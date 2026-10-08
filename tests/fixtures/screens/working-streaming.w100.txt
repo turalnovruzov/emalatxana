@@ -1,0 +1,50 @@
+  a legend.
+
+  Legendary Origins in China
+
+  According to Chinese tradition, tea was discovered in 2737 BCE by Shennong, the mythical "Divine
+  Farmer" credited with teaching agriculture and herbal medicine to the Chinese people. In the
+  story, Shennong was boiling drinking water beneath a wild tea tree when a few leaves drifted into
+  his pot. He tasted the faintly bitter, fragrant result and found it refreshing and restorative.
+  The tale is almost certainly apocryphal, but it captures something true. In China, tea was first
+  valued as medicine, a tonic believed to clear the mind and sharpen the senses.
+
+  The archaeological record is more modest but still impressive. The oldest physical tea leaves yet
+  identified were found in the mausoleum of Emperor Jing of Han, who died in 141 BCE. They were
+  buried alongside him as a luxury fit for the afterlife. Written references from the same era show
+  that tea was being bought and sold in the markets of Sichuan. The tea plant itself probably
+  originated in the borderlands where southwestern China meets Myanmar and northeastern India. Wild
+  tea trees there still grow to towering heights, and local peoples chewed or pickled the leaves
+  long before anyone thought to steep them.
+
+  The Tang and Song Dynasties: Tea Becomes Culture
+
+  Tea moved from medicine to everyday pleasure during the Tang dynasty (618–907 CE), a period of
+  prosperity and cosmopolitan confidence. Its defining document appeared around 760 CE, when the
+  scholar Lu Yu wrote the Cha Jing, or Classic of Tea. It was the first known book devoted entirely
+  to the subject. Lu Yu described how tea was cultivated, how it should be processed, which waters
+  were best for brewing, and what implements a refined drinker should own. In his time, tea leaves
+  were steamed, pounded and pressed into cakes. Pieces of the cake were roasted, ground and boiled,
+  sometimes with salt. Lu Yu turned tea drinking into an art with an aesthetic and moral dimension,
+  and he was later revered as the "Sage of Tea."
+
+  Under the Song dynasty (960–1279), fashion changed again. Tea was now ground into a fine powder
+  and whisked with hot water in a bowl until it formed a pale froth. Whisked-tea competitions became
+  popular among the elite, and the emperor Huizong wrote a treatise of his own on the subject.
+  Dark-glazed ceramic bowls, prized because they showed off the white foam, became highly
+  collectible. Tea was also a currency of state. The government ran a monopoly and traded tea for
+  warhorses with Tibetan and Central Asian peoples along routes later called the Tea Horse Road,
+  which wound through the mountains of Yunnan and Sichuan.
+
+  The Ming Revolution: Loose Leaf
+
+  The next transformation came under the Ming dynasty. In 1391, the Hongwu Emperor decreed that
+  tribute tea should be presented as loose leaves rather than labor-intensive compressed cakes. The
+  decision was partly practical and partly a gesture toward the common people. It reshaped how tea
+  was made and consumed. Steeping whole leaves in a pot became standard, and new processing
+
+───────────────────────────────────────────────────────────────────────────────── emx-test-working ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  <status line>
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

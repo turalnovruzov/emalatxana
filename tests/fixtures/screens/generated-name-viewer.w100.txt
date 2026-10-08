@@ -1,0 +1,50 @@
+
+ ▐▛███▛█   Claude Code v2.1.293
+▝▜██████▀  Opus 5.5 (1M context) · <plan>
+ ▝▝   ▝▝   <tmp>/work · /rc
+
+
+❯ Reply with exactly the word: pong
+
+⏺ pong
+
+✻ Cogitated for 9s · done 11:25 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────── ping-pong-reply ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  <status line>
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents

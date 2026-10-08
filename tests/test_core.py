@@ -420,6 +420,45 @@ class MainViewState(unittest.TestCase):
         self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha", 41), "unknown")
 
 
+FIXTURES = Path(__file__).parent / "fixtures" / "screens"
+
+
+def real_screen(name):
+    """A screen captured from a throwaway Claude Code 2.1.293 session; the file name carries the pane width."""
+    (path,) = FIXTURES.glob(f"{name}.w*.txt")
+    return path.read_text(encoding="utf-8"), int(path.stem.rsplit(".w", 1)[1])
+
+
+class MainViewStateOnRealScreens(unittest.TestCase):
+    CASES = [
+        ("named-viewer", "emx-test-named", "ok"),
+        ("generated-name-viewer", "ping-pong-reply", "ok"),
+        ("unnamed-empty-viewer", "", "unknown"),
+        ("unnamed-empty-viewer", "emx-test-named", "unknown"),
+        ("agent-view", "emx-test-named", "agent_view"),
+        ("agent-view", "", "agent_view"),
+        ("working-streaming", "emx-test-working", "ok"),
+        ("working-spinner", "emx-test-perm", "ok"),
+        ("permission-dialog", "emx-test-perm", "unknown"),
+        ("permission-dialog", "emx-test-named", "unknown"),
+        ("permission-dismissed", "emx-test-perm", "ok"),
+        ("cross-wired", "emx-test-named", "mismatch"),
+        ("cross-wired", "emx-test-perm", "ok"),
+    ]
+
+    def test_cases(self):
+        for name, expected, want in self.CASES:
+            with self.subTest(screen=name, expected=expected):
+                text, width = real_screen(name)
+                self.assertEqual(core.main_view_state(text, expected, width), want)
+
+    def test_agent_view_header_alone(self):
+        text, width = real_screen("agent-view")
+        lines = [line for line in text.splitlines() if line.strip()]
+        cut = "\n".join(lines[:-1] + ["  ? for shortcuts"])
+        self.assertEqual(core.main_view_state(cut, "emx-test-named", width), "agent_view")
+
+
 class LatchOffMain(unittest.TestCase):
     def test_off_states_flag_the_pane(self):
         for state in ("agent_view", "mismatch"):

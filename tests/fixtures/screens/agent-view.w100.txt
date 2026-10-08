@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.293
+▝▜██████▀  Opus 5.5 (1M context) · <tmp>/work
+ ▝▝   ▝▝   2 awaiting input · 0 working · 1 completed
+
+<tmp>/work
+✻ emx-test-named   Needs input · space to send it a prompt                                        1m
+✻ new session      Needs input · send a prompt to start                                           1m
+✻ ping-pong-reply  Done · pong                                                                   17s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ describe a task for a new session
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  enter to open · space to reply · hold space to speak · ctrl+x to delete · ? for shortcuts
