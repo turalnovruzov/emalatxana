@@ -1449,6 +1449,9 @@ class HoldCursor(unittest.TestCase):
     def test_sessions_coming_back_drop_the_hold(self):
         self.assertIsNone(core.hold_cursor(("b", ["a", "b"]), True, None, []))
 
+    def test_an_empty_listing_with_no_cursor_holds_nothing(self):
+        self.assertIsNone(core.hold_cursor(None, False, None, ["a", "b"]))
+
 
 class StaleViewers(unittest.TestCase):
     def test_live_viewer_not_stale_and_misses_cleared(self):

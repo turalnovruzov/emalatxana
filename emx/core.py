@@ -946,8 +946,8 @@ def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
 def edit_session_gone(session_id: str, live_ids, misses: dict) -> tuple:
     """(misses, gone) after a successful listing: whether the session an open edit is about has been missing from STALE_AFTER_MISSES listings in a row.
 
-    A listing with no sessions at all counts as no listing, as in `prune_pins`,
-    so one glitchy poll never throws away a half-typed edit.
+    A listing with no sessions at all counts as no listing (see
+    `stale_viewers`), so one glitchy poll never throws away a half-typed edit.
     """
     misses, gone = stale_viewers([session_id], live_ids, misses)
     return misses, bool(gone)
