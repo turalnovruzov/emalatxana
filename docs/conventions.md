@@ -154,6 +154,30 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: a tail's first line is cut and its last line may be half-written, so neither is read as an entry: the first is dropped (`partial=True`) and a half-written last one fails to parse as JSON and is skipped. The project folder name is Claude Code's own mangling of the cwd and can be shortened, so a miss is looked up by `<sessionId>.jsonl` across the project folders, with backoff. The listing, not the transcript, decides a session's state.
 
+### A session counts as gone only after `STALE_AFTER_MISSES` listings in a row without it
+
+1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count and the decision live in core (`stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`). Viewer closing (`App.close_stale`) counts misses but does not yet skip empty listings.
+2. **Why**: `claude agents` can return one glitchy or empty result. Acting on it closes or discards something he is using.
+3. **Minimal example**:
+   ```python
+   misses, gone = core.edit_session_gone(sid, live_ids, misses)
+   ```
+4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. And check for the empty listing before counting: `stale_viewers` alone counts an empty listing as a miss for everything.
+
+### emx types into a session only through `Tmux.type_if`, after the listing and screen checks
+
+1. **Rule**: before emx types anything into a session's viewer, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check (running, not working). The core screen checks pass on the viewer as it is now: not in a mode, showing this session and no other, an empty prompt. Then the keys go only through `Tmux.type_if`, with a gate format built by `core.type_gate`, so tmux re-checks the viewer and his focus and types in the same command.
+2. **Why**: a check in Python and a separate `send-keys` leave a gap of 15–50 ms. A key of his that lands in it is submitted along with the line, and a viewer he scrolled back in the meantime (copy mode) takes the keys as tmux commands instead of text.
+3. **Minimal example**:
+   ```python
+   # worker thread: listing refusal, then screen refusal, then
+   gate = core.type_gate(viewer.id, panel, sid, cursor_y, SESSION_OPT)
+   if gate is not None:
+       report = tmux.type_if(viewer.id, gate, line, core.TYPED, core.gate_report(SESSION_OPT))
+       refusal = core.gate_refusal(rename, report, cursor_y)
+   ```
+4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
