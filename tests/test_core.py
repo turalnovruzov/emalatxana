@@ -1902,10 +1902,17 @@ class Pins(unittest.TestCase):
 
     def test_a_session_back_in_the_listing_resets_its_misses(self):
         prefs = {**core.DEFAULT_PREFS, "pinned": ["b"]}
-        prefs, misses, _ = core.prune_pins(prefs, [], {})
+        prefs, misses, _ = core.prune_pins(prefs, ["x"], {})
         prefs, misses, _ = core.prune_pins(prefs, ["b"], misses)
-        prefs, misses, changed = core.prune_pins(prefs, [], misses)
+        prefs, misses, changed = core.prune_pins(prefs, ["x"], misses)
         self.assertEqual((prefs["pinned"], changed), (["b"], False))
+
+    def test_a_listing_with_no_sessions_prunes_nothing(self):
+        prefs = {**core.DEFAULT_PREFS, "pinned": ["a", "b"]}
+        misses = {}
+        for _ in range(core.STALE_AFTER_MISSES + 1):
+            prefs, misses, changed = core.prune_pins(prefs, [], misses)
+            self.assertEqual((prefs["pinned"], misses, changed), (["a", "b"], {}, False))
 
     def test_n_on_the_pinned_header_never_takes_its_key_for_a_folder(self):
         groups = core.group_sessions(self.sessions, {}, core.PROJECT, frozenset({"a"}))

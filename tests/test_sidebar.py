@@ -1401,6 +1401,28 @@ class FindSessions(AppCase):
         self.assertEqual(self.opened, [])
         self.assertIn("Still starting", self.app.notice)
 
+    def click(self, item):
+        self.app.draw()
+        y = next(y for y, at in self.app.row_map.items() if at == item)
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+
+    def test_a_click_on_a_header_while_finding_does_nothing(self):
+        self.keys(sidebar.CTRL_F, *"alpha")
+        saved = core.load_prefs(self.app.prefs_file)
+        self.click(("group", "/p/alpha"))
+        self.assertEqual(self.app.find, "alpha")
+        self.assertNotIn("/p/alpha", core.collapsed_keys(self.app.prefs, self.app.view()))
+        self.assertEqual(core.load_prefs(self.app.prefs_file), saved)
+        self.assertEqual(self.opened, [])
+
+    def test_a_click_on_a_session_while_finding_ends_the_find_and_opens_it(self):
+        self.keys(sidebar.CTRL_F, *"alpha")
+        self.click(("session", "c"))
+        self.assertEqual(self.opened, [("c", core.OPEN)])
+        self.assertIsNone(self.app.find)
+        self.assertEqual(self.app.cursor, ("session", "c"))
+
     def test_a_poll_while_finding_keeps_the_filter(self):
         self.keys(sidebar.CTRL_F, *"beta")
         self.poll(session("a", "/p/alpha"), session("b", "/p/beta"), session("d", "/p/beta-two"))
@@ -1447,6 +1469,14 @@ class PinSessions(AppCase):
         self.poll(session("b", "/p/beta"))
         self.app.refresh()
         self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), set())
+
+    def test_an_empty_listing_prunes_nothing(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        for _ in range(3):
+            self.poll()
+            self.app.refresh()
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), {"a"})
 
     def test_a_failed_listing_prunes_nothing(self):
         self.app.cursor = ("session", "a")

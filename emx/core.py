@@ -484,7 +484,13 @@ def pin_notice(prefs: dict, session: Session) -> str:
 
 
 def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
-    """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer."""
+    """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer.
+
+    A listing with no sessions at all counts as no listing, so a transient
+    empty result can never wipe every pin.
+    """
+    if not live_ids:
+        return prefs, misses, False
     misses, gone = stale_viewers(pinned_ids(prefs), live_ids, misses)
     if not gone:
         return prefs, misses, False

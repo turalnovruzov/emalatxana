@@ -1036,7 +1036,13 @@ class App:
             return
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
-        self.activate(self.row_map.get(y))
+        item = self.row_map.get(y)
+        if self.find is not None:
+            # A header click would fold a group he cannot see folded until find closes.
+            if not item or item[0] == "group":
+                return
+            self.close_find()
+        self.activate(item)
 
     def handle_key(self, key) -> None:
         self.confirm = core.confirm_after_key(self.confirm, key == CTRL_X, key == curses.KEY_RESIZE)
