@@ -84,10 +84,10 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the panel's rows come from the last poll, which can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile.
 
-### `claude` and git calls never run on the curses thread
+### `claude` calls, git calls and filesystem scans never run on the curses thread
 
-1. **Rule**: any call to the `claude` CLI or git runs on a worker thread. One-shot workers (`Starter`, `Checker`) are started by the curses thread, which checks `is_alive()` from `refresh()` and then reads `.result`. Long-running ones (`Poller`, and the `Resolver` it starts) loop on their own, and `refresh()` collects their latest answer with `.take()`, which hands it over under a lock and returns None when nothing is new. The curses thread never calls `list_rows`, `fetch_sessions` or `run_git` itself.
-2. **Why**: `claude agents` can take up to its 15 s timeout. On the curses thread that freezes the panel, and every key he presses meanwhile is lost or queued.
+1. **Rule**: any call to the `claude` CLI or git runs on a worker thread. One-shot workers (`Starter`, `Checker`) are started by the curses thread, which checks `is_alive()` from `refresh()` and then reads `.result`. Long-running ones (`Poller`, and the `Resolver` it starts) loop on their own, and `refresh()` collects their latest answer with `.take()`, which hands it over under a lock and returns None when nothing is new. The curses thread never calls `list_rows`, `fetch_sessions` or `run_git` itself. Listing or stat-ing any folder the picker reads follows the same rule (startup reads of home and the prefs file excepted): the folder picker asks `Listings.get` or `Listings.readable`, which return whatever is cached (None until the first read lands) and starts a short-lived thread per folder, never two for one folder and at most `MAX_LISTINGS` at once; the curses thread judges a typed path from those cached reads (`core.folder_exists`) and dedupes paths with `normpath` only.
+2. **Why**: `claude agents` can take up to its 15 s timeout, and a folder on a hung mount can block a listing or a stat for good. On the curses thread either freezes the panel, and every key he presses meanwhile is lost or queued.
 3. **Minimal example**:
    ```python
    self.checker = Checker(self.claude, (main.session, main.id))
@@ -97,7 +97,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    if checker is not None and not checker.is_alive():
        sessions, _ = checker.result or (None, "listing sessions failed")
    ```
-4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls.
+4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; folder listings are the exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
 ### A tmux key binding that intercepts a key fails open
 

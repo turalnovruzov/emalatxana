@@ -962,5 +962,422 @@ class CloseSession(AppCase):
         self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
+class FakeListings:
+    def __init__(self, cache=None):
+        self.cache = dict(cache or {})
+        self.asked = []
+        self.readable_cache = {}
+
+    def get(self, folder):
+        self.asked.append(folder)
+        return self.cache.get(folder)
+
+    def readable(self, folder):
+        self.asked.append(folder)
+        return self.readable_cache.get(folder)
+
+
+class NewSession(AppCase):
+    """`n` starts where the cursor is; Tab picks another folder from suggestions, never touching the filesystem on this thread."""
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+        test = self
+
+        class FakeStarter:
+            def __init__(self, claude, folder, message):
+                test.started.append((folder, message))
+
+            def start(self):
+                pass
+
+        patch = mock.patch.object(sidebar, "Starter", FakeStarter)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.app.home = "/h/me"
+        self.app.listings = FakeListings()
+        self.poll(session("a", "/p/alpha/sub"), session("b", "/p/beta"))
+        self.app.refresh()
+
+    def keys(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def type(self, text):
+        self.keys(*text)
+
+    def test_n_then_enter_starts_an_empty_session_in_the_cursors_session_folder(self):
+        self.app.cursor = ("session", "a")
+        self.keys("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/p/alpha/sub"))
+        self.keys("\n")
+        self.assertEqual(self.started, [("/p/alpha/sub", "")])
+        self.assertIsNone(self.app.prompt)
+
+    def test_on_a_group_header_the_groups_folder_and_the_message_goes_with_it(self):
+        self.app.cursor = ("group", "/p/beta")
+        self.keys("n")
+        self.type("hi there")
+        self.keys("\r")
+        self.assertEqual(self.started, [("/p/beta", "hi there")])
+
+    def test_the_prompt_names_the_folder_and_shows_tab(self):
+        self.app.cursor = ("session", "a")
+        self.keys("n")
+        drawn = [text for text, _ in self.app.bottom_lines(39)]
+        self.assertIn("New session in /p/alpha/sub", drawn)
+        self.assertIn("Tab folder", drawn[-1])
+        self.assertFalse(any(line in sidebar.FOOTERS for line in drawn), drawn)
+
+    def test_a_by_state_header_uses_the_last_folder_else_opens_the_picker(self):
+        self.app.toggle_view()
+        self.app.cursor = ("group", core.WORKING)
+        self.keys("n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.app.prefs["last_folder"] = "/p/last"
+        self.keys("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/p/last"))
+
+    def test_with_no_sessions_n_opens_the_picker_and_esc_cancels(self):
+        self.poll()
+        self.app.refresh()
+        self.keys("n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.assertEqual(self.started, [])
+
+    def test_tab_picks_a_suggestion_with_the_arrows_and_keeps_the_message(self):
+        self.app.listings.cache["/h/me"] = ["Emx-Lab", "notes"]
+        self.app.cursor = ("session", "b")
+        self.keys("n")
+        self.type("draft")
+        self.keys("\t")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.type("EmX")
+        self.keys(curses.KEY_DOWN)
+        self.assertEqual(self.app.prompt["picked"], "/h/me/Emx-Lab")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"], self.app.prompt["text"]),
+                         ("message", "/h/me/Emx-Lab", "draft"))
+        self.keys("\n")
+        self.assertEqual(self.started, [("/h/me/Emx-Lab", "draft")])
+
+    def test_esc_in_the_picker_goes_back_to_the_message_and_a_second_esc_cancels(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n")
+        self.type("draft")
+        self.keys("\t", "x", "\x1b")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"], self.app.prompt["text"]),
+                         ("message", "/p/beta", "draft"))
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.assertEqual(self.started, [])
+
+    def test_the_highlight_stays_on_the_folder_he_chose_when_the_rows_move(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("p")
+        self.keys(curses.KEY_DOWN, curses.KEY_DOWN)
+        chosen = self.app.prompt["picked"]
+        self.assertEqual([r.path for r in self.app.suggestions()].index(chosen), 1)
+        self.poll(session("a", "/p/alpha/sub"), session("b", "/p/beta"), session("c", "/p/a"))
+        self.app.refresh()
+        self.assertEqual([r.path for r in self.app.suggestions()].index(chosen), 2)
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["folder"], chosen)
+
+    def test_tab_completes_the_highlighted_or_first_suggestion(self):
+        self.app.listings.cache["/h/me"] = ["Work"]
+        self.app.listings.cache["/h/me/Work"] = ["inner"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("wo")
+        self.keys("\t")
+        self.assertEqual(self.app.prompt["text"], "~/Work/")
+        rows = self.app.suggestions()
+        self.assertEqual([r.path for r in rows if r.source == core.LISTED], ["/h/me/Work/inner"])
+
+    def test_a_typed_path_is_accepted_only_once_a_listing_shows_it_is_a_folder(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/new")
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.assertIn("Still reading", self.app.prompt["hint"])
+        self.app.listings.cache["/q"] = ["other"]
+        self.keys("\n")
+        self.assertIn("Not a folder", self.app.prompt["hint"])
+        self.app.listings.cache["/q"] = ["new"]
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/new"))
+
+    def test_the_picker_never_touches_the_filesystem_on_this_thread(self):
+        self.app.cursor = ("session", "b")
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("scanned")), \
+                mock.patch.object(sidebar.os.path, "isdir", side_effect=AssertionError("stat")):
+            self.keys("n", "\t")
+            self.type("~/some/path")
+            self.app.draw()
+            self.keys(curses.KEY_DOWN, "\t", "\n")
+
+    def test_n_enter_enter_never_reopens_the_stopped_row_under_the_cursor(self):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.keys("n", "\n", "\n", curses.KEY_RIGHT)
+        self.assertEqual(self.started, [("/p/stopped", "")])
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+        self.assertEqual(self.app.cursor, ("session", "s"))
+
+    def test_a_late_enter_after_the_start_waits_for_the_new_row(self):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.keys("n", "\n")
+        self.app.starter = mock.Mock(folder="/p/stopped", result=(session("new1", "/p/stopped"), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertIsNone(self.app.starter)
+        self.keys("\n", curses.KEY_RIGHT)
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"), session("new1", "/p/stopped"))
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "new1"))
+        self.keys("\n")
+        self.assertIn("new1", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def start_from_the_stopped_row(self, folder):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.app.starter = mock.Mock(folder=folder, result=(session("new1", folder), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+
+    def test_a_late_enter_stays_blocked_while_the_new_row_is_folded_out_of_reach(self):
+        self.app.toggle_group("/p/beta")
+        self.start_from_the_stopped_row("/p/beta")
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"), session("new1", "/p/beta"))
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "s"))
+        self.keys("\n")
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+
+    def test_j_or_k_lifts_the_block_while_the_listing_is_out(self):
+        self.start_from_the_stopped_row("/p/stopped")
+        self.keys("\n")
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.keys("k", "j")
+        self.assertEqual(self.app.cursor, ("session", "s"))
+        self.keys("\n")
+        self.assertIn("s", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_a_late_enter_is_freed_once_the_wait_gives_up(self):
+        self.start_from_the_stopped_row("/p/stopped")
+        later = sidebar.time.monotonic() + sidebar.FRESH_GRACE_SECONDS + 1
+        with mock.patch.object(sidebar.time, "monotonic", return_value=later):
+            self.keys("\n")
+        self.assertIn("s", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_a_failed_start_frees_enter_once_its_notice_shows(self):
+        self.app.cursor = ("session", "b")
+        self.app.starter = mock.Mock(folder="/p/beta", result=(None, "claude said no"))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertEqual(self.app.notice, "claude said no")
+        self.keys("\n")
+        self.assertIn("b", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_enter_on_a_group_header_still_folds_while_a_session_starts(self):
+        self.app.cursor = ("group", "/p/beta")
+        self.keys("n", "\n")
+        self.assertIsNotNone(self.app.starter)
+        self.keys("\n")
+        self.assertIn("/p/beta", self.app.collapsed())
+
+    def test_a_suggestion_that_raises_shows_an_error_line_not_a_frozen_draw(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        with mock.patch.object(core, "folder_suggestions", side_effect=IndexError("boom")):
+            drawn = [text for text, _ in self.app.bottom_lines(39, 20)]
+        self.assertIn("! boom", drawn)
+
+    def test_enter_with_nothing_highlighted_takes_a_confirmed_typed_folder_else_the_top_suggestion(self):
+        self.app.listings.cache["/q"] = ["xy"]
+        self.app.listings.readable_cache["/q/x"] = True
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/x")
+        self.assertEqual(self.app.suggestions()[0].path, "/q/xy")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/x"))
+        self.keys("\t")
+        self.type("/q/x-")
+        self.app.listings.cache["/q"] = ["x-ray", "x-wing-long"]
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/x-ray"))
+        self.keys("\t")
+        self.type("/q/zzz")
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.assertIn("Not a folder", self.app.prompt["hint"])
+
+    def test_a_bare_word_finds_a_folder_one_level_inside_a_folder_he_uses(self):
+        self.app.listings.cache["/p"] = ["beta", "quokka"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("quok")
+        self.assertEqual([r.path for r in self.app.suggestions()], ["/p/quokka"])
+        self.assertIn("/p", self.app.listings.asked)
+
+    def test_a_bare_word_searches_beside_a_worktrees_repo_in_either_view(self):
+        worktree = "/w/kiwi/.claude/worktrees/feat"
+        self.poll(session("a", worktree))
+        self.app.refresh()
+        self.app.listings.cache["/w"] = ["kiwi", "quokka"]
+        self.app.listings.cache["/w/kiwi/.claude/worktrees"] = ["quokka-wt"]
+        self.app.placements = {worktree: core.Placement("/w/kiwi", "feat")}
+        self.app.prefs["recent_folders"] = [worktree]
+        for view in (core.PROJECT, core.BY_STATE):
+            with self.subTest(view=view):
+                self.assertEqual(self.app.view(), view)
+                self.app.listings.asked.clear()
+                self.app.cursor = ("session", "a")
+                self.keys("n", "\t")
+                self.type("quok")
+                self.assertEqual([r.path for r in self.app.suggestions()], ["/w/quokka"])
+                self.assertIn("/w", self.app.listings.asked)
+                self.assertNotIn("/w/kiwi/.claude/worktrees", self.app.listings.asked)
+                self.keys("\x1b", "\x1b")
+                self.app.toggle_view()
+        self.assertEqual(self.app.view(), core.PROJECT)
+
+    def test_enter_on_an_empty_picker_takes_the_top_suggestion(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        top = self.app.suggestions()[0].path
+        self.assertNotEqual(top, "/h/me")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", top))
+        self.keys("\t")
+        self.type("x")
+        self.keys("\x15", "\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", top))
+
+    def test_enter_on_an_empty_picker_with_no_suggestions_falls_back_to_home(self):
+        self.poll()
+        self.app.refresh()
+        self.keys("n")
+        self.assertEqual(self.app.suggestions(), [])
+        self.keys("\n")
+        self.assertIn("Still reading", self.app.prompt["hint"])
+        self.app.listings.readable_cache["/h/me"] = True
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/h/me"))
+
+    def test_no_match_is_said_once(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/zzz")
+        self.keys("\t")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 20)]
+        self.assertEqual(sum("no match" in line for line in drawn), 1, drawn)
+
+    def test_on_a_short_pane_the_rows_give_way_and_the_highlight_survives_past_them(self):
+        self.app.listings.cache["/h/me"] = [f"dir{i}" for i in range(12)]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("~/")
+        for _ in range(6):
+            self.keys(curses.KEY_DOWN)
+        picked = self.app.prompt["picked"]
+        self.assertEqual(picked, "/h/me/dir3")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 9)]
+        self.assertLessEqual(len(drawn), 9 - 2)
+        self.assertEqual(drawn[0], "New session · pick a folder:")
+        self.assertTrue(drawn[1].startswith("> ~/"), drawn)
+        self.assertTrue(any("more" in line for line in drawn), drawn)
+        self.assertFalse(any("dir3" in line for line in drawn), drawn)
+        self.assertEqual(self.app.prompt["picked"], picked)
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["folder"], picked)
+
+    def test_the_title_and_input_stay_on_a_pane_too_short_for_any_row(self):
+        self.app.listings.cache["/h/me"] = ["dir"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 5)]
+        self.assertEqual(drawn[0], "New session · pick a folder:")
+        self.assertFalse(any("dir" in line for line in drawn), drawn)
+
+    def test_a_started_folder_becomes_recent_and_last(self):
+        self.app.starter = mock.Mock(folder="/p/gamma", result=(session("new1", "/p/gamma"), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertEqual(self.app.prefs["recent_folders"][0], "/p/gamma")
+        self.assertEqual(core.load_prefs(self.app.prefs_file)["last_folder"], "/p/gamma")
+
+    def test_the_help_says_where_n_starts(self):
+        self.assertIn("Tab", dict(sidebar.HELP)["n"])
+
+
+class FolderListingsOffThread(unittest.TestCase):
+    def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
+        release = threading.Event()
+        all_started = threading.Barrier(sidebar.MAX_LISTINGS + 1, timeout=5)
+        calls = []
+
+        def hang(folder):
+            calls.append(folder)
+            all_started.wait()
+            release.wait(5)
+            return ["late"]
+
+        listings = sidebar.Listings()
+        with mock.patch.object(sidebar, "list_subdirs", side_effect=hang):
+            began = time.monotonic()
+            for _ in range(20):
+                self.assertIsNone(listings.get("/hung"))
+            self.assertLess(time.monotonic() - began, 0.5)
+            for i in range(sidebar.MAX_LISTINGS + 3):
+                listings.get(f"/other{i}")
+            all_started.wait()
+            self.assertEqual(calls.count("/hung"), 1)
+            self.assertEqual(len(calls), sidebar.MAX_LISTINGS)
+            release.set()
+            deadline = time.monotonic() + 2
+            while listings.get("/hung") is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(listings.get("/hung"), ["late"])
+
+    def test_list_subdirs_lists_folders_only_and_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("Alpha", ".hidden"):
+                os.mkdir(os.path.join(d, n))
+            Path(d, "file").write_text("")
+            self.assertEqual(sorted(sidebar.list_subdirs(d)), [".hidden", "Alpha"])
+            self.assertIsNone(sidebar.list_subdirs(os.path.join(d, "missing")))
+            self.assertIsNone(sidebar.list_subdirs(os.path.join(d, "file")))
+
+    def test_a_folder_read_says_whether_it_is_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "file").write_text("")
+            listings = sidebar.Listings()
+            deadline = time.monotonic() + 2
+            while (listings.readable(d) is None or listings.readable(os.path.join(d, "file")) is None) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(listings.readable(d))
+            self.assertFalse(listings.readable(os.path.join(d, "file")))
+            self.assertEqual(listings.get(os.path.join(d, "file")), [])
+
+
 if __name__ == "__main__":
     unittest.main()
