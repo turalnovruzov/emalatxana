@@ -2498,7 +2498,7 @@ class Summary:
     at: float
 
 
-def _number(value) -> float:
+def _count(value) -> float:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
 
 
@@ -2527,10 +2527,10 @@ def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
     model = next(iter(models), "") if isinstance(models, dict) and models else ""
     return SummaryCall(
         text=clean_summary(result), model=str(model), wall_ms=float(wall_ms),
-        duration_ms=_number(data.get("duration_ms")), cost_usd=_number(data.get("total_cost_usd")),
-        input_tokens=int(_number(usage.get("input_tokens"))), output_tokens=int(_number(usage.get("output_tokens"))),
-        cache_creation_tokens=int(_number(usage.get("cache_creation_input_tokens"))),
-        cache_read_tokens=int(_number(usage.get("cache_read_input_tokens"))),
+        duration_ms=_count(data.get("duration_ms")), cost_usd=_count(data.get("total_cost_usd")),
+        input_tokens=int(_count(usage.get("input_tokens"))), output_tokens=int(_count(usage.get("output_tokens"))),
+        cache_creation_tokens=int(_count(usage.get("cache_creation_input_tokens"))),
+        cache_read_tokens=int(_count(usage.get("cache_read_input_tokens"))),
     ), None
 
 

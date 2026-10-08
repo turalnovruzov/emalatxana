@@ -6,6 +6,7 @@ import curses
 import locale
 import os
 import subprocess
+import tempfile
 import textwrap
 import threading
 import time
@@ -23,6 +24,9 @@ GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
 MAX_LISTINGS = 4
 TRANSCRIPT_SECONDS = 3
+SUMMARY_TIMEOUT = 30
+SUMMARY_TICK_SECONDS = 1
+SUMMARY_CALLS_KEPT = 500
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 WHATS_NEW_SECONDS = 60
@@ -513,6 +517,33 @@ def read_transcript(path: str, size: int) -> tuple:
     return found, True
 
 
+def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises.
+
+    The excerpt goes on stdin so text starting with `-` can't be read as a
+    flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded.
+    """
+    started = time.monotonic()
+    try:
+        done = subprocess.run(
+            core.summary_args(claude), input=excerpt, cwd=cwd, capture_output=True, encoding="utf-8",
+            errors="replace", timeout=SUMMARY_TIMEOUT,
+        )
+    except FileNotFoundError:
+        return None, f"can't find the claude command ({claude})"
+    except subprocess.TimeoutExpired:
+        return None, "claude -p timed out"
+    except (OSError, ValueError) as exc:
+        return None, f"can't run claude: {exc}"
+    wall_ms = (time.monotonic() - started) * 1000
+    if done.returncode != 0:
+        call, error = core.parse_summary_output(done.stdout, wall_ms)
+        if error and done.stdout.strip().startswith("{"):
+            return None, error
+        return None, core.first_message(done.stderr) or f"claude -p exited with {done.returncode}"
+    return core.parse_summary_output(done.stdout, wall_ms)
+
+
 class Transcripts(threading.Thread):
     """Reads each listed session's transcript on its own thread, so a large file or a slow disk never holds up listing or drawing.
 
@@ -607,8 +638,93 @@ class Transcripts(threading.Thread):
                     return path
         return None
 
+    def snapshot(self) -> dict:
+        """A copy of what each session's transcript says now, leaving `take`'s changed flag alone."""
+        with self.lock:
+            return dict(self.found)
+
     def take(self):
         """A copy of what each session's transcript says when any of it changed since the last take, else None."""
+        with self.lock:
+            if not self.changed:
+                return None
+            self.changed = False
+            return dict(self.found)
+
+
+class Summaries(threading.Thread):
+    """Has Haiku write each session's row line, one call at a time on its own thread, so a slow call never holds up listing or drawing.
+
+    A session is summarised again only when what Haiku would be shown
+    changed, at most every `core.SUMMARY_EVERY_SECONDS` unless its state
+    changed. A failed call keeps the earlier line and backs off.
+    """
+
+    def __init__(self, claude: str, transcripts: Transcripts):
+        super().__init__(daemon=True)
+        self.claude = claude
+        self.transcripts = transcripts
+        self.lock = threading.Lock()
+        self.wanted = {}
+        self.found = {}
+        self.calls = []
+        self.changed = False
+        self.failures = {}
+        self.tried = {}
+        self.scratch = None
+
+    def want(self, sessions) -> None:
+        with self.lock:
+            self.wanted = {s.id: s for s in sessions}
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.step()
+            except Exception:
+                pass
+            time.sleep(SUMMARY_TICK_SECONDS)
+
+    def step(self) -> None:
+        """Summarises the one session most overdue, if any is due."""
+        now = time.monotonic()
+        with self.lock:
+            wanted = dict(self.wanted)
+            found = dict(self.found)
+        transcripts = self.transcripts.snapshot()
+        due = []
+        for sid, session in wanted.items():
+            excerpt = core.summary_excerpt(session, transcripts.get(sid))
+            count, failed_at = self.failures.get(sid, (0, None))
+            if core.summary_due(session, excerpt, found.get(sid), count, failed_at, now):
+                due.append((self.tried.get(sid, 0.0), sid, session, excerpt))
+        with self.lock:
+            for sid in set(self.found) - set(wanted):
+                del self.found[sid]
+                self.changed = True
+        for table in (self.failures, self.tried):
+            for sid in set(table) - set(wanted):
+                del table[sid]
+        if not due:
+            return
+        _, sid, session, excerpt = min(due, key=lambda d: d[0])
+        self.tried[sid] = now
+        if self.scratch is None:
+            self.scratch = tempfile.TemporaryDirectory(prefix="emx-summary-")
+        call, error = summarise(self.claude, excerpt, self.scratch.name)
+        with self.lock:
+            if call is None:
+                count = self.failures.get(sid, (0, None))[0]
+                self.failures[sid] = (count + 1, time.monotonic())
+                return
+            self.failures.pop(sid, None)
+            self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
+            if sid in self.wanted and call.text:
+                self.found[sid] = core.Summary(call.text, core.category(session), excerpt, time.monotonic())
+                self.changed = True
+
+    def take(self):
+        """A copy of each session's line when any changed since the last take, else None."""
         with self.lock:
             if not self.changed:
                 return None
@@ -627,6 +743,7 @@ class Poller(threading.Thread):
         self.result = None
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
         self.transcripts = Transcripts(claude_home())
+        self.summaries = Summaries(claude, self.transcripts)
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.claude)
@@ -634,11 +751,13 @@ class Poller(threading.Thread):
             return None, error
         self.resolver.want(s.cwd for s in sessions)
         self.transcripts.want(sessions)
+        self.summaries.want(sessions)
         return sessions, None
 
     def run(self) -> None:
         self.resolver.start()
         self.transcripts.start()
+        self.summaries.start()
         while True:
             try:
                 result = self.poll()
@@ -704,6 +823,7 @@ class App:
         self.focused = None
         self.pending_keys = []
         self.transcripts = {}
+        self.summaries = {}
         self.peeking = False
         self.peek_wrapped = (None, [])
         self.whats_new = None
@@ -1635,7 +1755,7 @@ class App:
         """The row's lines as `core.row_lines` gives them, or, while it is armed or renamed, the close label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
-        detail = core.row_detail(s, self.transcripts.get(s.id))
+        detail = core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
         lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
         if armed is not None:
             return core.confirm_lines(core.confirm_label(armed), width, len(lines))
@@ -1714,6 +1834,11 @@ class App:
         if found is not None:
             self.transcripts = found
 
+    def take_summaries(self) -> None:
+        found = self.poller.summaries.take()
+        if found is not None:
+            self.summaries = found
+
     def peeked(self):
         """The session the peek shows: the one under the cursor."""
         if not self.cursor or self.cursor[0] != "session":
@@ -1749,6 +1874,7 @@ class App:
             fresh_list = self.take_poll()
             self.take_placements()
             self.take_transcripts()
+            self.take_summaries()
             if self.peeking and self.peeked() is None:
                 self.peeking = False
             now = time.monotonic()

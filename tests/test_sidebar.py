@@ -2006,6 +2006,116 @@ class TranscriptReader(unittest.TestCase):
         with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
             poller.poll()
         self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1)})
+        self.assertEqual(set(poller.summaries.wanted), {"s1"})
+
+
+GOOD_JSON = json.dumps({"result": "\"Fixing the tests.\"\nmore", "is_error": False, "duration_ms": 600,
+                        "total_cost_usd": 0.0001, "usage": {"input_tokens": 2, "output_tokens": 9},
+                        "modelUsage": {"claude-haiku-5-5": {}}})
+
+
+def completed(returncode=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess([], returncode, stdout, stderr)
+
+
+class Summarise(unittest.TestCase):
+    def test_every_failure_is_a_line_never_a_raise(self):
+        for exc in (FileNotFoundError(), subprocess.TimeoutExpired("claude", 30), OSError("boom")):
+            with self.subTest(exc=exc), mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                call, error = sidebar.summarise("claude", "x", "/tmp")
+                self.assertIsNone(call)
+                self.assertIsInstance(error, str)
+
+    def test_a_failing_exit_gives_the_reported_error(self):
+        out = json.dumps({"is_error": True, "result": "Not logged in"})
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(1, out, "")):
+            self.assertEqual(sidebar.summarise("claude", "x", "/tmp"), (None, "Not logged in"))
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(2, "", "\n  bad flag\n")):
+            self.assertEqual(sidebar.summarise("claude", "x", "/tmp"), (None, "bad flag"))
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(3)):
+            self.assertEqual(sidebar.summarise("claude", "x", "/tmp"), (None, "claude -p exited with 3"))
+
+    def test_the_excerpt_goes_on_stdin_and_the_call_runs_in_the_folder_given(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, GOOD_JSON)) as run:
+            call, error = sidebar.summarise("claude", "--help me", "/tmp/scratch")
+        self.assertIsNone(error)
+        self.assertEqual(run.call_args.kwargs["input"], "--help me")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/scratch")
+        self.assertNotEqual(run.call_args.kwargs["cwd"], os.getcwd())
+        self.assertEqual(run.call_args.args[0], core.summary_args("claude"))
+        self.assertNotIn("--help me", run.call_args.args[0])
+        self.assertEqual((call.text, call.model), ("Fixing the tests", "claude-haiku-5-5"))
+
+
+class SummariesWorker(unittest.TestCase):
+    def setUp(self):
+        self.transcripts = sidebar.Transcripts("/nonexistent")
+        self.worker = sidebar.Summaries("claude", self.transcripts)
+        self.worker.want([session("a", "/p/alpha")])
+        self.transcripts.found = {"a": core.Transcript(prompt="Fix it", latest="prompt")}
+        self.excerpts = []
+        self.fail = False
+
+        def fake(claude, excerpt, cwd):
+            self.excerpts.append(excerpt)
+            if self.fail:
+                return None, "boom"
+            return core.SummaryCall(f"Line {len(self.excerpts)}", "claude-haiku-5-5", 1, 1, 0.0, 1, 1, 0, 0), None
+
+        patch = mock.patch.object(sidebar, "summarise", fake)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(lambda: self.worker.scratch and self.worker.scratch.cleanup())
+
+    def test_an_unchanged_transcript_is_summarised_once(self):
+        self.worker.step()
+        self.worker.step()
+        self.assertEqual(len(self.excerpts), 1)
+        self.assertEqual(self.worker.take()["a"].text, "Line 1")
+
+    def test_a_changed_transcript_is_summarised_again_once_the_interval_passed(self):
+        self.worker.step()
+        self.transcripts.found = {"a": core.Transcript(prompt="Fix it", reply="Done now", latest="reply")}
+        self.worker.step()
+        self.assertEqual(len(self.excerpts), 1)
+        with mock.patch.object(core, "SUMMARY_EVERY_SECONDS", 0):
+            self.worker.step()
+        self.assertEqual(len(self.excerpts), 2)
+        self.assertEqual(len(self.worker.calls), 2)
+
+    def test_a_failed_call_keeps_the_earlier_line(self):
+        self.worker.step()
+        self.fail = True
+        self.transcripts.found = {"a": core.Transcript(prompt="Other", latest="prompt")}
+        with mock.patch.object(core, "SUMMARY_EVERY_SECONDS", 0):
+            self.worker.step()
+        self.assertEqual(len(self.excerpts), 2)
+        self.assertEqual(self.worker.found["a"].text, "Line 1")
+        self.assertEqual(self.worker.take()["a"].text, "Line 1")
+
+    def test_a_dropped_session_is_gone_from_the_next_take(self):
+        self.worker.step()
+        self.worker.take()
+        self.worker.want([])
+        self.worker.step()
+        self.assertEqual(self.worker.take(), {})
+
+    def test_take_is_none_when_nothing_changed(self):
+        self.assertIsNone(self.worker.take())
+        self.worker.step()
+        self.assertIsNotNone(self.worker.take())
+        self.assertIsNone(self.worker.take())
+
+    def test_an_excerpt_starting_with_a_flag_reaches_the_call_only_as_the_excerpt(self):
+        self.transcripts.found = {"a": core.Transcript(prompt="--help", latest="prompt")}
+        self.worker.step()
+        self.assertIn("--help", self.excerpts[0])
+        self.assertFalse(self.excerpts[0].startswith("-"))
+
+    def test_the_session_with_nothing_to_say_is_never_called(self):
+        self.transcripts.found = {}
+        self.worker.step()
+        self.assertEqual(self.excerpts, [])
 
 
 class RecordingScr(FakeScr):
@@ -2033,6 +2143,53 @@ PERMISSION = core.parse_transcript("\n".join([
     transcript_line("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",
                                    "input": {"command": "npm test", "description": "Run the tests"}}]),
 ]))
+
+
+class HaikuRows(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(width=120)
+        self.app.scr = self.scr
+
+    def screen(self):
+        return "\n".join(self.scr.cells.get(y, "") for y in range(self.scr.size[0]))
+
+    def test_haikus_line_shows_on_its_row(self):
+        self.poll(session("a", "/p/alpha", state="done"))
+        self.app.poller.summaries.found = {"a": core.Summary("Wrote the parser", core.DONE, "x", 0.0)}
+        self.app.poller.summaries.changed = True
+        self.app.refresh()
+        self.app.draw()
+        self.assertIn("Wrote the parser", self.screen())
+
+    def test_a_line_for_another_state_gives_way_to_the_transcript_line(self):
+        self.poll(session("a", "/p/alpha", state="working"))
+        self.app.poller.summaries.found = {"a": core.Summary("Wrote the parser", core.DONE, "x", 0.0)}
+        self.app.poller.summaries.changed = True
+        self.app.poller.transcripts.found = {"a": core.parse_transcript(
+            (Path(__file__).parent / "fixtures" / "transcripts" / "working.jsonl").read_text(encoding="utf-8"))}
+        self.app.poller.transcripts.changed = True
+        self.app.refresh()
+        self.app.draw()
+        self.assertIn("Sleep for 9 seconds", self.screen())
+        self.assertNotIn("Wrote the parser", self.screen())
+
+    def test_without_summaries_today_s_line_shows(self):
+        self.poll(blocked("a", "/p/alpha"))
+        self.app.poller.transcripts.found = {"a": PERMISSION}
+        self.app.poller.transcripts.changed = True
+        self.app.refresh()
+        self.app.draw()
+        self.assertIn("approve", self.screen())
+
+    def test_the_curses_thread_never_runs_a_subprocess_for_it(self):
+        self.poll(session("a", "/p/alpha", state="done"))
+        self.app.poller.summaries.found = {"a": core.Summary("Wrote the parser", core.DONE, "x", 0.0)}
+        self.app.poller.summaries.changed = True
+        with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("ran on the main thread")):
+            self.app.refresh()
+            self.app.draw()
+        self.assertEqual(self.app.notice, "")
 
 
 class Peek(AppCase):
