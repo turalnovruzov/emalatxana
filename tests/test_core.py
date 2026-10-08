@@ -1914,6 +1914,23 @@ class Pins(unittest.TestCase):
             prefs, misses, changed = core.prune_pins(prefs, [], misses)
             self.assertEqual((prefs["pinned"], misses, changed), (["a", "b"], {}, False))
 
+    def test_an_edit_is_gone_only_after_its_session_misses_two_listings_in_a_row(self):
+        misses, gone = core.edit_session_gone("a", ["b"], {})
+        self.assertEqual((misses, gone), ({"a": 1}, False))
+        misses, gone = core.edit_session_gone("a", ["b"], misses)
+        self.assertTrue(gone)
+
+    def test_an_empty_listing_never_counts_against_an_edit(self):
+        misses = {"a": 1}
+        for listing in ([], iter([])):
+            misses, gone = core.edit_session_gone("a", listing, misses)
+            self.assertEqual((misses, gone), ({"a": 1}, False))
+
+    def test_a_listing_that_has_the_edits_session_resets_its_misses(self):
+        misses, _ = core.edit_session_gone("a", ["b"], {})
+        misses, gone = core.edit_session_gone("a", ["a"], misses)
+        self.assertEqual((misses, gone), ({}, False))
+
     def test_n_on_the_pinned_header_never_takes_its_key_for_a_folder(self):
         groups = core.group_sessions(self.sessions, {}, core.PROJECT, frozenset({"a"}))
         self.assertEqual(core.default_folder(("group", core.PINNED), groups, self.sessions, core.PROJECT, "/r/last"), "/r/last")

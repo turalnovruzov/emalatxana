@@ -1637,11 +1637,32 @@ class RenameSession(AppCase):
 
     def test_an_edit_whose_session_drops_out_of_the_listing_is_dropped_with_a_reason(self):
         self.keys(sidebar.CTRL_R, *"half")
-        self.poll(session("b", "/p/beta"), session("c", "/p/gamma"))
-        self.app.refresh()
+        for _ in range(core.STALE_AFTER_MISSES):
+            self.poll(session("b", "/p/beta"), session("c", "/p/gamma"))
+            self.app.refresh()
         self.assertIsNone(self.app.rename_edit)
         self.assertEqual(self.app.notice, "emx-test-named isn't listed any more, so emx dropped the rename.")
         self.assertTrue(self.app.notice_error)
+
+    def test_one_listing_without_the_session_keeps_the_edit_and_its_text(self):
+        self.keys(sidebar.CTRL_R, "\x15", *"half")
+        self.poll(session("b", "/p/beta"), session("c", "/p/gamma"))
+        self.app.refresh()
+        self.assertEqual(self.app.rename_edit["text"], "half")
+
+    def test_an_empty_listing_never_counts_against_the_edit(self):
+        self.keys(sidebar.CTRL_R, "\x15", *"half")
+        for _ in range(core.STALE_AFTER_MISSES + 1):
+            self.poll()
+            self.app.refresh()
+        self.assertEqual(self.app.rename_edit["text"], "half")
+
+    def test_a_listing_that_still_has_the_session_resets_the_misses(self):
+        self.keys(sidebar.CTRL_R, "\x15", *"half")
+        for listing in ([session("b", "/p/beta")], [self.named], [session("b", "/p/beta")]):
+            self.poll(*listing)
+            self.app.refresh()
+        self.assertEqual(self.app.rename_edit["text"], "half")
 
     def test_a_viewer_scrolled_back_is_never_typed_into(self):
         self.app.tmux.in_mode = True

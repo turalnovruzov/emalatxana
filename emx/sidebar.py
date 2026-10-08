@@ -695,6 +695,7 @@ class App:
         self.renamer = None
         self.renaming = {}
         self.pin_misses = {}
+        self.rename_misses = {}
         self.flagged_viewers = frozenset()
         self.auto_tried = frozenset()
         self.last_restore = None
@@ -1108,6 +1109,7 @@ class App:
             self.say(blocked, error=True)
             return
         self.rename_edit = {"id": session.id, "old": session.name, "text": core.rename_start(session), "hint": ""}
+        self.rename_misses = {}
         self.say("")
 
     def rename_key(self, key) -> None:
@@ -1630,9 +1632,16 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
-        if self.rename_edit is not None and not any(s.id == self.rename_edit["id"] for s in sessions):
-            self.say(f"{self.rename_edit['old']} isn't listed any more, so emx dropped the rename.", error=True)
-            self.rename_edit = None
+        if self.rename_edit is None:
+            self.rename_misses = {}
+        else:
+            self.rename_misses, gone = core.edit_session_gone(
+                self.rename_edit["id"], [s.id for s in sessions], self.rename_misses,
+            )
+            if gone:
+                self.say(f"{self.rename_edit['old']} isn't listed any more, so emx dropped the rename.", error=True)
+                self.rename_edit = None
+                self.rename_misses = {}
         self.loaded = True
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
