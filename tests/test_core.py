@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from emx import core
@@ -120,38 +121,30 @@ class TextHelpers(unittest.TestCase):
 
 
 class Layout(unittest.TestCase):
-    def test_main_capped_at_reading_width(self):
-        lay = core.compute_layout(300, 40, 100)
-        self.assertEqual((lay.panel, lay.main), (40, 100))
-        self.assertEqual(lay.panel + lay.main + lay.spacer + 2, 300)
+    def test_main_takes_the_rest(self):
+        lay = core.compute_layout(300, 40)
+        self.assertEqual((lay.panel, lay.main), (40, 259))
 
-    def test_spacer_takes_remainder(self):
-        lay = core.compute_layout(200, 40, 90)
-        self.assertEqual(lay.spacer, 200 - 2 - 40 - 90)
-
-    def test_widths_always_positive_and_fit(self):
+    def test_widths_always_positive_and_fill(self):
         for ww in range(0, 400):
             for pw in (1, 16, 40, 500):
-                for mw in (1, 20, 100, 500):
-                    lay = core.compute_layout(ww, pw, mw)
-                    with self.subTest(ww=ww, pw=pw, mw=mw):
-                        self.assertGreaterEqual(lay.panel, 1)
-                        self.assertGreaterEqual(lay.main, 1)
-                        self.assertGreaterEqual(lay.spacer, 1)
-                        if ww >= 5:
-                            self.assertLessEqual(lay.panel + lay.main + lay.spacer + 2, ww)
+                lay = core.compute_layout(ww, pw)
+                with self.subTest(ww=ww, pw=pw):
+                    self.assertGreaterEqual(lay.panel, 1)
+                    self.assertGreaterEqual(lay.main, 1)
+                    if ww >= 3:
+                        self.assertEqual(lay.panel + lay.main + 1, ww)
 
     def test_narrow_terminal_keeps_min_main(self):
-        lay = core.compute_layout(60, 40, 100)
-        self.assertGreaterEqual(lay.main, core.MIN_MAIN)
-        self.assertLessEqual(lay.panel + lay.main + lay.spacer + 2, 60)
+        lay = core.compute_layout(60, 40)
+        self.assertEqual((lay.panel, lay.main), (39, core.MIN_MAIN))
+        self.assertEqual(lay.panel + lay.main + 1, 60)
 
     def test_width_action(self):
-        self.assertEqual(core.width_action(None, (200, 40, 100)), "apply")
-        self.assertEqual(core.width_action((200, 40, 100), (180, 40, 100)), "apply")
-        self.assertEqual(core.width_action((200, 40, 100), (200, 45, 100)), "adopt-panel")
-        self.assertEqual(core.width_action((200, 40, 100), (200, 40, 90)), "adopt-main")
-        self.assertIsNone(core.width_action((200, 40, 100), (200, 40, 100)))
+        self.assertEqual(core.width_action(None, (200, 40)), "apply")
+        self.assertEqual(core.width_action((200, 40), (180, 40)), "apply")
+        self.assertEqual(core.width_action((200, 40), (200, 45)), "adopt-panel")
+        self.assertIsNone(core.width_action((200, 40), (200, 40)))
 
 
 class Prefs(unittest.TestCase):
@@ -176,19 +169,28 @@ class Prefs(unittest.TestCase):
         self.assertEqual(core.load_prefs(self.path), core.DEFAULT_PREFS)
 
     def test_roundtrip_creates_parent_dirs(self):
-        prefs = {"side": "left", "main_width": 80, "panel_width": 30, "last_folder": "/x"}
+        prefs = {"side": "left", "panel_width": 30, "last_folder": "/x"}
         core.save_prefs(self.path, prefs)
         self.assertEqual(core.load_prefs(self.path), prefs)
         self.assertFalse(self.path.with_name("prefs.json.tmp").exists())
 
+    def test_old_file_with_main_width_loads_and_drops_it(self):
+        self.path.parent.mkdir(parents=True)
+        old = {"side": "left", "main_width": 80, "panel_width": 30, "last_folder": "/x"}
+        self.path.write_text(json.dumps(old), encoding="utf-8")
+        got = core.load_prefs(self.path)
+        self.assertEqual(got, {"side": "left", "panel_width": 30, "last_folder": "/x"})
+        core.save_prefs(self.path, got)
+        self.assertNotIn("main_width", json.loads(self.path.read_text(encoding="utf-8")))
+
     def test_normalize_rejects_bad_values(self):
-        got = core.normalize_prefs({"side": "up", "main_width": "9", "panel_width": True, "last_folder": ""})
+        got = core.normalize_prefs({"side": "up", "panel_width": True, "last_folder": ""})
         self.assertEqual(got, core.DEFAULT_PREFS)
+        self.assertEqual(core.normalize_prefs({"panel_width": "9"}), core.DEFAULT_PREFS)
 
     def test_normalize_clamps(self):
-        got = core.normalize_prefs({"main_width": -5, "panel_width": 10**9})
-        self.assertEqual(got["main_width"], core.MIN_MAIN)
-        self.assertEqual(got["panel_width"], core.MAX_WIDTH)
+        self.assertEqual(core.normalize_prefs({"panel_width": 5})["panel_width"], core.MIN_PANEL)
+        self.assertEqual(core.normalize_prefs({"panel_width": 10**9})["panel_width"], core.MAX_WIDTH)
 
     def test_normalize_non_dict(self):
         for raw in (None, [], "s", 3):
@@ -196,7 +198,7 @@ class Prefs(unittest.TestCase):
 
     def test_normalize_does_not_mutate_defaults(self):
         core.normalize_prefs({"side": "left", "last_folder": "/q"})
-        self.assertEqual(core.DEFAULT_PREFS, {"side": "right", "main_width": 100, "panel_width": 40})
+        self.assertEqual(core.DEFAULT_PREFS, {"side": "right", "panel_width": 40})
 
     def test_prefs_path_xdg(self):
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "/cfg"}), Path("/cfg/emx/prefs.json"))
@@ -208,12 +210,12 @@ class Prefs(unittest.TestCase):
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": ""}), want)
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "rel/dir"}), want)
 
-    def test_adjust_width_clamped(self):
+    def test_adjust_panel_width_clamped(self):
         p = dict(core.DEFAULT_PREFS)
-        self.assertEqual(core.adjust_width(p, "main_width", -1000)["main_width"], core.MIN_MAIN)
-        self.assertEqual(core.adjust_width(p, "panel_width", -1000)["panel_width"], core.MIN_PANEL)
-        self.assertEqual(core.adjust_width(p, "panel_width", 10**6)["panel_width"], core.MAX_WIDTH)
-        self.assertEqual(core.adjust_width(p, "main_width", 5)["main_width"], 105)
+        self.assertEqual(core.adjust_panel_width(p, -1000)["panel_width"], core.MIN_PANEL)
+        self.assertEqual(core.adjust_panel_width(p, 10**6)["panel_width"], core.MAX_WIDTH)
+        self.assertEqual(core.adjust_panel_width(p, 5)["panel_width"], 45)
+        self.assertEqual(core.adjust_panel_width(p, -5)["panel_width"], 35)
         self.assertEqual(p, core.DEFAULT_PREFS)
 
     def test_flip_side(self):
@@ -309,6 +311,95 @@ class StaleViewers(unittest.TestCase):
     def test_accepts_sets_and_generators(self):
         _, close = core.stale_viewers({"a", "b"}, (x for x in ["a"]), {"b": 1})
         self.assertEqual(close, ["b"])
+
+
+@dataclass(frozen=True)
+class P:
+    id: str
+    window: str = "@1"
+    role: str = ""
+    session: str = ""
+    dead: bool = False
+
+
+def old_release(side="right"):
+    """The panes a workspace from the release with the reading-width cap holds after one session was opened."""
+    home = [P("%2", role="spacer"), P("%3", session="s1"), P("%1", role="sidebar")]
+    if side == "left":
+        home.reverse()
+    return home + [P("%0", window="@2", role="placeholder"), P("%4", window="@3", session="s2")]
+
+
+class CodeVersion(unittest.TestCase):
+    FILES = [("bin/emx", b"launcher"), ("emx/core.py", b"core"), ("emx/emx.tmux.conf", b"conf")]
+
+    def test_order_does_not_matter(self):
+        self.assertEqual(core.code_version(self.FILES), core.code_version(list(reversed(self.FILES))))
+
+    def test_a_content_change_changes_it(self):
+        changed = [*self.FILES[:2], ("emx/emx.tmux.conf", b"conf2")]
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version(changed))
+
+    def test_a_rename_or_new_file_changes_it(self):
+        renamed = [("bin/emx", b"launcher"), ("emx/core2.py", b"core"), ("emx/emx.tmux.conf", b"conf")]
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version(renamed))
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version([*self.FILES, ("emx/x.py", b"")]))
+
+    def test_moving_bytes_between_name_and_content_changes_it(self):
+        self.assertNotEqual(core.code_version([("a", b"bc")]), core.code_version([("ab", b"c")]))
+
+    def test_bytecode_dotfiles_and_editor_backups_do_not_count(self):
+        for rel in (
+            "emx/__pycache__/core.cpython-314.pyc", "emx/core.pyc", "emx/.DS_Store", ".hidden/x.py",
+            "emx/cli.py~", "emx/emx.tmux.conf~",
+        ):
+            with self.subTest(rel=rel):
+                self.assertFalse(core.counts_for_version(rel))
+        for rel in ("bin/emx", "emx/cli.py", "emx/emx.tmux.conf"):
+            with self.subTest(rel=rel):
+                self.assertTrue(core.counts_for_version(rel))
+
+    def test_needs_upgrade(self):
+        self.assertTrue(core.needs_upgrade("", "abc"))
+        self.assertTrue(core.needs_upgrade("old", "abc"))
+        self.assertFalse(core.needs_upgrade("abc", "abc"))
+
+
+class RelaunchPlan(unittest.TestCase):
+    def test_upgrade_from_old_release_respawns_sidebar_and_drops_spacer(self):
+        for side in ("left", "right"):
+            with self.subTest(side=side):
+                self.assertEqual(core.relaunch_plan(old_release(side), upgrade=True), (["%1"], ["%2"]))
+
+    def test_viewers_and_placeholder_never_touched(self):
+        respawn, drop = core.relaunch_plan(old_release(), upgrade=True)
+        self.assertFalse({"%0", "%3", "%4"} & set(respawn + drop))
+
+    def test_same_version_only_revives_a_dead_sidebar(self):
+        self.assertEqual(core.relaunch_plan(old_release(), upgrade=False), ([], []))
+        panes = [P("%1", role="sidebar", dead=True), P("%3", session="s1")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=False), (["%1"], []))
+
+    def test_current_layout_upgrade_only_respawns_sidebar(self):
+        panes = [P("%3", session="s1"), P("%1", role="sidebar"), P("%0", window="@2", role="placeholder")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), (["%1"], []))
+
+    def test_a_pane_holding_a_session_is_never_chosen_whatever_its_role(self):
+        panes = [P("%1", role="sidebar", session="s1", dead=True), P("%2", role="spacer", session="s2"), P("%3")]
+        for upgrade in (True, False):
+            with self.subTest(upgrade=upgrade):
+                self.assertEqual(core.relaunch_plan(panes, upgrade=upgrade), ([], []))
+
+    def test_never_drops_the_last_pane_of_a_window(self):
+        panes = [P("%1", role="sidebar"), P("%3"), P("%5", window="@4", role="spacer")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), (["%1"], []))
+
+    def test_two_spacers_alone_in_a_window_keep_one(self):
+        panes = [P("%5", window="@4", role="spacer"), P("%6", window="@4", role="spacer")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), ([], ["%5"]))
+
+    def test_no_panes(self):
+        self.assertEqual(core.relaunch_plan([], upgrade=True), ([], []))
 
 
 def viewer_screen(rule_line, prompt="❯ ", width=40, transcript=("some answer text", "❯ an earlier message", "")):

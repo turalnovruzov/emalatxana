@@ -8,6 +8,7 @@ from dataclasses import dataclass
 SESSION = "emx"
 ROLE = "@emx_role"
 SESSION_OPT = "@emx_session"
+VERSION_OPT = "@emx_version"
 
 
 class TmuxError(RuntimeError):
@@ -63,13 +64,13 @@ class Tmux:
 
     def has_session(self) -> bool:
         try:
-            self.run("has-session", "-t", f"={SESSION}")
+            self.run("has-session", "-t", f"={SESSION}:")
             return True
         except TmuxError:
             return False
 
     def panes(self) -> list:
-        out = self.run("list-panes", "-s", "-t", f"={SESSION}", "-F", _PANE_FORMAT)
+        out = self.run("list-panes", "-s", "-t", f"={SESSION}:", "-F", _PANE_FORMAT)
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")
@@ -80,6 +81,15 @@ class Tmux:
                 Pane(pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0))
             )
         return panes
+
+    def session_option(self, name: str) -> str:
+        return self.run("show-options", "-qv", "-t", f"={SESSION}:", name).strip()
+
+    def set_session_option(self, name: str, value: str) -> None:
+        self.run("set-option", "-t", f"={SESSION}:", name, value)
+
+    def source_config(self) -> None:
+        self.run("source-file", self.config)
 
     def set_pane_option(self, pane: str, name: str, value: str) -> None:
         self.run("set-option", "-p", "-t", pane, name, value)

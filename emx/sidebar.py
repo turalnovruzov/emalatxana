@@ -19,9 +19,9 @@ LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
 BACK_KEY = "C-\\"
 FOOTERS = (
-    "↵ open  n new  r restart  s side  [ ] main  < > panel  q detach  ^\\ back",
-    "n new  r restart  s side  []<> size  q detach  ^\\ back",
-    "n new r restart s side []<> q ^\\back",
+    "↵ open  n new  r restart  s side  < > panel  q detach  ^\\ back",
+    "n new  r restart  s side  <> panel  q detach  ^\\ back",
+    "n new r restart s side <> q ^\\back",
 )
 GLYPHS = {"working": "●", "blocked": "◆", "done": "✓"}
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
@@ -173,14 +173,12 @@ class App:
             self.say(f"Couldn't save prefs: {exc}", error=True)
 
     def layout_panes(self, panes: list) -> tuple:
-        """(sidebar, main, spacer) in the sidebar's window. The main slot is whichever pane is neither of the other two, since swap-pane moves pane ids around."""
+        """(sidebar, main) in the sidebar's window. The main slot is whichever pane is not the sidebar, since swap-pane moves pane ids around."""
         mine = next((p for p in panes if p.id == self.me), None)
         if mine is None:
-            return None, None, None
-        home = [p for p in panes if p.window == mine.window]
-        spacer = next((p for p in home if p.role == "spacer"), None)
-        main = next((p for p in home if p is not mine and p is not spacer), None)
-        return mine, main, spacer
+            return None, None
+        main = next((p for p in panes if p.window == mine.window and p is not mine), None)
+        return mine, main
 
     def session(self, sid: str):
         """The session with this id in the latest successful poll, or None."""
@@ -195,13 +193,13 @@ class App:
     def housekeep(self, fresh_list: bool) -> None:
         try:
             panes = self.tmux.panes()
-            sidebar, main, spacer = self.layout_panes(panes)
+            sidebar, main = self.layout_panes(panes)
             self.main_pane = main
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
                 self.bound = (sidebar.id, main.id)
-            if sidebar and main and spacer:
-                self.reconcile_widths(sidebar, main, spacer)
+            if sidebar and main:
+                self.reconcile_widths(sidebar)
             if fresh_list:
                 self.close_stale(panes, main)
             self.flagged_viewers &= {p.id for p in panes}
@@ -225,27 +223,20 @@ class App:
     def main_is_off(self) -> bool:
         return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
 
-    def reconcile_widths(self, sidebar: Pane, main: Pane, spacer: Pane) -> None:
-        actual = (sidebar.window_width, sidebar.width, main.width)
-        action = core.width_action(self.applied, actual)
-        if action == "adopt-main":
-            self.prefs["main_width"] = main.width
-            self.save_prefs()
-            self.applied = actual
-            return
+    def reconcile_widths(self, sidebar: Pane) -> None:
+        action = core.width_action(self.applied, (sidebar.window_width, sidebar.width))
         if action == "adopt-panel":
             self.prefs["panel_width"] = sidebar.width
             self.save_prefs()
         if action is not None:
-            self.apply_layout(sidebar, spacer)
+            self.apply_layout(sidebar)
 
-    def apply_layout(self, sidebar: Pane, spacer: Pane) -> None:
-        want = core.compute_layout(sidebar.window_width, self.prefs["panel_width"], self.prefs["main_width"])
+    def apply_layout(self, sidebar: Pane) -> None:
+        want = core.compute_layout(sidebar.window_width, self.prefs["panel_width"])
         self.tmux.resize_width(sidebar.id, want.panel)
-        self.tmux.resize_width(spacer.id, want.spacer)
-        sidebar, main, _ = self.layout_panes(self.tmux.panes())
-        if sidebar and main:
-            self.applied = (sidebar.window_width, sidebar.width, main.width)
+        sidebar, _ = self.layout_panes(self.tmux.panes())
+        if sidebar:
+            self.applied = (sidebar.window_width, sidebar.width)
 
     def close_stale(self, panes: list, main: Pane | None) -> None:
         now = time.monotonic()
@@ -266,7 +257,7 @@ class App:
     def switch_to(self, sid: str) -> None:
         try:
             panes = self.tmux.panes()
-            _, main, _ = self.layout_panes(panes)
+            _, main = self.layout_panes(panes)
             if main is None:
                 self.say("The main pane is missing; restart emx.", error=True)
                 return
@@ -315,10 +306,10 @@ class App:
 
     def flip_side(self) -> None:
         try:
-            sidebar, _, spacer = self.layout_panes(self.tmux.panes())
-            if sidebar is None or spacer is None:
+            sidebar, main = self.layout_panes(self.tmux.panes())
+            if sidebar is None or main is None:
                 return
-            self.tmux.swap(sidebar.id, spacer.id)
+            self.tmux.swap(sidebar.id, main.id)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
             return
@@ -327,8 +318,8 @@ class App:
         self.applied = None
         self.housekeep(fresh_list=False)
 
-    def change_width(self, key: str, delta: int) -> None:
-        self.prefs = core.adjust_width(self.prefs, key, delta)
+    def change_panel_width(self, delta: int) -> None:
+        self.prefs = core.adjust_panel_width(self.prefs, delta)
         self.save_prefs()
         self.applied = None
         self.housekeep(fresh_list=False)
@@ -431,14 +422,10 @@ class App:
             self.restart_viewer()
         elif key == "s":
             self.flip_side()
-        elif key == "[":
-            self.change_width("main_width", -core.WIDTH_STEP)
-        elif key == "]":
-            self.change_width("main_width", core.WIDTH_STEP)
         elif key in ("<", ","):
-            self.change_width("panel_width", -core.WIDTH_STEP)
+            self.change_panel_width(-core.WIDTH_STEP)
         elif key in (">", "."):
-            self.change_width("panel_width", core.WIDTH_STEP)
+            self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
 
