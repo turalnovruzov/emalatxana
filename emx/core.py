@@ -464,6 +464,7 @@ STATUS_MIN = 5
 DETAIL_MIN = 6
 BRANCH_MIN = 4
 WORKTREE_MARK = "⎇ "
+BARE_MARK = WORKTREE_MARK.rstrip()
 
 
 def row_label(name: str, worktree: str) -> str:
@@ -477,10 +478,11 @@ def name_column(rows, width: int) -> int:
     The column is the widest `row_label` within half the row. A worktree
     label too wide for that counts as half the row when its branch can
     shorten to fit, since `row_layout` shortens the branch to the column; one
-    too wide even so counts its name alone, since `row_layout` then drops the
-    branch. A name too wide by itself is left out, so one long name doesn't
-    push every row. A row alone in its group has nothing to line up with, so
-    it gets no column and keeps its whole branch.
+    too wide even so counts its name and the bare mark, since `row_layout`
+    then drops the branch but keeps the mark. A name too wide for that is
+    left out, so one long name doesn't push every row. A row alone in its
+    group has nothing to line up with, so it gets no column and keeps its
+    whole branch.
     """
     rows = list(rows)
     if len(rows) < 2:
@@ -493,14 +495,18 @@ def name_column(rows, width: int) -> int:
         if label > cap and worktree:
             if shortest <= cap:
                 label = cap
-            elif display_width(name) <= cap:
-                label = display_width(name)
+            elif _bare_label(name) <= cap:
+                label = _bare_label(name)
         widths.append(label)
     return max((w for w in widths if w <= cap), default=0)
 
 
 def _branch_floor(worktree: str) -> int:
     return min(BRANCH_MIN, display_width(worktree))
+
+
+def _bare_label(name: str) -> int:
+    return display_width(name) + 1 + display_width(BARE_MARK)
 
 
 def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
@@ -512,10 +518,12 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     line up within a group; a worktree's branch shortens to stay inside that
     column, or goes when it can't, as `name_column` assumes. As space runs
     out, in order: the status detail shortens; the worktree's branch
-    shortens, down to BRANCH_MIN, then goes; the state word goes whole, never
-    cut, since the glyph's colour still shows the state; a name too long to
-    leave even STATUS_MIN columns is cut, down to NAME_MIN, to keep the state
-    word; and last the status goes and the name is cut to whatever is left.
+    shortens, down to BRANCH_MIN, then goes, leaving the bare mark; the state
+    word goes whole, never cut, since the glyph's colour still shows the
+    state; a name too long to leave even STATUS_MIN columns is cut, down to
+    NAME_MIN, to keep the state word; and last the status goes and the name
+    is cut to whatever is left. A worktree row keeps at least its bare mark
+    while its name is whole; only a cut name loses it.
     An empty `word` (the by-state view, whose header already says it) leaves
     the detail alone as the status.
     """
@@ -536,14 +544,22 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
             spare = min(spare, in_column)
         if spare >= _branch_floor(worktree):
             extra = WORKTREE_MARK + fit(worktree, spare)
-    if extra or name_w + gap + word_w <= room:
+    mark_w = _bare_label(name) - name_w if worktree else 0
+    if extra or name_w + mark_w + gap + word_w <= room:
         shown, keep_word = name, True
-    elif room - name_w - 2 >= STATUS_MIN:
+    elif room - name_w - mark_w - 2 >= STATUS_MIN:
         shown, keep_word = name, False
-    elif word and room - 2 - word_w >= NAME_MIN:
+    elif word and NAME_MIN <= room - 2 - word_w < name_w:
         shown, keep_word = fit(name, room - 2 - word_w), True
+    elif name_w + mark_w <= room:
+        shown, keep_word = name, False
+    elif worktree and name_w <= room and room > mark_w:
+        # The name would fit only without its mark; cutting it keeps both on screen.
+        return _row(fit(name, room - mark_w), BARE_MARK, "", age, age_x)
     else:
         return _row(fit(name, room), "", "", age, age_x)
+    if worktree and not extra and shown == name:
+        extra = BARE_MARK
 
     lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
     status_room = room - lead_w - 2

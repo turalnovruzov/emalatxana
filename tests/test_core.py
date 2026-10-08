@@ -440,13 +440,13 @@ class RowLayout(unittest.TestCase):
                     x, text, part = parts[-1]
                     self.assertEqual((part, x + core.display_width(text)), ("age", width - 1))
 
-    def test_detail_shortens_then_worktree_goes(self):
+    def test_detail_shortens_then_branch_goes_and_mark_stays(self):
         got = rendered(self.row(50, detail="approve Bash: touch made-by-test.txt"))
         self.assertEqual(got, "   emx-test-perm  Needs input · approve Bash… 12m")
         got = rendered(self.row(41, name="emx-test-wt", worktree="feat-x", word="Needs input", detail="approve it"))
         self.assertEqual(got, "   emx-test-wt ⎇ feat-x  Needs input 12m")
         got = rendered(self.row(36, name="emx-test-wt", worktree="feat-x"))
-        self.assertEqual(got, "   emx-test-wt  Needs input     12m")
+        self.assertEqual(got, "   emx-test-wt ⎇  Needs input   12m")
 
     def test_tiny_detail_is_left_out(self):
         got = rendered(self.row(40, detail="approve Bash: touch x"))
@@ -515,6 +515,9 @@ class RowLayout(unittest.TestCase):
                     status_x = [next((x for x, _, p in parts if p == "status"), None) for parts in rows]
                     if None not in status_x:
                         self.assertEqual(len(set(status_x)), 1, [rendered(r) for r in rows])
+                    for (n, w), parts in zip(group, rows):
+                        if w and next(t for _, t, p in parts if p == "name") == n:
+                            self.assertIn("⎇", rendered(parts))
                     if group[0][1] == "" and width in (40, 50, 60):
                         self.assertEqual(status_x, [3 + column + 2] * len(rows))
                         self.assertIn("⎇", rendered(rows[-1]))
