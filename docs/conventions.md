@@ -40,6 +40,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: "never" includes decoding. Output with invalid UTF-8 raises inside `subprocess.run` before your own `try` around parsing sees it, so decode with `errors="replace"`. Threads and the main loop still catch everything as a backstop.
 
+### Screen detection is tested on real captures
+
+1. **Rule**: we test screen detection against real captures from throwaway sessions, stored as `tests/fixtures/screens/<what>.w<pane width>.txt`. The width in the file name is passed to the detector, and anything private is replaced with `<placeholder>` tokens.
+2. **Why**: hand-written screens encode what we think Claude Code draws. Real captures caught the logo prefix, the zero counts in the agent header and footer differences that broke the detector before, and the width must be tmux's, not one inferred from the text.
+3. **Minimal example**:
+   ```python
+   text, width = real_screen("agent-view")   # agent-view.w100.txt
+   core.main_view_state(text, "emx-test-named", width)
+   ```
+4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

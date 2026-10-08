@@ -456,7 +456,9 @@ class App:
         if self.main_is_off():
             session = self.session(self.main_pane.session)
             name = session.name if session else self.main_pane.session
-            warning = f"Main isn't showing {name} — press r to go back"
+            # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
+            verb = "isn't" if session and session.name != session.id else "may not be"
+            warning = f"Main {verb} showing {name} — press r to go back"
             lines += [(t, self.color("error")) for t in core.wrap(warning, width)[:3]]
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap(f"! {self.list_error}", width)[:3]]
