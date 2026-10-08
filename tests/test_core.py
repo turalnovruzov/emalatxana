@@ -1439,26 +1439,56 @@ class ClaudeCommands(unittest.TestCase):
         self.assertEqual(cmd, "exec '/p with space/claude' attach 'a;b'")
 
 
+class HoldCursor(unittest.TestCase):
+    def test_the_first_empty_listing_holds_the_cursor_and_items(self):
+        self.assertEqual(core.hold_cursor(None, False, "b", ["a", "b"]), ("b", ["a", "b"]))
+
+    def test_a_second_empty_listing_keeps_the_first_hold(self):
+        self.assertEqual(core.hold_cursor(("b", ["a", "b"]), False, None, []), ("b", ["a", "b"]))
+
+    def test_sessions_coming_back_drop_the_hold(self):
+        self.assertIsNone(core.hold_cursor(("b", ["a", "b"]), True, None, []))
+
+    def test_an_empty_listing_with_no_cursor_holds_nothing(self):
+        self.assertIsNone(core.hold_cursor(None, False, None, ["a", "b"]))
+
+
 class StaleViewers(unittest.TestCase):
     def test_live_viewer_not_stale_and_misses_cleared(self):
         self.assertEqual(core.stale_viewers(["a"], ["a"], {"a": 1}), ({}, []))
 
     def test_one_miss_is_not_enough(self):
-        self.assertEqual(core.stale_viewers(["a"], [], {}), ({"a": 1}, []))
+        self.assertEqual(core.stale_viewers(["a"], ["other"], {}), ({"a": 1}, []))
 
     def test_second_consecutive_miss_closes(self):
-        misses, close = core.stale_viewers(["a"], [], {"a": 1})
+        misses, close = core.stale_viewers(["a"], ["other"], {"a": 1})
         self.assertEqual(close, ["a"])
         self.assertNotIn("a", misses)
 
     def test_miss_streak_resets_when_seen(self):
-        misses, _ = core.stale_viewers(["a"], [], {})
+        misses, _ = core.stale_viewers(["a"], ["other"], {})
         misses, _ = core.stale_viewers(["a"], ["a"], misses)
-        misses, close = core.stale_viewers(["a"], [], misses)
+        misses, close = core.stale_viewers(["a"], ["other"], misses)
         self.assertEqual(close, [])
 
     def test_no_viewers(self):
-        self.assertEqual(core.stale_viewers([], [], {"gone": 1}), ({}, []))
+        self.assertEqual(core.stale_viewers([], ["other"], {"gone": 1}), ({}, []))
+
+    def test_an_empty_listing_never_closes_a_live_viewer(self):
+        for listing in ([], iter([])):
+            misses = {"a": 1}
+            for _ in range(core.STALE_AFTER_MISSES + 1):
+                misses, close = core.stale_viewers(["a"], listing, misses)
+                self.assertEqual((misses, close), ({"a": 1}, []))
+
+    def test_an_empty_listing_still_counts_against_a_dead_viewer(self):
+        misses, close = core.stale_viewers(["a", "b"], [], {}, dead={"b"})
+        self.assertEqual((misses, close), ({"b": 1}, []))
+        misses, close = core.stale_viewers(["a", "b"], [], misses, dead={"b"})
+        self.assertEqual(close, ["b"])
+
+    def test_dead_is_ignored_when_the_listing_has_sessions(self):
+        self.assertEqual(core.stale_viewers(["a"], ["a"], {}, dead={"a"}), ({}, []))
 
     def test_accepts_sets_and_generators(self):
         _, close = core.stale_viewers({"a", "b"}, (x for x in ["a"]), {"b": 1})
@@ -3179,6 +3209,12 @@ class SummaryOutput(unittest.TestCase):
         stopped = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": 0.0001639,
                               "errors": ["Reached maximum budget ($0.00001)"]})
         self.assertEqual(core.parse_summary_output(stopped, 1), (None, "Reached maximum budget ($0.00001)"))
+
+    def test_a_refusal_is_emxs_own_line_not_the_clis_advice(self):
+        refused = json.dumps({"type": "result", "subtype": "success", "is_error": True, "stop_reason": "refusal", "num_turns": 2,
+                              "result": "API Error: Haiku 5.5 can't help with this. Start a new session to continue."})
+        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_REFUSED))
+        self.assertNotIn("new session", core.HAIKU_REFUSED)
 
     def test_cleaning_takes_the_first_line_without_controls_quotes_or_full_stop(self):
         self.assertEqual(core.clean_summary("\x1b[31m\"Fixing tests.\"\x07\nsecond"), "Fixing tests")

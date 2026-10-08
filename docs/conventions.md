@@ -136,7 +136,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
 
-1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` in the current listing that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
+1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
 2. **Why**: the contract allows reading `~/.claude` and forbids writing, moving or deleting anything there. Transcripts run to many megabytes and grow while being read, and a read on the curses thread would freeze the panel.
 3. **Minimal example**:
    ```python
@@ -156,13 +156,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### A session counts as gone only after `STALE_AFTER_MISSES` listings in a row without it
 
-1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count and the decision live in core (`stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`). Viewer closing (`App.close_stale`) counts misses but does not yet skip empty listings.
+1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it, closing its viewer) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count, the decision and the empty-listing rule live in core `stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`. The one thing an empty listing still counts against is a viewer whose pane is dead (`dead=`), since a stopped session ends its viewer.
 2. **Why**: `claude agents` can return one glitchy or empty result. Acting on it closes or discards something he is using.
 3. **Minimal example**:
    ```python
    misses, gone = core.edit_session_gone(sid, live_ids, misses)
    ```
-4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. And check for the empty listing before counting: `stale_viewers` alone counts an empty listing as a miss for everything.
+4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's.
 
 ### emx types into a session only through `Tmux.type_if` or `Tmux.key_if`, after the listing and screen checks
 
