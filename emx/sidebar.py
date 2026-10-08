@@ -312,9 +312,10 @@ class Renamer(threading.Thread):
     message, typed).
     """
 
-    def __init__(self, claude: str, tmux: Tmux, rename: core.Rename):
+    def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
         super().__init__(daemon=True)
         self.claude, self.tmux, self.rename = claude, tmux, rename
+        self.panel, self.flagged = panel, flagged
         self.result = None
 
     def run(self) -> None:
@@ -330,15 +331,24 @@ class Renamer(threading.Thread):
         if refusal:
             return False, refusal, False
         try:
-            viewer = next((p for p in self.tmux.panes() if p.session == self.rename.id and not p.dead), None)
+            panes = self.tmux.panes()
+            viewer = next((p for p in panes if p.session == self.rename.id and not p.dead), None)
             if viewer is None:
                 return False, f"{self.rename.old}'s viewer has closed, so emx didn't rename it.", False
+            # pane_active is per window, so it is read off the panel: the viewer may be alone in a hidden window.
+            panel_active = any(p.id == self.panel and p.active for p in panes)
             named = session.name != session.id
-            state = core.main_view_state(self.tmux.capture(viewer.id), session.name if named else "", viewer.width)
+            captured = self.tmux.capture(viewer.id)
             x, y, shown, width = self.tmux.cursor(viewer.id)
             line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-            empty = core.empty_prompt(line, below, x, shown, width)
-            refusal = core.rename_screen_refusal(self.rename, named, state, empty)
+            screen = core.RenameScreen(
+                view_state=core.main_view_state(captured, session.name if named else "", viewer.width),
+                bare_rule=core.bare_rule_above_prompt(captured, viewer.width),
+                prompt_empty=core.empty_prompt(line, below, x, shown, width),
+                flagged=viewer.id in self.flagged,
+                panel_active=panel_active,
+            )
+            refusal = core.rename_screen_refusal(self.rename, named, screen)
             if refusal:
                 return False, refusal, False
             self.tmux.type_line(viewer.id, core.rename_line(self.rename.new))
@@ -984,7 +994,7 @@ class App:
             return
         rename = core.Rename(edit["id"], edit["old"], name)
         self.renaming[rename.id] = (rename.old, rename.new)
-        self.renamer = Renamer(self.claude, self.tmux, rename)
+        self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
 

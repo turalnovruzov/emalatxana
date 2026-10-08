@@ -1935,13 +1935,27 @@ class RenameChecks(unittest.TestCase):
             with self.subTest(want=want):
                 self.assertIn(want, core.rename_listing_refusal(self.rename, session, fresh))
 
+    def screen(self, state="ok", bare=False, empty=True, flagged=False, active=True):
+        return core.RenameScreen(state, bare, empty, flagged, active)
+
     def test_the_screen_must_show_this_sessions_empty_prompt(self):
-        self.assertIsNone(core.rename_screen_refusal(self.rename, True, "ok", True))
-        self.assertIsNone(core.rename_screen_refusal(self.rename, False, "unknown", True))
-        self.assertIn("isn't empty", core.rename_screen_refusal(self.rename, True, "ok", False))
-        for named_, state in ((True, "unknown"), (True, "mismatch"), (True, "agent_view"), (False, "agent_view")):
-            with self.subTest(named=named_, state=state):
-                self.assertIn("isn't showing its prompt", core.rename_screen_refusal(self.rename, named_, state, True))
+        self.assertIsNone(core.rename_screen_refusal(self.rename, True, self.screen()))
+        self.assertIsNone(core.rename_screen_refusal(self.rename, False, self.screen("unknown", bare=True)))
+        self.assertIn("isn't empty", core.rename_screen_refusal(self.rename, True, self.screen(empty=False)))
+        refused = [
+            (True, self.screen("unknown")), (True, self.screen("mismatch")), (True, self.screen("agent_view")),
+            (False, self.screen("agent_view", bare=True)), (False, self.screen("unknown", bare=False)),
+            (True, self.screen(flagged=True)), (False, self.screen("unknown", bare=True, flagged=True)),
+        ]
+        for named_, screen in refused:
+            with self.subTest(named=named_, screen=screen):
+                self.assertIn("isn't showing its prompt", core.rename_screen_refusal(self.rename, named_, screen))
+
+    def test_focus_off_the_panel_refuses_before_anything_else(self):
+        self.assertEqual(
+            core.rename_screen_refusal(self.rename, True, self.screen(active=False)),
+            "Focus left the panel, so emx didn't type into alpha.",
+        )
 
     def test_on_real_screens_only_this_sessions_empty_prompt_passes(self):
         cases = {
@@ -1954,16 +1968,27 @@ class RenameChecks(unittest.TestCase):
             ("agent-view", "emx-test-named", "prompt-empty"): "isn't showing",
             ("agent-view", "", "prompt-empty"): "isn't showing",
             ("unnamed-empty-viewer", "", "prompt-empty"): None,
+            ("cross-wired", "", "prompt-empty"): "isn't showing",
+            ("named-viewer", "", "prompt-empty"): "isn't showing",
         }
         for (screen, name, prompt), want in cases.items():
             with self.subTest(screen=screen, name=name, prompt=prompt):
                 text, width = real_screen(screen)
-                state = core.main_view_state(text, name, width)
-                refusal = core.rename_screen_refusal(self.rename, bool(name), state, core.empty_prompt(*at_cursor(prompt)))
+                shown = core.RenameScreen(
+                    core.main_view_state(text, name, width), core.bare_rule_above_prompt(text, width),
+                    core.empty_prompt(*at_cursor(prompt)), False, True,
+                )
+                refusal = core.rename_screen_refusal(self.rename, bool(name), shown)
                 if want is None:
                     self.assertIsNone(refusal)
                 else:
                     self.assertIn(want, refusal)
+
+    def test_a_bare_rule_is_only_an_unnamed_sessions(self):
+        cases = {"unnamed-empty-viewer": True, "named-viewer": False, "cross-wired": False, "permission-dialog": False}
+        for name, want in cases.items():
+            with self.subTest(screen=name):
+                self.assertEqual(core.bare_rule_above_prompt(*real_screen(name)), want)
 
     def test_the_rename_counts_once_the_listing_shows_any_new_name(self):
         self.assertIsNone(core.renamed_to(self.rename, named("a", "alpha")))

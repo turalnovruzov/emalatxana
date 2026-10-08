@@ -387,18 +387,44 @@ def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool)
     return None
 
 
-def rename_screen_refusal(rename: Rename, named: bool, view_state: str, prompt_empty: bool) -> str | None:
-    """Why emx may not type `/rename` into the session's viewer as it is on screen now, or None.
+@dataclass(frozen=True)
+class RenameScreen:
+    """What is on screen at the moment emx would type `/rename`.
 
-    The viewer must show this session: its rule names it, or, for an
-    unnamed session whose rule names nothing, it is at least not Claude
-    Code's agent view, where the line would start a new session. And its
+    `view_state` is `main_view_state` of the viewer against the session's
+    name ("" when unnamed); `bare_rule` says the line over its prompt is a
+    pane-wide rule naming no session (`bare_rule_above_prompt`); `flagged`
+    says emx has caught this viewer showing something else
+    (`latch_off_main`); `panel_active` says his focus is still on the panel.
+    """
+
+    view_state: str
+    bare_rule: bool
+    prompt_empty: bool
+    flagged: bool
+    panel_active: bool
+
+
+def rename_screen_refusal(rename: Rename, named: bool, screen: RenameScreen) -> str | None:
+    """Why emx may not type `/rename` into the session's viewer as things are on screen now, or None.
+
+    His focus must still be on the panel, so no key of his can land between
+    this check and the typing. The viewer must show this session: its rule
+    names it, or, for an unnamed session, its rule names no session and it
+    is not Claude Code's agent view, where the line would start a new
+    session; and emx must not have caught it showing another session. Its
     prompt must be empty (`empty_prompt`), so a draft of his is never
     touched and no dialog or menu takes the keys.
     """
-    if view_state != "ok" and (named or view_state != "unknown"):
+    if not screen.panel_active:
+        return f"Focus left the panel, so emx didn't type into {rename.old}."
+    if named:
+        shows = screen.view_state == "ok"
+    else:
+        shows = screen.view_state == "unknown" and screen.bare_rule
+    if screen.flagged or not shows:
         return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
-    if not prompt_empty:
+    if not screen.prompt_empty:
         return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
     return None
 
@@ -1465,6 +1491,13 @@ def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:
     if not match or not expected_name.strip():
         return "unknown"
     return "ok" if _names_match(match.group(1), expected_name) else "mismatch"
+
+
+def bare_rule_above_prompt(captured: str, pane_width: int) -> bool:
+    """Whether the line over the input box is a pane-wide rule with no session name on it, as an unnamed session's viewer draws it."""
+    lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
+    above = _line_above_prompt(lines, pane_width)
+    return above is not None and bool(_FULL_RULE.match(above))
 
 
 def _line_above_prompt(lines: list, pane_width: int) -> str | None:

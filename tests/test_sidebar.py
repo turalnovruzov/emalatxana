@@ -1480,11 +1480,11 @@ PROMPT_CURSORS = json.loads((Path(__file__).parent / "fixtures" / "screens" / "p
 
 
 class RenameTmux:
-    """Main (%2) shows `named`; a hidden viewer (%3) shows `b`. Its screen and prompt come from real captures."""
+    """The panel (%1) has focus; main (%2) shows `named`; a hidden viewer (%3) shows `b`. Its screen and prompt come from real captures."""
 
     def __init__(self):
         self.list = [
-            Pane("%1", "@1", False, "sidebar", "", 40, 141),
+            Pane("%1", "@1", False, "sidebar", "", 40, 141, active=True),
             Pane("%2", "@1", False, "", "named", 100, 141),
             Pane("%3", "@2", False, "", "b", 100, 100),
         ]
@@ -1601,6 +1601,45 @@ class RenameSession(AppCase):
                 self.settle()
                 self.assertEqual(self.app.tmux.typed, [])
                 self.assertIn("isn't showing its prompt", self.app.notice)
+
+    def test_an_unnamed_sessions_viewer_showing_another_session_is_never_typed_into(self):
+        unnamed = core.Session("named", "named", "/p/alpha", "blocked", "", "", 0.0, True)
+        self.poll(unnamed)
+        self.app.refresh()
+        self.listings = [[unnamed]]
+        self.app.tmux.view("cross-wired", "prompt-empty")
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertIn("isn't showing its prompt", self.app.notice)
+
+    def test_an_unnamed_sessions_own_empty_prompt_is_typed_into(self):
+        unnamed = core.Session("named", "named", "/p/alpha", "blocked", "", "", 0.0, True)
+        self.poll(unnamed)
+        self.app.refresh()
+        self.listings = [[unnamed]]
+        self.after = core.Session("named", "fresh name", "/p/alpha", "blocked", "", "", 0.0, True)
+        self.app.tmux.view("unnamed-empty-viewer", "prompt-empty")
+        self.keys(sidebar.CTRL_R)
+        self.assertEqual(self.app.rename_edit["text"], "")
+        self.keys(*"fresh name", "\r")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
+        self.assertEqual(self.app.notice, "Renamed named to fresh name.")
+
+    def test_a_viewer_emx_caught_showing_something_else_is_never_typed_into(self):
+        self.app.flagged_viewers = frozenset({"%2"})
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertIn("isn't showing its prompt", self.app.notice)
+
+    def test_focus_leaving_the_panel_before_the_typing_types_nothing(self):
+        self.app.tmux.list[0] = Pane("%1", "@1", False, "sidebar", "", 40, 141, active=False)
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertEqual(self.app.notice, "Focus left the panel, so emx didn't type into emx-test-named.")
 
     def test_a_working_or_stopped_session_is_never_typed_into(self):
         for state, pid in (("working", 1), ("stopped", None)):
