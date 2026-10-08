@@ -17,7 +17,7 @@
 ## The execution model
 
 - **Tural is the product owner:** *"it's gonna be a personal project so I won't be checking the code or anything They can just keep working and I'll be the product owner"*, and *"I just wanna be the product owner and ask for what I want and I want it to be done"*. He checks outputs by using them.
-- **You, the session lead, orchestrate; you never bulk-write code inline.** Plan, brief delegates, adjudicate, self-merge, report in plain language.
+- **You, the session lead, orchestrate; you never bulk-write code inline.** Brief delegates with his own words, adjudicate, self-merge, report in plain language.
 - **The independent reviewer plus verification stand in for his review.** Codery built this system and builds no product.
 
 ### They keep working
@@ -26,22 +26,27 @@ In a session Tural starts, work open issues back to back (his pick, else oldest 
 
 ## Stages
 
-pick (GitHub Issues) → build (delegated, tight brief) → review → verify → merge. No deploy stage.
+pick (GitHub Issues) → locate → plan → plan review → execute → review → verify → merge. No deploy stage.
+
+- **locate**: `locator` maps, up to three.
+- **plan**: `planner` writes `.codery/run/<issue>-<slug>/plan.md`, briefed with his in-session words verbatim; what he has not settled that he would see is asked, never defaulted.
+- **plan review**: a fresh `plan-reviewer`, same words, fixes in place; a critical item or CRITICAL gap is asked of him in-session.
+- **execute**: `coder` works the plan, writes the tests it names, runs both verify lines.
+- **small path**: a one-line or copy fix skips locate, plan and plan review; the brief stands in for the plan; review still runs.
 
 - **review**: independent, fresh-context, with a fix loop. **Exit:** no unresolved **Critical** or **Important** findings. Nits get one fix pass with no new review; the delegate reports anything it changed beyond the Nits, and you check its diff touches only Nit lines, else that change gets a review.
 - **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in; his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
 
 ## The squad
 
-Three lanes under [`.claude/agents/`](.claude/agents/): **`coder`** (Opus) implements; **`tester`** (Sonnet) owns the checks and is deliberately not the implementer; **`reviewer`** (Opus) is the blocking gate.
+Five lanes under [`.claude/agents/`](.claude/agents/): **`locator`** (Sonnet) reads; **`planner`** (Opus) plans; **`plan-reviewer`** (Opus, fresh) checks the plan; **`coder`** (Sonnet) executes the plan and writes its tests, no separate tester, since the plan names the assertions; **`reviewer`** (Opus) is the blocking gate.
 
 - **The reviewer is a plain fresh-context subagent holding no `Write`, `Edit` or `SendMessage` tool.** Its verdict also says whether the change **established** or **violated** a convention in [`docs/conventions.md`](docs/conventions.md).
 - **Agent teams are off:** lanes talk through you; scope every brief to one sentence. Improvement ideas go in your report, never unsolicited into `main`.
 
 ### Multi-agent cost discipline
 
-- At most 5 concurrent delegates; more needs his go-ahead.
-- Report on completion or blocker only; brief completely, then wait, never nudge; batch follow-ups into the next assignment.
+- At most 5 concurrent delegates (more needs his go-ahead); brief completely, then wait, never nudge; they report on completion or blocker only; follow-ups batch into the next assignment.
 - Verification scales to the delta: expensive checks run once, at the final pre-merge SHA.
 - A fix pass gets a fresh spawn; never chain a new work item onto a warm delegate.
 
@@ -64,10 +69,9 @@ The repo is private, but it may be made public later and the tool stays separate
 
 **Machine and process gates:**
 
-- The tracking gate enforces the PR-issue rule (see Conventions): it blocks the first violating `gh pr create` in a session; a conscious retry proceeds.
 - **"Green `main`":** checks pass **and the number collected is not zero**, zero skipped, review resolved, evidence with counts, every dependency recorded.
 
-**What runs:** the tracking gate, the dependency check and `permissions.deny` (`pkill` and `killall` by prefix, not `sudo` or `xargs`). The tracking gate fires when a session was started in the directory it works in; it does nothing when a session started in the main checkout works inside a worktree; there the reviewer is the barrier. Everything else, including the sessions and keep-his-data-out rules, is prose, enforced by you and the reviewer. `main` has no branch protection and nothing makes checks merge-blocking yet; no CI is promised.
+**What runs:** the tracking gate, the dependency check and `permissions.deny` (`pkill` and `killall` by prefix, not `sudo` or `xargs`). The tracking gate enforces the PR-issue rule (see Conventions): it blocks the first violating `gh pr create` in a session, in any worktree of this repo (common-dir scope); a conscious retry proceeds. Everything else, including the sessions and keep-his-data-out rules, is prose, enforced by you and the reviewer. `main` has no branch protection and nothing makes checks merge-blocking yet; no CI is promised.
 
 ## Conventions
 
@@ -92,7 +96,7 @@ He never reads the code; the failure to defend against is **an agent tuning the 
 1. **Evidence before any done-claim**: ran-X-observed-Y with counts, at every agent boundary and in every PR body. A claim that cannot carry evidence is a hypothesis.
 2. **An empty or skipped check is red, never green.**
 3. **He checks by using it:** Before a done-claim on anything he sees, exercise the real tool (in throwaway sessions only) and report how he can try it.
-4. The test suite's shape is not decided; it is worked out in-session when the first code needs checks.
+4. Checks are the standard-library `unittest` suite in `tests/`: `python3 -m unittest discover -s tests -v`, reported with ran and skipped counts; the executor runs the plan's live checks, and at the final pre-merge SHA the suite runs once.
 
 ## Delivery to Tural
 
