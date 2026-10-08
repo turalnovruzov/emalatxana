@@ -313,6 +313,114 @@ def closed_text(confirm: Confirm, output: str = "") -> str:
     return f"{done} {extra}" if extra else done
 
 
+RENAME_MAX = 200
+
+
+@dataclass(frozen=True)
+class Rename:
+    """A confirmed rename. The session is the one Ctrl+R was pressed on, never the row under the cursor at Enter."""
+
+    id: str
+    old: str
+    new: str
+
+
+def rename_start(session: Session) -> str:
+    """The text the inline edit opens with: the name, or nothing for an unnamed session, whose name is its id."""
+    return "" if session.name == session.id else session.name
+
+
+def rename_text(text: str) -> tuple:
+    """(name, None) for the name he typed, or (None, why not).
+
+    It is typed into his session as one line, so a control character such
+    as a newline, which would submit early or send a key, is refused, and
+    so is a name longer than Claude Code keeps.
+    """
+    name = text.strip()
+    if not name:
+        return None, "Type a name, or Esc to cancel."
+    if any(unicodedata.category(ch).startswith("C") for ch in name):
+        return None, "A name can't hold control characters."
+    if len(name) > RENAME_MAX:
+        return None, f"A name can be at most {RENAME_MAX} characters."
+    return name, None
+
+
+def rename_line(name: str) -> str:
+    return f"/rename {name}"
+
+
+def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None, has_viewer: bool) -> str | None:
+    """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
+
+    emx renames only by typing `/rename` into a viewer already open on a
+    running session: it never attaches just to rename.
+    """
+    if busy is not None:
+        return f"Still renaming {busy.old}…"
+    if list_failing:
+        return "Can't list sessions right now, so emx won't rename one."
+    if session is None:
+        return None
+    if not session.running:
+        return f"{session.name} isn't running, so emx can't rename it. Open it first."
+    if not has_viewer:
+        return f"Open {session.name} once, then press ctrl+r to rename it."
+    return None
+
+
+def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool) -> str | None:
+    """Why a confirmed rename may not type into the session, judged on a listing taken just before, or None.
+
+    A working session would queue `/rename` behind its turn, or treat it as
+    a reply; a session with no live process has nothing to type into.
+    """
+    if not fresh:
+        return f"Couldn't list sessions to check {rename.old}, so emx didn't rename it."
+    if session is None:
+        return f"{rename.old} isn't listed any more, so emx didn't rename it."
+    if not session.running:
+        return f"{rename.old} isn't running, so emx didn't rename it."
+    if category(session) == WORKING:
+        return f"{rename.old} is working. Rename it once it stops."
+    return None
+
+
+def rename_screen_refusal(rename: Rename, named: bool, view_state: str, prompt_empty: bool) -> str | None:
+    """Why emx may not type `/rename` into the session's viewer as it is on screen now, or None.
+
+    The viewer must show this session: its rule names it, or, for an
+    unnamed session whose rule names nothing, it is at least not Claude
+    Code's agent view, where the line would start a new session. And its
+    prompt must be empty (`empty_prompt`), so a draft of his is never
+    touched and no dialog or menu takes the keys.
+    """
+    if view_state != "ok" and (named or view_state != "unknown"):
+        return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
+    if not prompt_empty:
+        return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
+    return None
+
+
+def renamed_to(rename: Rename, session: Session | None) -> str | None:
+    """The name the listing shows after `/rename`, or None while it shows no rename.
+
+    Claude Code may change the name it was given (a variant when another
+    live session has it, or a cut to its length cap), so any new name
+    counts, and is what emx reports.
+    """
+    if session is None or session.name in (rename.old, session.id):
+        return None
+    return session.name
+
+
+def renamed_text(rename: Rename, name: str | None) -> str:
+    if name is None:
+        return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
+    return f"Renamed {rename.old} to {name}."
+
+
 @dataclass(frozen=True)
 class Placement:
     repo: str
@@ -395,6 +503,9 @@ def retry_after(failures: int) -> float:
 
 PROJECT, BY_STATE = "project", "state"
 VIEWS = (PROJECT, BY_STATE)
+# Never a folder (those are absolute paths) or a state, so it can't collide with another group's key.
+PINNED = ":pinned"
+PINNED_LABEL = "Pinned"
 
 
 @dataclass(frozen=True)
@@ -407,21 +518,65 @@ def _oldest_first(session: Session) -> tuple:
     return (session.started_at is None, session.started_at or 0.0, session.id)
 
 
-def group_sessions(sessions, placements: Mapping, view: str) -> list:
+def group_sessions(sessions, placements: Mapping, view: str, pinned=frozenset()) -> list:
     """Groups for the panel, each with its sessions oldest first.
 
-    By project: one group per repository, alphabetical by folder name. By
-    state: Needs input, Working, Done, Stopped, leaving out empty ones.
+    Sessions whose id is in `pinned` leave their own group for a Pinned
+    group at the top, in either view. By project: one group per repository,
+    alphabetical by folder name. By state: Needs input, Working, Done,
+    Stopped, leaving out empty ones.
     """
-    buckets = {}
+    buckets, top = {}, []
     for s in sessions:
+        if s.id in pinned:
+            top.append(s)
+            continue
         key = category(s) if view == BY_STATE else placements.get(s.cwd, Placement(s.cwd)).repo
         buckets.setdefault(key, []).append(s)
     if view == BY_STATE:
         keys = [c for c in CATEGORIES if c in buckets]
     else:
         keys = sorted(buckets, key=lambda k: (os.path.basename(k.rstrip("/")).lower(), k))
-    return [Group(k, tuple(sorted(buckets[k], key=_oldest_first))) for k in keys]
+    groups = [Group(PINNED, tuple(sorted(top, key=_oldest_first)))] if top else []
+    return groups + [Group(k, tuple(sorted(buckets[k], key=_oldest_first))) for k in keys]
+
+
+def find_matches(sessions, query: str, home: str = "") -> list:
+    """The sessions whose name or folder contains `query`, ignoring case, as `claude agents`' find does. The folder is matched as shown, with `~` for home, so a query never matches every session's home path."""
+    q = query.strip().casefold()
+    if not q:
+        return list(sessions)
+    return [s for s in sessions if q in s.name.casefold() or q in tilde_path(s.cwd, home).casefold()]
+
+
+def top_match(items: list):
+    """Where the cursor goes when the find text changes: the first session listed."""
+    return next((item for item in items if item[0] == "session"), None)
+
+
+def pinned_ids(prefs: dict) -> frozenset:
+    return frozenset(prefs.get("pinned", ()))
+
+
+def toggle_pin(prefs: dict, sid: str) -> dict:
+    pinned = [p for p in prefs.get("pinned", ()) if p != sid]
+    if len(pinned) == len(prefs.get("pinned", ())):
+        pinned.append(sid)
+    return {**prefs, "pinned": pinned}
+
+
+def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
+    """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer."""
+    misses, gone = stale_viewers(pinned_ids(prefs), live_ids, misses)
+    if not gone:
+        return prefs, misses, False
+    return {**prefs, "pinned": [p for p in prefs.get("pinned", ()) if p not in gone]}, misses, True
+
+
+def pending_renames(renaming: Mapping, sessions, in_flight: str | None) -> dict:
+    """The renames (id → (old, new)) whose new name the viewer may show before the listing does: kept while the listing still shows the old name, or while the rename is still being typed and checked."""
+    names = {s.id: s.name for s in sessions}
+    return {sid: pair for sid, pair in renaming.items() if names.get(sid) == pair[0] or sid == in_flight}
 
 
 def panel_lines(groups, collapsed) -> list:
@@ -731,7 +886,9 @@ def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, 
     room = usable - 2 - (1 + len(count_text) if count_text else 0)
     if room <= 0:
         return [(0, fit(arrow, usable), "arrow")]
-    if view == BY_STATE:
+    if key == PINNED:
+        dir_part, name = "", fit(PINNED_LABEL, room)
+    elif view == BY_STATE:
         dir_part, name = "", fit(CATEGORY_LABELS.get(key, key), room)
     else:
         name = os.path.basename(key.rstrip("/")) or key or "?"
@@ -890,6 +1047,11 @@ def normalize_prefs(raw) -> dict:
         recent = list(dict.fromkeys(f for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
         if recent:
             prefs["recent_folders"] = recent
+    pinned = raw.get("pinned")
+    if isinstance(pinned, list):
+        pinned = list(dict.fromkeys(p for p in pinned if isinstance(p, str) and p))
+        if pinned:
+            prefs["pinned"] = pinned
     if raw.get("view") in VIEWS:
         prefs["view"] = raw["view"]
     collapsed = raw.get("collapsed")
@@ -971,8 +1133,8 @@ def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -
     """Where `n` starts a session without asking, as `claude agents` does, or None to open the folder picker.
 
     A session row means that session's own folder, and a header in the
-    project view its group's folder. A by-state header has no folder, so the
-    last folder used stands in. With no sessions at all there is nothing to
+    project view its group's folder. A by-state header, or the Pinned one,
+    has no folder, so the last folder used stands in. With no sessions at all there is nothing to
     go on, so he picks.
     """
     if not sessions:
@@ -981,7 +1143,7 @@ def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -
         session = next((s for s in sessions if s.id == cursor[1]), None)
         if session is not None and session.cwd:
             return session.cwd
-    if cursor and cursor[0] == "group" and view == PROJECT and cursor[1]:
+    if cursor and cursor[0] == "group" and view == PROJECT and cursor[1] and cursor[1] != PINNED:
         return cursor[1]
     return last_folder or None
 
@@ -1205,7 +1367,7 @@ def repo_roots(folders, placements: Mapping) -> list:
 
 def session_folders(sessions, groups, view: str) -> list:
     """The folders the panel already shows, for the picker: each project group's folder in panel order, then any session's own folder not among them."""
-    folders = [g.key for g in groups if g.key] if view == PROJECT else []
+    folders = [g.key for g in groups if g.key and g.key != PINNED] if view == PROJECT else []
     for s in sessions:
         if s.cwd and s.cwd not in folders:
             folders.append(s.cwd)
@@ -1268,6 +1430,12 @@ _AGENT_FOOTER = re.compile(r"^\s*enter to return\b|\bctrl\+x to delete\b")
 _AGENT_COUNT = r"\d+ (?:awaiting input|working|completed)"
 _AGENT_HEADER = re.compile(rf"^[\s▐▛▜▌▝▘█]*{_AGENT_COUNT}(?: · {_AGENT_COUNT})+$")
 _PROMPT_REACH = 12
+
+
+def view_state_for(captured: str, names, pane_width: int) -> str:
+    """`main_view_state` against any of `names`: "ok" when the rule names one of them. While a rename lands, the viewer's rule already shows the new name and the listing still the old one, so either is his session."""
+    states = [main_view_state(captured, name, pane_width) for name in names]
+    return "ok" if "ok" in states else states[0]
 
 
 def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:

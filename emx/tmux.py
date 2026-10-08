@@ -176,6 +176,21 @@ class Tmux:
     def capture(self, pane: str) -> str:
         return self.run("capture-pane", "-p", "-t", pane)
 
+    def cursor(self, pane: str) -> tuple:
+        """(x, y, shown, pane width) of the pane's cursor."""
+        out = self.run("display-message", "-p", "-t", pane, "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_width}")
+        x, y, shown, width = out.strip().split("\t")
+        return int(x), int(y), shown == "1", int(width)
+
+    def type_line(self, pane: str, text: str) -> None:
+        """Type `text` into the pane and press Enter, in one tmux command so nothing lands between them.
+
+        The text goes as hex bytes (`-H`): tmux reads an argument ending in
+        `;` as a command separator and drops the `;`, even with `-l`.
+        """
+        keys = [format(b, "02x") for b in text.encode("utf-8")]
+        self.run("send-keys", "-t", pane, "-H", *keys, ";", "send-keys", "-t", pane, "Enter")
+
     def detach(self) -> None:
         """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""
         self.run("detach-client")
