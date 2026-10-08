@@ -190,6 +190,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: anything that reads `row_map` or `scroll`, or reserves list space (the peek box), must count screen rows the same way, from heights worked out in the same frame they are drawn: a row's height changes with the width, its group's name column and its summary.
 
+### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it
+
+1. **Rule**: the version is held only in `emx/__init__.py` (`__version__`). `CHANGELOG.md` lists versions newest first as `## X.Y.Z — YYYY-MM-DD` headings, each followed by flat `- ` plain-language bullets, and the newest heading equals `__version__`.
+2. **Why**: the panel parses the file for the what's-new note (`core.changelog_entry`, `core.whats_new_since`), and `test_the_shipped_changelog_leads_with_the_code_version` ties the two together.
+3. **Minimal example**: the 1.0.0 entry in `CHANGELOG.md`.
+4. **Gotcha**: no `###` subheadings (Keep-a-Changelog's "### Fixed"). Any `#` line that is not a version heading ends the entry, so lines after it silently never reach the panel.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

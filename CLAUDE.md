@@ -34,7 +34,7 @@ pick (GitHub Issues) → locate → plan → plan review → execute → review 
 - **execute**: `coder` works the plan, writes the tests it names, runs both verify lines.
 - **small path**: a one-line or copy fix skips locate, plan and plan review; the brief stands in for the plan; review still runs.
 - **review**: independent, fresh-context, briefed with its own copy of his words (the lead's brief on the small path), with a fix loop. **Exit:** no unresolved **Critical** or **Important** findings. Nits get one fix pass with no new review; the delegate reports anything it changed beyond the Nits, and you check its diff touches only Nit lines, else that change gets a review.
-- **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in and the PR bumps the [version](#conventions) from current `main`; his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
+- **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in and the PR carries its own [version](#conventions) bump, checked in review; before merging you re-check the number is still the next one on current `main` and, if another merge took it, renumber it (number and heading only, no new review); his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
 
 ## The squad
 
@@ -64,7 +64,7 @@ The repo is private, but it may be made public later and the tool stays separate
 
 ## Gates
 
-**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, **making this repo public**, repo settings). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate. Everything else proceeds without him.
+**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** (a dependency's or emx's own, e.g. 1.x to 2.0.0) ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, **making this repo public**, repo settings). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate. Everything else proceeds without him.
 
 **Machine and process gates:**
 
@@ -79,13 +79,13 @@ The repo is private, but it may be made public later and the tool stays separate
 - **PRs are four sections: Why / What / Evidence / How to try it.** Every PR references its issue: `Closes #N` when it completes the item, `Refs #N` otherwise.
 - **Documentation:** the three homes are indexed in [`docs/README.md`](docs/README.md).
 - **Comments** follow [`.claude/rules/codery-code-comments.md`](.claude/rules/codery-code-comments.md).
-- **Versioning:** semantic versioning from 1.0.0 (Tural, 2026-10-08), held in `emx/__init__.py`. Right before merge, you add the bump from current `main` as the PR's last commit, so a fix pass after it or a parallel PR that took the number cannot leave it wrong. The bump follows the change type (a feature the minor, a breaking change the major, a fix or anything else the patch) and adds the PR's lines to [`CHANGELOG.md`](CHANGELOG.md) under that version. After the squash merge, tag the merge commit `vX.Y.Z` and push the tag; no GitHub Release.
+- **Versioning:** semantic versioning from 1.0.0 (Tural, 2026-10-08), held in `emx/__init__.py`. Each PR carries its own bump in `emx/__init__.py` and its plain-language lines in [`CHANGELOG.md`](CHANGELOG.md) under that version, in the PR before review, and the reviewer checks them (Tural, 2026-10-08: "In the PR, before review"). The bump follows the change type (a feature the minor, a breaking change the major, a fix or anything else the patch). At merge you only re-check the number is still the next one on current `main`; if another merge took it, you renumber it (number and heading only, mechanical, no new review), then squash-merge. After the merge, tag the merge commit `vX.Y.Z` and push the tag; no GitHub Release.
 
 ## Knowledge currency and technology decisions
 
 ### The technology gate
 
-**A new library, a new third-party service, or a major version bump requires Tural's word before it lands.** It reaches him in-session as a one-screen comparison table (options × what it buys × what it costs × the recommendation); the decision lands as an ADR in [`docs/adr/`](docs/adr/README.md).
+**A new library, a new third-party service, or a major version bump (a dependency's or emx's own, e.g. 1.x to 2.0.0) requires Tural's word before it lands.** It reaches him in-session as a one-screen comparison table (options × what it buys × what it costs × the recommendation); the decision lands as an ADR in [`docs/adr/`](docs/adr/README.md).
 
 Dependencies are gated in conversation: no `ask` rules sit in [`.claude/settings.json`](.claude/settings.json). [`.claude/hooks/dependency-record-check.sh`](.claude/hooks/dependency-record-check.sh) reports at `SessionStart` any dependency with no record in `docs/adr/` or [`docs/stack.md`](docs/stack.md): a report, not a gate, Python manifests and lockfiles only. **The stack is tmux plus the Python standard library** ([ADR 0001](docs/adr/0001-tmux-and-python-standard-library.md)), so there is no manifest yet; a decision that brings one extends the check in the same change. `docs/stack.md` holds decisions made, never plans.
 

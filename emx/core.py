@@ -880,7 +880,10 @@ def top_line(sessions, version: str, width: int, loaded: bool = True) -> list:
         parts_width = display_width(" · ".join(t for t, _ in parts))
         if logo_width + TOP_GAP + parts_width <= width:
             return _logo(logo) + [(width - parts_width + x, t, tag) for x, t, tag in fit_parts(parts, parts_width)]
-    kept = nameless if display_width(" ".join(t for t, _ in nameless)) + TOP_GAP + 1 <= width else bare
+    nameless_width = display_width(" ".join(t for t, _ in nameless))
+    kept = nameless if nameless_width + TOP_GAP + 1 <= width else bare
+    if kept is bare and nameless_width <= width:
+        return _logo(nameless)
     start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
     return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
 
