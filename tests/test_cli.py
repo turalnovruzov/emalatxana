@@ -103,7 +103,6 @@ class LeftCheck(unittest.TestCase):
                 self.assertEqual(self.run_check(args, ["❯\xa0", "─" * 30], error), 1)
 
 
-
 class Version(unittest.TestCase):
     def test_version_prints_and_never_starts_tmux(self):
         out = io.StringIO()
@@ -128,6 +127,7 @@ class Version(unittest.TestCase):
         with mock.patch.object(cli, "CHANGELOG", "/nonexistent/CHANGELOG.md"):
             self.assertEqual(cli.read_changelog(), "")
         self.assertIn(f"## {__version__}", cli.read_changelog())
+
 
 if __name__ == "__main__":
     unittest.main()

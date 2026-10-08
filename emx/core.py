@@ -860,26 +860,29 @@ TOP_GAP = 2
 def top_line(sessions, version: str, width: int, loaded: bool = True) -> list:
     """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
 
-    Room runs out in this order: the counts switch to short words, the
-    version goes, then the name, and only then are the counts cut; the logo
-    itself always stays.
+    Room runs out in this order: the counts switch to short words, the name
+    goes, then the counts are cut; the logo and the version stay until there
+    is no room for even one cut count beside them, then the version goes too.
     """
     if width <= 0:
         return []
-    logos = ([(LOGO, "logo"), (NAME, "name"), (version, "version")], [(LOGO, "logo"), (NAME, "name")], [(LOGO, "logo")])
+    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")]
+    nameless = [(LOGO, "logo"), (version, "version")]
+    bare = [(LOGO, "logo")]
     if not loaded:
         counts = [[("…", None)]]
     elif sessions:
         counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
     else:
         counts = [[("no sessions", None)]]
-    for logo, parts in [(logos[0], counts[0])] + [(logo, counts[-1]) for logo in logos]:
+    for logo, parts in [(whole, counts[0])] + [(logo, counts[-1]) for logo in (whole, nameless)]:
         logo_width = display_width(" ".join(t for t, _ in logo))
         parts_width = display_width(" · ".join(t for t, _ in parts))
         if logo_width + TOP_GAP + parts_width <= width:
             return _logo(logo) + [(width - parts_width + x, t, tag) for x, t, tag in fit_parts(parts, parts_width)]
-    start = display_width(LOGO) + TOP_GAP
-    return [(0, LOGO, "logo")] + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
+    kept = nameless if display_width(" ".join(t for t, _ in nameless)) + TOP_GAP + 1 <= width else bare
+    start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
+    return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
 
 
 def _logo(parts: list) -> list:

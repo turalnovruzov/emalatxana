@@ -750,7 +750,6 @@ class AutoRestore(AppCase):
         self.assertIsNone(self.app.notice_until)
 
 
-
 class CloseTmux:
     """The sidebar (%1), main (%2) showing `a`, a hidden viewer (%3) of `b` and the placeholder (%4) in its own window."""
 
@@ -2287,8 +2286,6 @@ class WrappedRows(AppCase):
         self.assertIn("Needs input · " + LONG_WAIT, self.screen()[self.rows_of("a")[0]])
 
 
-
-
 class WhatsNew(AppCase):
     """The first panel to run a newer version shows its changelog lines once, then records the version."""
 
@@ -2381,6 +2378,7 @@ class TopLine(AppCase):
         app.poller.result = ([session("a", "/p/alpha")], None)
         app.refresh()
         self.assertEqual(scr.cells[0], f" ⚒ emalatxana {sidebar.__version__}".ljust(30) + "1 working")
+
 
 if __name__ == "__main__":
     unittest.main()

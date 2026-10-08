@@ -376,16 +376,18 @@ class Summary(unittest.TestCase):
             line = line.ljust(x) + text
         return line
 
-    def test_the_top_line_gives_up_words_then_version_then_name_then_counts(self):
+    def test_the_top_line_gives_up_words_then_name_then_counts(self):
         cases = {
             62: "⚒ emalatxana 1.0.0  1 waiting · 2 working · 1 done · 1 stopped",
             61: "⚒ emalatxana 1.0.0          1 wait · 2 work · 1 done · 1 stop",
             53: "⚒ emalatxana 1.0.0  1 wait · 2 work · 1 done · 1 stop",
-            52: "⚒ emalatxana       1 wait · 2 work · 1 done · 1 stop",
-            47: "⚒ emalatxana  1 wait · 2 work · 1 done · 1 stop",
-            46: "⚒            1 wait · 2 work · 1 done · 1 stop",
-            36: "⚒  1 wait · 2 work · 1 done · 1 stop",
-            35: "⚒  1 wait · 2 work · 1 done · 1 st…",
+            52: "⚒ 1.0.0            1 wait · 2 work · 1 done · 1 stop",
+            42: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 stop",
+            41: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 st…",
+            38: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1…",
+            30: "⚒ 1.0.0  1 wait · 2 work · 1…",
+            10: "⚒ 1.0.0  …",
+            9: "⚒  1 wait",
             4: "⚒  …",
             3: "⚒",
             1: "⚒",
@@ -394,6 +396,20 @@ class Summary(unittest.TestCase):
         for width, want in cases.items():
             with self.subTest(width=width):
                 self.assertEqual(self.text(core.top_line(self.SESSIONS, "1.0.0", width)), want)
+
+    def test_the_version_stays_at_the_default_width(self):
+        for count in range(1, 5):
+            with self.subTest(categories=count):
+                sessions = [mk(state=state) for state in ("blocked", "working", "done", "stopped")[:count]]
+                placed = core.top_line(sessions, "1.0.0", 38)
+                self.assertIn(("1.0.0", "version"), [(t, tag) for _, t, tag in placed])
+
+    def test_the_name_goes_before_the_version(self):
+        for width in range(0, 81):
+            with self.subTest(width=width):
+                tags = [tag for _, _, tag in core.top_line(self.SESSIONS, "1.0.0", width)]
+                if "name" in tags:
+                    self.assertIn("version", tags)
 
     def test_one_count_fits_beside_the_whole_logo_in_a_default_panel(self):
         placed = core.top_line([mk(state="working"), mk(state="working")], "1.0.0", 38)
@@ -1004,7 +1020,6 @@ class Folders(unittest.TestCase):
         self.assertEqual(core.resolve_folder("a/../b", "/base"), "/base/b")
         self.assertEqual(core.resolve_folder("/x//y/", "/base"), "/x/y")
         self.assertEqual(core.resolve_folder("  /x  ", "/base"), "/x")
-
 
 
 def bg(sid, cwd, state="working"):
@@ -2795,7 +2810,6 @@ class PeekHeight(unittest.TestCase):
         self.assertEqual(core.peek_height(10, 50, 7), 10 - core.PEEK_MIN_LIST_ROWS)
 
 
-
 CHANGELOG = """# Changelog
 
 Intro text.
@@ -2868,6 +2882,7 @@ class Versions(unittest.TestCase):
         parsed = [core.parse_version(v) for v in versions]
         self.assertEqual(parsed, sorted(parsed, reverse=True))
         self.assertEqual(len(set(parsed)), len(parsed))
+
 
 if __name__ == "__main__":
     unittest.main()
