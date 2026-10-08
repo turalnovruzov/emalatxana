@@ -235,6 +235,53 @@ class TypeIf(PrivateServer):
         self.assertTrue(self.tmux.prompt_probe(self.main)[4])
 
 
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class KeyIf(PrivateServer):
+    """One named key into a viewer through `type_gate`, judged and sent by tmux in one command, never followed by Enter."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.select(self.sidebar)
+
+    def send(self, gate=None):
+        gate = gate or core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        return self.tmux.key_if(self.main, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
+
+    def test_it_sends_escape_and_no_enter_while_the_gate_holds(self):
+        self.assertEqual(self.send(), core.TYPED)
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"\x1b")
+        self.assertEqual(self.typed("sidebar"), b"")
+
+    def test_a_false_gate_sends_nothing_and_reports(self):
+        report = self.send("#{==:1,0}")
+        self.assertEqual(report, "0 0 1 2 0 s1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_a_viewer_in_copy_mode_gets_nothing(self):
+        self.tmux.run("copy-mode", "-t", self.main)
+        report = self.send()
+        self.assertNotEqual(report, core.TYPED)
+        self.assertEqual(report.split()[0], "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        self.assertEqual(self.typed("sidebar"), b"")
+
+
+class KeyIfTarget(unittest.TestCase):
+    def test_a_key_off_the_allowlist_or_a_bad_pane_runs_no_tmux_command(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            for pane, key in (("%3", "Enter"), ("%3", "C-c"), ("%3", "Escape ; kill-server"), ("%3", "escape"),
+                              ("emx:", "Escape"), ("%3;", "Escape"), ("%3 ", "Escape")):
+                with self.subTest(pane=pane, key=key):
+                    with self.assertRaises(TmuxError):
+                        tmux.key_if(pane, "#{==:1,1}", key, core.TYPED, "")
+        run.assert_not_called()
+
+
 class TypeIfTarget(unittest.TestCase):
     def test_a_target_that_is_not_a_pane_id_runs_no_tmux_command(self):
         tmux = Tmux("emx-test-unused")
