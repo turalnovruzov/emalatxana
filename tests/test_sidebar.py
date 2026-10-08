@@ -1022,7 +1022,8 @@ class NewSession(AppCase):
         self.keys("n")
         drawn = [text for text, _ in self.app.bottom_lines(39)]
         self.assertIn("New session in /p/alpha/sub", drawn)
-        self.assertTrue(any("Tab folder" in line for line in drawn), drawn)
+        self.assertIn("Tab folder", drawn[-1])
+        self.assertFalse(any(line in sidebar.FOOTERS for line in drawn), drawn)
 
     def test_a_by_state_header_uses_the_last_folder_else_opens_the_picker(self):
         self.app.toggle_view()

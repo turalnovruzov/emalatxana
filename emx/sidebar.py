@@ -1017,7 +1017,8 @@ class App:
             attr = self.color("error") if self.notice_error else curses.A_DIM
             lines += [(t, attr) for t in core.wrap_words(self.notice, width)[:6]]
         if self.prompt is not None:
-            lines += self.prompt_lines(width)
+            # The prompt's own hint line stands in for the footer, whose keys don't apply while typing.
+            return lines + self.prompt_lines(width)
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
         lines.append((footer, curses.A_DIM))

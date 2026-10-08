@@ -988,13 +988,12 @@ def fuzzy_match(query: str, text: str) -> tuple | None:
 
     The matched letters are the tightest window ending at the earliest
     complete match, taken back to front. The key ranks more letters next to
-    each other first, then a match that starts a folder name (the last one
-    counts as the prefix), then more letters at word starts, then the shorter
-    text.
+    each other first, then a match that starts the last folder name (the
+    prefix), then the shorter text.
     """
     q, t = query.lower(), text.lower()
     if not q:
-        return (0, 0, 0, len(text))
+        return (0, False, len(text))
     at = -1
     for ch in q:
         at = t.find(ch, at + 1)
@@ -1007,10 +1006,9 @@ def fuzzy_match(query: str, text: str) -> tuple | None:
         at -= 1
     picked.reverse()
     together = sum(1 for a, b in zip(picked, picked[1:]) if b == a + 1)
-    starts = sum(1 for i in picked if _word_start(text, i))
     last = text.rstrip("/").rfind("/") + 1
     prefix = picked[0] >= last and _word_start(text, picked[0])
-    return (-together, not prefix, -starts, len(text))
+    return (-together, not prefix, len(text))
 
 
 def _word_start(text: str, i: int) -> bool:
