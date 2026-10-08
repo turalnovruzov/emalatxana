@@ -99,6 +99,28 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls.
 
+### A tmux key binding that intercepts a key fails open
+
+1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding.
+2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths.
+3. **Minimal example** (the ← binding as `list-keys` shows it, abridged):
+   ```
+   bind-key -n Left if-shell -F "#{&&:<at an empty prompt>,#{P:#{?#{==:#{pane_id},%1},1,}}}" \
+       "if-shell \"#{@emx_left} #{pane_id} …\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\" \"send-keys Left\"" \
+       "send-keys Left"
+   ```
+4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms). And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
+
+### Style-aware detectors are tested on styled captures
+
+1. **Rule**: a detector that depends on styling is tested on `capture-pane -e` captures, with the cursor tmux reported recorded in `prompt-cursors.json` together with the Claude Code version.
+2. **Why**: the dim example text is the only thing that tells an empty prompt apart from typed text.
+3. **Minimal example**:
+   ```python
+   core.empty_prompt(*at_cursor("prompt-empty"))   # line, line below, cursor x, shown, width
+   ```
+4. **Gotcha**: removing SGR codes changes what the test proves, so redact only inside the same styled span. SGR colour parameters such as `38;5;2` are not dim.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

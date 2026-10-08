@@ -141,6 +141,23 @@ def blank(message: str) -> int:
             continue
 
 
+def left_check(args: list) -> int:
+    """Exit 0 when ← in this viewer should move focus to the panel, 1 when it should reach Claude Code. Prints nothing.
+
+    `args` are the socket, then the pane, cursor x and y, cursor shown flag
+    and pane width as tmux formats them. Any failure answers 1, so a broken
+    check costs him the shortcut, never a keypress.
+    """
+    try:
+        socket, pane, x, y, shown, width = args
+        if private_socket(socket) is None:
+            return 1
+        line, below = (Tmux(socket).cursor_lines(pane, int(y)) + ["", ""])[:2]
+        return 0 if core.empty_prompt(line, below, int(x), shown == "1", int(width)) else 1
+    except Exception:
+        return 1
+
+
 def main(argv: list) -> int:
     if not argv:
         return launch()
@@ -154,6 +171,8 @@ def main(argv: list) -> int:
         from emx.sidebar import run
 
         return run(argv[1])
+    if argv[0] == "left":
+        return left_check(argv[1:])
     if argv[0] == "blank":
         return blank(argv[1] if len(argv) > 1 else "")
     print(USAGE, file=sys.stderr)

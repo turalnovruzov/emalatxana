@@ -11,6 +11,7 @@ import threading
 import time
 
 from emx import core
+from emx.cli import self_command
 from emx.tmux import ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
@@ -20,15 +21,19 @@ LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
 GIT_SECONDS = 5
 BACK_KEY = "C-\\"
+RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
-    "↵ open  n new  ^s view  ? keys",
-    "↵ open n new ^s view ? keys",
-    "n new  ? keys",
+    "→ open  ← back  n new  ^s view  ? keys",
+    "→ open ← back n new ^s view ? keys",
+    "→ open ← back ? keys",
+    "→ open ? keys",
     "? keys",
 )
 HELP = (
+    ("→ ↵", "open the session and go to it"),
+    ("←", "back here, from an empty prompt"),
     ("↑↓ j k", "move"),
-    ("↵ click", "open a session, fold a group"),
+    ("↵ click", "fold a group; a click opens a session"),
     ("n", "new session"),
     ("^s", "by project / by state"),
     ("r", "restart the main viewer"),
@@ -40,6 +45,7 @@ HELP = (
 )
 HELP_KEY_WIDTH = 9
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
+FOCUS_REPORTS_ON, FOCUS_REPORTS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
 CTRL_S = "\x13"
 FRAME_SECONDS = 0.15
@@ -57,7 +63,7 @@ TONES = {
     "error": (203, curses.COLOR_RED),
     "plain": (-1, -1),
 }
-SELECTED_BG = 237
+BAR_BG = {"focused": 24, "unfocused": 236}
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
@@ -196,12 +202,13 @@ class Starter(threading.Thread):
 class Checker(threading.Thread):
     """Lists sessions off the main thread before a restart, so a slow `claude agents` never freezes the panel.
 
-    `asked` is (session id, main pane id) from when he pressed `r`.
+    `asked` is (session id, main pane id) from when he pressed `r`, or from
+    when emx caught the agent view in main (`auto`).
     """
 
-    def __init__(self, claude: str, asked: tuple):
+    def __init__(self, claude: str, asked: tuple, auto: bool = False):
         super().__init__(daemon=True)
-        self.claude, self.asked = claude, asked
+        self.claude, self.asked, self.auto = claude, asked, auto
         self.result = None
 
     def run(self) -> None:
@@ -329,6 +336,7 @@ class App:
         self.list_error = ""
         self.notice = ""
         self.notice_error = False
+        self.notice_until = None
         self.cursor = None
         self.wanted_cursor = None
         self.help = False
@@ -346,9 +354,15 @@ class App:
         self.starter = None
         self.checker = None
         self.flagged_viewers = frozenset()
+        self.auto_tried = frozenset()
+        self.last_restore = None
+        self.focused = None
+        self.pending_keys = []
 
-    def say(self, text: str, error: bool = False) -> None:
+    def say(self, text: str, error: bool = False, seconds: float | None = None) -> None:
+        """Show a notice; with `seconds` it goes by itself after that long, unless another replaces it first."""
         self.notice, self.notice_error = text, error
+        self.notice_until = time.monotonic() + seconds if seconds is not None else None
 
     def save_prefs(self) -> None:
         try:
@@ -416,7 +430,10 @@ class App:
             self.main_pane = main
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
+                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
                 self.bound = (sidebar.id, main.id)
+            if sidebar:
+                self.take_focus(sidebar)
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -426,11 +443,61 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
+    def set_focus(self, focused: bool, back: bool = False) -> None:
+        """Note whether the panel has focus.
+
+        Coming back from main with ← (`back`) puts the cursor on the session
+        there, as `claude agents` does; Ctrl+\\ or a click leaves it where he
+        left it.
+        """
+        if focused and self.focused is False and back:
+            main = self.main_pane
+            main_sid = main.session if main is not None and not self.main_is_off() else ""
+            self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
+            self.wanted_cursor = None
+        self.focused = focused
+
+    def read_focus(self) -> None:
+        """Take focus from tmux's active pane, never from the report itself.
+
+        tmux also passes on his terminal window losing and regaining focus,
+        which would read as leaving the panel and coming back from main.
+        """
+        try:
+            sidebar, _ = self.layout_panes(self.tmux.panes())
+        except TmuxError as exc:
+            self.say(f"tmux: {exc}", error=True)
+            return
+        if sidebar:
+            self.take_focus(sidebar)
+
+    def take_focus(self, sidebar: Pane) -> None:
+        """Focus as tmux reports it. The ← binding marks the panel before selecting it; a mark is cleared as soon as it is seen, and moves the cursor only when the panel is active."""
+        back = core.came_back(sidebar.active, sidebar.back)
+        if sidebar.back:
+            try:
+                self.tmux.clear_back(sidebar.id)
+            except TmuxError as exc:
+                self.say(f"tmux: {exc}", error=True)
+        self.set_focus(sidebar.active, back=back)
+
     def check_main(self, main: Pane | None) -> None:
-        """Flag the main pane once it stops showing the session emx put there: ← opens the agent view, and from there any session."""
+        """Flag the main pane once it stops showing the session emx put there, and bring the session back if it shows Claude Code's agent view."""
         if main is None or main.dead or not main.session:
             return
-        self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, self.view_state(main))
+        state = self.view_state(main)
+        self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
+        self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
+        self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
+        action = core.auto_restore(
+            state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
+        )
+        if action is not None:
+            self.auto_tried |= {main.id}
+        if action == core.RESTORE:
+            self.start_check(main, auto=True)
+        elif action == core.GIVE_UP:
+            self.say("")
 
     def view_state(self, viewer: Pane) -> str:
         session = self.session(viewer.session)
@@ -441,6 +508,13 @@ class App:
 
     def main_is_off(self) -> bool:
         return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
+
+    def restoring_main(self) -> bool:
+        checker = self.checker
+        return checker is not None and core.restoring_main(checker.asked, checker.auto, self.main_id())
+
+    def main_id(self) -> str | None:
+        return self.main_pane.id if self.main_pane is not None else None
 
     def reconcile_widths(self, sidebar: Pane) -> None:
         action = core.width_action(self.applied, (sidebar.window_width, sidebar.width))
@@ -528,17 +602,24 @@ class App:
             self.say("No session is open in the main pane.")
             return
         if self.checker is None:
-            if self.list_error:
-                self.confirm_attach(main.session, core.RESTART)
-                return
-            self.checker = Checker(self.claude, (main.session, main.id))
-            self.checker.start()
+            self.start_check(main)
         elif not core.check_still_applies(self.checker.asked, main.id, main.session):
             self.say("The previous restart check is still finishing; press r again in a moment.")
+        else:
+            self.checker.auto = False
+
+    def start_check(self, main: Pane, auto: bool = False) -> None:
+        if self.list_error:
+            self.confirm_attach(main.session, core.RESTART)
             return
-        sid = self.checker.asked[0]
-        shown = self.session(sid)
-        self.say(f"Checking {shown.name if shown else sid} is still running…")
+        self.checker = Checker(self.claude, (main.session, main.id), auto)
+        self.checker.start()
+        shown = self.session(main.session)
+        name = shown.name if shown else main.session
+        if auto:
+            self.say(f"Main showed Claude Code's agent view; bringing back {name}…")
+        else:
+            self.say(f"Checking {name} is still running…")
 
     def finish_check(self) -> None:
         checker = self.checker
@@ -552,12 +633,22 @@ class App:
             if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
                 self.say("The main pane changed while emx was checking, so it wasn't restarted.")
                 return
+            state = self.view_state(main) if checker.auto else None
+            if not core.restore_still_wanted(checker.auto, state):
+                self.say("")
+                return
             if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
                 return
             self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
             self.flagged_viewers -= {pane_id}
-            self.tmux.select(pane_id)
-            self.say("Viewer restarted.")
+            if checker.auto:
+                self.last_restore = core.record_restore(self.last_restore, pane_id, time.monotonic())
+                self.tmux.select(self.me)
+                self.set_focus(True, back=True)
+                self.say("Main showed Claude Code's agent view, so emx brought the session back.", seconds=RESTORED_NOTICE_SECONDS)
+            else:
+                self.tmux.select(pane_id)
+                self.say("Viewer restarted.")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
@@ -674,6 +765,9 @@ class App:
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, 1), None
         elif key in ENTER_KEYS:
             self.activate(self.cursor)
+        elif key == curses.KEY_RIGHT:
+            if self.cursor and self.cursor[0] == "session":
+                self.activate(self.cursor)
         elif key == CTRL_S:
             self.toggle_view()
         elif key == "n":
@@ -700,7 +794,7 @@ class App:
     def bottom_lines(self, width: int) -> list:
         """(text, attr) lines for the area under the list: notice, prompt, footer."""
         lines = []
-        if self.main_is_off():
+        if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
             session = self.session(self.main_pane.session)
             name = session.name if session else self.main_pane.session
             # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
@@ -757,9 +851,10 @@ class App:
             placed = core.fit_parts([("…", None)], width - 2)
         else:
             placed = core.summary_line(self.sessions, width - 2)
+        style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
         for x, text, cat in placed:
             tone = "muted" if cat in (None, core.STOPPED) else CATEGORY_TONE[cat]
-            self.put(0, 1 + x, text, self.palette.attr(tone))
+            self.put(0, 1 + x, text, self.palette.attr(tone) | style)
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, "Keys", curses.A_BOLD)
@@ -792,10 +887,10 @@ class App:
             if line is None:
                 continue
             y = top + slot
-            selected = line == self.cursor
+            selected = core.selection_bar(line == self.cursor, self.focused is not False)
             self.row_map[y] = line
             if selected:
-                self.put(y, 0, " " * width, self.palette.attr("plain", True))
+                self.put(y, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
                 self.draw_header(y, groups[line[1]], selected, line[1] == cursor_group, width)
             else:
@@ -804,7 +899,7 @@ class App:
                     in_main = session.id == main_sid
                     self.draw_session(y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame)
 
-    def draw_header(self, y: int, group, selected: bool, bold: bool, width: int) -> None:
+    def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
         view = self.view()
         name_tone = CATEGORY_TONE[group.key] if view == core.BY_STATE else "plain"
         tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
@@ -819,7 +914,7 @@ class App:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
     def draw_session(
-        self, y: int, s, selected: bool, in_main: bool, width: int, align: int, now_ms: float, frame: int,
+        self, y: int, s, selected: str | None, in_main: bool, width: int, align: int, now_ms: float, frame: int,
     ) -> None:
         cat = core.category(s)
         stopped = cat == core.STOPPED
@@ -839,7 +934,7 @@ class App:
         parts = core.row_layout(s.name, self.worktree(s), word, s.waiting_for, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
         for x, text, part in parts:
-            emphasis = curses.A_BOLD if part == "name" and (selected or in_main) else 0
+            emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
             self.put(y, x, text, attr(tones[part], emphasis))
 
     def take_poll(self) -> bool:
@@ -869,6 +964,8 @@ class App:
             fresh_list = self.take_poll()
             self.take_placements()
             now = time.monotonic()
+            if core.notice_expired(self.notice_until, now):
+                self.say("")
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:
                 self.last_housekeep = now
                 self.housekeep(fresh_list)
@@ -886,16 +983,44 @@ class App:
         try:
             for _ in range(MAX_QUEUED_KEYS):
                 try:
-                    key = self.scr.get_wch()
+                    key = self.next_key()
                 except curses.error:
                     return
                 self.scr.timeout(0)
                 try:
+                    if self.focus_report(key) is not None:
+                        self.read_focus()
+                        continue
+                    if key not in (curses.KEY_RESIZE, curses.KEY_MOUSE):
+                        # A key typed here proves focus; he is already moving, so the cursor stays his.
+                        self.set_focus(True)
                     self.handle_key(key)
                 except Exception as exc:
                     self.say(f"emx error: {core.error_line(exc)}", error=True)
         finally:
             self.scr.timeout(KEY_WAIT_MS)
+
+    def next_key(self):
+        if self.pending_keys:
+            return self.pending_keys.pop(0)
+        return self.scr.get_wch()
+
+    def focus_report(self, key) -> bool | None:
+        """tmux reports focus as ESC [ I or ESC [ O, which curses hands over one key at a time.
+
+        Keys read past the ESC that turn out not to be a report are put back,
+        so Esc and anything after it still reach `handle_key`.
+        """
+        keys = [key]
+        while core.may_be_focus_report(keys):
+            try:
+                keys.append(self.next_key())
+            except curses.error:
+                break
+        focus = core.focus_report(keys)
+        if focus is None:
+            self.pending_keys[:0] = keys[1:]
+        return focus
 
     def run(self) -> None:
         self.poller.start()
@@ -906,6 +1031,8 @@ class App:
 
 def setup_curses(scr) -> None:
     curses.raw()
+    # Asks tmux (focus-events on) to report focus changes, so the panel restyles at once rather than at the next housekeeping.
+    os.write(1, FOCUS_REPORTS_ON.encode())
     try:
         curses.curs_set(0)
     except curses.error:
@@ -917,10 +1044,11 @@ def setup_curses(scr) -> None:
 
 
 class Palette:
-    """curses attributes for each tone in TONES, plain or on the selection bar.
+    """curses attributes for each tone in TONES, plain or on a selection bar ("focused" or "unfocused", see `core.selection_bar`).
 
-    With 256 colours the bar is a dark grey background; with fewer it is
-    reverse video, and the greys become dim white.
+    With 256 colours each bar is a background colour from BAR_BG; with fewer
+    the bar is reverse video, dimmed while the panel lacks focus, and the
+    greys become dim white.
     """
 
     def __init__(self):
@@ -931,20 +1059,22 @@ class Palette:
             return
         curses.start_color()
         curses.use_default_colors()
-        self.rich = curses.COLORS >= 256 and curses.COLOR_PAIRS > 2 * len(TONES)
-        bar = SELECTED_BG if self.rich else -1
+        self.rich = curses.COLORS >= 256 and curses.COLOR_PAIRS > 3 * len(TONES)
         for i, (tone, (rich, basic)) in enumerate(TONES.items()):
             fg = rich if self.rich else basic
-            curses.init_pair(2 * i + 1, fg, -1)
-            curses.init_pair(2 * i + 2, fg, bar)
-            self.pairs[tone] = (2 * i + 1, 2 * i + 2)
+            self.pairs[tone] = {None: 3 * i + 1}
+            curses.init_pair(3 * i + 1, fg, -1)
+            for j, (bar, bg) in enumerate(BAR_BG.items(), start=2):
+                curses.init_pair(3 * i + j, fg, bg if self.rich else -1)
+                self.pairs[tone][bar] = 3 * i + j
 
-    def attr(self, tone: str, selected: bool = False) -> int:
-        dim = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped") else 0
-        bar = curses.A_REVERSE if selected and not self.rich else 0
+    def attr(self, tone: str, bar: str | None = None) -> int:
+        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped") else 0
+        if bar and not self.rich:
+            extra |= curses.A_REVERSE | (curses.A_DIM if bar == "unfocused" else 0)
         if not self.colored:
-            return dim | bar | (curses.A_BOLD if tone == "error" else 0)
-        return curses.color_pair(self.pairs[tone][1 if selected else 0]) | dim | bar
+            return extra | (curses.A_BOLD if tone == "error" else 0)
+        return curses.color_pair(self.pairs[tone][bar]) | extra
 
 
 def run(socket: str) -> int:
@@ -954,7 +1084,10 @@ def run(socket: str) -> int:
 
     def body(scr):
         setup_curses(scr)
-        App(scr, Tmux(socket), claude).run()
+        try:
+            App(scr, Tmux(socket), claude).run()
+        finally:
+            os.write(1, FOCUS_REPORTS_OFF.encode())
 
     # Stale LINES/COLUMNS inherited from the launching shell would override the pane's real size.
     # curses.use_env(False) is not the fix: it falls back to terminfo's fixed 80x24, not the pane.

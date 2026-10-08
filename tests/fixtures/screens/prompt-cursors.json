@@ -1,0 +1,50 @@
+{
+  "claude_code": "2.1.294",
+  "cursors": {
+    "prompt-empty-bare": {
+      "x": 2,
+      "y": 26,
+      "shown": true
+    },
+    "prompt-empty": {
+      "x": 2,
+      "y": 26,
+      "shown": true
+    },
+    "prompt-model-menu": {
+      "x": 3,
+      "y": 20,
+      "shown": false
+    },
+    "prompt-multiline-empty-first": {
+      "x": 2,
+      "y": 25,
+      "shown": true
+    },
+    "prompt-multiline": {
+      "x": 2,
+      "y": 25,
+      "shown": true
+    },
+    "prompt-permission": {
+      "x": 1,
+      "y": 19,
+      "shown": true
+    },
+    "prompt-slash-menu": {
+      "x": 8,
+      "y": 26,
+      "shown": true
+    },
+    "prompt-text-at-start": {
+      "x": 2,
+      "y": 26,
+      "shown": true
+    },
+    "prompt-text": {
+      "x": 10,
+      "y": 26,
+      "shown": true
+    }
+  }
+}

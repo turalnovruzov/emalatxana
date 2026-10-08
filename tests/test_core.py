@@ -340,6 +340,16 @@ class Navigation(unittest.TestCase):
         self.assertEqual(core.settle_cursor(items, here, self.GROUPS, ("session", "3")), ("session", "3"))
         self.assertEqual(core.settle_cursor(items, here, self.GROUPS, None), here)
 
+    def test_focus_from_main_puts_the_cursor_on_the_session_there(self):
+        open_items = [i for i in core.panel_lines(self.GROUPS, frozenset()) if i]
+        folded = [i for i in core.panel_lines(self.GROUPS, {"/a"}) if i]
+        here = ("session", "3")
+        self.assertEqual(core.cursor_on_focus(open_items, here, self.GROUPS, "2"), ("session", "2"))
+        self.assertEqual(core.cursor_on_focus(folded, here, self.GROUPS, "2"), ("group", "/a"))
+        for main_sid in ("", "gone"):
+            with self.subTest(main_sid=main_sid):
+                self.assertEqual(core.cursor_on_focus(open_items, here, self.GROUPS, main_sid), here)
+
     def test_cursor_group(self):
         self.assertEqual(core.cursor_group(("session", "3"), self.GROUPS), "/b")
         self.assertEqual(core.cursor_group(("group", "/a"), self.GROUPS), "/a")
@@ -1055,9 +1065,194 @@ FIXTURES = Path(__file__).parent / "fixtures" / "screens"
 
 
 def real_screen(name):
-    """A screen captured from a throwaway Claude Code 2.1.293 session; the file name carries the pane width."""
+    """A screen captured from a throwaway Claude Code session; the file name carries the pane width.
+
+    The prompt-* screens keep their styling (`capture-pane -e`) and come from
+    the version in prompt-cursors.json, with the cursor tmux reported; the
+    rest are plain text, agent-view and cross-wired from 2.1.294 (agent-view
+    from `claude agents --cwd`, so only throwaway sessions show) and the
+    others from 2.1.293.
+    """
     (path,) = FIXTURES.glob(f"{name}.w*.txt")
     return path.read_text(encoding="utf-8"), int(path.stem.rsplit(".w", 1)[1])
+
+
+PROMPT_CURSORS = json.loads((FIXTURES / "prompt-cursors.json").read_text(encoding="utf-8"))
+
+
+def at_cursor(name):
+    """(cursor line, line under it, cursor x, cursor shown, pane width) for a prompt-* screen, as `emx left` gets them."""
+    text, width = real_screen(name)
+    cursor = PROMPT_CURSORS["cursors"][name]
+    lines = text.split("\n")
+    return lines[cursor["y"]], lines[cursor["y"] + 1], cursor["x"], cursor["shown"], width
+
+
+class EmptyPromptOnRealScreens(unittest.TestCase):
+    CASES = {
+        "prompt-empty": True,
+        "prompt-empty-bare": True,
+        "prompt-text": False,
+        "prompt-text-at-start": False,
+        "prompt-multiline": False,
+        "prompt-multiline-empty-first": False,
+        "prompt-slash-menu": False,
+        "prompt-permission": False,
+        "prompt-model-menu": False,
+    }
+
+    def test_every_capture_is_covered(self):
+        self.assertEqual(set(PROMPT_CURSORS["cursors"]), set(self.CASES))
+
+    def test_cases(self):
+        for name, want in self.CASES.items():
+            with self.subTest(screen=name):
+                self.assertEqual(core.empty_prompt(*at_cursor(name)), want)
+
+    def test_the_example_text_only_counts_while_it_is_dim(self):
+        line, below, x, shown, width = at_cursor("prompt-empty")
+        self.assertIn("\x1b[2m", line)
+        self.assertFalse(core.empty_prompt(line.replace("\x1b[2m", ""), below, x, shown, width))
+
+    def test_an_empty_prompt_needs_the_cursor_shown_after_the_mark_and_the_rule_under_it(self):
+        line, below, x, shown, width = at_cursor("prompt-empty-bare")
+        self.assertTrue(core.empty_prompt(line, below, x, shown, width))
+        self.assertFalse(core.empty_prompt(line, below, x + 1, shown, width))
+        self.assertFalse(core.empty_prompt(line, below, x, False, width))
+        self.assertFalse(core.empty_prompt(line, below, x, shown, width + 1))
+        self.assertFalse(core.empty_prompt(line, "  second line", x, shown, width))
+        self.assertFalse(core.empty_prompt(" " + line, below, x, shown, width))
+
+
+class StyledCells(unittest.TestCase):
+    def test_dim_follows_sgr_and_skips_colour_numbers(self):
+        cases = [
+            ("\x1b[2mab", True),
+            ("\x1b[2m\x1b[22mab", False),
+            ("\x1b[2m\x1b[0mab", False),
+            ("\x1b[2m\x1b[mab", False),
+            ("\x1b[1;2mab", True),
+            ("\x1b[38;5;2mab", False),
+            ("\x1b[38;2;2;2;2mab", False),
+            ("\x1b[48;5;244;2mab", True),
+            ("\x1b[2m\x1b[38;5;246mab", True),
+        ]
+        for line, dim in cases:
+            with self.subTest(line=line):
+                self.assertEqual(core._styled_cells(line), [("a", dim), ("b", dim)])
+
+    def test_other_escapes_are_dropped(self):
+        self.assertEqual(core._styled_cells("\x1b]8;;http://x\x07a\x1b[?25lb"), [("a", False), ("b", False)])
+
+
+class FocusReports(unittest.TestCase):
+    def test_reports(self):
+        self.assertTrue(core.focus_report(["\x1b", "[", "I"]))
+        self.assertFalse(core.focus_report(["\x1b", "[", "O"]))
+        for keys in (["\x1b"], ["\x1b", "["], ["\x1b", "[", "A"], ["\x1b", "x"], ["[", "I"], ["\x1b", "[", "I", "x"]):
+            with self.subTest(keys=keys):
+                self.assertIsNone(core.focus_report(keys))
+
+    def test_only_a_report_in_progress_is_worth_reading_on(self):
+        self.assertTrue(core.may_be_focus_report(["\x1b"]))
+        self.assertTrue(core.may_be_focus_report(["\x1b", "["]))
+        for keys in (["x"], ["\x1b", "x"], ["\x1b", "[", "I"], [258]):
+            with self.subTest(keys=keys):
+                self.assertFalse(core.may_be_focus_report(keys))
+
+
+class CameBack(unittest.TestCase):
+    def test_the_left_mark_counts_only_once_the_panel_is_active(self):
+        self.assertTrue(core.came_back(active=True, marked=True))
+        self.assertFalse(core.came_back(active=False, marked=True))
+        self.assertFalse(core.came_back(active=True, marked=False))
+
+
+class NoticeExpiry(unittest.TestCase):
+    def test_a_timed_notice_goes_at_its_end_and_an_untimed_one_stays(self):
+        self.assertFalse(core.notice_expired(None, 1e9))
+        self.assertFalse(core.notice_expired(10.0, 9.9))
+        self.assertTrue(core.notice_expired(10.0, 10.0))
+        self.assertTrue(core.notice_expired(10.0, 11.0))
+
+
+class FocusStyle(unittest.TestCase):
+    def test_selection_bar_and_title_follow_focus(self):
+        self.assertIsNone(core.selection_bar(False, True))
+        self.assertIsNone(core.selection_bar(False, False))
+        self.assertEqual(core.selection_bar(True, True), "focused")
+        self.assertEqual(core.selection_bar(True, False), "unfocused")
+        self.assertEqual((core.title_style(True), core.title_style(False)), ("bold", "dim"))
+
+
+class AutoRestore(unittest.TestCase):
+    NOW = 1000.0
+
+    def decide(self, state="agent_view", tried=False, checking=False, last_restore=None):
+        return core.auto_restore(state, "%2", tried, checking, last_restore, self.NOW)
+
+    def test_only_the_agent_view_is_brought_back_once_and_never_over_a_running_check(self):
+        self.assertEqual(self.decide(), core.RESTORE)
+        self.assertIsNone(self.decide(tried=True))
+        self.assertIsNone(self.decide(checking=True))
+        for state in ("mismatch", "ok", "unknown"):
+            with self.subTest(state=state):
+                self.assertIsNone(self.decide(state))
+
+    def test_the_agent_view_back_soon_after_emxs_own_restore_gives_up(self):
+        soon = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS + 1, 1)
+        self.assertEqual(self.decide(last_restore=soon), core.GIVE_UP)
+        self.assertIsNone(self.decide(last_restore=soon, tried=True))
+        self.assertIsNone(self.decide("unknown", last_restore=soon))
+
+    def test_a_restore_long_ago_or_of_another_pane_does_not_hold_it_back(self):
+        long_ago = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS - 1, 1)
+        self.assertEqual(self.decide(last_restore=long_ago), core.RESTORE)
+        self.assertEqual(self.decide(last_restore=("%7", self.NOW, 1)), core.RESTORE)
+
+    def test_the_agent_view_back_after_a_second_restore_gives_up_however_long_ago(self):
+        long_ago = self.NOW - 10 * core.RESTORE_BACKOFF_SECONDS
+        self.assertEqual(self.decide(last_restore=("%2", long_ago, 2)), core.GIVE_UP)
+        self.assertEqual(self.decide(last_restore=("%7", long_ago, 2)), core.RESTORE)
+
+    def test_restores_of_one_pane_add_up_and_another_pane_starts_again(self):
+        first = core.record_restore(None, "%2", 1.0)
+        self.assertEqual(first, ("%2", 1.0, 1))
+        self.assertEqual(core.record_restore(first, "%2", 9.0), ("%2", 9.0, 2))
+        self.assertEqual(core.record_restore(first, "%7", 9.0), ("%7", 9.0, 1))
+
+    def test_his_r_is_always_carried_out_and_emxs_restore_only_while_the_agent_view_shows(self):
+        self.assertTrue(core.restore_still_wanted(False, None))
+        self.assertTrue(core.restore_still_wanted(False, "ok"))
+        self.assertTrue(core.restore_still_wanted(True, "agent_view"))
+        for state in ("ok", "mismatch", "unknown", None):
+            with self.subTest(state=state):
+                self.assertFalse(core.restore_still_wanted(True, state))
+
+    def test_an_ok_read_of_the_restored_pane_ends_the_backoff(self):
+        last = ("%2", self.NOW, 1)
+        self.assertIsNone(core.last_restore_after(last, "%2", "ok"))
+        for pane, state in (("%2", "agent_view"), ("%2", "unknown"), ("%2", "mismatch"), ("%7", "ok")):
+            with self.subTest(pane=pane, state=state):
+                self.assertEqual(core.last_restore_after(last, pane, state), last)
+        self.assertIsNone(core.last_restore_after(None, "%2", "ok"))
+
+    def test_a_pane_stays_tried_only_while_it_is_flagged(self):
+        self.assertEqual(core.still_tried(frozenset({"%2", "%3"}), frozenset({"%3", "%4"})), frozenset({"%3"}))
+        self.assertEqual(core.still_tried(frozenset({"%2"}), frozenset()), frozenset())
+
+    def test_restoring_main_means_emxs_own_check_on_the_pane_in_main(self):
+        self.assertTrue(core.restoring_main(("s1", "%2"), True, "%2"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), False, "%2"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), True, "%5"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), True, None))
+
+    def test_the_off_main_warning_waits_while_emx_brings_it_back(self):
+        flagged = frozenset({"%2"})
+        self.assertTrue(core.off_main_warning(flagged, "%2", restoring=False))
+        self.assertFalse(core.off_main_warning(flagged, "%2", restoring=True))
+        self.assertFalse(core.off_main_warning(flagged, "%5", restoring=False))
+        self.assertFalse(core.off_main_warning(flagged, None, restoring=False))
 
 
 class MainViewStateOnRealScreens(unittest.TestCase):
