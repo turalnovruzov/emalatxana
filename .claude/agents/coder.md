@@ -20,9 +20,10 @@ If a brief would require you to invent one of those, the brief is wrong. Say so 
 
 Tural works in Claude Code sessions all day, and losing one mid-work is the thing he fears most. So:
 
-- **Only ever use throwaway Claude Code sessions you started yourself**, in a directory you created with `mktemp -d`, never in one of his project folders, and never with `--dangerously-skip-permissions`. Act only on the session ids and PIDs you recorded when you started them, and clean them up before you report.
-- **Never attach to, stop, kill, resume, rename, or send input to a session you did not start**, and never run `/resume` against one. Never `pkill` or `killall` by name. Reading the session list (`claude agents --json`) is fine.
-- **Nothing under `~/.claude/`** (session transcripts and state, his settings, hooks, skills, memory) is written, moved or deleted. Reading it is fine.
+- **Throwaway sessions only:** started by you, in a directory you created with `mktemp -d`, never in one of his project folders, and never with `--dangerously-skip-permissions`. If a test needs a background session (it shows in his `claude agents` list), name it with a recognisable prefix such as `emx-test-` and record the id it started.
+- **Clean up** before you report: end the processes, or `claude stop` then `claude rm`, only the ids you started and recorded; delete the `mktemp` directory.
+- **Never stop, rm, attach to, resume, rename, send input to, or otherwise act on an id you did not start.** Never `pkill` or `killall` by name. Reading the session list (`claude agents --json`) is fine.
+- **What Claude Code itself writes** for a session you started (its transcript and state under `~/.claude/`) is expected and stays. You never edit, move or delete anything under `~/.claude/` yourself, and never change his settings or hooks. Reading is fine.
 
 ## This repo is public
 
