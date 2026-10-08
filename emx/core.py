@@ -269,6 +269,16 @@ def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
     return None
 
 
+def open_blocked(starting: bool) -> str | None:
+    """Why Enter or → on the panel opens nothing now, or None.
+
+    While a new session starts, an Enter he meant for its prompt (the old
+    `n`, Enter, Enter habit) lands on the panel, where it would reopen the
+    stopped session under the cursor.
+    """
+    return "Still starting the last session…" if starting else None
+
+
 def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) -> bool:
     """Whether a confirmed stop or remove may run, judged on a listing a worker took just before running it (`checked_row`).
 
@@ -948,6 +958,9 @@ def resolve_folder(text: str, base: str) -> str:
 RECENT_FOLDERS = 20
 PICKER_ROWS = 8
 SESSIONS, RECENT, LISTED = "sessions", "recent", "listed"
+_SOURCE_RANK = {SESSIONS: 0, RECENT: 1, LISTED: 2}
+SEARCHED_PARENTS = 6
+MAX_LISTED_NAMES = 5000
 _BOUNDARY = "/-_. "
 
 
@@ -986,10 +999,9 @@ def tilde_path(path: str, home: str) -> str:
 def fuzzy_match(query: str, text: str) -> tuple | None:
     """How well `query` matches `text` as a case-insensitive subsequence, as fzf and zsh do: a sort key, smaller is better, or None for no match.
 
-    The matched letters are the tightest window ending at the earliest
-    complete match, taken back to front. The key ranks more letters next to
-    each other first, then a match that starts the last folder name (the
-    prefix), then the shorter text.
+    Of every way the letters can line up, the best one counts: the most
+    letters next to each other, then a match that starts the last folder
+    name (the prefix). The key ranks those two first, then the shorter text.
     """
     q, t = query.lower(), text.lower()
     if not q:
@@ -999,15 +1011,22 @@ def fuzzy_match(query: str, text: str) -> tuple | None:
         at = t.find(ch, at + 1)
         if at < 0:
             return None
-    picked = []
-    for ch in reversed(q):
-        at = t.rfind(ch, 0, at + 1)
-        picked.append(at)
-        at -= 1
-    picked.reverse()
-    together = sum(1 for a, b in zip(picked, picked[1:]) if b == a + 1)
     last = text.rstrip("/").rfind("/") + 1
-    prefix = picked[0] >= last and _word_start(text, picked[0])
+    # best[j] is the best (letters together, prefix) with the query so far matched and its latest letter at j.
+    best = [(0, j >= last and _word_start(text, j)) if c == q[0] else None for j, c in enumerate(t)]
+    for ch in q[1:]:
+        step, before = [None] * len(t), None
+        for j, c in enumerate(t):
+            if j >= 2 and best[j - 2] is not None and (before is None or best[j - 2] > before):
+                before = best[j - 2]
+            if c != ch:
+                continue
+            options = [before] if before is not None else []
+            if j >= 1 and best[j - 1] is not None:
+                options.append((best[j - 1][0] + 1, best[j - 1][1]))
+            step[j] = max(options) if options else None
+        best = step
+    together, prefix = max(b for b in best if b is not None)
     return (-together, not prefix, len(text))
 
 
@@ -1036,45 +1055,94 @@ def picker_query(text: str, home: str) -> tuple:
     return resolve_folder(head + sep, home), tail
 
 
-def folder_suggestions(text: str, session_folders, recent_folders, listed: tuple | None, home: str, limit: int = PICKER_ROWS) -> list:
-    """The picker's rows for `text`: folders with sessions, then recent folders, then subfolders of the folder being typed.
+def search_folders(session_folders, recent_folders, home: str, limit: int = SEARCHED_PARENTS) -> list:
+    """The folders a bare word searches one level inside: home, then the parents of the folders he already uses, those holding the most of them first, at most `limit` of them."""
+    home = os.path.normpath(home)
+    counts = {}
+    for folder in dict.fromkeys(os.path.normpath(f) for f in [*session_folders, *recent_folders] if f):
+        parent = os.path.dirname(folder)
+        counts[parent] = counts.get(parent, 0) + 1
+    parents = [p for p in sorted(counts, key=lambda p: -counts[p]) if p != home]
+    return [home] + parents[:limit]
 
-    Each source keeps its own order while nothing is typed, and is ranked by
-    `fuzzy_match` once something is. Folders already offered by an earlier
-    source are not offered again. `listed` is (folder, names of its
-    subfolders) from a listing taken off the curses thread, or None while
-    there is none yet. Hidden folders show only when the typed name starts
-    with a dot.
+
+def _path_mode(query: str) -> bool:
+    return "/" in query or query == "~"
+
+
+def folders_to_list(text: str, session_folders, recent_folders, home: str) -> list:
+    """The folders whose listings the picker needs for `text`: the one being typed into, or for a bare word the ones it searches."""
+    if _path_mode(text.strip()):
+        return [picker_query(text, home)[0]]
+    return search_folders(session_folders, recent_folders, home)
+
+
+def folder_suggestions(text: str, session_folders, recent_folders, listed: Mapping, home: str, limit: int = PICKER_ROWS) -> list:
+    """The picker's rows for `text`, from folders with sessions, recent folders, and listings of folders.
+
+    `listed` maps a folder to the names of its subfolders, from listings
+    taken off the curses thread; a folder not yet listed is missing. With
+    nothing typed, the sources follow each other in their own order, with
+    home's subfolders last. Once a path is typed (it has a `/`), only folders
+    under the folder being typed into are offered, each matched on its path
+    from there. A bare word is matched against the whole path of every known
+    folder and of the subfolders of `search_folders`. Typed text ranks every
+    source together by `fuzzy_match`; the source only breaks ties. Hidden
+    subfolders show only when the typed name starts with a dot.
     """
     query = text.strip()
-    rows, seen = [], set()
+    known = [(SESSIONS, f) for f in session_folders if f] + [(RECENT, f) for f in recent_folders if f]
+    candidates = []
+    if _path_mode(query):
+        parent, match_on = picker_query(query, home)
+        under = parent.rstrip("/") + "/"
+        for source, folder in known:
+            folder = os.path.normpath(folder)
+            if folder.startswith(under):
+                candidates.append((source, folder, folder[len(under):]))
+        names = listed.get(parent) or []
+        candidates += [(LISTED, os.path.join(parent, n), n) for n in _visible(names, match_on)]
+    else:
+        match_on = query
+        candidates += [(source, f, tilde_path(os.path.normpath(f), home)) for source, f in known]
+        searched = [os.path.normpath(home)] if not query else search_folders(session_folders, recent_folders, home)
+        for folder in searched:
+            for n in _visible(listed.get(folder) or [], query):
+                path = os.path.join(folder, n)
+                candidates.append((LISTED, path, tilde_path(path, home)))
+    ranked, seen = [], set()
+    for order, (source, path, target) in enumerate(candidates):
+        key = os.path.normpath(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        match = fuzzy_match(match_on, target) if match_on or _path_mode(query) else ()
+        if match is not None:
+            ranked.append(((match, _SOURCE_RANK[source], order), key, source))
+    return [Suggestion(key, tilde_path(key, home), source) for _, key, source in sorted(ranked)[:limit]]
 
-    def add(source: str, candidates) -> None:
-        ranked = []
-        for order, (path, target) in enumerate(candidates):
-            key = os.path.normpath(path)
-            if key in seen:
-                continue
-            match = fuzzy_match(match_on, target) if match_on else (order,)
-            if match is not None:
-                ranked.append((match, order, key))
-        for _, _, key in sorted(ranked)[: limit - len(rows)]:
-            seen.add(key)
-            rows.append(Suggestion(key, tilde_path(key, home), source))
 
-    def known(folders):
-        return [(f, f if query.startswith("/") else tilde_path(os.path.normpath(f), home)) for f in folders if f]
+def _visible(names, typed: str) -> list:
+    return sorted((n for n in names if typed.startswith(".") or not n.startswith(".")), key=lambda n: (n.lower(), n))
 
-    match_on = query
-    add(SESSIONS, known(session_folders))
-    add(RECENT, known(recent_folders))
-    if listed is not None:
-        parent, tail = picker_query(text, home)
-        if listed[0] == parent:
-            names = sorted(listed[1], key=lambda n: (n.lower(), n))
-            match_on = tail
-            add(LISTED, [(os.path.join(parent, n), n) for n in names if tail.startswith(".") or not n.startswith(".")])
-    return rows
+
+def picker_enter(picked: str | None, typed: str, exists: bool | None, rows: list) -> tuple:
+    """(folder, None) for Enter in the folder picker, or (None, the hint to show).
+
+    The highlighted folder first, then the typed path once it is confirmed a
+    folder. While that is still being checked he waits, so a path he typed
+    in full is not swapped for a suggestion. A typed path that is not a
+    folder gives way to the top suggestion.
+    """
+    if picked:
+        return picked, None
+    if exists:
+        return typed, None
+    if exists is None:
+        return None, "Still reading that folder; press Enter again in a moment."
+    if rows:
+        return rows[0].path, None
+    return None, "Not a folder. ↓ picks a suggestion."
 
 
 def completed_text(suggestion: Suggestion) -> str:
@@ -1082,14 +1150,24 @@ def completed_text(suggestion: Suggestion) -> str:
     return suggestion.shown.rstrip("/") + "/"
 
 
-def folder_exists(folder: str, known, listed: tuple | None) -> bool | None:
-    """Whether `folder` is a folder, judged without touching the filesystem: a folder emx already knows, or one its parent's listing names. None while that listing hasn't come in."""
+def folder_exists(folder: str, known, listed: tuple | None, readable: bool | None = None) -> bool | None:
+    """Whether `folder` is a folder, judged without touching the filesystem, or None while that can't be told yet.
+
+    It is one when emx already knows it, when its parent's listing (`listed`,
+    as (parent, names)) names it, or when `readable` says a read of the
+    folder itself, taken off the curses thread, succeeded. A listing cut
+    short at MAX_LISTED_NAMES can't show it is missing, so then only that
+    read decides.
+    """
     folder = os.path.normpath(folder)
-    if folder == "/" or folder in {os.path.normpath(k) for k in known if k}:
+    if folder == "/" or folder in {os.path.normpath(k) for k in known if k} or readable:
         return True
-    if listed is None or listed[0] != os.path.dirname(folder):
-        return None
-    return os.path.basename(folder) in listed[1]
+    if listed is not None and listed[0] == os.path.dirname(folder):
+        if os.path.basename(folder) in listed[1]:
+            return True
+        if len(listed[1]) < MAX_LISTED_NAMES:
+            return False
+    return readable
 
 
 def session_folders(sessions, groups, view: str) -> list:

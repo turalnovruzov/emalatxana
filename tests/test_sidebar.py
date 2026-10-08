@@ -967,9 +967,15 @@ class FakeListings:
         self.cache = dict(cache or {})
         self.asked = []
 
+        self.readable_cache = {}
+
     def get(self, folder):
         self.asked.append(folder)
         return self.cache.get(folder)
+
+    def readable(self, folder):
+        self.asked.append(folder)
+        return self.readable_cache.get(folder)
 
 
 class NewSession(AppCase):
@@ -1119,6 +1125,79 @@ class NewSession(AppCase):
             self.app.draw()
             self.keys(curses.KEY_DOWN, "\t", "\n")
 
+    def test_n_enter_enter_never_reopens_the_stopped_row_under_the_cursor(self):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.keys("n", "\n", "\n", curses.KEY_RIGHT)
+        self.assertEqual(self.started, [("/p/stopped", "")])
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+        self.assertEqual(self.app.cursor, ("session", "s"))
+
+    def test_enter_with_nothing_highlighted_takes_a_confirmed_typed_folder_else_the_top_suggestion(self):
+        self.app.listings.cache["/q"] = ["xy"]
+        self.app.listings.readable_cache["/q/x"] = True
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/x")
+        self.assertEqual(self.app.suggestions()[0].path, "/q/xy")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/x"))
+        self.keys("\t")
+        self.type("/q/x-")
+        self.app.listings.cache["/q"] = ["x-ray", "x-wing-long"]
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/x-ray"))
+        self.keys("\t")
+        self.type("/q/zzz")
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.assertIn("Not a folder", self.app.prompt["hint"])
+
+    def test_a_bare_word_finds_a_folder_one_level_inside_a_folder_he_uses(self):
+        self.app.listings.cache["/p"] = ["beta", "quokka"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("quok")
+        self.assertEqual([r.path for r in self.app.suggestions()], ["/p/quokka"])
+        self.assertIn("/p", self.app.listings.asked)
+
+    def test_no_match_is_said_once(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/zzz")
+        self.keys("\t")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 20)]
+        self.assertEqual(sum("no match" in line for line in drawn), 1, drawn)
+
+    def test_on_a_short_pane_the_rows_give_way_and_the_highlight_survives_past_them(self):
+        self.app.listings.cache["/h/me"] = [f"dir{i}" for i in range(12)]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("~/")
+        for _ in range(6):
+            self.keys(curses.KEY_DOWN)
+        picked = self.app.prompt["picked"]
+        self.assertEqual(picked, "/h/me/dir5")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 9)]
+        self.assertLessEqual(len(drawn), 9 - 2)
+        self.assertEqual(drawn[0], "New session · pick a folder:")
+        self.assertTrue(drawn[1].startswith("> ~/"), drawn)
+        self.assertTrue(any("more" in line for line in drawn), drawn)
+        self.assertFalse(any("dir5" in line for line in drawn), drawn)
+        self.assertEqual(self.app.prompt["picked"], picked)
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["folder"], picked)
+
+    def test_the_title_and_input_stay_on_a_pane_too_short_for_any_row(self):
+        self.app.listings.cache["/h/me"] = ["dir"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        drawn = [text for text, _ in self.app.bottom_lines(39, 5)]
+        self.assertEqual(drawn[0], "New session · pick a folder:")
+        self.assertFalse(any("dir" in line for line in drawn), drawn)
+
     def test_a_started_folder_becomes_recent_and_last(self):
         self.app.starter = mock.Mock(folder="/p/gamma", result=(session("new1", "/p/gamma"), None))
         self.app.starter.is_alive.return_value = False
@@ -1133,10 +1212,12 @@ class NewSession(AppCase):
 class FolderListingsOffThread(unittest.TestCase):
     def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
         release = threading.Event()
+        all_started = threading.Barrier(sidebar.MAX_LISTINGS + 1, timeout=5)
         calls = []
 
         def hang(folder):
             calls.append(folder)
+            all_started.wait()
             release.wait(5)
             return ["late"]
 
@@ -1148,7 +1229,7 @@ class FolderListingsOffThread(unittest.TestCase):
             self.assertLess(time.monotonic() - began, 0.5)
             for i in range(sidebar.MAX_LISTINGS + 3):
                 listings.get(f"/other{i}")
-            time.sleep(0.05)
+            all_started.wait()
             self.assertEqual(calls.count("/hung"), 1)
             self.assertEqual(len(calls), sidebar.MAX_LISTINGS)
             release.set()
@@ -1163,7 +1244,20 @@ class FolderListingsOffThread(unittest.TestCase):
                 os.mkdir(os.path.join(d, n))
             Path(d, "file").write_text("")
             self.assertEqual(sorted(sidebar.list_subdirs(d)), [".hidden", "Alpha"])
-            self.assertEqual(sidebar.list_subdirs(os.path.join(d, "missing")), [])
+            self.assertIsNone(sidebar.list_subdirs(os.path.join(d, "missing")))
+            self.assertIsNone(sidebar.list_subdirs(os.path.join(d, "file")))
+
+    def test_a_folder_read_says_whether_it_is_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "file").write_text("")
+            listings = sidebar.Listings()
+            deadline = time.monotonic() + 2
+            while (listings.readable(d) is None or listings.readable(os.path.join(d, "file")) is None) \
+                    and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(listings.readable(d))
+            self.assertFalse(listings.readable(os.path.join(d, "file")))
+            self.assertEqual(listings.get(os.path.join(d, "file")), [])
 
 
 if __name__ == "__main__":

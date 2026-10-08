@@ -22,7 +22,6 @@ LISTED_CHECK_SECONDS = 0.5
 GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
 MAX_LISTINGS = 4
-MAX_LISTED_NAMES = 5000
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
@@ -209,8 +208,8 @@ def close_session(claude: str, confirm: core.Confirm) -> tuple:
     return done.stdout, None
 
 
-def list_subdirs(folder: str) -> list:
-    """Names of the folders in `folder`, or [] when it can't be read. Never raises.
+def list_subdirs(folder: str) -> list | None:
+    """Names of the folders in `folder`, at most MAX_LISTED_NAMES of them, or None when it can't be read as a folder. Never raises.
 
     Called only from a `Listings` thread: a folder on a hung mount can block
     here for good.
@@ -224,19 +223,20 @@ def list_subdirs(folder: str) -> list:
                         names.append(entry.name)
                 except OSError:
                     continue
-                if len(names) >= MAX_LISTED_NAMES:
+                if len(names) >= core.MAX_LISTED_NAMES:
                     break
     except OSError:
-        return []
+        return None
     return names
 
 
 class Listings:
     """Folder listings for the picker, each read on its own short-lived thread and kept for a while.
 
-    `get` never waits: it hands back whatever is cached (None before the
-    first listing arrives) and starts a read when the cache is missing or
-    old. A folder still being read is never read twice, and at most
+    `get` and `readable` never wait: they hand back whatever is cached (None
+    before the first read arrives) and start a read when the cache is
+    missing or old. `readable` says whether the folder itself could be read,
+    which confirms a folder its parent's listing can't. A folder still being read is never read twice, and at most
     MAX_LISTINGS reads run at once, so a hung mount holds one slot instead
     of piling up threads or freezing the panel.
     """
@@ -247,21 +247,27 @@ class Listings:
         self.reading = set()
 
     def get(self, folder: str):
+        return self.lookup(folder)[0]
+
+    def readable(self, folder: str):
+        return self.lookup(folder)[1]
+
+    def lookup(self, folder: str) -> tuple:
         with self.lock:
-            names, at = self.cache.get(folder, (None, None))
+            names, readable, at = self.cache.get(folder, (None, None, None))
             stale = at is None or time.monotonic() - at >= LISTING_FRESH_SECONDS
             if stale and folder not in self.reading and len(self.reading) < MAX_LISTINGS:
                 self.reading.add(folder)
                 threading.Thread(target=self.read, args=(folder,), daemon=True).start()
-        return names
+        return names, readable
 
     def read(self, folder: str) -> None:
         try:
             names = list_subdirs(folder)
         except Exception:
-            names = []
+            names = None
         with self.lock:
-            self.cache[folder] = (names, time.monotonic())
+            self.cache[folder] = (names or [], names is not None, time.monotonic())
             self.reading.discard(folder)
 
 
@@ -872,30 +878,31 @@ class App:
 
     def suggestions(self) -> list:
         p = self.prompt
-        parent, _ = core.picker_query(p["text"], self.home)
-        names = self.listings.get(parent)
-        listed = (parent, names) if names is not None else None
         folders = core.session_folders(self.sessions, self.groups, self.view())
-        return core.folder_suggestions(p["text"], folders, self.prefs.get("recent_folders", []), listed, self.home)
-
-    def picked(self, rows: list):
-        """The highlighted suggestion, kept by path: a listing arriving late can move rows, and the row he chose must not change under him."""
-        return next((r for r in rows if r.path == self.prompt.get("picked")), None)
+        recent = self.prefs.get("recent_folders", [])
+        listed = {}
+        for folder in core.folders_to_list(p["text"], folders, recent, self.home):
+            names = self.listings.get(folder)
+            if names is not None:
+                listed[folder] = names
+        return core.folder_suggestions(p["text"], folders, recent, listed, self.home)
 
     def move_pick(self, delta: int) -> None:
-        rows = self.suggestions()
-        if not rows:
+        """The highlight is kept by path: a listing arriving late can move rows, and the folder he chose must not change under him."""
+        paths = [r.path for r in self.suggestions()]
+        if not paths:
             return
-        current = self.picked(rows)
-        at = rows.index(current) + delta if current else (0 if delta > 0 else len(rows) - 1)
-        self.prompt["picked"] = rows[max(0, min(len(rows) - 1, at))].path
+        current = self.prompt.get("picked")
+        at = paths.index(current) + delta if current in paths else (0 if delta > 0 else len(paths) - 1)
+        self.prompt["picked"] = paths[max(0, min(len(paths) - 1, at))]
 
     def complete_suggestion(self) -> None:
+        """Tab: the highlighted folder, else the top suggestion. With neither, the rows already say "no match"."""
         rows = self.suggestions()
-        chosen = self.picked(rows) or (rows[0] if rows else None)
-        if chosen is None:
-            self.prompt["hint"] = "no match"
+        path = self.prompt.get("picked") or (rows[0].path if rows else None)
+        if path is None:
             return
+        chosen = core.Suggestion(path, core.tilde_path(path, self.home), "")
         self.prompt.update(text=core.completed_text(chosen), picked=None, hint="")
 
     def prompt_submit(self) -> None:
@@ -909,23 +916,18 @@ class App:
         self.say("Starting a session…")
 
     def pick_folder(self) -> None:
-        """Enter in the picker: the highlighted folder, else the typed path once a listing confirms it is a folder. The filesystem itself is never touched here."""
+        """Enter in the picker (`core.picker_enter`). The typed path is judged from cached reads; the filesystem itself is never touched here."""
         p = self.prompt
-        chosen = self.picked(self.suggestions())
-        if chosen is not None:
-            folder = chosen.path
-        else:
-            folder = core.resolve_folder(p["text"], self.home)
-            known = core.session_folders(self.sessions, self.groups, self.view()) + self.prefs.get("recent_folders", [])
-            parent = os.path.dirname(folder)
-            names = self.listings.get(parent)
-            exists = core.folder_exists(folder, known, (parent, names) if names is not None else None)
-            if exists is None:
-                p["hint"] = "Still reading that folder; press Enter again in a moment."
-                return
-            if not exists:
-                p["hint"] = "Not a folder. ↓ picks a suggestion."
-                return
+        typed = core.resolve_folder(p["text"], self.home)
+        known = core.session_folders(self.sessions, self.groups, self.view()) + self.prefs.get("recent_folders", [])
+        parent = os.path.dirname(typed)
+        names = self.listings.get(parent)
+        listed = (parent, names) if names is not None else None
+        exists = core.folder_exists(typed, known, listed, self.listings.readable(typed))
+        folder, hint = core.picker_enter(p.get("picked"), typed, exists, self.suggestions())
+        if folder is None:
+            p["hint"] = hint
+            return
         p.update(stage="message", folder=folder, text=p["message"], hint="")
 
     def finish_start(self) -> None:
@@ -971,10 +973,11 @@ class App:
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, -1), None
         elif key in (curses.KEY_DOWN, "j"):
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, 1), None
-        elif key in ENTER_KEYS:
-            self.activate(self.cursor)
-        elif key == curses.KEY_RIGHT:
-            if self.cursor and self.cursor[0] == "session":
+        elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
+            blocked = core.open_blocked(self.starter is not None)
+            if blocked:
+                self.say(blocked)
+            elif key in ENTER_KEYS or (self.cursor and self.cursor[0] == "session"):
                 self.activate(self.cursor)
         elif key == CTRL_S:
             self.toggle_view()
@@ -1001,8 +1004,8 @@ class App:
             except curses.error:
                 pass
 
-    def bottom_lines(self, width: int) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, footer."""
+    def bottom_lines(self, width: int, height: int | None = None) -> list:
+        """(text, attr) lines for the area under the list: notice, prompt, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
         if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
             session = self.session(self.main_pane.session)
@@ -1018,36 +1021,46 @@ class App:
             lines += [(t, attr) for t in core.wrap_words(self.notice, width)[:6]]
         if self.prompt is not None:
             # The prompt's own hint line stands in for the footer, whose keys don't apply while typing.
-            return lines + self.prompt_lines(width)
+            room = None if height is None else height - 2 - len(lines)
+            return lines + self.prompt_lines(width, room)
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
         lines.append((footer, curses.A_DIM))
         return lines
 
-    def prompt_lines(self, width: int) -> list:
+    def prompt_lines(self, width: int, room: int | None = None) -> list:
+        """The prompt's lines; the picker's suggestions get only what `room` leaves after the title, input and hints."""
         p = self.prompt
         if p["stage"] == "message":
             title = "New session in "
-            lines = [(title + core.short_path(p["folder"], width - core.display_width(title), self.home), curses.A_BOLD)]
-            lines += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
+            head = [(title + core.short_path(p["folder"], width - core.display_width(title), self.home), curses.A_BOLD)]
             hint = "Enter start · Tab folder · Esc cancel"
         else:
-            lines = [("New session · pick a folder:", curses.A_BOLD)]
-            lines += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
-            rows = self.suggestions()
-            picked = self.picked(rows)
-            if picked is None:
-                p["picked"] = None
-            for row in rows:
-                bar = "focused" if row is picked else None
-                text = core.fit((" " + core.short_path(row.path, width - 1, self.home)).ljust(width), width)
-                lines.append((text, self.palette.attr("plain", bar) if bar else self.palette.attr("path")))
-            if not rows:
-                lines.append(("no match", curses.A_DIM))
+            head = [("New session · pick a folder:", curses.A_BOLD)]
             hint = "↑↓ pick · Tab fill · ↵ use · Esc " + ("back" if p.get("back") else "cancel")
-        if p["hint"]:
-            lines += [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]]
-        lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]
+        head += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
+        tail = [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]] if p["hint"] else []
+        tail += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]
+        if p["stage"] == "message":
+            return head + tail
+        fits = core.PICKER_ROWS if room is None else max(0, room - len(head) - len(tail))
+        return head + self.suggestion_lines(width, fits) + tail
+
+    def suggestion_lines(self, width: int, fits: int) -> list:
+        """At most `fits` lines. Rows that don't fit become one "more" line, highlighted when the highlighted folder is among them."""
+        rows = self.suggestions()
+        if not rows:
+            return [("no match", curses.A_DIM)][:fits]
+        picked = self.prompt.get("picked")
+        shown = rows if len(rows) <= fits else rows[:max(0, fits - 1)]
+        lines = []
+        for row in shown:
+            text = core.fit((" " + core.short_path(row.path, width - 1, self.home)).ljust(width), width)
+            lines.append((text, self.palette.attr("plain", "focused") if row.path == picked else self.palette.attr("path")))
+        hidden = rows[len(shown):]
+        if hidden and fits > 0:
+            attr = self.palette.attr("plain", "focused") if picked in {r.path for r in hidden} else curses.A_DIM
+            lines.append((core.fit(f" … {len(hidden)} more".ljust(width), width), attr))
         return lines
 
     def color(self, name: str) -> int:
@@ -1060,7 +1073,7 @@ class App:
         self.row_map = {}
         self.draw_summary(w)
         self.put(1, 0, "─" * w, self.palette.attr("muted"))
-        bottom = self.bottom_lines(max(1, w - 1))
+        bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 2, h - len(bottom)
         if self.help:
             self.draw_help(list_top, list_bottom, w)

@@ -859,7 +859,7 @@ class FuzzyMatch(unittest.TestCase):
     FOLDERS = [
         "~/Workspace/email-export",
         "~/Downloads/web-stuff/memex",
-        "~/Workspace/emalatxana",
+        "~/Workspace/emberlynx",
         "~/Documents/Notes",
         "~/Workspace/website",
     ]
@@ -871,21 +871,26 @@ class FuzzyMatch(unittest.TestCase):
     def test_subsequence_in_any_case(self):
         for query in ("emx", "EMX", "eMx", "wsemx", "WsEmX"):
             with self.subTest(query=query):
-                self.assertIsNotNone(core.fuzzy_match(query, "~/Workspace/emalatxana"))
-        self.assertIsNone(core.fuzzy_match("xme", "~/Workspace/emalatxana"))
-        self.assertIsNone(core.fuzzy_match("emxz", "~/Workspace/emalatxana"))
+                self.assertIsNotNone(core.fuzzy_match(query, "~/Workspace/emberlynx"))
+        self.assertIsNone(core.fuzzy_match("xme", "~/Workspace/emberlynx"))
+        self.assertIsNone(core.fuzzy_match("emxz", "~/Workspace/emberlynx"))
 
     def test_wsemx_and_emx_find_the_folder_among_others_that_match(self):
         for query in ("wsemx", "emx"):
             with self.subTest(query=query):
                 ranked = self.ranked(query)
                 self.assertGreater(len(ranked), 1)
-                self.assertEqual(ranked[0], "~/Workspace/emalatxana")
+                self.assertEqual(ranked[0], "~/Workspace/emberlynx")
 
     def test_letters_together_beat_letters_spread(self):
         self.assertEqual(self.ranked("site"), ["~/Workspace/website"])
         self.assertEqual(self.ranked("web")[0], "~/Workspace/website")
         self.assertEqual(self.ranked("exp")[0], "~/Workspace/email-export")
+
+    def test_the_best_alignment_counts_not_the_earliest(self):
+        self.assertEqual(core.fuzzy_match("ab", "a_xb_ab")[0], -1)
+        self.assertEqual(core.fuzzy_match("abc", "a_b_abc")[0], -2)
+        self.assertEqual(core.fuzzy_match("ab", "xab/ab"), (-1, False, 6))
 
     def test_a_match_starting_the_folder_name_beats_one_inside_it(self):
         self.assertEqual(self.ranked("not", ["~/a/denote", "~/a/notes-long"]), ["~/a/notes-long", "~/a/denote"])
@@ -899,39 +904,92 @@ class FuzzyMatch(unittest.TestCase):
 
 class FolderSuggestions(unittest.TestCase):
     def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS):
-        return [(r.shown, r.source) for r in core.folder_suggestions(text, sessions, recent, listed, HOME, limit)]
+        rows = core.folder_suggestions(text, sessions, recent, listed or {}, HOME, limit)
+        return [(r.shown, r.source) for r in rows]
 
     def test_sources_in_order_each_keeping_its_own_order_when_nothing_is_typed(self):
-        got = self.shown("", ["/h/me/zeta", "/h/me/alpha"], ["/h/me/beta", "/h/me/zeta/"], (HOME, ["Gamma", "alpha", ".git"]))
+        got = self.shown("", ["/h/me/zeta", "/h/me/alpha"], ["/h/me/beta", "/h/me/zeta/"], {HOME: ["Gamma", "alpha", ".git"]})
         self.assertEqual(got, [
             ("~/zeta", core.SESSIONS), ("~/alpha", core.SESSIONS), ("~/beta", core.RECENT), ("~/Gamma", core.LISTED),
         ])
 
-    def test_typed_text_ranks_within_each_source_and_drops_non_matches(self):
-        got = self.shown("emx", ["/h/me/Workspace/email-export", "/h/me/Workspace/emalatxana", "/h/me/notes"],
-                         ["/h/me/memex", "/h/me/other"], (HOME, ["Emx-lab", "Workspace"]))
+    def test_a_bare_word_ranks_every_source_together_and_drops_non_matches(self):
+        got = self.shown("emx", ["/h/me/Workspace/email-export", "/h/me/Workspace/emberlynx", "/h/me/notes"],
+                         ["/h/me/memex", "/h/me/other"], {HOME: ["Emx-lab", "Workspace"]})
         self.assertEqual(got, [
-            ("~/Workspace/emalatxana", core.SESSIONS), ("~/Workspace/email-export", core.SESSIONS),
-            ("~/memex", core.RECENT), ("~/Emx-lab", core.LISTED),
+            ("~/Emx-lab", core.LISTED), ("~/Workspace/emberlynx", core.SESSIONS),
+            ("~/Workspace/email-export", core.SESSIONS), ("~/memex", core.RECENT),
         ])
 
+    def test_the_source_breaks_a_tie(self):
+        got = self.shown("kiw", [], ["/h/me/kiwi"], {HOME: ["kiwi", "kiwa"]})
+        self.assertEqual(got, [("~/kiwi", core.RECENT), ("~/kiwa", core.LISTED)])
+        got = self.shown("kiw", ["/h/me/kiwa"], ["/h/me/kiwi"])
+        self.assertEqual(got, [("~/kiwa", core.SESSIONS), ("~/kiwi", core.RECENT)])
+
+    def test_a_bare_word_searches_one_level_inside_the_folders_he_uses(self):
+        listed = {"/h/me/Workspace": ["alpha", "beta", "quokka-tools"], HOME: ["Workspace"], "/h/me/elsewhere": ["quokka"]}
+        got = self.shown("quok", ["/h/me/Workspace/alpha"], ["/h/me/Workspace/beta"], listed)
+        self.assertEqual(got, [("~/Workspace/quokka-tools", core.LISTED)])
+
+    def test_the_searched_folders_are_home_then_the_busiest_parents(self):
+        sessions = ["/h/me/w/a", "/h/me/w/b", "/q/x", "/h/me/top", "/h/me/w/a/"]
+        recent = ["/r/1", "/r/2", "/r/3", "/q/y"]
+        self.assertEqual(core.search_folders(sessions, recent, HOME), [HOME, "/r", "/h/me/w", "/q"])
+        self.assertEqual(core.search_folders(sessions, recent, HOME, limit=2), [HOME, "/r", "/h/me/w"])
+        self.assertEqual(core.search_folders([], [], HOME), [HOME])
+
+    def test_the_folders_to_list_follow_what_is_typed(self):
+        sessions = ["/h/me/w/a"]
+        self.assertEqual(core.folders_to_list("~/w/x", sessions, [], HOME), ["/h/me/w"])
+        self.assertEqual(core.folders_to_list("~", sessions, [], HOME), [HOME])
+        self.assertEqual(core.folders_to_list("ab", sessions, [], HOME), [HOME, "/h/me/w"])
+        self.assertEqual(core.folders_to_list("", sessions, [], HOME), [HOME, "/h/me/w"])
+
+    def test_a_typed_parent_shows_its_subfolders_even_with_many_known_folders_under_it(self):
+        known = [f"/h/me/Workspace/kiwi/.claude/worktrees/task-{i}" for i in range(9)]
+        listed = {"/h/me/Workspace": ["kiwi", "newrepo", "zebra-notes"]}
+        got = self.shown("~/Workspace/", known, ["/h/me/Workspace/kiwi"], listed)
+        self.assertEqual(len(got), core.PICKER_ROWS)
+        self.assertEqual(got[:3], [
+            ("~/Workspace/kiwi", core.RECENT), ("~/Workspace/newrepo", core.LISTED), ("~/Workspace/zebra-notes", core.LISTED),
+        ])
+
+    def test_the_exact_listed_folder_ranks_ahead_of_long_worktree_paths(self):
+        known = ["/h/me/Workspace/foo/.claude/worktrees/feature+foo-fix", "/h/me/Workspace/foo/.claude/worktrees/foo-docs"]
+        listed = {"/h/me/Workspace": ["foo", "foobar-app", "other"]}
+        got = self.shown("~/Workspace/foo", known, listed=listed)
+        self.assertEqual(got[:2], [("~/Workspace/foo", core.LISTED), ("~/Workspace/foobar-app", core.LISTED)])
+        self.assertEqual(len(got), 4)
+
+    def test_a_name_starting_with_the_typed_text_ranks_first(self):
+        known = ["/h/me/Workspace/kiwi/.claude/worktrees/renew-cache", "/h/me/other/newthing"]
+        listed = {"/h/me/Workspace": ["kiwi", "renewal", "newrepo"]}
+        got = self.shown("~/Workspace/new", known, listed=listed)
+        self.assertEqual(got[0], ("~/Workspace/newrepo", core.LISTED))
+        self.assertNotIn(("~/other/newthing", core.SESSIONS), got)
+
+    def test_known_folders_outside_the_typed_parent_are_not_offered(self):
+        got = self.shown("~/Workspace/k", ["/h/me/kiwi", "/h/me/Workspace", "/h/me/Workspace/kiwi"], ["/h/me/Workspaces/k"])
+        self.assertEqual(got, [("~/Workspace/kiwi", core.SESSIONS)])
+
     def test_subfolders_of_the_typed_parent_match_the_last_segment(self):
-        listed = ("/h/me/Workspace", ["Alpha-Site", "beta", "alps"])
+        listed = {"/h/me/Workspace": ["Alpha-Site", "beta", "alps"]}
         got = self.shown("~/Workspace/AL", listed=listed)
         self.assertEqual(got, [("~/Workspace/alps", core.LISTED), ("~/Workspace/Alpha-Site", core.LISTED)])
-        self.assertEqual(self.shown("~/Workspace/al", listed=("/h/me/Other", ["alps"])), [])
+        self.assertEqual(self.shown("~/Workspace/al", listed={"/h/me/Other": ["alps"]}), [])
 
     def test_hidden_folders_only_for_a_dot(self):
-        listed = ("/h/me/w", [".cache", "code"])
+        listed = {"/h/me/w": [".cache", "code"]}
         self.assertEqual(self.shown("~/w/", listed=listed), [("~/w/code", core.LISTED)])
         self.assertEqual(self.shown("~/w/.", listed=listed), [("~/w/.cache", core.LISTED)])
 
     def test_absolute_typing_matches_absolute_paths(self):
-        got = self.shown("/opt/pro", ["/opt/projects/x", "/h/me/proj"], listed=("/opt", ["projects"]))
-        self.assertEqual(got, [("/opt/projects/x", core.SESSIONS), ("/opt/projects", core.LISTED)])
+        got = self.shown("/opt/pro", ["/opt/projects/x", "/h/me/proj"], listed={"/opt": ["projects"]})
+        self.assertEqual(got, [("/opt/projects", core.LISTED), ("/opt/projects/x", core.SESSIONS)])
 
     def test_capped(self):
-        listed = (HOME, [f"d{i}" for i in range(20)])
+        listed = {HOME: [f"d{i}" for i in range(20)]}
         self.assertEqual(len(self.shown("", [f"/s/{i}" for i in range(5)], listed=listed)), core.PICKER_ROWS)
         self.assertEqual(len(self.shown("", [f"/s/{i}" for i in range(5)], listed=listed, limit=3)), 3)
 
@@ -954,6 +1012,26 @@ class FolderSuggestions(unittest.TestCase):
         self.assertIsNone(core.folder_exists("/r/new", [], ("/q", ["new"])))
         self.assertTrue(core.folder_exists("/r/new", [], ("/r", ["new"])))
         self.assertFalse(core.folder_exists("/r/New", [], ("/r", ["new"])))
+        self.assertTrue(core.folder_exists("/r/new", [], None, readable=True))
+        self.assertFalse(core.folder_exists("/r/new", [], None, readable=False))
+
+    def test_a_listing_cut_short_leaves_the_answer_to_a_read_of_the_folder_itself(self):
+        full = ("/r", [f"d{i}" for i in range(core.MAX_LISTED_NAMES)])
+        self.assertIsNone(core.folder_exists("/r/big", [], full))
+        self.assertTrue(core.folder_exists("/r/big", [], full, readable=True))
+        self.assertFalse(core.folder_exists("/r/big", [], full, readable=False))
+
+    def test_enter_takes_the_highlight_then_a_confirmed_typed_folder_then_the_top_suggestion(self):
+        rows = [core.Suggestion("/r/top", "/r/top", core.LISTED)]
+        self.assertEqual(core.picker_enter("/r/hi", "/r/typed", True, rows), ("/r/hi", None))
+        self.assertEqual(core.picker_enter(None, "/r/typed", True, rows), ("/r/typed", None))
+        self.assertEqual(core.picker_enter(None, "/r/typed", False, rows), ("/r/top", None))
+        folder, hint = core.picker_enter(None, "/r/typed", None, rows)
+        self.assertIsNone(folder)
+        self.assertIn("Still reading", hint)
+        folder, hint = core.picker_enter(None, "/r/typed", False, [])
+        self.assertIsNone(folder)
+        self.assertIn("Not a folder", hint)
 
     def test_the_panels_folders_are_its_groups_then_other_session_folders(self):
         sessions = [bg("a", "/r/app/sub"), bg("b", "/r/app"), bg("c", "")]
@@ -961,6 +1039,12 @@ class FolderSuggestions(unittest.TestCase):
         self.assertEqual(core.session_folders(sessions, groups, core.PROJECT), ["/r/app", "/r/app/sub"])
         state_groups = core.group_sessions(sessions, {}, core.BY_STATE)
         self.assertEqual(core.session_folders(sessions, state_groups, core.BY_STATE), ["/r/app/sub", "/r/app"])
+
+
+class OpenWhileStarting(unittest.TestCase):
+    def test_enter_and_right_open_nothing_while_a_session_starts(self):
+        self.assertIsNone(core.open_blocked(False))
+        self.assertEqual(core.open_blocked(True), "Still starting the last session…")
 
 
 class ClaudeCommands(unittest.TestCase):
