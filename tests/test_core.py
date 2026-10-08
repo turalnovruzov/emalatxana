@@ -1784,6 +1784,153 @@ class CloseConfirm(unittest.TestCase):
         self.assertEqual(core.one_line(""), "")
 
 
+def named(sid, name, cwd="/r/app", state="blocked", running=True, started=None):
+    return core.Session(sid, name, cwd, state, "", "", started, running)
+
+
+class Find(unittest.TestCase):
+    def setUp(self):
+        self.sessions = [
+            named("a", "Fix Login", "/h/me/work/shop"),
+            named("b", "docs pass", "/h/me/work/Blog"),
+            named("c", "c", "/srv/tools"),
+        ]
+
+    def ids(self, query):
+        return [s.id for s in core.find_matches(self.sessions, query, "/h/me")]
+
+    def test_a_substring_of_the_name_any_case(self):
+        self.assertEqual(self.ids("LOGIN"), ["a"])
+        self.assertEqual(self.ids("ss"), ["b"])
+
+    def test_a_substring_of_the_folder_as_shown(self):
+        self.assertEqual(self.ids("blog"), ["b"])
+        self.assertEqual(self.ids("work/"), ["a", "b"])
+        self.assertEqual(self.ids("srv"), ["c"])
+
+    def test_the_home_path_itself_never_matches_every_session(self):
+        self.assertEqual(self.ids("/h/me"), [])
+
+    def test_letters_apart_do_not_match(self):
+        self.assertEqual(self.ids("flg"), [])
+
+    def test_nothing_typed_shows_every_session(self):
+        self.assertEqual(self.ids(""), ["a", "b", "c"])
+        self.assertEqual(self.ids("  "), ["a", "b", "c"])
+
+    def test_the_top_match_is_the_first_session_row(self):
+        groups = core.group_sessions(self.sessions, {}, core.PROJECT)
+        items = [line for line in core.panel_lines(groups, frozenset()) if line]
+        self.assertEqual(core.top_match(items), items[1])
+        self.assertIsNone(core.top_match([("group", "/x")]))
+        self.assertIsNone(core.top_match([]))
+
+    def test_arrows_while_finding_skip_headers(self):
+        items = [("group", "/x"), ("session", "a"), ("group", "/y"), ("session", "b")]
+        self.assertEqual(core.find_move(items, ("session", "a"), 1), ("session", "b"))
+        self.assertEqual(core.find_move(items, ("session", "b"), -1), ("session", "a"))
+        self.assertEqual(core.find_move(items, ("group", "/y"), 1), ("session", "a"))
+        self.assertIsNone(core.find_move([("group", "/x")], None, 1))
+
+    def test_enter_opens_the_session_under_the_cursor_else_the_top_match(self):
+        items = [("group", "/x"), ("session", "a"), ("session", "b")]
+        self.assertEqual(core.find_target(items, ("session", "b")), ("session", "b"))
+        self.assertEqual(core.find_target(items, ("group", "/x")), ("session", "a"))
+        self.assertEqual(core.find_target(items, None), ("session", "a"))
+        self.assertIsNone(core.find_target([("group", "/x")], ("group", "/x")))
+
+    def test_nothing_is_folded_while_finding(self):
+        prefs = core.toggle_collapsed(dict(core.DEFAULT_PREFS), core.PROJECT, "/r/app")
+        self.assertEqual(core.finding_collapsed(prefs, core.PROJECT, False), {"/r/app"})
+        self.assertEqual(core.finding_collapsed(prefs, core.PROJECT, True), frozenset())
+
+
+class Pins(unittest.TestCase):
+    def setUp(self):
+        self.sessions = [
+            named("a", "alpha", "/r/app", "working", started=1.0),
+            named("b", "beta", "/r/app", "done", started=2.0),
+            named("c", "gamma", "/r/zed", "blocked", started=3.0),
+        ]
+
+    def test_pinned_sessions_leave_their_group_for_a_pinned_group_at_the_top_in_both_views(self):
+        for view in core.VIEWS:
+            with self.subTest(view=view):
+                groups = core.group_sessions(self.sessions, {}, view, frozenset({"c", "b"}))
+                self.assertEqual(groups[0], core.Group(core.PINNED, (self.sessions[1], self.sessions[2])))
+                self.assertEqual([s.id for g in groups[1:] for s in g.sessions], ["a"])
+
+    def test_no_pins_no_pinned_group(self):
+        groups = core.group_sessions(self.sessions, {}, core.PROJECT, frozenset({"gone"}))
+        self.assertNotIn(core.PINNED, [g.key for g in groups])
+
+    def test_the_pinned_key_is_no_folder_and_no_state(self):
+        self.assertFalse(core.PINNED.startswith("/"))
+        self.assertNotIn(core.PINNED, core.CATEGORIES)
+
+    def test_the_pinned_header_says_pinned_in_both_views(self):
+        for view in core.VIEWS:
+            with self.subTest(view=view):
+                parts = core.header_layout(view, core.PINNED, 2, True, 40)
+                self.assertEqual([(t, p) for _, t, p in parts], [("▸", "arrow"), ("Pinned", "name"), ("2", "count")])
+
+    def test_toggle_pins_then_unpins(self):
+        prefs = core.toggle_pin(dict(core.DEFAULT_PREFS), "a")
+        prefs = core.toggle_pin(prefs, "b")
+        self.assertEqual(core.pinned_ids(prefs), {"a", "b"})
+        prefs = core.toggle_pin(prefs, "a")
+        self.assertEqual(prefs["pinned"], ["b"])
+
+    def test_pins_survive_saving_and_loading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "emx" / "prefs.json"
+            core.save_prefs(path, core.toggle_pin(dict(core.DEFAULT_PREFS), "a"))
+            self.assertEqual(core.pinned_ids(core.load_prefs(path)), {"a"})
+
+    def test_bad_pins_in_the_file_are_dropped(self):
+        prefs = core.normalize_prefs({"pinned": ["a", "", 3, None, "a", "b"]})
+        self.assertEqual(prefs["pinned"], ["a", "b"])
+        self.assertNotIn("pinned", core.normalize_prefs({"pinned": "a"}))
+        self.assertNotIn("pinned", core.normalize_prefs({"pinned": []}))
+
+    def test_a_pin_is_pruned_once_its_session_misses_two_listings_in_a_row(self):
+        prefs = {**core.DEFAULT_PREFS, "pinned": ["a", "b"]}
+        prefs, misses, changed = core.prune_pins(prefs, ["a"], {})
+        self.assertEqual((prefs["pinned"], changed), (["a", "b"], False))
+        prefs, misses, changed = core.prune_pins(prefs, ["a"], misses)
+        self.assertEqual((prefs["pinned"], changed), (["a"], True))
+
+    def test_a_session_back_in_the_listing_resets_its_misses(self):
+        prefs = {**core.DEFAULT_PREFS, "pinned": ["b"]}
+        prefs, misses, _ = core.prune_pins(prefs, ["x"], {})
+        prefs, misses, _ = core.prune_pins(prefs, ["b"], misses)
+        prefs, misses, changed = core.prune_pins(prefs, ["x"], misses)
+        self.assertEqual((prefs["pinned"], changed), (["b"], False))
+
+    def test_a_listing_with_no_sessions_prunes_nothing(self):
+        prefs = {**core.DEFAULT_PREFS, "pinned": ["a", "b"]}
+        misses = {}
+        for _ in range(core.STALE_AFTER_MISSES + 1):
+            prefs, misses, changed = core.prune_pins(prefs, [], misses)
+            self.assertEqual((prefs["pinned"], misses, changed), (["a", "b"], {}, False))
+
+    def test_n_on_the_pinned_header_never_takes_its_key_for_a_folder(self):
+        groups = core.group_sessions(self.sessions, {}, core.PROJECT, frozenset({"a"}))
+        self.assertEqual(core.default_folder(("group", core.PINNED), groups, self.sessions, core.PROJECT, "/r/last"), "/r/last")
+        self.assertNotIn(core.PINNED, core.session_folders(self.sessions, groups, core.PROJECT))
+
+    def test_only_by_state_headers_other_than_pinned_name_a_state(self):
+        self.assertTrue(core.state_group(core.BY_STATE, core.WORKING))
+        self.assertFalse(core.state_group(core.BY_STATE, core.PINNED))
+        self.assertFalse(core.state_group(core.PROJECT, "/r/app"))
+        self.assertFalse(core.state_group(core.PROJECT, core.PINNED))
+
+    def test_the_notice_says_whether_the_session_is_now_pinned(self):
+        prefs = core.toggle_pin(dict(core.DEFAULT_PREFS), "a")
+        self.assertEqual(core.pin_notice(prefs, self.sessions[0]), "Pinned alpha.")
+        self.assertEqual(core.pin_notice(core.toggle_pin(prefs, "a"), self.sessions[0]), "Unpinned alpha.")
+
+
 class ErrorLine(unittest.TestCase):
     def test_first_line_of_message(self):
         self.assertEqual(core.error_line(RuntimeError("first\nsecond")), "first")

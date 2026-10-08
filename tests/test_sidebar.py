@@ -1328,6 +1328,179 @@ class NewSession(AppCase):
         self.assertIn("Tab", dict(sidebar.HELP)["n"])
 
 
+class FindSessions(AppCase):
+    """Ctrl+F or / filters the panel to sessions whose name or folder contains the text; Esc clears it, Enter opens the top match."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.home = "/h/me"
+        self.poll(session("a", "/p/alpha"), session("b", "/p/beta"), session("c", "/p/alpha/docs", started=1.0))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+
+    def keys(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def shown(self):
+        return [item[1] for item in self.app.items() if item[0] == "session"]
+
+    def test_typing_filters_by_name_or_folder_and_puts_the_cursor_on_the_top_match(self):
+        self.keys(sidebar.CTRL_F, *"BETA")
+        self.assertEqual(self.shown(), ["b"])
+        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.keys(*["\x7f"] * 4, *"docs")
+        self.assertEqual(self.shown(), ["c"])
+
+    def test_slash_opens_find_too_and_its_line_replaces_the_footer(self):
+        self.keys("/", *"alp")
+        texts = [t for t, _ in self.app.bottom_lines(39)]
+        self.assertIn("> alp▏", texts)
+        self.assertIn(sidebar.FIND_HINT, texts)
+        self.assertFalse(any(f in texts for f in sidebar.FOOTERS))
+
+    def test_esc_clears_the_filter(self):
+        self.keys(sidebar.CTRL_F, *"beta", "\x1b")
+        self.assertIsNone(self.app.find)
+        self.assertEqual(sorted(self.shown()), ["a", "b", "c"])
+        self.assertEqual(self.app.cursor, ("session", "b"))
+
+    def test_enter_opens_the_top_match_and_ends_the_find(self):
+        self.keys(sidebar.CTRL_F, *"alpha", "\r")
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+        self.assertIsNone(self.app.find)
+
+    def test_arrows_move_among_the_matches_and_enter_opens_the_one_chosen(self):
+        self.keys(sidebar.CTRL_F, *"alpha", curses.KEY_DOWN, "\r")
+        self.assertEqual(self.opened, [("c", core.OPEN)])
+
+    def test_no_match_opens_nothing(self):
+        self.keys(sidebar.CTRL_F, *"zzz", "\r")
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.groups, [])
+        self.assertEqual(self.app.notice, "No session matches.")
+
+    def test_keys_typed_into_find_are_text_not_commands(self):
+        self.keys(sidebar.CTRL_F, *"nq<")
+        self.assertEqual(self.app.find, "nq<")
+        self.assertIsNone(self.app.prompt)
+        self.assertEqual(self.app.prefs["panel_width"], core.DEFAULT_PREFS["panel_width"])
+
+    def test_a_folded_group_shows_its_matches_while_finding(self):
+        self.app.toggle_group("/p/alpha")
+        self.assertNotIn("a", self.shown())
+        self.keys(sidebar.CTRL_F, *"alpha")
+        self.assertEqual(self.shown(), ["a", "c"])
+        self.keys("\x1b")
+        self.assertNotIn("a", self.shown())
+
+    def test_enter_waits_while_a_session_starts(self):
+        self.app.starter = mock.Mock()
+        self.app.starter.is_alive.return_value = True
+        self.keys(sidebar.CTRL_F, *"alpha", "\r")
+        self.assertEqual(self.opened, [])
+        self.assertIn("Still starting", self.app.notice)
+
+    def click(self, item):
+        self.app.draw()
+        y = next(y for y, at in self.app.row_map.items() if at == item)
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+
+    def test_a_click_on_a_header_while_finding_does_nothing(self):
+        self.keys(sidebar.CTRL_F, *"alpha")
+        saved = core.load_prefs(self.app.prefs_file)
+        self.click(("group", "/p/alpha"))
+        self.assertEqual(self.app.find, "alpha")
+        self.assertNotIn("/p/alpha", core.collapsed_keys(self.app.prefs, self.app.view()))
+        self.assertEqual(core.load_prefs(self.app.prefs_file), saved)
+        self.assertEqual(self.opened, [])
+
+    def test_a_click_on_a_session_while_finding_ends_the_find_and_opens_it(self):
+        self.keys(sidebar.CTRL_F, *"alpha")
+        self.click(("session", "c"))
+        self.assertEqual(self.opened, [("c", core.OPEN)])
+        self.assertIsNone(self.app.find)
+        self.assertEqual(self.app.cursor, ("session", "c"))
+
+    def test_a_poll_while_finding_keeps_the_filter(self):
+        self.keys(sidebar.CTRL_F, *"beta")
+        self.poll(session("a", "/p/alpha"), session("b", "/p/beta"), session("d", "/p/beta-two"))
+        self.app.refresh()
+        self.assertEqual(self.shown(), ["b", "d"])
+
+
+class PinSessions(AppCase):
+    """Ctrl+T pins a session into a Pinned group at the top, kept in emx's prefs and dropped once the session is gone."""
+
+    def setUp(self):
+        super().setUp()
+        self.poll(session("a", "/p/alpha"), session("b", "/p/beta"))
+        self.app.refresh()
+
+    def test_ctrl_t_pins_and_unpins_the_session_under_the_cursor(self):
+        self.app.cursor = ("session", "b")
+        self.app.handle_key(sidebar.CTRL_T)
+        self.assertEqual(self.app.groups[0], core.Group(core.PINNED, (session("b", "/p/beta"),)))
+        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.app.handle_key(sidebar.CTRL_T)
+        self.assertNotIn(core.PINNED, [g.key for g in self.app.groups])
+
+    def test_ctrl_t_on_a_header_does_nothing(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.app.handle_key(sidebar.CTRL_T)
+        self.assertNotIn("pinned", self.app.prefs)
+
+    def test_a_pin_survives_a_restart_of_the_panel(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        again = sidebar.App(FakeScr(), tmux=None, claude="claude")
+        again.poller.result = ([session("a", "/p/alpha"), session("b", "/p/beta")], None)
+        again.housekeep = lambda fresh_list: None
+        again.refresh()
+        self.assertEqual(again.groups[0].key, core.PINNED)
+
+    def test_a_pin_is_dropped_after_two_listings_without_its_session(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        self.poll(session("b", "/p/beta"))
+        self.app.refresh()
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), {"a"})
+        self.poll(session("b", "/p/beta"))
+        self.app.refresh()
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), set())
+
+    def test_an_empty_listing_prunes_nothing(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        for _ in range(3):
+            self.poll()
+            self.app.refresh()
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), {"a"})
+
+    def test_a_failed_listing_prunes_nothing(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        for _ in range(3):
+            self.app.poller.result = (None, "listing broken")
+            self.app.refresh()
+        self.assertEqual(core.pinned_ids(self.app.prefs), {"a"})
+
+    def test_the_by_state_view_shows_a_pinned_rows_state(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(sidebar.CTRL_T)
+        self.app.toggle_view()
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+        self.app.draw()
+        self.assertIn("Pinned", drawn)
+        self.assertIn("Working", drawn)
+        self.assertEqual(drawn.count("Working"), 2)
+
+    def test_the_help_says_the_pin_is_emxs_own(self):
+        self.assertIn("in emx", dict(sidebar.HELP)["^t"])
+
+
 class FolderListingsOffThread(unittest.TestCase):
     def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
         release = threading.Event()

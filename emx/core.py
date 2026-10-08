@@ -395,6 +395,9 @@ def retry_after(failures: int) -> float:
 
 PROJECT, BY_STATE = "project", "state"
 VIEWS = (PROJECT, BY_STATE)
+# Never a folder (those are absolute paths) or a state, so it can't collide with another group's key.
+PINNED = ":pinned"
+PINNED_LABEL = "Pinned"
 
 
 @dataclass(frozen=True)
@@ -407,21 +410,91 @@ def _oldest_first(session: Session) -> tuple:
     return (session.started_at is None, session.started_at or 0.0, session.id)
 
 
-def group_sessions(sessions, placements: Mapping, view: str) -> list:
+def group_sessions(sessions, placements: Mapping, view: str, pinned=frozenset()) -> list:
     """Groups for the panel, each with its sessions oldest first.
 
-    By project: one group per repository, alphabetical by folder name. By
-    state: Needs input, Working, Done, Stopped, leaving out empty ones.
+    Sessions whose id is in `pinned` leave their own group for a Pinned
+    group at the top, in either view. By project: one group per repository,
+    alphabetical by folder name. By state: Needs input, Working, Done,
+    Stopped, leaving out empty ones.
     """
-    buckets = {}
+    buckets, top = {}, []
     for s in sessions:
+        if s.id in pinned:
+            top.append(s)
+            continue
         key = category(s) if view == BY_STATE else placements.get(s.cwd, Placement(s.cwd)).repo
         buckets.setdefault(key, []).append(s)
     if view == BY_STATE:
         keys = [c for c in CATEGORIES if c in buckets]
     else:
         keys = sorted(buckets, key=lambda k: (os.path.basename(k.rstrip("/")).lower(), k))
-    return [Group(k, tuple(sorted(buckets[k], key=_oldest_first))) for k in keys]
+    groups = [Group(PINNED, tuple(sorted(top, key=_oldest_first)))] if top else []
+    return groups + [Group(k, tuple(sorted(buckets[k], key=_oldest_first))) for k in keys]
+
+
+def find_matches(sessions, query: str, home: str = "") -> list:
+    """The sessions whose name or folder contains `query`, ignoring case, as `claude agents`' find does. The folder is matched as shown, with `~` for home, so a query never matches every session's home path."""
+    q = query.strip().casefold()
+    if not q:
+        return list(sessions)
+    return [s for s in sessions if q in s.name.casefold() or q in tilde_path(s.cwd, home).casefold()]
+
+
+def top_match(items: list):
+    """Where the cursor goes when the find text changes: the first session listed."""
+    return next((item for item in items if item[0] == "session"), None)
+
+
+def find_move(items: list, cursor, delta: int):
+    """↑↓ while finding move among the matching sessions only, skipping headers."""
+    return move_cursor([item for item in items if item[0] == "session"], cursor, delta)
+
+
+def find_target(items: list, cursor):
+    """What Enter opens while finding: the session under the cursor, else the top match, else None."""
+    if cursor and cursor[0] == "session":
+        return cursor
+    return top_match(items)
+
+
+def finding_collapsed(prefs: dict, view: str, finding: bool) -> frozenset:
+    """The folded groups; none while a find filters the panel, so every group shows its matches, as in `claude agents`."""
+    return frozenset() if finding else collapsed_keys(prefs, view)
+
+
+def state_group(view: str, key: str) -> bool:
+    """Whether the group's header names a state, so its rows leave the state word out: every by-state group but Pinned."""
+    return view == BY_STATE and key != PINNED
+
+
+def pinned_ids(prefs: dict) -> frozenset:
+    return frozenset(prefs.get("pinned", ()))
+
+
+def toggle_pin(prefs: dict, sid: str) -> dict:
+    pinned = [p for p in prefs.get("pinned", ()) if p != sid]
+    if len(pinned) == len(prefs.get("pinned", ())):
+        pinned.append(sid)
+    return {**prefs, "pinned": pinned}
+
+
+def pin_notice(prefs: dict, session: Session) -> str:
+    return f"{'Pinned' if session.id in pinned_ids(prefs) else 'Unpinned'} {session.name}."
+
+
+def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
+    """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer.
+
+    A listing with no sessions at all counts as no listing, so a transient
+    empty result can never wipe every pin.
+    """
+    if not live_ids:
+        return prefs, misses, False
+    misses, gone = stale_viewers(pinned_ids(prefs), live_ids, misses)
+    if not gone:
+        return prefs, misses, False
+    return {**prefs, "pinned": [p for p in prefs.get("pinned", ()) if p not in gone]}, misses, True
 
 
 def panel_lines(groups, collapsed) -> list:
@@ -731,7 +804,9 @@ def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, 
     room = usable - 2 - (1 + len(count_text) if count_text else 0)
     if room <= 0:
         return [(0, fit(arrow, usable), "arrow")]
-    if view == BY_STATE:
+    if key == PINNED:
+        dir_part, name = "", fit(PINNED_LABEL, room)
+    elif view == BY_STATE:
         dir_part, name = "", fit(CATEGORY_LABELS.get(key, key), room)
     else:
         name = os.path.basename(key.rstrip("/")) or key or "?"
@@ -890,6 +965,11 @@ def normalize_prefs(raw) -> dict:
         recent = list(dict.fromkeys(f for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
         if recent:
             prefs["recent_folders"] = recent
+    pinned = raw.get("pinned")
+    if isinstance(pinned, list):
+        pinned = list(dict.fromkeys(p for p in pinned if isinstance(p, str) and p))
+        if pinned:
+            prefs["pinned"] = pinned
     if raw.get("view") in VIEWS:
         prefs["view"] = raw["view"]
     collapsed = raw.get("collapsed")
@@ -971,8 +1051,8 @@ def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -
     """Where `n` starts a session without asking, as `claude agents` does, or None to open the folder picker.
 
     A session row means that session's own folder, and a header in the
-    project view its group's folder. A by-state header has no folder, so the
-    last folder used stands in. With no sessions at all there is nothing to
+    project view its group's folder. A by-state header, or the Pinned one,
+    has no folder, so the last folder used stands in. With no sessions at all there is nothing to
     go on, so he picks.
     """
     if not sessions:
@@ -981,7 +1061,7 @@ def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -
         session = next((s for s in sessions if s.id == cursor[1]), None)
         if session is not None and session.cwd:
             return session.cwd
-    if cursor and cursor[0] == "group" and view == PROJECT and cursor[1]:
+    if cursor and cursor[0] == "group" and view == PROJECT and cursor[1] and cursor[1] != PINNED:
         return cursor[1]
     return last_folder or None
 
@@ -1205,7 +1285,7 @@ def repo_roots(folders, placements: Mapping) -> list:
 
 def session_folders(sessions, groups, view: str) -> list:
     """The folders the panel already shows, for the picker: each project group's folder in panel order, then any session's own folder not among them."""
-    folders = [g.key for g in groups if g.key] if view == PROJECT else []
+    folders = [g.key for g in groups if g.key and g.key != PINNED] if view == PROJECT else []
     for s in sessions:
         if s.cwd and s.cwd not in folders:
             folders.append(s.cwd)
