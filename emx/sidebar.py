@@ -1026,7 +1026,8 @@ class App:
     def prompt_lines(self, width: int) -> list:
         p = self.prompt
         if p["stage"] == "message":
-            lines = [(t, curses.A_BOLD) for t in core.wrap_words("New session in " + core.short_path(p["folder"], width), width)[:2]]
+            title = "New session in "
+            lines = [(title + core.short_path(p["folder"], width - core.display_width(title), self.home), curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
             hint = "Enter start · Tab folder · Esc cancel"
         else:
@@ -1042,9 +1043,7 @@ class App:
                 lines.append((text, self.palette.attr("plain", bar) if bar else self.palette.attr("path")))
             if not rows:
                 lines.append(("no match", curses.A_DIM))
-            hint = "↑↓ pick · Tab complete · Enter use · Esc back" if p.get("back") else (
-                "↑↓ pick · Tab complete · Enter use · Esc cancel"
-            )
+            hint = "↑↓ pick · Tab fill · ↵ use · Esc " + ("back" if p.get("back") else "cancel")
         if p["hint"]:
             lines += [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]]
         lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]
