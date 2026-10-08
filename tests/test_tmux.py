@@ -106,7 +106,6 @@ class PrivateServer(unittest.TestCase):
             return b""
 
 
-
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class LeftBinding(PrivateServer):
     """The ← binding as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
@@ -164,7 +163,6 @@ class LeftBinding(PrivateServer):
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
         self.wait_for(lambda: self.typed("main"), "the key in main")
         self.assertEqual(self.typed("main"), LEFT)
-
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")

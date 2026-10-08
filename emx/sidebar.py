@@ -67,6 +67,7 @@ CTRL_X = "\x18"
 CTRL_F = "\x06"
 CTRL_T = "\x14"
 CTRL_R = "\x12"
+CTRL_U = "\x15"
 CONFIRM_FOOTER = "ctrl+x to confirm"
 RENAME_FOOTER = "enter to save · esc to cancel"
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
@@ -1068,7 +1069,7 @@ class App:
             return
         if key in BACKSPACE_KEYS:
             text = self.find[:-1]
-        elif key == "\x15":
+        elif key == CTRL_U:
             text = ""
         elif isinstance(key, str) and key.isprintable():
             text = self.find + key
@@ -1117,7 +1118,7 @@ class App:
             self.submit_rename()
         elif key in BACKSPACE_KEYS:
             edit.update(text=edit["text"][:-1], hint="")
-        elif key == "\x15":
+        elif key == CTRL_U:
             edit.update(text="", hint="")
         elif isinstance(key, str) and core.name_char_allowed(key):
             edit.update(text=edit["text"] + key, hint="")
@@ -1203,7 +1204,7 @@ class App:
         elif key in BACKSPACE_KEYS:
             p["text"] = p["text"][:-1]
             p.update(picked=None, hint="")
-        elif key == "\x15":
+        elif key == CTRL_U:
             p.update(text="", picked=None, hint="")
         elif key == "\t":
             if p["stage"] == "message":
@@ -1629,6 +1630,9 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        if self.rename_edit is not None and not any(s.id == self.rename_edit["id"] for s in sessions):
+            self.say(f"{self.rename_edit['old']} isn't listed any more, so emx dropped the rename.", error=True)
+            self.rename_edit = None
         self.loaded = True
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:

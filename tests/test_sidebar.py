@@ -1635,6 +1635,14 @@ class RenameSession(AppCase):
         self.keys("\x01", "\u2028")
         self.assertEqual(self.app.rename_edit["text"], family)
 
+    def test_an_edit_whose_session_drops_out_of_the_listing_is_dropped_with_a_reason(self):
+        self.keys(sidebar.CTRL_R, *"half")
+        self.poll(session("b", "/p/beta"), session("c", "/p/gamma"))
+        self.app.refresh()
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(self.app.notice, "emx-test-named isn't listed any more, so emx dropped the rename.")
+        self.assertTrue(self.app.notice_error)
+
     def test_a_viewer_scrolled_back_is_never_typed_into(self):
         self.app.tmux.in_mode = True
         self.rename_to("fresh name")

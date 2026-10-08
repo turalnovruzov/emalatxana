@@ -346,7 +346,8 @@ def name_char_allowed(ch: str) -> bool:
 
     Control characters and line or paragraph separators would submit early
     or send a key. Format characters are allowed: the zero-width joiner
-    holds emoji such as 👨‍👩‍👧 together.
+    holds emoji such as a family emoji (👨 U+200D 👩 U+200D 👧)
+    together.
     """
     return len(ch) == 1 and unicodedata.category(ch) not in ("Cc", "Cs", "Zl", "Zp")
 
@@ -552,7 +553,8 @@ def renamed_to(rename: Rename, session: Session | None) -> str | None:
     """The name the listing shows after `/rename`, or None while it shows no rename.
 
     Claude Code may store a name other than the one typed (2.1.294 turned
-    the zero-width joiners in 👨‍👩‍👧 into spaces), so any new name counts,
+    the zero-width joiners in a family emoji
+    (👨 U+200D 👩 U+200D 👧) into spaces), so any new name counts,
     and is what emx reports.
     """
     if session is None or session.name in (rename.old, session.id):
