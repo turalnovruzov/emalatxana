@@ -5,6 +5,7 @@ from __future__ import annotations
 import curses
 import locale
 import os
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -517,6 +518,16 @@ def read_transcript(path: str, size: int) -> tuple:
     return found, True
 
 
+def summary_scratch() -> str:
+    """The empty private folder every summary call runs in, one per user so a panel killed mid-run leaves nothing new behind."""
+    path = os.path.join(tempfile.gettempdir(), f"emx-summary-{os.getuid()}")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise OSError(f"{path} is not a folder of yours")
+    return path
+
+
 def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
     """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises.
 
@@ -710,8 +721,8 @@ class Summaries(threading.Thread):
         _, sid, session, excerpt = min(due, key=lambda d: d[0])
         self.tried[sid] = now
         if self.scratch is None:
-            self.scratch = tempfile.TemporaryDirectory(prefix="emx-summary-")
-        call, error = summarise(self.claude, excerpt, self.scratch.name)
+            self.scratch = summary_scratch()
+        call, error = summarise(self.claude, excerpt, self.scratch)
         with self.lock:
             if call is None:
                 count = self.failures.get(sid, (0, None))[0]

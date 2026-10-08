@@ -190,6 +190,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: anything that reads `row_map` or `scroll`, or reserves list space (the peek box), must count screen rows the same way, from heights worked out in the same frame they are drawn: a row's height changes with the width, its group's name column and its summary.
 
+### Every `claude -p` call is built by a pure core function, isolated, budget-flagged, and run through a never-raising wrapper
+
+1. **Rule**: every `claude -p` call emx makes has its command built by a pure function in `core` (`core.summary_args`) with the full isolation flag set plus `--max-budget-usd`; its input goes on stdin, never argv; it runs in an empty private temp folder as its cwd, on a worker thread, through a wrapper that never raises.
+2. **Why**: without `--strict-mcp-config --setting-sources ""` one call cost $0.39; without `--no-session-persistence` each call writes a transcript under `~/.claude/projects`; input in argv can be read as a flag; a project folder as cwd loads its CLAUDE.md.
+3. **Minimal example**: `subprocess.run(core.summary_args(claude), input=excerpt, cwd=scratch, ...)` in `sidebar.summarise`.
+4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps and the instruction (ADR 0002).
+
 ### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it
 
 1. **Rule**: the version is held only in `emx/__init__.py` (`__version__`). `CHANGELOG.md` lists versions newest first as `## X.Y.Z — YYYY-MM-DD` headings, each followed by flat `- ` plain-language bullets, and the newest heading equals `__version__`.

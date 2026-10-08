@@ -2714,7 +2714,6 @@ class RowDetail(unittest.TestCase):
         self.assertEqual(core.row_detail(st("done"), core.parse_transcript(real_transcript("done"))), "Alpha done.")
         self.assertEqual(core.row_detail(st("done", "idle"), core.parse_transcript(real_transcript("done"))), "Alpha done.")
 
-
     def haiku(self, text, category, at=0.0):
         return core.Summary(text, category, "x", at)
 
@@ -2744,8 +2743,10 @@ class SummaryArgs(unittest.TestCase):
             self.assertIn(flag, args)
         self.assertNotIn("--bare", args)
         for flag, value in (("--model", "haiku"), ("--output-format", "json"), ("--tools", ""),
-                            ("--setting-sources", ""), ("--system-prompt", core.SUMMARY_INSTRUCTION)):
+                            ("--setting-sources", ""), ("--system-prompt", core.SUMMARY_INSTRUCTION),
+                            ("--effort", "low"), ("--max-budget-usd", "0.002")):
             self.assertEqual(args[args.index(flag) + 1], value, flag)
+        self.assertEqual(core.SUMMARY_MAX_BUDGET_USD, 0.002)
 
 
 class SummaryExcerpt(unittest.TestCase):
@@ -2802,6 +2803,11 @@ class SummaryOutput(unittest.TestCase):
             call, err = core.parse_summary_output(bad, 1)
             self.assertIsNone(call, bad)
             self.assertIsInstance(err, str, bad)
+
+    def test_a_budget_stopped_call_is_an_error_with_the_clis_own_reason(self):
+        stopped = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": 0.0001639,
+                              "errors": ["Reached maximum budget ($0.00001)"]})
+        self.assertEqual(core.parse_summary_output(stopped, 1), (None, "Reached maximum budget ($0.00001)"))
 
     def test_cleaning_takes_the_first_line_without_controls_quotes_or_full_stop(self):
         self.assertEqual(core.clean_summary("\x1b[31m\"Fixing tests.\"\x07\nsecond"), "Fixing tests")

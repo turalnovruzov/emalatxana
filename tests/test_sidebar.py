@@ -2014,6 +2014,14 @@ GOOD_JSON = json.dumps({"result": "\"Fixing the tests.\"\nmore", "is_error": Fal
                         "modelUsage": {"claude-haiku-5-5": {}}})
 
 
+BUDGET_STOP_JSON = json.dumps({
+    "type": "result", "subtype": "error_max_budget_usd", "is_error": True, "num_turns": 1, "stop_reason": "end_turn",
+    "terminal_reason": "budget_exhausted", "total_cost_usd": 0.0001639, "duration_ms": 596,
+    "usage": {"input_tokens": 0, "output_tokens": 0}, "modelUsage": {"claude-haiku-5-5": {"costUSD": 0.0001639}},
+    "errors": ["Reached maximum budget ($0.00001)"],
+})
+
+
 def completed(returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess([], returncode, stdout, stderr)
 
@@ -2035,6 +2043,10 @@ class Summarise(unittest.TestCase):
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(3)):
             self.assertEqual(sidebar.summarise("claude", "x", "/tmp"), (None, "claude -p exited with 3"))
 
+    def test_a_call_stopped_by_the_budget_is_a_failure_with_its_own_message(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(1, BUDGET_STOP_JSON, "")):
+            self.assertEqual(sidebar.summarise("claude", "x", "/tmp"), (None, "Reached maximum budget ($0.00001)"))
+
     def test_the_excerpt_goes_on_stdin_and_the_call_runs_in_the_folder_given(self):
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, GOOD_JSON)) as run:
             call, error = sidebar.summarise("claude", "--help me", "/tmp/scratch")
@@ -2045,6 +2057,23 @@ class Summarise(unittest.TestCase):
         self.assertEqual(run.call_args.args[0], core.summary_args("claude"))
         self.assertNotIn("--help me", run.call_args.args[0])
         self.assertEqual((call.text, call.model), ("Fixing the tests", "claude-haiku-5-5"))
+
+
+class SummaryScratch(unittest.TestCase):
+    def test_it_is_one_private_empty_folder_reused_across_calls(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
+            first = sidebar.summary_scratch()
+            self.assertEqual(sidebar.summary_scratch(), first)
+            self.assertEqual(os.listdir(first), [])
+            self.assertEqual(os.stat(first).st_mode & 0o777, 0o700)
+            self.assertTrue(os.path.dirname(first) == tmp and "emx-summary-" in first)
+
+    def test_a_path_that_is_not_a_folder_of_ours_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
+            target = os.path.join(tmp, f"emx-summary-{os.getuid()}")
+            os.symlink(tmp, target)
+            with self.assertRaises(OSError):
+                sidebar.summary_scratch()
 
 
 class SummariesWorker(unittest.TestCase):
@@ -2065,7 +2094,9 @@ class SummariesWorker(unittest.TestCase):
         patch = mock.patch.object(sidebar, "summarise", fake)
         patch.start()
         self.addCleanup(patch.stop)
-        self.addCleanup(lambda: self.worker.scratch and self.worker.scratch.cleanup())
+        scratch = mock.patch.object(sidebar, "summary_scratch", return_value="/tmp/emx-test-scratch")
+        scratch.start()
+        self.addCleanup(scratch.stop)
 
     def test_an_unchanged_transcript_is_summarised_once(self):
         self.worker.step()
@@ -2092,6 +2123,19 @@ class SummariesWorker(unittest.TestCase):
         self.assertEqual(len(self.excerpts), 2)
         self.assertEqual(self.worker.found["a"].text, "Line 1")
         self.assertEqual(self.worker.take()["a"].text, "Line 1")
+
+    def test_a_budget_stopped_call_backs_off_and_is_not_asked_again_at_once(self):
+        def stopped(claude, excerpt, cwd):
+            self.excerpts.append(excerpt)
+            return sidebar.core.parse_summary_output(BUDGET_STOP_JSON, 10)
+
+        with mock.patch.object(sidebar, "summarise", stopped):
+            for _ in range(5):
+                self.worker.step()
+        self.assertEqual(len(self.excerpts), 1)
+        self.assertEqual(self.worker.failures["a"][0], 1)
+        self.assertIsNone(self.worker.take())
+        self.assertNotIn("a", self.worker.found)
 
     def test_a_dropped_session_is_gone_from_the_next_take(self):
         self.worker.step()

@@ -678,7 +678,7 @@ RETRY_MAX_SECONDS = 300
 
 
 def retry_after(failures: int) -> float:
-    """Seconds to wait before asking git about a folder again after `failures` failed tries in a row: doubling, capped."""
+    """Seconds to wait before asking again after `failures` failed tries in a row: doubling, capped. Used for git folders and for Haiku summaries."""
     return float(min(RETRY_MAX_SECONDS, RETRY_FIRST_SECONDS * 2 ** max(0, failures - 1)))
 
 
@@ -2426,6 +2426,9 @@ SUMMARY_INSTRUCTION = (
     "or what it did when it is done, or what it is asking when it is waiting, or that it is stopped. "
     "No quotes, no preamble, no markdown."
 )
+SUMMARY_EFFORT = "low"
+# The CLI checks it only after an answer has come back, so it stops a second turn but does not cap one call (ADR 0002).
+SUMMARY_MAX_BUDGET_USD = 0.002
 SUMMARY_EVERY_SECONDS = 20
 SUMMARY_CATEGORIES = CATEGORIES
 SUMMARY_MAX_CHARS = 120
@@ -2439,11 +2442,13 @@ def summary_args(claude: str) -> list:
     Every flag is load-bearing: without `--strict-mcp-config` and
     `--setting-sources ""` one call cost $0.39 in cache tokens, and without
     `--no-session-persistence` each call leaves a transcript behind.
+    `--max-budget-usd` is a backstop, not a cap on one call.
     """
     return [
         claude, "-p", "--model", SUMMARY_MODEL, "--output-format", "json", "--no-session-persistence",
         "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "",
-        "--system-prompt", SUMMARY_INSTRUCTION,
+        "--system-prompt", SUMMARY_INSTRUCTION, "--effort", SUMMARY_EFFORT,
+        "--max-budget-usd", str(SUMMARY_MAX_BUDGET_USD),
     ]
 
 
@@ -2521,7 +2526,12 @@ def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
         return None, "claude -p printed an unexpected answer"
     result = data.get("result")
     if data.get("is_error") or not isinstance(result, str) or not result.strip():
-        return None, first_message(result) if isinstance(result, str) and result.strip() else "claude -p gave no summary"
+        if isinstance(result, str) and result.strip():
+            return None, first_message(result)
+        errors = data.get("errors")
+        if isinstance(errors, list) and errors and isinstance(errors[0], str) and errors[0].strip():
+            return None, first_message(errors[0])
+        return None, "claude -p gave no summary"
     usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     models = data.get("modelUsage")
     model = next(iter(models), "") if isinstance(models, dict) and models else ""
