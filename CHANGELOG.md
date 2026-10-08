@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.1.0 — 2026-10-08
+
+- Ctrl+X on a working session interrupts it, as Esc does in Claude Code: it stays in the panel and its row reads Idle. If it isn't open in emx, emx opens it out of sight to do this.
+- Ctrl+X twice closes a session: a running one is stopped, then removed. The row itself reads closing… until it is gone.
+- When a row goes, the cursor moves to the line below it, or above it when it was the last, instead of jumping to the top.
+- Ctrl+X twice on a project's header closes every session in it. The first press unfolds a folded group and says how many it will close.
+
 ## 1.0.0 — 2026-10-08
 
 - emx opens one workspace: the Claude Code session you are reading, with a panel of every background session beside it, and reattaches if it is already running.
