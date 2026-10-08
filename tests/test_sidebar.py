@@ -2221,6 +2221,123 @@ class TranscriptReader(unittest.TestCase):
         self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1)})
         self.assertEqual(set(poller.summaries.wanted), {"s1"})
 
+    def test_path_is_the_file_read_for_a_listed_session(self):
+        self.write("-tmp-a", U1, transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", U1)])
+        self.reader.read_all()
+        self.assertEqual(self.reader.path("s1"), self.reader.stamps["s1"][0])
+        self.assertTrue(self.reader.path("s1").endswith(f"{U1}.jsonl"))
+        self.assertIsNone(self.reader.path("unknown"))
+
+
+def requests_file(folder, *requests, name="s.jsonl"):
+    path = Path(folder, name)
+    lines = []
+    for text in requests:
+        lines.append(transcript_line("user", text))
+        lines.append(transcript_line("assistant", [{"type": "text", "text": f"Reply to {text}."}]))
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return str(path)
+
+
+class ReadRequests(unittest.TestCase):
+    def test_reads_read_only_and_never_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = requests_file(d, "write a poem", "now a csv parser")
+            before = os.stat(path)
+            with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
+                found = sidebar.read_requests(path)
+            self.assertEqual(found, (["write a poem", "now a csv parser"], None, True))
+            self.assertEqual([c.args[1] for c in opened.call_args_list], ["rb"])
+            self.assertEqual(os.stat(path).st_mtime_ns, before.st_mtime_ns)
+
+    def test_a_big_file_keeps_first_and_latest_and_marks_the_gap(self):
+        padding = json.dumps({"type": "attachment", "x": "p" * 100})
+        lines = [transcript_line("user", "early 1"), transcript_line("user", "early 2")]
+        lines += [padding] * 30
+        lines += [transcript_line("user", f"middle {i}") for i in range(3)]
+        lines += [padding] * 30
+        lines += [transcript_line("user", "late 1"), transcript_line("user", "late 2")]
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(core, "NAME_READ_MAX_BYTES", 4096):
+            path = Path(d, "big.jsonl")
+            path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+            self.assertGreater(os.stat(path).st_size, 4096)
+            requests, gap_at, ok = sidebar.read_requests(str(path))
+        self.assertTrue(ok)
+        self.assertEqual(requests, ["early 1", "early 2", "late 1", "late 2"])
+        self.assertEqual(gap_at, 2)
+
+    def test_missing_file_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(sidebar.read_requests(os.path.join(d, "missing.jsonl")), (None, None, False))
+
+
+NAME_JSON = json.dumps({"result": "tea poem and csv parser", "is_error": False, "duration_ms": 700,
+                        "total_cost_usd": 0.001, "usage": {"input_tokens": 50, "output_tokens": 8},
+                        "modelUsage": {"claude-haiku-5-5": {}}})
+
+
+class SuggestName(unittest.TestCase):
+    def test_every_failure_is_a_line_never_a_raise(self):
+        for exc in (FileNotFoundError(), subprocess.TimeoutExpired("claude", 30), OSError("boom")):
+            with self.subTest(exc=exc), mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                call, error = sidebar.suggest_name("claude", "x", "/tmp")
+                self.assertIsNone(call)
+                self.assertIsInstance(error, str)
+        for done, want in ((completed(1, json.dumps({"is_error": True, "result": "Not logged in"})), "Not logged in"),
+                           (completed(2, "", "\n  bad flag\n"), "bad flag"),
+                           (completed(3), "claude -p exited with 3"),
+                           (completed(1, BUDGET_STOP_JSON), "Reached maximum budget ($0.00001)")):
+            with self.subTest(want=want), mock.patch.object(sidebar.subprocess, "run", return_value=done):
+                self.assertEqual(sidebar.suggest_name("claude", "x", "/tmp"), (None, want))
+
+    def test_the_excerpt_goes_on_stdin_and_the_call_runs_in_the_folder_given(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            call, error = sidebar.suggest_name("claude", "--help me", "/tmp/scratch")
+        self.assertIsNone(error)
+        self.assertEqual(run.call_args.kwargs["input"], "--help me")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/scratch")
+        self.assertEqual(run.call_args.args[0], core.name_args("claude"))
+        self.assertNotIn("--help me", run.call_args.args[0])
+        self.assertEqual(call.text, "tea poem and csv parser")
+
+
+class NamerWorker(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        scratch = mock.patch.object(sidebar, "summary_scratch", return_value=self.dir)
+        scratch.start()
+        self.addCleanup(scratch.stop)
+
+    def run_namer(self, path, offered=()):
+        namer = sidebar.Namer("claude", path, "a", "emx-test-a", False, offered)
+        namer.start()
+        namer.join(5)
+        return namer.result
+
+    def test_no_transcript_or_no_requests_asks_nothing(self):
+        Path(self.dir, "replies.jsonl").write_text(transcript_line("assistant", [{"type": "text", "text": "Hi."}]) + "\n")
+        with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("called claude")) as run:
+            self.assertEqual(self.run_namer(None), (None, sidebar.NAME_NO_TRANSCRIPT, None))
+            self.assertEqual(self.run_namer(os.path.join(self.dir, "replies.jsonl")), (None, sidebar.NAME_NO_REQUESTS, None))
+        run.assert_not_called()
+
+    def test_a_name_already_offered_did_not_fit(self):
+        path = requests_file(self.dir, "write a poem")
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)):
+            name, error, call = self.run_namer(path, offered=("tea poem and csv parser",))
+        self.assertEqual((name, error), (None, sidebar.NAME_UNFIT))
+        self.assertEqual(call.model, "claude-haiku-5-5")
+
+    def test_a_good_answer_is_the_name(self):
+        path = requests_file(self.dir, "write a poem")
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            name, error, _ = self.run_namer(path)
+        self.assertEqual((name, error), ("tea poem and csv parser", None))
+        self.assertIn("write a poem", run.call_args.kwargs["input"])
+
 
 GOOD_JSON = json.dumps({"result": "\"Fixing the tests.\"\nmore", "is_error": False, "duration_ms": 600,
                         "total_cost_usd": 0.0001, "usage": {"input_tokens": 2, "output_tokens": 9},

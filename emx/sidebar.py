@@ -738,19 +738,25 @@ def summary_scratch() -> str:
 
 
 def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
-    """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises.
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises."""
+    return _run_haiku(core.summary_args(claude), excerpt, cwd)
 
-    The excerpt goes on stdin so text starting with `-` can't be read as a
-    flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded.
-    """
+
+def suggest_name(claude: str, excerpt: str, cwd: str) -> tuple:
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku suggest a session name from `excerpt`, or (None, one-line error). Never raises."""
+    return _run_haiku(core.name_args(claude), excerpt, cwd)
+
+
+def _run_haiku(args: list, text: str, cwd: str) -> tuple:
+    """The text goes on stdin so text starting with `-` can't be read as a flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded."""
     started = time.monotonic()
     try:
         done = subprocess.run(
-            core.summary_args(claude), input=excerpt, cwd=cwd, capture_output=True, encoding="utf-8",
+            args, input=text, cwd=cwd, capture_output=True, encoding="utf-8",
             errors="replace", timeout=SUMMARY_TIMEOUT,
         )
     except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
+        return None, f"can't find the claude command ({args[0]})"
     except subprocess.TimeoutExpired:
         return None, "claude -p timed out"
     except (OSError, ValueError) as exc:
@@ -762,6 +768,70 @@ def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
             return None, error
         return None, core.first_message(done.stderr) or f"claude -p exited with {done.returncode}"
     return core.parse_summary_output(done.stdout, wall_ms)
+
+
+def read_requests(path: str) -> tuple:
+    """(his requests in the transcript at `path`, oldest first; the index of the first one read after an unread middle, or None; whether the read succeeded). Never raises, and never writes.
+
+    A file over `core.NAME_READ_MAX_BYTES` is read as its head and its tail,
+    so a single line longer than its window is lost.
+    """
+    requests, gap_at = [], None
+    try:
+        size = os.stat(path).st_size
+        with open(path, "rb") as f:
+            for start, length, drop_first, drop_last in core.name_read_ranges(size):
+                f.seek(start)
+                # Split on newlines only: Claude Code writes U+2028 unescaped, and `splitlines` would cut a line there.
+                lines = f.read(length).decode("utf-8", errors="replace").split("\n")
+                if drop_first:
+                    lines, gap_at = lines[1:], len(requests)
+                if drop_last:
+                    lines = lines[:-1]
+                requests += core.user_requests(lines)
+    except (OSError, ValueError):
+        return None, None, False
+    return requests, gap_at, True
+
+
+NAME_NO_TRANSCRIPT = "emx hasn't found this session's transcript yet."
+NAME_UNREADABLE = "emx couldn't read this session's transcript."
+NAME_NO_REQUESTS = "No requests of yours in this session yet."
+NAME_UNFIT = "Haiku's name didn't fit; Tab for another."
+
+
+class Namer(threading.Thread):
+    """Asks Haiku for a name, on Tab in the rename box, off the curses thread. It only reads: the name goes into the box, and only Enter renames.
+
+    `result` is (name or None, error line or None, the call or None).
+    """
+
+    def __init__(self, claude: str, path: str | None, sid: str, current: str, unnamed: bool, offered):
+        super().__init__(daemon=True)
+        self.claude, self.path, self.sid = claude, path, sid
+        self.current, self.unnamed, self.offered = current, unnamed, tuple(offered)
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.ask()
+        except Exception as exc:
+            self.result = (None, f"asking for a name failed: {core.error_line(exc)}", None)
+
+    def ask(self) -> tuple:
+        if self.path is None:
+            return None, NAME_NO_TRANSCRIPT, None
+        requests, gap_at, ok = read_requests(self.path)
+        if not ok:
+            return None, NAME_UNREADABLE, None
+        excerpt = core.name_excerpt(self.current, self.unnamed, requests, gap_at, self.offered)
+        if not excerpt:
+            return None, NAME_NO_REQUESTS, None
+        call, error = suggest_name(self.claude, excerpt, summary_scratch())
+        if error:
+            return None, error, None
+        name = core.clean_name(call.text, self.sid, self.current, self.offered)
+        return (name, None, call) if name else (None, NAME_UNFIT, call)
 
 
 class Transcripts(threading.Thread):
@@ -857,6 +927,12 @@ class Transcripts(threading.Thread):
                     self.misses.pop(uuid, None)
                     return path
         return None
+
+    def path(self, sid: str) -> str | None:
+        """The transcript file last read for a listed session, or None while none has been."""
+        with self.lock:
+            stamp = self.stamps.get(sid)
+        return stamp[0] if stamp else None
 
     def snapshot(self) -> dict:
         """A copy of what each session's transcript says now, leaving `take`'s changed flag alone."""
