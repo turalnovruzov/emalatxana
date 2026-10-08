@@ -20,6 +20,8 @@ We build `emx` on **tmux** (a private server, its own socket and config) for the
 
 *Amended 2026-10-08 (#4, Tural's word):* emx may stop a session (`claude stop`) or remove one that is no longer running (`claude rm`), but only on his confirmed double Ctrl+X on that session's row, matching `claude agents`. Only his explicit open reopens a stopped session. See `docs/conventions.md`.
 
+*Amended 2026-10-08 (#9):* to rename a session, emx types exactly `/rename <name>` and Enter into that session's open viewer. That is Claude Code's documented command; there is no CLI path. It does so only on his confirmed Ctrl+R edit, only when the session is running and not working, only when the viewer shows that session with an empty prompt, and it never touches a prompt holding his draft. This is the only input emx ever types into a session.
+
 ## Consequences
 
 - tmux becomes a runtime requirement. Nothing gets pip-installed, so the dependency check has no manifest to read.
