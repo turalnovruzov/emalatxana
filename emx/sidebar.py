@@ -974,9 +974,10 @@ class Poller(threading.Thread):
         sessions, error = fetch_sessions(self.claude)
         if error:
             return None, error
-        self.resolver.want(s.cwd for s in sessions)
-        self.transcripts.want(sessions)
-        self.summaries.want(sessions)
+        if sessions:
+            self.resolver.want(s.cwd for s in sessions)
+            self.transcripts.want(sessions)
+            self.summaries.want(sessions)
         return sessions, None
 
     def run(self) -> None:
@@ -1023,6 +1024,7 @@ class App:
         self.applied = None
         self.misses = {}
         self.fresh = {}
+        self.held_cursor = None
         self.bound = None
         self.prompt = None
         self.row_map = {}
@@ -1112,7 +1114,12 @@ class App:
     def regroup(self) -> None:
         before = self.items()
         self.groups = self.grouped()
-        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor, before)
+        held = self.held_cursor
+        self.held_cursor = core.hold_cursor(held, bool(self.sessions), self.cursor, before)
+        if held and self.sessions:
+            self.cursor = core.settle_cursor(self.items(), held[0], self.groups, self.wanted_cursor, held[1])
+        else:
+            self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor, before)
         if self.cursor == self.wanted_cursor:
             self.wanted_cursor = None
 
@@ -1260,7 +1267,8 @@ class App:
         live = {s.id for s in self.sessions}
         self.fresh = {sid: t for sid, t in self.fresh.items() if sid not in live and now - t < FRESH_GRACE_SECONDS}
         viewers = {p.session for p in panes if p.session and p.session not in self.fresh}
-        self.misses, close = core.stale_viewers(viewers, live, self.misses)
+        dead = {p.session for p in panes if p.session and p.dead}
+        self.misses, close = core.stale_viewers(viewers, live, self.misses, dead)
         self.close_viewers(panes, main, close)
 
     def close_viewers(self, panes: list, main: Pane | None, sids) -> None:
@@ -2138,7 +2146,8 @@ class App:
         if pruned:
             self.save_prefs()
         in_flight = self.renamer.rename.id if self.renamer else None
-        self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
+        if sessions:
+            self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
         self.regroup()
         return True
 

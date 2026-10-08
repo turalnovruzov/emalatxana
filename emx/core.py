@@ -934,11 +934,9 @@ def pin_notice(prefs: dict, session: Session) -> str:
 def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
     """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer.
 
-    A listing with no sessions at all counts as no listing, so a transient
-    empty result can never wipe every pin.
+    A listing with no sessions at all counts as no listing (see
+    `stale_viewers`), so a transient empty result can never wipe every pin.
     """
-    if not live_ids:
-        return prefs, misses, False
     misses, gone = stale_viewers(pinned_ids(prefs), live_ids, misses)
     if not gone:
         return prefs, misses, False
@@ -951,9 +949,6 @@ def edit_session_gone(session_id: str, live_ids, misses: dict) -> tuple:
     A listing with no sessions at all counts as no listing, as in `prune_pins`,
     so one glitchy poll never throws away a half-typed edit.
     """
-    live_ids = list(live_ids)
-    if not live_ids:
-        return misses, False
     misses, gone = stale_viewers([session_id], live_ids, misses)
     return misses, bool(gone)
 
@@ -976,6 +971,15 @@ def move_cursor(items: list, cursor, delta: int):
     if cursor not in items:
         return items[0]
     return items[max(0, min(len(items) - 1, items.index(cursor) + delta))]
+
+
+def hold_cursor(held, sessions_listed: bool, cursor, before):
+    """The cursor and items to return to once sessions are listed again: taken when the listing first empties, kept while it stays empty, dropped when sessions are back."""
+    if sessions_listed:
+        return None
+    if held is None and cursor is not None:
+        return cursor, before
+    return held
 
 
 def settle_cursor(items: list, cursor, groups, wanted=None, before=None):
@@ -2049,17 +2053,24 @@ def viewer_command(claude: str, session_id: str) -> str:
     return f"exec {shlex.quote(claude)} attach {shlex.quote(session_id)}"
 
 
-def stale_viewers(viewer_ids, live_ids, misses: dict) -> tuple:
+def stale_viewers(viewer_ids, live_ids, misses: dict, dead=frozenset()) -> tuple:
     """Viewers whose session is missing from STALE_AFTER_MISSES polls in a row.
 
     One missing poll is not enough: a single glitchy listing would otherwise
-    close the viewer he is reading.
+    close the viewer he is reading. A listing with no sessions at all is a
+    glitch, not news: it counts against no one, and every miss count is kept
+    as it was. The one exception is a viewer in `dead` (its pane has ended,
+    which happens when its session is stopped), which still counts.
     Returns (updated_misses, ids_to_close).
     """
     live = set(live_ids)
     updated, close = {}, []
     for sid in viewer_ids:
         if sid in live:
+            continue
+        if not live and sid not in dead:
+            if sid in misses:
+                updated[sid] = misses[sid]
             continue
         count = misses.get(sid, 0) + 1
         if count >= STALE_AFTER_MISSES:

@@ -802,6 +802,78 @@ class CloseTmux:
         self.calls.append(("kill", pane))
 
 
+class CloseStaleOnListings(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.tmux = CloseTmux()
+        self.app.tmux = self.tmux
+        self.app.sessions = []
+
+    def run_close(self, times):
+        for _ in range(times):
+            panes = self.tmux.panes()
+            main = next(p for p in panes if p.id == "%2")
+            self.app.close_stale(panes, main)
+
+    def make_dead(self, pane_id):
+        self.tmux.list = [replace(p, dead=True) if p.id == pane_id else p for p in self.tmux.list]
+
+    def test_empty_listings_never_close_live_viewers(self):
+        self.run_close(core.STALE_AFTER_MISSES + 1)
+        self.assertEqual(self.tmux.calls, [])
+
+    def test_empty_listings_close_a_dead_viewer(self):
+        self.make_dead("%3")
+        self.run_close(core.STALE_AFTER_MISSES)
+        self.assertIn(("kill", "%3"), self.tmux.calls)
+        self.assertNotIn(("kill", "%2"), self.tmux.calls)
+
+    def test_a_dead_viewer_in_main_is_swapped_for_the_placeholder(self):
+        self.make_dead("%2")
+        self.run_close(core.STALE_AFTER_MISSES)
+        self.assertEqual(self.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
+
+    def test_a_listing_without_the_session_still_closes_its_viewer(self):
+        self.app.sessions = [session("b", "/tmp/b")]
+        self.run_close(2)
+        self.assertIn(("swap", "%4", "%2"), self.tmux.calls)
+        self.assertIn(("kill", "%2"), self.tmux.calls)
+        self.assertNotIn(("kill", "%3"), self.tmux.calls)
+
+
+class EmptyListing(AppCase):
+    def test_the_cursor_returns_to_its_row_after_an_empty_listing(self):
+        rows = [session(x, "/tmp/x") for x in "abc"]
+        self.poll(*rows)
+        self.app.take_poll()
+        self.app.cursor = ("session", "b")
+        self.poll()
+        self.app.take_poll()
+        self.assertIsNone(self.app.cursor)
+        self.poll(*rows)
+        self.app.take_poll()
+        self.assertEqual(self.app.cursor, ("session", "b"))
+
+    def test_after_an_empty_listing_a_gone_row_leaves_the_cursor_on_its_neighbour(self):
+        rows = [session(x, "/tmp/x") for x in "abc"]
+        self.poll(*rows)
+        self.app.take_poll()
+        self.app.cursor = ("session", "b")
+        self.poll()
+        self.app.take_poll()
+        self.poll(rows[0], rows[2])
+        self.app.take_poll()
+        self.assertEqual(self.app.cursor, ("session", "c"))
+
+    def test_a_pending_rename_survives_an_empty_listing(self):
+        self.poll(session("a", "/tmp/x"))
+        self.app.take_poll()
+        self.app.renaming = {"a": ("old", "new", time.monotonic() + 30)}
+        self.poll()
+        self.app.take_poll()
+        self.assertIn("a", self.app.renaming)
+
+
 class CloseSession(AppCase):
     """Ctrl+X twice on one row closes that session (stop if running, then remove), on a worker thread, after a fresh listing agrees with the row.
 
@@ -2220,6 +2292,18 @@ class TranscriptReader(unittest.TestCase):
             poller.poll()
         self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1)})
         self.assertEqual(set(poller.summaries.wanted), {"s1"})
+
+    def test_an_empty_listing_keeps_what_the_workers_want(self):
+        poller = sidebar.Poller("claude")
+        rows = [self.row("s1", "/tmp/a", U1)]
+        with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
+            poller.poll()
+        wanted = (dict(poller.transcripts.wanted), set(poller.summaries.wanted), set(poller.resolver.wanted))
+        with mock.patch.object(sidebar, "fetch_sessions", return_value=([], None)):
+            self.assertEqual(poller.poll(), ([], None))
+        self.assertEqual(
+            (dict(poller.transcripts.wanted), set(poller.summaries.wanted), set(poller.resolver.wanted)), wanted,
+        )
 
 
 GOOD_JSON = json.dumps({"result": "\"Fixing the tests.\"\nmore", "is_error": False, "duration_ms": 600,
