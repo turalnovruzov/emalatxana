@@ -2715,6 +2715,133 @@ class RowDetail(unittest.TestCase):
         self.assertEqual(core.row_detail(st("done", "idle"), core.parse_transcript(real_transcript("done"))), "Alpha done.")
 
 
+    def haiku(self, text, category, at=0.0):
+        return core.Summary(text, category, "x", at)
+
+    def test_haikus_line_shows_while_it_is_for_the_state_the_row_is_in(self):
+        done = core.parse_transcript(real_transcript("done"))
+        self.assertEqual(core.row_detail(st("done"), done, self.haiku("Wrote the parser", core.DONE)), "Wrote the parser")
+
+    def test_a_line_for_another_state_gives_way_to_the_transcript_line(self):
+        working = core.parse_transcript(real_transcript("working"))
+        got = core.row_detail(st("working"), working, self.haiku("Wrote the parser", core.DONE))
+        self.assertEqual(got, core.row_detail(st("working"), working))
+        self.assertNotEqual(got, "Wrote the parser")
+
+    def test_every_state_shows_haikus_line(self):
+        for state, cat in (("blocked", core.NEEDS_INPUT), ("working", core.WORKING), ("done", core.DONE), ("stopped", core.STOPPED)):
+            self.assertEqual(core.row_detail(st(state), None, self.haiku("Line", cat)), "Line", state)
+
+    def test_an_empty_line_falls_back(self):
+        self.assertEqual(core.row_detail(st("blocked", "permission prompt"), None, self.haiku("", core.NEEDS_INPUT)), "permission prompt")
+
+
+class SummaryArgs(unittest.TestCase):
+    def test_the_full_isolation_flag_set(self):
+        args = core.summary_args("claude")
+        self.assertEqual(args[0], "claude")
+        for flag in ("-p", "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands"):
+            self.assertIn(flag, args)
+        self.assertNotIn("--bare", args)
+        for flag, value in (("--model", "haiku"), ("--output-format", "json"), ("--tools", ""),
+                            ("--setting-sources", ""), ("--system-prompt", core.SUMMARY_INSTRUCTION)):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+
+
+class SummaryExcerpt(unittest.TestCase):
+    def excerpt(self, name, session):
+        return core.summary_excerpt(session, core.parse_transcript(real_transcript(name)))
+
+    def test_it_names_the_state_and_is_repeatable(self):
+        a = self.excerpt("working", st("working"))
+        self.assertIn("working", a)
+        self.assertEqual(a, self.excerpt("working", st("working")))
+
+    def test_a_different_transcript_or_state_gives_a_different_one(self):
+        a = self.excerpt("working", st("working"))
+        self.assertNotEqual(a, self.excerpt("done", st("working")))
+        self.assertNotEqual(a, self.excerpt("working", st("done")))
+
+    def test_no_transcript_gives_nothing(self):
+        self.assertEqual(core.summary_excerpt(st("working"), None), "")
+        self.assertEqual(core.summary_excerpt(st("stopped"), None), "")
+        self.assertEqual(core.summary_excerpt(st("working"), core.Transcript()), "")
+
+    def test_a_waiting_row_carries_what_is_asked(self):
+        self.assertIn("Which colour do you prefer?", self.excerpt("question", st("blocked", "input needed")))
+        self.assertIn("echo emx-perm-check", self.excerpt("permission", st("blocked", "permission prompt")))
+
+    def test_a_stopped_row_with_a_transcript_is_covered(self):
+        self.assertIn("stopped", self.excerpt("done", st("stopped")))
+
+    def test_it_is_capped(self):
+        t = core.Transcript(prompt="p" * 10000, reply="r" * 10000, tool="t" * 10000, tool_about="a" * 10000, latest="tool")
+        self.assertLess(len(core.summary_excerpt(st("working"), t)), 2000)
+
+
+class SummaryOutput(unittest.TestCase):
+    GOOD = json.dumps({
+        "result": "Fixing the tests.", "is_error": False, "duration_ms": 640, "total_cost_usd": 0.000155,
+        "usage": {"input_tokens": 2, "output_tokens": 19, "cache_creation_input_tokens": 724, "cache_read_input_tokens": 5},
+        "modelUsage": {"claude-haiku-5-5": {"costUSD": 0.000155}},
+    })
+
+    def test_a_captured_shape_parses(self):
+        call, err = core.parse_summary_output(self.GOOD, 1234.5)
+        self.assertIsNone(err)
+        self.assertEqual((call.text, call.model, call.wall_ms, call.duration_ms, call.cost_usd),
+                         ("Fixing the tests", "claude-haiku-5-5", 1234.5, 640, 0.000155))
+        self.assertEqual((call.input_tokens, call.output_tokens, call.cache_creation_tokens, call.cache_read_tokens), (2, 19, 724, 5))
+
+    def test_missing_fields_read_as_zero_and_no_model(self):
+        call, _ = core.parse_summary_output(json.dumps({"result": "Hi"}), 1)
+        self.assertEqual((call.model, call.cost_usd, call.input_tokens, call.cache_read_tokens), ("", 0, 0, 0))
+
+    def test_bad_output_is_an_error_line_never_a_raise(self):
+        for bad in ("not json", "[]", json.dumps({"result": "boom", "is_error": True}), json.dumps({"result": ""}), "", json.dumps({})):
+            call, err = core.parse_summary_output(bad, 1)
+            self.assertIsNone(call, bad)
+            self.assertIsInstance(err, str, bad)
+
+    def test_cleaning_takes_the_first_line_without_controls_quotes_or_full_stop(self):
+        self.assertEqual(core.clean_summary("\x1b[31m\"Fixing tests.\"\x07\nsecond"), "Fixing tests")
+        self.assertEqual(core.clean_summary("\n\n  Two   words \n"), "Two words")
+
+    def test_cleaning_caps_the_length(self):
+        out = core.clean_summary("x" * 500)
+        self.assertEqual(len(out), core.SUMMARY_MAX_CHARS)
+        self.assertTrue(out.endswith("…"))
+
+
+class SummaryDue(unittest.TestCase):
+    def last(self, excerpt="old", cat=core.WORKING, at=100.0):
+        return core.Summary("line", cat, excerpt, at)
+
+    def due(self, excerpt="new", last="default", failures=0, failed_at=None, now=200.0, state="working"):
+        last = self.last() if last == "default" else last
+        return core.summary_due(st(state), excerpt, last, failures, failed_at, now)
+
+    def test_the_same_excerpt_is_not_due(self):
+        self.assertFalse(self.due(excerpt="old", now=10000.0))
+
+    def test_a_changed_excerpt_waits_out_the_interval(self):
+        self.assertFalse(self.due(now=100.0 + core.SUMMARY_EVERY_SECONDS - 15))
+        self.assertTrue(self.due(now=100.0 + core.SUMMARY_EVERY_SECONDS))
+
+    def test_a_state_change_is_due_at_once(self):
+        self.assertTrue(self.due(now=101.0, state="done"))
+
+    def test_the_first_is_due(self):
+        self.assertTrue(self.due(last=None))
+
+    def test_a_failure_backs_off(self):
+        self.assertFalse(self.due(last=None, failures=1, failed_at=200.0 - core.retry_after(1) + 1))
+        self.assertTrue(self.due(last=None, failures=1, failed_at=200.0 - core.retry_after(1)))
+
+    def test_an_empty_excerpt_is_never_due(self):
+        self.assertFalse(self.due(excerpt="", last=None))
+
+
 class PeekContent(unittest.TestCase):
     NOW = ms("2026-10-08T09:45:33.103Z")
 
