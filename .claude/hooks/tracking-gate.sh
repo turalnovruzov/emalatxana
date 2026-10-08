@@ -12,10 +12,10 @@
 # -F <file> is uninspectable from the command string; any "#<digits>"
 # occurrence passes, even a spurious one; a command string merely
 # mentioning "gh pr create" (e.g. inside an echo) trips the deny-once.
-# Inherited from the scaffold: the CLAUDE_PROJECT_DIR scope check makes this
-# gate a no-op when the session's project dir and the repo root differ, which
-# includes a session driving a git worktree of this repo — the independent
-# review of the PR remains the second barrier in that case.
+# Scope: the check compares git common dirs, so a session started in the main
+# checkout is gated in any worktree of this repo, and a session in another repo
+# is not. The hook that runs is the copy in the session's project dir, so a
+# change here is live only once that checkout has it.
 # The deny-once authorization is keyed per session AND per exact command
 # string, so a bypass frees only the command that was denied; commands
 # differing by so much as whitespace are distinct. Where no digest tool is
@@ -42,18 +42,31 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 # --- defensive re-check: act only on commands this gate is about ---
 printf '%s' "$COMMAND" | grep -Eq "$PATTERN" || exit 0
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+# --- the session's working dir: hook input cwd, else the process cwd ---
+WORK_DIR=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null)
+[ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ] || WORK_DIR=$PWD
+
+common_dir() { # absolute git common dir of a directory (same for every worktree)
+  git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null
+}
+
+REPO_ROOT=$(git -C "$WORK_DIR" rev-parse --show-toplevel 2>/dev/null) || exit 0
+REPO_COMMON=$(common_dir "$WORK_DIR") || exit 0
+[ -n "$REPO_COMMON" ] || exit 0
 
 # --- scope: this gate enforces its own project's spec, nothing else ---
-if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ "$REPO_ROOT" != "$CLAUDE_PROJECT_DIR" ]; then
-  exit 0
+# same repository (any worktree of it) is in scope; another repository is not
+if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  PROJECT_COMMON=$(common_dir "$CLAUDE_PROJECT_DIR") || exit 0
+  [ "$REPO_COMMON" != "$PROJECT_COMMON" ] && exit 0
 fi
-# best-effort: a command that first cd's outside this repo is out of scope
+# best-effort: a command that first cd's into a different repository is out of scope
 FIRST_CD=$(printf '%s' "$COMMAND" | sed -nE 's/^[[:space:]]*cd[[:space:]]+([^[:space:];&|]+).*/\1/p')
 if [ -n "$FIRST_CD" ]; then
-  CD_TARGET=$(cd "$FIRST_CD" 2>/dev/null && pwd)
-  if [ -n "$CD_TARGET" ] && [ "$CD_TARGET" != "$REPO_ROOT" ] && [ "${CD_TARGET#$REPO_ROOT/}" = "$CD_TARGET" ]; then
-    exit 0
+  CD_TARGET=$(cd "$WORK_DIR" 2>/dev/null && cd "$FIRST_CD" 2>/dev/null && pwd)
+  if [ -n "$CD_TARGET" ]; then
+    CD_COMMON=$(common_dir "$CD_TARGET")
+    [ "$CD_COMMON" != "$REPO_COMMON" ] && exit 0
   fi
 fi
 
