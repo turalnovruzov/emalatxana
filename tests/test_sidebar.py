@@ -1163,6 +1163,51 @@ class NewSession(AppCase):
         self.assertEqual([r.path for r in self.app.suggestions()], ["/p/quokka"])
         self.assertIn("/p", self.app.listings.asked)
 
+    def test_a_bare_word_searches_beside_a_worktrees_repo_in_either_view(self):
+        worktree = "/w/kiwi/.claude/worktrees/feat"
+        self.poll(session("a", worktree))
+        self.app.refresh()
+        self.app.listings.cache["/w"] = ["kiwi", "quokka"]
+        self.app.listings.cache["/w/kiwi/.claude/worktrees"] = ["quokka-wt"]
+        self.app.placements = {worktree: core.Placement("/w/kiwi", "feat")}
+        self.app.prefs["recent_folders"] = [worktree]
+        for view in (core.PROJECT, core.BY_STATE):
+            with self.subTest(view=view):
+                self.assertEqual(self.app.view(), view)
+                self.app.listings.asked.clear()
+                self.app.cursor = ("session", "a")
+                self.keys("n", "\t")
+                self.type("quok")
+                self.assertEqual([r.path for r in self.app.suggestions()], ["/w/quokka"])
+                self.assertIn("/w", self.app.listings.asked)
+                self.assertNotIn("/w/kiwi/.claude/worktrees", self.app.listings.asked)
+                self.keys("\x1b", "\x1b")
+                self.app.toggle_view()
+        self.assertEqual(self.app.view(), core.PROJECT)
+
+    def test_enter_on_an_empty_picker_takes_the_top_suggestion(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        top = self.app.suggestions()[0].path
+        self.assertNotEqual(top, "/h/me")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", top))
+        self.keys("\t")
+        self.type("x")
+        self.keys("\x15", "\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", top))
+
+    def test_enter_on_an_empty_picker_with_no_suggestions_falls_back_to_home(self):
+        self.poll()
+        self.app.refresh()
+        self.keys("n")
+        self.assertEqual(self.app.suggestions(), [])
+        self.keys("\n")
+        self.assertIn("Still reading", self.app.prompt["hint"])
+        self.app.listings.readable_cache["/h/me"] = True
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/h/me"))
+
     def test_no_match_is_said_once(self):
         self.app.cursor = ("session", "b")
         self.keys("n", "\t")
@@ -1179,13 +1224,13 @@ class NewSession(AppCase):
         for _ in range(6):
             self.keys(curses.KEY_DOWN)
         picked = self.app.prompt["picked"]
-        self.assertEqual(picked, "/h/me/dir5")
+        self.assertEqual(picked, "/h/me/dir3")
         drawn = [text for text, _ in self.app.bottom_lines(39, 9)]
         self.assertLessEqual(len(drawn), 9 - 2)
         self.assertEqual(drawn[0], "New session · pick a folder:")
         self.assertTrue(drawn[1].startswith("> ~/"), drawn)
         self.assertTrue(any("more" in line for line in drawn), drawn)
-        self.assertFalse(any("dir5" in line for line in drawn), drawn)
+        self.assertFalse(any("dir3" in line for line in drawn), drawn)
         self.assertEqual(self.app.prompt["picked"], picked)
         self.keys("\n")
         self.assertEqual(self.app.prompt["folder"], picked)

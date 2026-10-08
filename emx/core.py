@@ -1070,14 +1070,25 @@ def _path_mode(query: str) -> bool:
     return "/" in query or query == "~"
 
 
-def folders_to_list(text: str, session_folders, recent_folders, home: str) -> list:
-    """The folders whose listings the picker needs for `text`: the one being typed into, or for a bare word the ones it searches."""
+def folders_to_list(text: str, session_folders, recent_folders, home: str, roots=None) -> list:
+    """The folders whose listings the picker needs for `text`: the one being typed into, or for a bare word the ones it searches.
+
+    `roots`, when given, are the folders whose parents a bare word searches
+    in place of the session and recent folders; it must be what
+    `folder_suggestions` gets, or a searched folder is never listed.
+    """
     if _path_mode(text.strip()):
         return [picker_query(text, home)[0]]
-    return search_folders(session_folders, recent_folders, home)
+    return _searched(session_folders, recent_folders, home, roots)
 
 
-def folder_suggestions(text: str, session_folders, recent_folders, listed: Mapping, home: str, limit: int = PICKER_ROWS) -> list:
+def _searched(session_folders, recent_folders, home: str, roots) -> list:
+    if roots is None:
+        return search_folders(session_folders, recent_folders, home)
+    return search_folders(roots, [], home)
+
+
+def folder_suggestions(text: str, session_folders, recent_folders, listed: Mapping, home: str, limit: int = PICKER_ROWS, roots=None) -> list:
     """The picker's rows for `text`, from folders with sessions, recent folders, and listings of folders.
 
     `listed` maps a folder to the names of its subfolders, from listings
@@ -1087,8 +1098,11 @@ def folder_suggestions(text: str, session_folders, recent_folders, listed: Mappi
     under the folder being typed into are offered, each matched on its path
     from there. A bare word is matched against the whole path of every known
     folder and of the subfolders of `search_folders`. Typed text ranks every
-    source together by `fuzzy_match`; the source only breaks ties. Hidden
-    subfolders show only when the typed name starts with a dot.
+    source together by `fuzzy_match`; the source only breaks ties. A path
+    with nothing after its last slash lists the folders under it
+    alphabetically, its own subfolders before deeper known folders. Hidden
+    subfolders show only when the typed name starts with a dot. `roots` is
+    as in `folders_to_list`.
     """
     query = text.strip()
     known = [(SESSIONS, f) for f in session_folders if f] + [(RECENT, f) for f in recent_folders if f]
@@ -1105,7 +1119,7 @@ def folder_suggestions(text: str, session_folders, recent_folders, listed: Mappi
     else:
         match_on = query
         candidates += [(source, f, tilde_path(os.path.normpath(f), home)) for source, f in known]
-        searched = [os.path.normpath(home)] if not query else search_folders(session_folders, recent_folders, home)
+        searched = [os.path.normpath(home)] if not query else _searched(session_folders, recent_folders, home, roots)
         for folder in searched:
             for n in _visible(listed.get(folder) or [], query):
                 path = os.path.join(folder, n)
@@ -1116,7 +1130,10 @@ def folder_suggestions(text: str, session_folders, recent_folders, listed: Mappi
         if key in seen:
             continue
         seen.add(key)
-        match = fuzzy_match(match_on, target) if match_on or _path_mode(query) else ()
+        if _path_mode(query) and not match_on:
+            match = (target.count("/"), target.lower(), target)
+        else:
+            match = fuzzy_match(match_on, target) if match_on else ()
         if match is not None:
             ranked.append(((match, _SOURCE_RANK[source], order), key, source))
     return [Suggestion(key, tilde_path(key, home), source) for _, key, source in sorted(ranked)[:limit]]
@@ -1126,16 +1143,19 @@ def _visible(names, typed: str) -> list:
     return sorted((n for n in names if typed.startswith(".") or not n.startswith(".")), key=lambda n: (n.lower(), n))
 
 
-def picker_enter(picked: str | None, typed: str, exists: bool | None, rows: list) -> tuple:
+def picker_enter(picked: str | None, typed: str, exists: bool | None, rows: list, nothing_typed: bool = False) -> tuple:
     """(folder, None) for Enter in the folder picker, or (None, the hint to show).
 
-    The highlighted folder first, then the typed path once it is confirmed a
-    folder. While that is still being checked he waits, so a path he typed
-    in full is not swapped for a suggestion. A typed path that is not a
+    The highlighted folder first, then the top suggestion when nothing is
+    typed, then the typed path once it is confirmed a folder. While that is
+    still being checked he waits, so a path he typed in full is not swapped
+    for a suggestion. A typed path that is not a
     folder gives way to the top suggestion.
     """
     if picked:
         return picked, None
+    if nothing_typed and rows:
+        return rows[0].path, None
     if exists:
         return typed, None
     if exists is None:
@@ -1168,6 +1188,11 @@ def folder_exists(folder: str, known, listed: tuple | None, readable: bool | Non
         if len(listed[1]) < MAX_LISTED_NAMES:
             return False
     return readable
+
+
+def repo_roots(folders, placements: Mapping) -> list:
+    """Each folder's repository root once it has been placed, else the folder itself, so a worktree stands for its repo."""
+    return list(dict.fromkeys(placements[f].repo if f in placements else f for f in folders if f))
 
 
 def session_folders(sessions, groups, view: str) -> list:

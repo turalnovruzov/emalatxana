@@ -903,8 +903,8 @@ class FuzzyMatch(unittest.TestCase):
 
 
 class FolderSuggestions(unittest.TestCase):
-    def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS):
-        rows = core.folder_suggestions(text, sessions, recent, listed or {}, HOME, limit)
+    def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS, roots=None):
+        rows = core.folder_suggestions(text, sessions, recent, listed or {}, HOME, limit, roots)
         return [(r.shown, r.source) for r in rows]
 
     def test_sources_in_order_each_keeping_its_own_order_when_nothing_is_typed(self):
@@ -938,6 +938,30 @@ class FolderSuggestions(unittest.TestCase):
         self.assertEqual(core.search_folders(sessions, recent, HOME), [HOME, "/r", "/h/me/w", "/q"])
         self.assertEqual(core.search_folders(sessions, recent, HOME, limit=2), [HOME, "/r", "/h/me/w"])
         self.assertEqual(core.search_folders([], [], HOME), [HOME])
+
+    def test_a_placed_worktree_searches_its_repos_parent(self):
+        worktree, plain = "/h/me/Workspace/kiwi/.claude/worktrees/feat", "/h/me/notes/sub"
+        placements = {worktree: core.Placement("/h/me/Workspace/kiwi", "feat")}
+        roots = core.repo_roots([worktree, plain, worktree, ""], placements)
+        self.assertEqual(roots, ["/h/me/Workspace/kiwi", plain])
+        self.assertEqual(core.search_folders(roots, [], HOME), [HOME, "/h/me/Workspace", "/h/me/notes"])
+        self.assertEqual(core.folders_to_list("quok", [worktree], [], HOME, roots), [HOME, "/h/me/Workspace", "/h/me/notes"])
+        unplaced = core.repo_roots([worktree], {})
+        self.assertEqual(core.search_folders(unplaced, [], HOME), [HOME, "/h/me/Workspace/kiwi/.claude/worktrees"])
+        listed = {"/h/me/Workspace": ["kiwi", "quokka"], "/h/me/Workspace/kiwi/.claude/worktrees": ["quokka-wt"]}
+        got = self.shown("quok", [worktree], listed=listed, roots=roots)
+        self.assertEqual(got, [("~/Workspace/quokka", core.LISTED)])
+
+    def test_nothing_after_the_slash_lists_alphabetically_then_fuzzy_once_typed(self):
+        listed = {"/h/me/Workspace": ["zeta", "Beta", "alpha-long-name", "b"]}
+        known = ["/h/me/Workspace/Beta/.claude/worktrees/x", "/h/me/Workspace/Cat"]
+        got = [shown for shown, _ in self.shown("~/Workspace/", known, listed=listed)]
+        self.assertEqual(got, [
+            "~/Workspace/alpha-long-name", "~/Workspace/b", "~/Workspace/Beta", "~/Workspace/Cat",
+            "~/Workspace/zeta", "~/Workspace/Beta/.claude/worktrees/x",
+        ])
+        got = [shown for shown, _ in self.shown("~/Workspace/b", known, listed=listed)]
+        self.assertEqual(got[:2], ["~/Workspace/b", "~/Workspace/Beta"])
 
     def test_the_folders_to_list_follow_what_is_typed(self):
         sessions = ["/h/me/w/a"]
@@ -1032,6 +1056,16 @@ class FolderSuggestions(unittest.TestCase):
         folder, hint = core.picker_enter(None, "/r/typed", False, [])
         self.assertIsNone(folder)
         self.assertIn("Not a folder", hint)
+
+    def test_enter_with_nothing_typed_takes_the_top_suggestion(self):
+        rows = [core.Suggestion("/r/top", "/r/top", core.SESSIONS)]
+        self.assertEqual(core.picker_enter(None, HOME, True, rows, nothing_typed=True), ("/r/top", None))
+        self.assertEqual(core.picker_enter(None, HOME, None, rows, nothing_typed=True), ("/r/top", None))
+        self.assertEqual(core.picker_enter("/r/hi", HOME, True, rows, nothing_typed=True), ("/r/hi", None))
+        self.assertEqual(core.picker_enter(None, HOME, True, [], nothing_typed=True), (HOME, None))
+        folder, hint = core.picker_enter(None, HOME, None, [], nothing_typed=True)
+        self.assertIsNone(folder)
+        self.assertIn("Still reading", hint)
 
     def test_the_panels_folders_are_its_groups_then_other_session_folders(self):
         sessions = [bg("a", "/r/app/sub"), bg("b", "/r/app"), bg("c", "")]

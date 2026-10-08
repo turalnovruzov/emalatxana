@@ -880,12 +880,13 @@ class App:
         p = self.prompt
         folders = core.session_folders(self.sessions, self.groups, self.view())
         recent = self.prefs.get("recent_folders", [])
+        roots = core.repo_roots([s.cwd for s in self.sessions] + recent, self.placements)
         listed = {}
-        for folder in core.folders_to_list(p["text"], folders, recent, self.home):
+        for folder in core.folders_to_list(p["text"], folders, recent, self.home, roots):
             names = self.listings.get(folder)
             if names is not None:
                 listed[folder] = names
-        return core.folder_suggestions(p["text"], folders, recent, listed, self.home)
+        return core.folder_suggestions(p["text"], folders, recent, listed, self.home, roots=roots)
 
     def move_pick(self, delta: int) -> None:
         """The highlight is kept by path: a listing arriving late can move rows, and the folder he chose must not change under him."""
@@ -924,7 +925,7 @@ class App:
         names = self.listings.get(parent)
         listed = (parent, names) if names is not None else None
         exists = core.folder_exists(typed, known, listed, self.listings.readable(typed))
-        folder, hint = core.picker_enter(p.get("picked"), typed, exists, self.suggestions())
+        folder, hint = core.picker_enter(p.get("picked"), typed, exists, self.suggestions(), not p["text"].strip())
         if folder is None:
             p["hint"] = hint
             return
