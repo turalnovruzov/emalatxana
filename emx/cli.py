@@ -8,19 +8,20 @@ import shutil
 import signal
 import sys
 
-from emx import core
+from emx import __version__, core
 from emx.tmux import ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin", "emx")
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
+CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 
-USAGE = """usage: emx
+USAGE = """usage: emx [--version]
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
-first moving a running workspace onto this version of emx.
+first moving a running workspace onto this version of emx. --version prints the version.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude")."""
 
 
@@ -30,6 +31,14 @@ SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"de
 def private_socket(name: str) -> str | None:
     """None for an empty or "default" name: "default" is the socket of the user's default tmux server."""
     return None if name in ("", "default") else name
+
+
+def read_changelog() -> str:
+    try:
+        with open(CHANGELOG, encoding="utf-8") as fh:
+            return fh.read()
+    except (OSError, ValueError):
+        return ""
 
 
 def socket_name() -> str | None:
@@ -163,6 +172,9 @@ def main(argv: list) -> int:
         return launch()
     if argv[0] in ("-h", "--help", "help"):
         print(USAGE)
+        return 0
+    if argv[0] == "--version":
+        print(f"emx {__version__}")
         return 0
     if argv[0] == "sidebar" and len(argv) == 2:
         if private_socket(argv[1]) is None:

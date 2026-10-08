@@ -852,14 +852,115 @@ def summary(sessions, words: Mapping = SUMMARY_WORDS) -> list:
     return [(f"{counts[c]} {words[c]}", c) for c in CATEGORIES if counts[c]]
 
 
-def summary_line(sessions, width: int) -> list:
-    """`fit_parts` placements for the summary, switching to short words before anything is cut."""
-    full = summary(sessions)
-    if not full:
-        return fit_parts([("no sessions", None)], width)
-    if display_width(" · ".join(t for t, _ in full)) <= width:
-        return fit_parts(full, width)
-    return fit_parts(summary(sessions, SUMMARY_SHORT), width)
+LOGO = "⚒"
+NAME = "emalatxana"
+TOP_GAP = 2
+
+
+def top_line(sessions, version: str, width: int, loaded: bool = True) -> list:
+    """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
+
+    Room runs out in this order: the counts switch to short words, the name
+    goes, then the counts are cut; when not even one cut count fits beside
+    the logo and the version, the counts go and the version stays. Only when
+    the version itself does not fit does it go, and a cut count takes its place.
+    """
+    if width <= 0:
+        return []
+    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")]
+    nameless = [(LOGO, "logo"), (version, "version")]
+    bare = [(LOGO, "logo")]
+    if not loaded:
+        counts = [[("…", None)]]
+    elif sessions:
+        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
+    else:
+        counts = [[("no sessions", None)]]
+    for logo, parts in [(whole, counts[0])] + [(logo, counts[-1]) for logo in (whole, nameless)]:
+        logo_width = display_width(" ".join(t for t, _ in logo))
+        parts_width = display_width(" · ".join(t for t, _ in parts))
+        if logo_width + TOP_GAP + parts_width <= width:
+            return _logo(logo) + [(width - parts_width + x, t, tag) for x, t, tag in fit_parts(parts, parts_width)]
+    nameless_width = display_width(" ".join(t for t, _ in nameless))
+    kept = nameless if nameless_width + TOP_GAP + 1 <= width else bare
+    if kept is bare and nameless_width <= width:
+        return _logo(nameless)
+    start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
+    return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
+
+
+def _logo(parts: list) -> list:
+    placed, x = [], 0
+    for text, tag in parts:
+        placed.append((x, text, tag))
+        x += display_width(text) + 1
+    return placed
+
+
+def parse_version(text) -> tuple | None:
+    """(major, minor, patch) for a plain "X.Y.Z" semantic version, None for anything else."""
+    if not isinstance(text, str) or not re.fullmatch(r"\d+\.\d+\.\d+", text):
+        return None
+    return tuple(int(n) for n in text.split("."))
+
+
+SHOW_NEW, RECORD_ONLY = "show", "record"
+
+
+def whats_new_due(recorded, current: str) -> str | None:
+    """What a panel starting on `current` does about the version last recorded in prefs: SHOW_NEW its changelog and record it, RECORD_ONLY, or nothing (None).
+
+    A first run, with nothing recorded, only records. A recorded version
+    newer than this code (an older checkout run for a while) is left as it
+    is, so going back to the newer one doesn't announce it a second time.
+    """
+    now = parse_version(current)
+    if now is None:
+        return None
+    last = parse_version(recorded)
+    if last is None:
+        return RECORD_ONLY
+    return SHOW_NEW if now > last else None
+
+
+_CHANGELOG_HEADING = re.compile(r"^##\s+v?(\d+\.\d+\.\d+)\b")
+
+
+def changelog_versions(text: str) -> list:
+    return [m.group(1) for m in map(_CHANGELOG_HEADING.match, text.splitlines()) if m]
+
+
+def changelog_entry(text: str, version: str) -> list:
+    """The lines under `version`'s heading in the changelog, up to the next heading, without blank lines or list markers."""
+    lines, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            match = _CHANGELOG_HEADING.match(line)
+            inside = bool(match) and match.group(1) == version
+            continue
+        if inside and line.strip():
+            lines.append(re.sub(r"^\s*[-*]\s+", "", line.strip()))
+    return lines
+
+
+def whats_new_text(version: str, lines: list) -> str:
+    return "\n".join([f"New in emx {version}:"] + [f"· {line}" for line in lines])
+
+
+def whats_new_since(text: str, recorded, current: str) -> str:
+    """The changelog lines of every version after `recorded` up to `current`, newest first, each under its own heading."""
+    last, now = parse_version(recorded), parse_version(current)
+    if last is None or now is None:
+        return ""
+    newer = sorted((v for v in changelog_versions(text) if last < parse_version(v) <= now), key=parse_version, reverse=True)
+    return "\n".join(whats_new_text(v, lines) for v in newer if (lines := changelog_entry(text, v)))
+
+
+def cut_with_pointer(lines: list, limit: int, pointer: str) -> list:
+    """`lines` as they are when they fit `limit`, else the first limit - 1 and a last line saying how many more there are and where."""
+    if len(lines) <= limit:
+        return lines
+    return lines[:limit - 1] + [f"… {len(lines) - limit + 1} more in {pointer}"]
 
 
 def display_width(text: str) -> int:
@@ -1441,6 +1542,8 @@ def normalize_prefs(raw) -> dict:
             prefs["pinned"] = pinned
     if raw.get("view") in VIEWS:
         prefs["view"] = raw["view"]
+    if parse_version(raw.get("last_version")):
+        prefs["last_version"] = raw["last_version"]
     collapsed = raw.get("collapsed")
     if isinstance(collapsed, dict):
         clean = {}

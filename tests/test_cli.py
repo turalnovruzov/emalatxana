@@ -1,9 +1,12 @@
 import io
+import os
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from emx import cli
+from emx import __version__, cli, core
 from emx.tmux import VERSION_OPT, Pane, TmuxError
 
 
@@ -98,6 +101,32 @@ class LeftCheck(unittest.TestCase):
         ):
             with self.subTest(args=args, error=error):
                 self.assertEqual(self.run_check(args, ["❯\xa0", "─" * 30], error), 1)
+
+
+class Version(unittest.TestCase):
+    def test_version_prints_and_never_starts_tmux(self):
+        out = io.StringIO()
+        with mock.patch.object(cli, "launch", side_effect=AssertionError("launched")), \
+                mock.patch.object(cli, "Tmux", side_effect=AssertionError("tmux")), \
+                mock.patch.object(cli.os, "execvpe", side_effect=AssertionError("exec")), redirect_stdout(out):
+            code = cli.main(["--version"])
+        self.assertEqual((code, out.getvalue()), (0, f"emx {__version__}\n"))
+
+    def test_the_version_is_semver_and_in_the_usage(self):
+        self.assertIsNotNone(core.parse_version(__version__))
+        self.assertIn("--version", cli.USAGE)
+
+    def test_the_real_launcher_prints_the_version_with_no_tmux_on_path(self):
+        done = subprocess.run(
+            [sys.executable, cli.BIN, "--version"], capture_output=True, text=True, timeout=30,
+            env={**os.environ, "PATH": "/nonexistent"}, stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, f"emx {__version__}\n", ""))
+
+    def test_read_changelog_is_empty_when_the_file_is_missing(self):
+        with mock.patch.object(cli, "CHANGELOG", "/nonexistent/CHANGELOG.md"):
+            self.assertEqual(cli.read_changelog(), "")
+        self.assertIn(f"## {__version__}", cli.read_changelog())
 
 
 if __name__ == "__main__":
