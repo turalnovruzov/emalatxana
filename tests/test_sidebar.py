@@ -521,7 +521,7 @@ class Focus(AppCase):
     def test_leaving_the_panel_cancels_an_armed_ctrl_x_but_his_terminal_losing_focus_does_not(self):
         self.app.handle_key(sidebar.CTRL_X)
         # c is working, so the press also starts an interrupt; it is let finish before the test ends.
-        self.app.interrupter.join(5)
+        self.app.interrupters["c"].join(5)
         self.read(*FOCUS_OUT)
         self.assertEqual(self.app.confirm.id, "c")
         self.leave_panel()
@@ -829,7 +829,7 @@ class CloseSession(AppCase):
     def test_double_ctrl_x_on_a_running_row_stops_then_removes_it_off_the_curses_thread(self):
         self.press(sidebar.CTRL_X)
         self.assertEqual(self.app.confirm.id, "a")
-        self.assertIsNone(self.app.interrupter)
+        self.assertEqual(self.app.interrupters, {})
         self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
         self.assertEqual(self.ran, [])
         self.press(sidebar.CTRL_X)
@@ -2437,7 +2437,7 @@ class WrappedRows(AppCase):
         before = self.rows_of("b"), self.rows_of("a")
         self.app.handle_key(sidebar.CTRL_X)
         # b is working, so the press also starts an interrupt; it is let finish before the test ends.
-        self.app.interrupter.join(5)
+        self.app.interrupters["b"].join(5)
         self.app.draw()
         self.assertIsNotNone(self.app.confirm)
         self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
@@ -2744,7 +2744,7 @@ class InterruptSession(AppCase):
             self.app.handle_key(key)
 
     def settle(self):
-        for worker in (self.app.interrupter, self.app.closer):
+        for worker in (*self.app.interrupters.values(), self.app.closer):
             if worker is not None:
                 worker.join(5)
         self.app.refresh()
@@ -2788,7 +2788,7 @@ class InterruptSession(AppCase):
                 self.poll(row, session("b", "/p/beta"))
                 self.app.refresh()
                 self.press(sidebar.CTRL_X)
-                self.assertIsNone(self.app.interrupter)
+                self.assertEqual(self.app.interrupters, {})
                 self.assertEqual(self.app.confirm.id, "working")
         self.assertEqual(self.app.tmux.events, [])
         self.assertEqual(self.fetched, [])
@@ -2820,10 +2820,10 @@ class InterruptSession(AppCase):
 
         with mock.patch.object(sidebar.subprocess, "run", run):
             self.press(sidebar.CTRL_X)
-            first = self.app.interrupter
+            first = self.app.interrupters["working"]
             first.join(5)
             self.press(sidebar.CTRL_X)
-            self.assertIs(self.app.interrupter, first)
+            self.assertIs(self.app.interrupters["working"], first)
             self.assertIsNotNone(self.app.closer)
             self.settle()
         self.assertEqual(self.kinds().count("key_if"), 1)
@@ -2915,11 +2915,11 @@ class InterruptSession(AppCase):
 
         with mock.patch.object(sidebar, "fetch_sessions", fetch), mock.patch.object(sidebar.subprocess, "run", run):
             self.press(sidebar.CTRL_X)
-            interrupter = self.app.interrupter
+            interrupter = self.app.interrupters["working"]
             self.assertTrue(held.wait(5))
             self.press(sidebar.CTRL_X)
             self.assertTrue(interrupter.cancel.is_set())
-            self.assertIs(self.app.closer.wait_for, interrupter)
+            self.assertEqual(self.app.closer.wait_for, (interrupter,))
             time.sleep(0.1)
             self.assertEqual(ran, [])
             release.set()
@@ -2943,7 +2943,7 @@ class InterruptSession(AppCase):
 
         with mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 5), mock.patch.object(sidebar.subprocess, "run", run):
             self.press(sidebar.CTRL_X)
-            interrupter = self.app.interrupter
+            interrupter = self.app.interrupters["working"]
             deadline = time.monotonic() + 5
             while ("capture", "%5", "agent-view") not in list(tmux.events) and time.monotonic() < deadline:
                 time.sleep(0.005)
@@ -2992,6 +2992,63 @@ class InterruptSession(AppCase):
         interrupter = self.close_while_the_hidden_viewer_comes_up()
         self.assertTrue(interrupter.ended)
         self.assertIn(("run", ["claude", "stop", "working"]), self.app.tmux.events)
+
+    def held_interrupts(self):
+        """Interrupter.attempt replaced by one that records whose it is and waits for `release`, so several can be alive at once."""
+        attempts, release = [], threading.Event()
+
+        def attempt(interrupter):
+            attempts.append(interrupter.interrupt.id)
+            release.wait(5)
+            return True, f"Interrupted {interrupter.interrupt.name}."
+
+        p = mock.patch.object(sidebar.Interrupter, "attempt", attempt)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(release.set)
+        return attempts, release
+
+    def test_a_second_working_row_is_interrupted_while_the_first_still_is_and_each_gets_one(self):
+        attempts, release = self.held_interrupts()
+        self.press(sidebar.CTRL_X)
+        a = self.app.interrupters["working"]
+        self.app.cursor = ("session", "b")
+        self.press(sidebar.CTRL_X)
+        self.assertEqual(self.app.notice, "Interrupting emx-test-b…")
+        self.assertEqual(set(self.app.interrupters), {"working", "b"})
+        self.assertTrue(a.is_alive())
+        self.app.cursor, self.app.confirm = ("session", "working"), None
+        self.press(sidebar.CTRL_X)
+        self.assertIs(self.app.interrupters["working"], a)
+        release.set()
+        self.settle()
+        self.assertEqual(sorted(attempts), ["b", "working"])
+        self.assertEqual(self.app.interrupters, {})
+
+    def test_a_group_close_cancels_and_waits_for_every_interrupt_in_it(self):
+        attempts, release = self.held_interrupts()
+        self.press(sidebar.CTRL_X)
+        self.app.cursor = ("session", "b")
+        self.press(sidebar.CTRL_X)
+        both = (self.app.interrupters["b"], self.app.interrupters["working"])
+        act = core.GroupConfirm("/p", (core.Confirm("working", "emx-test-working", True, 0.0),
+                                       core.Confirm("b", "emx-test-b", True, 0.0)), 0.0)
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.app.start_close(act)
+            self.assertEqual(self.app.closer.wait_for, both)
+            self.assertTrue(all(i.cancel.is_set() for i in both))
+            time.sleep(0.1)
+            self.assertEqual(ran, [])
+            release.set()
+            self.app.closer.join(5)
+        self.assertTrue(all(not i.is_alive() for i in both))
+        self.assertEqual(ran[0], ["claude", "stop", "working"])
 
     def test_an_escape_that_does_not_stop_it_says_so(self):
         self.after = self.working

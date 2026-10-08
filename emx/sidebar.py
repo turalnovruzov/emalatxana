@@ -301,18 +301,18 @@ class Listings:
 class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
-    A running session is stopped, then removed. `wait_for` is an Interrupter
-    of one of them, cancelled when the close began. The close waits for it
-    to end, and an Interrupter that ends cancelled has killed any hidden
-    viewer it opened, so no `claude attach` it started can land after the
+    A running session is stopped, then removed. `wait_for` holds the
+    Interrupters of any of them, cancelled when the close began. The close
+    waits for them to end, and an Interrupter that ends cancelled has killed
+    any hidden viewer it opened, so no `claude attach` it started can land after the
     stop and resume the session; if that kill failed and the pane is still
     there, nothing is closed. `current` is the session being closed now.
     `result` is (all closed, message, {id: closed}).
     """
 
-    def __init__(self, claude: str, targets: tuple, wait_for: threading.Thread | None = None):
+    def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
         super().__init__(daemon=True)
-        self.claude, self.targets, self.wait_for = claude, tuple(targets), wait_for
+        self.claude, self.targets, self.wait_for = claude, tuple(targets), tuple(wait_for)
         self.current = self.targets[0]
         self.result = None
 
@@ -325,14 +325,16 @@ class Closer(threading.Thread):
             self.result = (False, f"close failed: {core.error_line(exc)}", finished)
 
     def attempt(self, finished: dict) -> tuple:
-        if self.wait_for is not None:
-            self.wait_for.join(INTERRUPT_JOIN_SECONDS)
-            if self.wait_for.is_alive():
+        deadline = time.monotonic() + INTERRUPT_JOIN_SECONDS
+        for interrupter in self.wait_for:
+            interrupter.join(max(0.0, deadline - time.monotonic()))
+            name = interrupter.interrupt.name
+            if interrupter.is_alive():
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx is still interrupting {self.current.name}, so it didn't close it.", finished
-            if not self.wait_for.ended:
+                return False, f"emx is still interrupting {name}, so it didn't close it.", finished
+            if not interrupter.ended:
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx couldn't close the viewer it opened for {self.current.name}, so it didn't close it.", finished
+                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close it.", finished
         messages = []
         for confirm in self.targets:
             self.current = confirm
@@ -849,7 +851,7 @@ class App:
         self.started = None
         self.checker = None
         self.closer = None
-        self.interrupter = None
+        self.interrupters = {}
         self.closing = {}
         self.confirm = None
         self.find = None
@@ -1236,37 +1238,35 @@ class App:
     def start_close(self, act) -> None:
         targets = core.close_targets(act)
         ids = {t.id for t in targets}
-        interrupter = self.interrupter
-        wait_for = None
-        if interrupter is not None and interrupter.interrupt.id in ids:
+        wait_for = tuple(self.interrupters[sid] for sid in sorted(ids) if sid in self.interrupters)
+        for interrupter in wait_for:
             interrupter.cancel.set()
-            wait_for = interrupter
         self.closing.update((sid, None) for sid in ids)
         self.closer = Closer(self.claude, targets, wait_for)
         self.closer.start()
         self.say(core.closing_text(act))
 
     def start_interrupt(self, session: core.Session) -> None:
-        """One interrupt at a time: two Escs in quick succession open Claude Code's rewind."""
-        if self.interrupter is not None:
+        """One interrupt per session at a time: two Escs in quick succession open Claude Code's rewind."""
+        if session.id in self.interrupters:
             return
-        self.interrupter = Interrupter(
+        interrupter = self.interrupters[session.id] = Interrupter(
             self.claude, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
             bool(self.list_error),
         )
-        self.interrupter.start()
+        interrupter.start()
         self.say(f"Interrupting {session.name}…")
 
     def finish_interrupt(self) -> None:
-        interrupter = self.interrupter
-        if interrupter is None or interrupter.is_alive():
-            return
-        self.interrupter = None
-        if interrupter.cancel.is_set():
-            return
-        done, message = interrupter.result or (False, "interrupt failed")
-        self.say(message, error=not done)
-        self.poller.wake.set()
+        for sid, interrupter in list(self.interrupters.items()):
+            if interrupter.is_alive():
+                continue
+            del self.interrupters[sid]
+            if interrupter.cancel.is_set():
+                continue
+            done, message = interrupter.result or (False, "interrupt failed")
+            self.say(message, error=not done)
+            self.poller.wake.set()
 
     def finish_close(self) -> None:
         closer = self.closer

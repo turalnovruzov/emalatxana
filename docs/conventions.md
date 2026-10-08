@@ -97,7 +97,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    if checker is not None and not checker.is_alive():
        sessions, _ = checker.result or (None, "listing sessions failed")
    ```
-4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; folder listings are the exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
+4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; interrupts are one per session, so a second working row is interrupted while the first still is; folder listings are the other exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
 ### A tmux key binding that intercepts a key fails open
 
@@ -176,7 +176,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
        report = tmux.key_if(viewer.id, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
        refusal = core.gate_refusal(interrupt, report, cursor_y, cursor_x=x)
    ```
-4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format. One Esc worker at a time: two Escs in quick succession open Claude Code's rewind.
+4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format. One Esc worker per session at a time (`App.interrupters`, keyed by id): two Escs in quick succession into one session open Claude Code's rewind, while Escs into different sessions are independent.
 
 ### A cancelled worker ends what it started before it returns
 
