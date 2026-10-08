@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -11,6 +12,9 @@ SESSION_OPT = "@emx_session"
 VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
+
+
+_PANE_ID = re.compile(r"%\d+")
 
 
 class TmuxError(RuntimeError):
@@ -191,6 +195,8 @@ class Tmux:
         pane. The text goes as hex bytes (`-H`): tmux reads an argument
         ending in `;` as a command separator and drops the `;`, even with `-l`.
         """
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
         keys = " ".join(format(b, "02x") for b in text.encode("utf-8"))
         send = f"send-keys -t {pane} -H {keys} ; send-keys -t {pane} Enter ; display-message -p {typed}"
         return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()

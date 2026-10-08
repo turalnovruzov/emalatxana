@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import core, sidebar
-from emx.tmux import Pane
+from emx.tmux import Pane, TmuxError
 
 
 def git(*args):
@@ -1521,6 +1521,7 @@ class RenameTmux:
         self.view("named-viewer", "prompt-empty")
         self.in_mode = False
         self.gate_says = core.TYPED
+        self.prompt_after = None
         self.typed = []
         self.gates = []
         self.threads = []
@@ -1556,6 +1557,10 @@ class RenameTmux:
         self.gates.append(gate)
         if self.gate_says == typed:
             self.typed.append((pane, text))
+            if self.prompt_after == "gone":
+                self.prompt_probe = mock.Mock(side_effect=TmuxError("can't find pane"))
+            elif self.prompt_after is not None:
+                self.view("named-viewer", self.prompt_after)
         return self.gate_says
 
 
@@ -1625,9 +1630,9 @@ class RenameSession(AppCase):
         self.assertEqual((self.app.notice, self.app.notice_error), ("Renamed emx-test-named to fresh name.", False))
 
     def test_an_emoji_held_together_by_joiners_can_be_typed_into_the_edit(self):
-        family = "\U0001f468‍\U0001f469‍\U0001f467"
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
         self.keys(sidebar.CTRL_R, "\x15", *family)
-        self.keys("\x01", " ")
+        self.keys("\x01", "\u2028")
         self.assertEqual(self.app.rename_edit["text"], family)
 
     def test_a_viewer_scrolled_back_is_never_typed_into(self):
@@ -1758,6 +1763,24 @@ class RenameSession(AppCase):
         with mock.patch.object(sidebar.time, "monotonic", lambda: later):
             self.app.refresh()
         self.assertNotIn("named", self.app.renaming)
+
+    def test_no_new_name_and_text_left_in_the_prompt_is_said_plainly(self):
+        self.after = self.named
+        self.app.tmux.prompt_after = "prompt-multiline"
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(len(self.app.tmux.typed), 1)
+        self.assertIn("prompt isn't empty", self.app.notice)
+        self.assertTrue(self.app.notice_error)
+        self.assertIn("named", self.app.renaming)
+
+    def test_a_tmux_error_rechecking_the_prompt_still_counts_the_rename_as_typed(self):
+        self.after = self.named
+        self.app.tmux.prompt_after = "gone"
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertIn("doesn't show a new name yet", self.app.notice)
+        self.assertIn("named", self.app.renaming)
 
     def test_the_new_name_on_main_is_not_flagged_while_the_listing_catches_up(self):
         self.rename_to("emx-test-renamed")

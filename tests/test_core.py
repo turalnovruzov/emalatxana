@@ -1957,16 +1957,34 @@ class RenameChecks(unittest.TestCase):
     def test_a_request_is_one_plain_line_and_emoji_joiners_are_plain(self):
         self.assertEqual(core.rename_request("a", "old", "  my name; with spaces "),
                          (core.Rename("a", "old", "my name; with spaces"), None))
-        family = "fam \U0001f468‍\U0001f469‍\U0001f467"
+        family = "fam \U0001f468\u200d\U0001f469\u200d\U0001f467"
         self.assertEqual(core.rename_request("a", "old", family)[0].new, family)
-        self.assertTrue(core.name_char_allowed("‍"))
-        for bad in ("", "   ", "two\nlines", "tab\there", "esc\x1bseq", "del\x7f", "line sep", "para sep",
+        self.assertTrue(core.name_char_allowed("\u200d"))
+        for bad in ("", "   ", "two\nlines", "tab\there", "esc\x1bseq", "del\x7f", "line\u2028sep", "para\u2029sep",
                     "x" * (core.RENAME_MAX + 1)):
             with self.subTest(bad=bad):
                 rename, error = core.rename_request("a", "old", bad)
                 self.assertIsNone(rename)
                 self.assertTrue(error)
         self.assertEqual(core.rename_request("a", "old", "x" * core.RENAME_MAX)[0].new, "x" * core.RENAME_MAX)
+
+    def test_a_name_ending_in_a_backslash_is_refused_and_one_holding_a_backslash_or_at_sign_is_typed(self):
+        for bad in ("name\\", "name\\  ", "name\\\\", "\\"):
+            with self.subTest(bad=bad):
+                rename, error = core.rename_request("a", "old", bad)
+                self.assertIsNone(rename)
+                self.assertIn("end with", error)
+        for good in ("a\\b", "a@b", "x @y", "x @", "@x"):
+            with self.subTest(good=good):
+                self.assertEqual(core.rename_request("a", "old", good), (core.Rename("a", "old", good), None))
+
+    def test_no_new_name_with_text_left_in_the_prompt_says_so(self):
+        rename = core.Rename("a", "alpha", "beta")
+        self.assertEqual(core.renamed_text(rename, "beta", False), "Renamed alpha to beta.")
+        self.assertIn("doesn't show a new name yet", core.renamed_text(rename, None))
+        left = core.renamed_text(rename, None, False)
+        self.assertIn("prompt isn't empty", left)
+        self.assertIn("may not have been sent", left)
 
     def test_an_unchanged_name_is_no_request_and_no_error_even_when_too_long_to_type(self):
         self.assertEqual(core.rename_request("a", "old", " old "), (None, None))
@@ -2071,6 +2089,14 @@ class RenameChecks(unittest.TestCase):
         twin = refusal(rename_screen("named-viewer", "prompt-empty"), sessions + [named("d", "emx-test-named")])
         self.assertIn("looks the same as another session's", twin)
 
+    def test_an_unnamed_session_twinned_by_another_unnamed_one_is_sent_to_rename_itself(self):
+        unnamed = named("u", "u")
+        rename = core.Rename("u", "u", "fresh")
+        screen = rename_screen("unnamed-empty-viewer", "prompt-empty")
+        refusal = core.rename_screen_refusal(rename, unnamed, [unnamed, named("v", "v")], screen)
+        self.assertIn("both unnamed", refusal)
+        self.assertIn("Rename it in the session itself: /rename", refusal)
+
     def test_the_rule_name_is_read_off_the_input_box(self):
         cases = {"named-viewer": "emx-test-named", "unnamed-empty-viewer": "", "cross-wired": "emx-test-perm",
                  "permission-dialog": None}
@@ -2079,7 +2105,7 @@ class RenameChecks(unittest.TestCase):
                 self.assertEqual(core.rule_name(*real_screen(screen)), want)
 
     def test_the_gate_takes_only_plain_ids(self):
-        self.assertIsNotNone(core.type_gate("%3", "%1", "c43619b4", 26, "@emx_session"))
+        self.assertIsNotNone(core.type_gate("%3", "%1", "f00dcafe", 26, "@emx_session"))
         bad = (("%3,", "%1", "a"), ("%3", "1", "a"), ("%3", "%1", "a}"), ("%3", "%1", "a b"), ("%3", "%1", ""))
         for viewer, panel, sid in bad:
             with self.subTest(viewer=viewer, panel=panel, sid=sid):

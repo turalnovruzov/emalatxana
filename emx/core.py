@@ -365,6 +365,9 @@ def rename_request(sid: str, old: str, text: str) -> tuple:
         return None, None
     if not all(name_char_allowed(ch) for ch in name):
         return None, "A name can't hold control characters or line breaks."
+    # Claude Code 2.1.294 reads `\` then Enter as a line break: the line stays in his prompt, unsent.
+    if name.endswith("\\"):
+        return None, "A name can't end with \\."
     if typed_length(name) > RENAME_MAX:
         return None, f"A name can be at most {RENAME_MAX} characters, and an emoji counts as two."
     return Rename(sid, old, name), None
@@ -476,6 +479,9 @@ def rename_screen_refusal(rename: Rename, session: Session, sessions, screen: Re
     if screen.in_mode:
         return f"{rename.old}'s viewer is scrolled back, so emx didn't type into it. Press q in it, then rename again."
     identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
+    if identity == "ambiguous" and session.name == session.id:
+        return (f"{rename.old} and another running session are both unnamed, so emx can't tell their viewers apart."
+                f" Rename it in the session itself: /rename <name>.")
     if identity == "ambiguous":
         return f"{rename.old}'s viewer looks the same as another session's, so emx didn't type into it."
     if identity != "ok":
@@ -554,10 +560,14 @@ def renamed_to(rename: Rename, session: Session | None) -> str | None:
     return session.name
 
 
-def renamed_text(rename: Rename, name: str | None) -> str:
-    if name is None:
-        return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
-    return f"Renamed {rename.old} to {name}."
+def renamed_text(rename: Rename, name: str | None, prompt_empty: bool = True) -> str:
+    """`prompt_empty` is whether the viewer's prompt was empty when no new name showed: text left there may be the unsent line, or a draft he began since."""
+    if name is not None:
+        return f"Renamed {rename.old} to {name}."
+    if not prompt_empty:
+        return (f"Typed /rename into {rename.old}, but no new name shows and its prompt isn't empty:"
+                f" the line may not have been sent. Check it before you press Enter there.")
+    return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
 
 
 def rename_started(renaming: Mapping, rename: Rename) -> dict:

@@ -154,6 +154,20 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: a tail's first line is cut and its last line may be half-written, so neither is read as an entry: the first is dropped (`partial=True`) and a half-written last one fails to parse as JSON and is skipped. The project folder name is Claude Code's own mangling of the cwd and can be shortened, so a miss is looked up by `<sessionId>.jsonl` across the project folders, with backoff. The listing, not the transcript, decides a session's state.
 
+### emx types into a session only through `Tmux.type_if`, after the listing and screen checks
+
+1. **Rule**: before emx types anything into a session's viewer, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check (running, not working). The core screen checks pass on the viewer as it is now: not in a mode, showing this session and no other, an empty prompt. Then the keys go only through `Tmux.type_if`, with a gate format built by `core.type_gate`, so tmux re-checks the viewer and his focus and types in the same command.
+2. **Why**: a check in Python and a separate `send-keys` leave a gap of 15–50 ms. A key of his that lands in it is submitted along with the line, and a viewer he scrolled back in the meantime (copy mode) takes the keys as tmux commands instead of text.
+3. **Minimal example**:
+   ```python
+   # worker thread: listing refusal, then screen refusal, then
+   gate = core.type_gate(viewer.id, panel, sid, cursor_y, SESSION_OPT)
+   if gate is not None:
+       report = tmux.type_if(viewer.id, gate, line, core.TYPED, core.gate_report(SESSION_OPT))
+       refusal = core.gate_refusal(rename, report, cursor_y)
+   ```
+4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

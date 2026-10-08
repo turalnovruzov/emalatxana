@@ -237,5 +237,16 @@ class TypeIf(PrivateServer):
         self.assertTrue(self.tmux.prompt_probe(self.main)[4])
 
 
+class TypeIfTarget(unittest.TestCase):
+    def test_a_target_that_is_not_a_pane_id_runs_no_tmux_command(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            for pane in ("emx:", "%3;", "%", "=emx:0.1", "%3 "):
+                with self.subTest(pane=pane):
+                    with self.assertRaises(TmuxError):
+                        tmux.type_if(pane, "#{==:1,1}", "/rename x", core.TYPED, "")
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

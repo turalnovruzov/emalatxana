@@ -364,7 +364,17 @@ class Renamer(threading.Thread):
         except TmuxError as exc:
             return False, f"tmux: {exc}", False
         name = self.wait_for_name()
-        return name is not None, core.renamed_text(self.rename, name), True
+        prompt_empty = True if name is not None else self.prompt_empty(viewer.id)
+        return name is not None, core.renamed_text(self.rename, name, prompt_empty), True
+
+    def prompt_empty(self, pane: str) -> bool:
+        """Whether the viewer's prompt is empty now; True when tmux can't tell, so only text seen there is reported."""
+        try:
+            x, y, shown, width, _ = self.tmux.prompt_probe(pane)
+            line, below = (self.tmux.cursor_lines(pane, y) + ["", ""])[:2]
+        except TmuxError:
+            return True
+        return core.empty_prompt(line, below, x, shown, width)
 
     def wait_for_name(self) -> str | None:
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
