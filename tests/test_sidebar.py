@@ -3035,6 +3035,35 @@ class InterruptSession(AppCase):
         self.assertEqual(ran, [["claude", "stop", "working"], ["claude", "rm", "working"]])
         self.assertEqual(self.app.unended, {})
 
+    def test_a_hidden_viewer_tmux_cant_place_at_the_end_is_left_for_the_next_close_to_kill(self):
+        tmux = self.app.tmux
+        listed = tmux.panes
+
+        def panes():
+            if "new_hidden_window" in [e[0] for e in tmux.events]:
+                raise sidebar.TmuxError("server busy")
+            return listed()
+
+        tmux.panes = panes
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertNotIn("kill", self.kinds())
+        self.assertFalse(interrupter.ended)
+        self.assertEqual(self.app.unended, {"working": [interrupter]})
+        tmux.panes = listed
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.app.start_close(core.Confirm("working", "emx-test-working", True, 0.0))
+            self.app.closer.join(5)
+            self.app.refresh()
+        self.assertIn(("kill", "%5"), tmux.events)
+        self.assertTrue(interrupter.ended)
+        self.assertEqual(ran, [["claude", "stop", "working"], ["claude", "rm", "working"]])
+
     def test_a_close_started_before_the_escape_cancels_it_and_waits_for_it(self):
         self.no_viewer()
         ran = []

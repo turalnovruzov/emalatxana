@@ -303,8 +303,8 @@ class Closer(threading.Thread):
 
     A running session is stopped, then removed. `wait_for` holds the
     Interrupters of any of them still running, cancelled when the close
-    began, and those that ended earlier without killing the hidden viewer
-    they meant to. The close waits for them to end and tries each failed
+    began, and those that ended earlier possibly leaving the hidden viewer
+    they meant to kill. The close waits for them to end and tries each
     kill again; while such a pane is still listed, nothing is closed. Any
     other hidden viewer an interrupt opened is gone, or came up and took
     the Esc, or was swapped into main by him, which makes it his like a
