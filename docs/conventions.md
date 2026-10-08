@@ -136,7 +136,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
 
-1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, and reads only files named after a `sessionId` in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
+1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
 2. **Why**: the contract allows reading `~/.claude` and forbids writing, moving or deleting anything there. Transcripts run to many megabytes and grow while being read, and a read on the curses thread would freeze the panel.
 3. **Minimal example**:
    ```python
@@ -204,10 +204,10 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every `claude -p` call is built by a pure core function, isolated, budget-flagged, and run through a never-raising wrapper
 
-1. **Rule**: every `claude -p` call emx makes has its command built by a pure function in `core` (`core.summary_args`) with the full isolation flag set plus `--max-budget-usd`; its input goes on stdin, never argv; it runs in an empty private temp folder as its cwd, on a worker thread, through a wrapper that never raises.
+1. **Rule**: every `claude -p` call emx makes has its command built by a pure function in `core` (`core.summary_args`, `core.name_args`) with the full isolation flag set plus `--max-budget-usd`; its input goes on stdin, never argv; it runs in an empty private temp folder as its cwd, on a worker thread, through a wrapper that never raises.
 2. **Why**: without `--strict-mcp-config --setting-sources ""` one call cost $0.39; without `--no-session-persistence` each call writes a transcript under `~/.claude/projects`; input in argv can be read as a flag; a project folder as cwd loads its CLAUDE.md.
 3. **Minimal example**: `subprocess.run(core.summary_args(claude), input=excerpt, cwd=scratch, ...)` in `sidebar.summarise`.
-4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps, the instruction and the 30 s timeout (ADR 0002).
+4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`, `NameArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps, the instruction and the 30 s timeout (ADR 0002).
 
 ### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it
 

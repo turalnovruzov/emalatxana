@@ -2112,6 +2112,168 @@ class RenameSession(AppCase):
         self.assertIn("/rename", dict(sidebar.HELP)["^r"])
 
 
+def named_call(text):
+    return core.SummaryCall(text, "claude-haiku-5-5", 1.0, 1.0, 0.0, 0, 0, 0, 0)
+
+
+class RenameSuggest(AppCase):
+    """Tab in the rename box asks Haiku for a name off the curses thread; the name only fills the box, and only Enter renames."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.named = session("named", "/p/alpha", state="blocked")
+        self.poll(self.named, session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.tmux = RenameTmux()
+        self.app.cursor = ("session", "named")
+        path = requests_file(tmp.name, "write a poem about tea", "now a csv parser")
+        self.app.poller.transcripts.path = lambda sid: path if sid == "named" else None
+        self.answers = [(named_call("fix-login-flow"), None), (named_call("tea poem and csv parser"), None)]
+        self.asked = []
+        self.release = threading.Event()
+        self.release.set()
+        self.addCleanup(self.release.set)
+        test = self
+
+        def suggest(claude, excerpt, cwd):
+            test.asked.append((excerpt, threading.current_thread() is threading.main_thread()))
+            test.release.wait(5)
+            return test.answers.pop(0) if test.answers else (None, "no more answers")
+
+        def fetch(claude):
+            return [test.named], None
+
+        for p in (
+            mock.patch.object(sidebar, "suggest_name", suggest),
+            mock.patch.object(sidebar, "summary_scratch", return_value=tmp.name),
+            mock.patch.object(sidebar, "fetch_sessions", fetch),
+            mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0.01),
+            mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0.2),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def keys(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def answered(self):
+        self.release.set()
+        if self.app.namer is not None:
+            self.app.namer.join(5)
+        self.app.refresh()
+
+    def settle(self):
+        if self.app.renamer is not None:
+            self.app.renamer.join(5)
+        self.app.refresh()
+
+    def test_tab_puts_a_name_in_the_box_and_types_nothing(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "fix-login-flow")
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertIsNone(self.app.renamer)
+        self.assertEqual([on_main for _, on_main in self.asked], [False])
+        self.assertIn("write a poem about tea", self.asked[0][0])
+
+    def test_the_box_says_it_is_asking_while_the_call_runs(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t")
+        self.assertIn(sidebar.NAME_ASKING, [t for t, _ in self.app.bottom_lines(39)])
+        self.answered()
+        self.assertNotIn(sidebar.NAME_ASKING, [t for t, _ in self.app.bottom_lines(39)])
+
+    def test_tab_again_sends_the_first_name_and_gets_another(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.keys("\t")
+        self.answered()
+        self.assertIn("fix-login-flow", self.asked[1][0])
+        self.assertEqual(self.app.rename_edit["text"], "tea poem and csv parser")
+
+    def test_tab_while_asking_starts_no_second_call(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\t", "\t")
+        self.answered()
+        self.assertEqual(len(self.asked), 1)
+
+    def test_enter_takes_it_through_the_rename_path(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.keys("\r")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fix-login-flow")])
+
+    def test_enter_while_asking_submits_the_box_and_drops_the_answer(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "-", "2", "\t")
+        self.assertEqual(self.app.rename_edit["asking"][1], "emx-test-named-2")
+        self.keys("\r")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename emx-test-named-2")])
+        self.answered()
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(len(self.app.tmux.typed), 1)
+
+    def test_esc_cancels_and_a_late_answer_is_dropped(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b")
+        self.answered()
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(self.app.tmux.typed, [])
+
+    def test_his_typing_is_never_overwritten(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "x")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-namedx")
+        self.assertNotIn("asking", self.app.rename_edit)
+
+    def test_a_reopened_box_ignores_the_old_answer(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b", sidebar.CTRL_R)
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
+        self.assertEqual(self.app.rename_edit["offered"], [])
+
+    def test_a_failure_keeps_the_text_and_shows_the_error(self):
+        self.answers = [(None, "claude -p timed out")]
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
+        self.assertEqual(self.app.rename_edit["hint"], "claude -p timed out")
+
+    def test_a_retry_after_a_failure_says_it_is_asking_again(self):
+        self.answers = [(None, "claude -p timed out")]
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertIn("claude -p timed out", [t for t, _ in self.app.bottom_lines(39)])
+        self.release.clear()
+        self.keys("\t")
+        shown = [t for t, _ in self.app.bottom_lines(39)]
+        self.assertIn(sidebar.NAME_ASKING, shown)
+        self.assertNotIn("claude -p timed out", shown)
+        self.answered()
+
+    def test_an_answer_that_arrived_since_the_last_frame_is_shown_and_tab_starts_nothing(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.app.namer.join(5)
+        self.keys("\t")
+        self.assertEqual(self.app.rename_edit["text"], "fix-login-flow")
+        self.assertEqual(len(self.asked), 1)
+        self.assertIsNone(self.app.namer)
+
+    def test_tab_in_a_new_box_while_an_old_call_finishes_says_so(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b", sidebar.CTRL_R, "\t")
+        self.assertEqual(self.app.rename_edit["hint"], sidebar.NAME_STILL_FINISHING)
+        self.answered()
+        self.assertEqual(len(self.asked), 1)
+
+
 class FolderListingsOffThread(unittest.TestCase):
     def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
         release = threading.Event()
@@ -2304,6 +2466,131 @@ class TranscriptReader(unittest.TestCase):
         self.assertEqual(
             (dict(poller.transcripts.wanted), set(poller.summaries.wanted), set(poller.resolver.wanted)), wanted,
         )
+
+    def test_path_is_the_file_read_for_a_listed_session(self):
+        self.write("-tmp-a", U1, transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", U1)])
+        self.reader.read_all()
+        self.assertEqual(self.reader.path("s1"), self.reader.stamps["s1"][0])
+        self.assertTrue(self.reader.path("s1").endswith(f"{U1}.jsonl"))
+        self.assertIsNone(self.reader.path("unknown"))
+
+
+def requests_file(folder, *requests, name="s.jsonl"):
+    path = Path(folder, name)
+    lines = []
+    for text in requests:
+        lines.append(transcript_line("user", text))
+        lines.append(transcript_line("assistant", [{"type": "text", "text": f"Reply to {text}."}]))
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return str(path)
+
+
+class ReadRequests(unittest.TestCase):
+    def test_reads_read_only_and_never_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = requests_file(d, "write a poem", "now a csv parser")
+            before = os.stat(path)
+            with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
+                found = sidebar.read_requests(path)
+            self.assertEqual(found, (["write a poem", "now a csv parser"], None, True))
+            self.assertEqual([c.args[1] for c in opened.call_args_list], ["rb"])
+            self.assertEqual(os.stat(path).st_mtime_ns, before.st_mtime_ns)
+
+    def test_a_big_file_keeps_first_and_latest_and_marks_the_gap(self):
+        padding = json.dumps({"type": "attachment", "x": "p" * 100})
+        lines = [transcript_line("user", "early 1"), transcript_line("user", "early 2")]
+        lines += [padding] * 30
+        lines += [transcript_line("user", f"middle {i}") for i in range(3)]
+        lines += [padding] * 30
+        lines += [transcript_line("user", "late 1"), transcript_line("user", "late 2")]
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(core, "NAME_READ_MAX_BYTES", 4096):
+            path = Path(d, "big.jsonl")
+            path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+            self.assertGreater(os.stat(path).st_size, 4096)
+            requests, gap_at, ok = sidebar.read_requests(str(path))
+        self.assertTrue(ok)
+        self.assertEqual(requests, ["early 1", "early 2", "late 1", "late 2"])
+        self.assertEqual(gap_at, 2)
+
+    def test_missing_file_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(sidebar.read_requests(os.path.join(d, "missing.jsonl")), (None, None, False))
+
+
+NAME_JSON = json.dumps({"result": "tea poem and csv parser", "is_error": False, "duration_ms": 700,
+                        "total_cost_usd": 0.001, "usage": {"input_tokens": 50, "output_tokens": 8},
+                        "modelUsage": {"claude-haiku-5-5": {}}})
+
+
+class SuggestName(unittest.TestCase):
+    def test_every_failure_is_a_line_never_a_raise(self):
+        for exc in (FileNotFoundError(), subprocess.TimeoutExpired("claude", 30), OSError("boom")):
+            with self.subTest(exc=exc), mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                call, error = sidebar.suggest_name("claude", "x", "/tmp")
+                self.assertIsNone(call)
+                self.assertIsInstance(error, str)
+        for done, want in ((completed(1, json.dumps({"is_error": True, "result": "Not logged in"})), "Not logged in"),
+                           (completed(2, "", "\n  bad flag\n"), "bad flag"),
+                           (completed(3), "claude -p exited with 3"),
+                           (completed(1, BUDGET_STOP_JSON), "Reached maximum budget ($0.00001)")):
+            with self.subTest(want=want), mock.patch.object(sidebar.subprocess, "run", return_value=done):
+                self.assertEqual(sidebar.suggest_name("claude", "x", "/tmp"), (None, want))
+
+    def test_a_refusal_is_the_name_line(self):
+        refused = json.dumps({"is_error": True, "stop_reason": "refusal", "result": "API Error: can't help. Start a new session."})
+        for code in (0, 1):
+            with self.subTest(code=code), mock.patch.object(sidebar.subprocess, "run", return_value=completed(code, refused)):
+                self.assertEqual(sidebar.suggest_name("claude", "x", "/tmp"), (None, sidebar.NAME_REFUSED))
+        self.assertEqual(sidebar.NAME_REFUSED, "Haiku wouldn't suggest a name for this session; type one instead.")
+
+    def test_the_excerpt_goes_on_stdin_and_the_call_runs_in_the_folder_given(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            call, error = sidebar.suggest_name("claude", "--help me", "/tmp/scratch")
+        self.assertIsNone(error)
+        self.assertEqual(run.call_args.kwargs["input"], "--help me")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/scratch")
+        self.assertEqual(run.call_args.args[0], core.name_args("claude"))
+        self.assertNotIn("--help me", run.call_args.args[0])
+        self.assertEqual(call.text, "tea poem and csv parser")
+
+
+class NamerWorker(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        scratch = mock.patch.object(sidebar, "summary_scratch", return_value=self.dir)
+        scratch.start()
+        self.addCleanup(scratch.stop)
+
+    def run_namer(self, path, offered=()):
+        namer = sidebar.Namer("claude", path, "a", "emx-test-a", False, offered)
+        namer.start()
+        namer.join(5)
+        return namer.result
+
+    def test_no_transcript_or_no_requests_asks_nothing(self):
+        Path(self.dir, "replies.jsonl").write_text(transcript_line("assistant", [{"type": "text", "text": "Hi."}]) + "\n")
+        with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("called claude")) as run:
+            self.assertEqual(self.run_namer(None), (None, sidebar.NAME_NO_TRANSCRIPT, None))
+            self.assertEqual(self.run_namer(os.path.join(self.dir, "replies.jsonl")), (None, sidebar.NAME_NO_REQUESTS, None))
+            self.assertEqual(self.run_namer(self.dir), (None, sidebar.NAME_UNREADABLE, None))
+        run.assert_not_called()
+
+    def test_a_name_already_offered_did_not_fit(self):
+        path = requests_file(self.dir, "write a poem")
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)):
+            name, error, call = self.run_namer(path, offered=("tea poem and csv parser",))
+        self.assertEqual((name, error), (None, sidebar.NAME_UNFIT))
+        self.assertEqual(call.model, "claude-haiku-5-5")
+
+    def test_a_good_answer_is_the_name(self):
+        path = requests_file(self.dir, "write a poem")
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            name, error, _ = self.run_namer(path)
+        self.assertEqual((name, error), ("tea poem and csv parser", None))
+        self.assertIn("write a poem", run.call_args.kwargs["input"])
 
 
 GOOD_JSON = json.dumps({"result": "\"Fixing the tests.\"\nmore", "is_error": False, "duration_ms": 600,

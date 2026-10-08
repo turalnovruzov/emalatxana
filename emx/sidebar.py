@@ -58,7 +58,7 @@ HELP = (
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
-    ("^r", "rename, via /rename in its open viewer"),
+    ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
@@ -78,7 +78,9 @@ CTRL_T = "\x14"
 CTRL_R = "\x12"
 CTRL_U = "\x15"
 CONFIRM_FOOTER = "ctrl+x to confirm"
-RENAME_FOOTER = "enter to save · esc to cancel"
+RENAME_FOOTER = "tab suggest · enter save · esc cancel"
+NAME_ASKING = "Asking Haiku for a name…"
+NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
@@ -738,19 +740,26 @@ def summary_scratch() -> str:
 
 
 def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
-    """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises.
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku sum up `excerpt`, or (None, one-line error). Never raises."""
+    return _run_haiku(core.summary_args(claude), excerpt, cwd)
 
-    The excerpt goes on stdin so text starting with `-` can't be read as a
-    flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded.
-    """
+
+def suggest_name(claude: str, excerpt: str, cwd: str) -> tuple:
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku suggest a session name from `excerpt`, or (None, one-line error). Never raises."""
+    call, error = _run_haiku(core.name_args(claude), excerpt, cwd)
+    return (call, error) if error != core.HAIKU_DECLINED else (None, NAME_REFUSED)
+
+
+def _run_haiku(args: list, text: str, cwd: str) -> tuple:
+    """The text goes on stdin so text starting with `-` can't be read as a flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded."""
     started = time.monotonic()
     try:
         done = subprocess.run(
-            core.summary_args(claude), input=excerpt, cwd=cwd, capture_output=True, encoding="utf-8",
+            args, input=text, cwd=cwd, capture_output=True, encoding="utf-8",
             errors="replace", timeout=SUMMARY_TIMEOUT,
         )
     except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
+        return None, f"can't find the claude command ({args[0]})"
     except subprocess.TimeoutExpired:
         return None, "claude -p timed out"
     except (OSError, ValueError) as exc:
@@ -762,6 +771,71 @@ def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
             return None, error
         return None, core.first_message(done.stderr) or f"claude -p exited with {done.returncode}"
     return core.parse_summary_output(done.stdout, wall_ms)
+
+
+def read_requests(path: str) -> tuple:
+    """(his requests in the transcript at `path`, oldest first; the index of the first one read after an unread middle, or None; whether the read succeeded). Never raises, and never writes.
+
+    A file over `core.NAME_READ_MAX_BYTES` is read as its head and its tail,
+    so a single line longer than its window is lost.
+    """
+    requests, gap_at = [], None
+    try:
+        size = os.stat(path).st_size
+        with open(path, "rb") as f:
+            for start, length, drop_first, drop_last in core.name_read_ranges(size):
+                f.seek(start)
+                # Split on newlines only: Claude Code writes U+2028 unescaped, and `splitlines` would cut a line there.
+                lines = f.read(length).decode("utf-8", errors="replace").split("\n")
+                if drop_first:
+                    lines, gap_at = lines[1:], len(requests)
+                if drop_last:
+                    lines = lines[:-1]
+                requests += core.user_requests(lines)
+    except (OSError, ValueError):
+        return None, None, False
+    return requests, gap_at, True
+
+
+NAME_NO_TRANSCRIPT = "emx hasn't found this session's transcript yet."
+NAME_UNREADABLE = "emx couldn't read this session's transcript."
+NAME_NO_REQUESTS = "No requests of yours in this session yet."
+NAME_REFUSED = "Haiku wouldn't suggest a name for this session; type one instead."
+NAME_UNFIT = "Haiku's name didn't fit; Tab for another."
+
+
+class Namer(threading.Thread):
+    """Asks Haiku for a name, on Tab in the rename box, off the curses thread. It only reads: the name goes into the box, and only Enter renames.
+
+    `result` is (name or None, error line or None, the call or None).
+    """
+
+    def __init__(self, claude: str, path: str | None, sid: str, current: str, unnamed: bool, offered):
+        super().__init__(daemon=True)
+        self.claude, self.path, self.sid = claude, path, sid
+        self.current, self.unnamed, self.offered = current, unnamed, tuple(offered)
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.ask()
+        except Exception as exc:
+            self.result = (None, f"asking for a name failed: {core.error_line(exc)}", None)
+
+    def ask(self) -> tuple:
+        if self.path is None:
+            return None, NAME_NO_TRANSCRIPT, None
+        requests, gap_at, ok = read_requests(self.path)
+        if not ok:
+            return None, NAME_UNREADABLE, None
+        excerpt = core.name_excerpt(self.current, self.unnamed, requests, gap_at, self.offered)
+        if not excerpt:
+            return None, NAME_NO_REQUESTS, None
+        call, error = suggest_name(self.claude, excerpt, summary_scratch())
+        if error:
+            return None, error, None
+        name = core.clean_name(call.text, self.sid, self.current, self.offered)
+        return (name, None, call) if name else (None, NAME_UNFIT, call)
 
 
 class Transcripts(threading.Thread):
@@ -857,6 +931,12 @@ class Transcripts(threading.Thread):
                     self.misses.pop(uuid, None)
                     return path
         return None
+
+    def path(self, sid: str) -> str | None:
+        """The transcript file last read for a listed session, or None while none has been."""
+        with self.lock:
+            stamp = self.stamps.get(sid)
+        return stamp[0] if stamp else None
 
     def snapshot(self) -> dict:
         """A copy of what each session's transcript says now, leaving `take`'s changed flag alone."""
@@ -1043,7 +1123,10 @@ class App:
         self.confirm = None
         self.find = None
         self.rename_edit = None
+        self.rename_gen = 0
         self.renamer = None
+        self.namer = None
+        self.namer_gen = None
         self.renaming = {}
         self.pin_misses = {}
         self.rename_misses = {}
@@ -1563,7 +1646,11 @@ class App:
         if blocked:
             self.say(blocked, error=True)
             return
-        self.rename_edit = {"id": session.id, "old": session.name, "text": core.rename_start(session), "hint": ""}
+        self.rename_gen += 1
+        self.rename_edit = {
+            "id": session.id, "old": session.name, "text": core.rename_start(session), "hint": "",
+            "offered": [], "gen": self.rename_gen,
+        }
         self.rename_misses = {}
         self.say("")
 
@@ -1573,6 +1660,8 @@ class App:
             self.rename_edit = None
         elif key in ENTER_KEYS:
             self.submit_rename()
+        elif key == "\t":
+            self.ask_name()
         elif key in BACKSPACE_KEYS:
             edit.update(text=edit["text"][:-1], hint="")
         elif key == CTRL_U:
@@ -1593,6 +1682,47 @@ class App:
         self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
+
+    def ask_name(self) -> None:
+        """Tab in the rename box: one Haiku call for a name, which lands in the box and renames nothing."""
+        edit = self.rename_edit
+        if self.namer is not None and not self.namer.is_alive():
+            # An answer for this box that arrived since the last frame is shown, not replaced unseen by another call.
+            answered_here = self.namer_gen == edit["gen"]
+            self.finish_name()
+            if answered_here:
+                return
+        if self.namer is not None:
+            if self.namer_gen != edit["gen"]:
+                edit["hint"] = NAME_STILL_FINISHING
+            return
+        sid = edit["id"]
+        self.namer = Namer(
+            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["old"] == sid, edit["offered"],
+        )
+        self.namer_gen = edit["gen"]
+        edit["hint"] = ""
+        edit["asking"] = (edit["gen"], edit["text"])
+        self.namer.start()
+
+    def finish_name(self) -> None:
+        """Puts a finished call's name into the box, only while it is the box that asked and he hasn't typed since."""
+        namer = self.namer
+        if namer is None or namer.is_alive():
+            return
+        self.namer = None
+        edit = self.rename_edit
+        if edit is None or edit["gen"] != self.namer_gen:
+            return
+        asking = edit.pop("asking", None)
+        if asking is None or asking[1] != edit["text"]:
+            return
+        name, error, _ = namer.result or (None, "asking for a name failed", None)
+        if name:
+            edit.update(text=name, hint="")
+            edit["offered"].append(name)
+        else:
+            edit["hint"] = error
 
     def finish_rename(self) -> None:
         renamer = self.renamer
@@ -1870,7 +2000,7 @@ class App:
             room = None if height is None else height - 2 - len(lines)
             return lines + self.prompt_lines(width, room)
         if self.rename_edit is not None:
-            hint = self.rename_edit["hint"]
+            hint = self.rename_edit["hint"] or (NAME_ASKING if self.rename_edit.get("asking") else "")
             lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(RENAME_FOOTER, width)[:2]]
         if self.find is not None:
@@ -2200,6 +2330,7 @@ class App:
             self.finish_close()
             self.finish_interrupt()
             self.finish_rename()
+            self.finish_name()
             peeked = self.peeked()
             fresh_list = self.take_poll()
             self.take_placements()

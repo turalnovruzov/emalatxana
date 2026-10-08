@@ -3035,6 +3035,130 @@ class SummaryArgs(unittest.TestCase):
         self.assertEqual(core.SUMMARY_MAX_BUDGET_USD, 0.002)
 
 
+class UserRequests(unittest.TestCase):
+    def test_every_real_fixture_agrees_with_parse_transcript(self):
+        paths = sorted(TRANSCRIPTS.glob("*.jsonl"))
+        self.assertGreater(len(paths), 0)
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                requests = core.user_requests(text.splitlines())
+                self.assertEqual(requests[-1], core.parse_transcript(text).prompt)
+
+    def test_only_his_text_in_order(self):
+        lines = [
+            entry("user", "first"),
+            entry("assistant", [{"type": "text", "text": "A reply of Claude's."}]),
+            entry("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "tool output"}]),
+            entry("user", "meta text", isMeta=True),
+            entry("user", "subagent text", isSidechain=True),
+            entry("user", "compaction summary", isCompactSummary=True),
+            entry("user", "<command-name>/rename</command-name><command-args>x</command-args>"),
+            entry("user", [{"type": "text", "text": "[Request interrupted by user]"}]),
+            "{not json",
+            "[1, 2]",
+            entry("user", [{"type": "text", "text": "second"}]),
+        ]
+        self.assertEqual(core.user_requests(lines), ["first", "second"])
+
+
+class NameReadRanges(unittest.TestCase):
+    def test_whole_up_to_the_cap_then_head_and_tail(self):
+        cap, half = core.NAME_READ_MAX_BYTES, core.NAME_READ_MAX_BYTES // 2
+        self.assertEqual(core.name_read_ranges(cap), [(0, cap, False, False)])
+        size = cap + 1
+        self.assertEqual(core.name_read_ranges(size), [(0, half, False, True), (size - half, half, True, False)])
+        self.assertEqual(core.name_read_ranges(0), [])
+
+
+class NameExcerpt(unittest.TestCase):
+    def excerpt(self, requests, gap_at=None, offered=(), current="emx-test-a", unnamed=False):
+        return core.name_excerpt(current, unnamed, requests, gap_at, offered)
+
+    def test_an_unnamed_session_has_no_current_name(self):
+        self.assertIn("Current name: none", self.excerpt(["go"], current="sid-1", unnamed=True))
+        self.assertIn("Current name: emx-test-a", self.excerpt(["go"]))
+
+    def test_every_request_oldest_first_and_no_reply(self):
+        lines = [entry("user", "write a poem"), entry("assistant", [{"type": "text", "text": "Here it is."}]),
+                 entry("user", "now a csv parser")]
+        text = self.excerpt(core.user_requests(lines))
+        self.assertLess(text.index("write a poem"), text.index("now a csv parser"))
+        self.assertNotIn("Here it is", text)
+
+    def test_requests_go_whole_until_the_total_cap_then_each_is_cut(self):
+        long = "x" * 5000
+        self.assertIn(long, self.excerpt(["a", long, "b"]))
+        many = ["y" * 3000] * 8 + [long]
+        self.assertGreater(sum(map(len, many)), core.NAME_REQUESTS_MAX_CHARS)
+        text = self.excerpt(many)
+        self.assertNotIn(long, text)
+        self.assertIn("x" * (core.NAME_REQUEST_MAX_CHARS - 1) + "…", text)
+
+    def test_the_gap_marker_sits_before_the_first_request_from_the_tail(self):
+        text = self.excerpt(["one", "two", "three"], gap_at=2)
+        self.assertLess(text.index("two"), text.index(core.NAME_GAP))
+        self.assertLess(text.index(core.NAME_GAP), text.index("three"))
+        self.assertNotIn(core.NAME_GAP, self.excerpt(["one", "two", "three"]))
+
+    def test_a_gap_after_the_last_request_is_still_marked(self):
+        text = self.excerpt(["one", "two"], gap_at=2)
+        self.assertGreater(text.index(core.NAME_GAP), text.index("two"))
+
+    def test_a_very_long_session_keeps_the_first_and_the_latest(self):
+        requests = [f"request {i:03d} " + "z" * 488 for i in range(200)]
+        text = self.excerpt(requests)
+        header = text[: text.index("- request")]
+        self.assertLessEqual(len(text) - len(header), core.NAME_REQUESTS_MAX_CHARS)
+        self.assertIn(requests[0], text)
+        self.assertIn(requests[-1], text)
+        self.assertIn("requests left out", text)
+
+    def test_offered_names_are_listed_up_to_the_cap(self):
+        self.assertIn("a-b", self.excerpt(["go"], offered=("a-b",)))
+        offered = [f"name {i:02d}" for i in range(12)]
+        text = self.excerpt(["go"], offered=offered)
+        self.assertNotIn("name 00", text)
+        self.assertNotIn("name 01", text)
+        for name in offered[2:]:
+            self.assertIn(name, text)
+
+    def test_no_requests_gives_nothing(self):
+        self.assertEqual(self.excerpt([]), "")
+
+
+class NameArgs(unittest.TestCase):
+    def test_only_the_instruction_and_budget_differ_from_summaries(self):
+        names, summaries = core.name_args("claude"), core.summary_args("claude")
+        self.assertEqual(len(names), len(summaries))
+        differ = [i for i, (a, b) in enumerate(zip(names, summaries)) if a != b]
+        self.assertEqual(differ, [names.index("--system-prompt") + 1, names.index("--max-budget-usd") + 1])
+        self.assertEqual(names[names.index("--system-prompt") + 1], core.NAME_INSTRUCTION)
+        self.assertEqual(names[names.index("--max-budget-usd") + 1], str(core.NAME_MAX_BUDGET_USD))
+
+    def test_haiku_and_never_bare(self):
+        args = core.name_args("claude")
+        self.assertEqual(args[args.index("--model") + 1], "haiku")
+        self.assertNotIn("--bare", args)
+
+
+class CleanName(unittest.TestCase):
+    def test_the_first_line_without_quotes(self):
+        self.assertEqual(core.clean_name("\"fix-login-flow\"\n", "s1", "emx-test-s1", ()), "fix-login-flow")
+        self.assertEqual(core.clean_name("\n`tea poem and csv parser`\nmore", "s1", "s1", ()), "tea poem and csv parser")
+
+    def test_markdown_emphasis_and_a_name_label_are_dropped(self):
+        for text in ("**tea poem**", "__tea poem__", "Name: tea poem", "**Name:** tea poem", "name:tea poem"):
+            with self.subTest(text=text):
+                self.assertEqual(core.clean_name(text, "s1", "emx-test-s1", ()), "tea poem")
+
+    def test_a_name_emx_would_not_type_or_already_offered_gives_none(self):
+        for text in ("", "  \n", "emx-test-s1", "fix login", "bad\x01name", "ends with\\", "n" * (core.RENAME_MAX + 1),
+                     "\U0001f600" * (core.RENAME_MAX // 2 + 1)):
+            with self.subTest(text=text):
+                self.assertIsNone(core.clean_name(text, "s1", "emx-test-s1", ("fix login",)))
+
+
 class SummaryExcerpt(unittest.TestCase):
     def excerpt(self, name, session):
         return core.summary_excerpt(session, core.parse_transcript(real_transcript(name)))
@@ -3094,6 +3218,23 @@ class SummaryOutput(unittest.TestCase):
         stopped = json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": 0.0001639,
                               "errors": ["Reached maximum budget ($0.00001)"]})
         self.assertEqual(core.parse_summary_output(stopped, 1), (None, "Reached maximum budget ($0.00001)"))
+
+    def test_a_refusal_is_emxs_own_neutral_line_not_the_clis_advice(self):
+        refused = json.dumps({"type": "result", "subtype": "success", "is_error": True, "stop_reason": "refusal", "num_turns": 2,
+                              "result": "API Error: Haiku 5.5 can't help with this. Start a new session to continue."})
+        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_DECLINED))
+        self.assertNotIn("new session", core.HAIKU_DECLINED)
+        self.assertNotIn("name", core.HAIKU_DECLINED)
+
+    def test_a_refusal_with_no_result_is_the_same_line(self):
+        refused = json.dumps({"stop_reason": "refusal", "is_error": False, "result": ""})
+        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_DECLINED))
+
+    def test_a_usable_result_survives_a_refusal_stop_reason(self):
+        kept = json.dumps({"stop_reason": "refusal", "is_error": False, "result": "tea poem"})
+        call, err = core.parse_summary_output(kept, 1)
+        self.assertIsNone(err)
+        self.assertEqual(call.text, "tea poem")
 
     def test_cleaning_takes_the_first_line_without_controls_quotes_or_full_stop(self):
         self.assertEqual(core.clean_summary("\x1b[31m\"Fixing tests.\"\x07\nsecond"), "Fixing tests")

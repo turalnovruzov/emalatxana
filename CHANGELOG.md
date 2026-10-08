@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.3.0 — 2026-10-08
+
+- In the rename box (Ctrl+R), Tab asks Claude Haiku for a name drawn from the requests you made in that session (for a very long one, the first and the latest); Tab again for another. Edit it if you like, Enter renames, Esc cancels.
+
 ## 1.2.1 — 2026-10-08
 
 - A hiccup in the session list no longer closes the sessions you have open; a view still closes once its session is really gone.
