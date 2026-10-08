@@ -81,7 +81,7 @@ Everything committed, every PR body and issue comment is public: no secrets, no 
 
 **A new library, a new third-party service, or a major version bump requires Tural's word before it lands.** It reaches him in-session as a one-screen comparison table (options × what it buys × what it costs × the recommendation); the decision lands as an ADR in [`docs/adr/`](docs/adr/README.md).
 
-Dependencies are gated in conversation: no `ask` rules sit in [`.claude/settings.json`](.claude/settings.json). [`.claude/hooks/dependency-record-check.sh`](.claude/hooks/dependency-record-check.sh) reports at `SessionStart` any dependency with no record in `docs/adr/` or [`docs/stack.md`](docs/stack.md): a report, not a gate, Python manifests only; extending it to the manifest the first stack decision brings is part of that decision's change. **No stack call has been made**; do not pre-populate `docs/stack.md`.
+Dependencies are gated in conversation: no `ask` rules sit in [`.claude/settings.json`](.claude/settings.json). [`.claude/hooks/dependency-record-check.sh`](.claude/hooks/dependency-record-check.sh) reports at `SessionStart` any dependency with no record in `docs/adr/` or [`docs/stack.md`](docs/stack.md): a report, not a gate, Python manifests and lockfiles only; extending it to the manifest the first stack decision brings is part of that decision's change. **No stack call has been made**; do not pre-populate `docs/stack.md`.
 
 ## Verification
 
@@ -89,7 +89,7 @@ He never reads the code; the failure to defend against is **an agent tuning the 
 
 1. **Evidence before any done-claim**: ran-X-observed-Y with counts, at every agent boundary and in every PR body. A claim that cannot carry evidence is a hypothesis.
 2. **An empty or skipped check is red, never green.**
-3. **He checks by using it:** exercise the real tool (in throwaway sessions only) and report how he can try it.
+3. **He checks by using it:** Before a done-claim on anything he sees, exercise the real tool (in throwaway sessions only) and report how he can try it.
 4. The test suite's shape is not decided; it is worked out in-session when the first code needs checks.
 
 ## Delivery to Tural
