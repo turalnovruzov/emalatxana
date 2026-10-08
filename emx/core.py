@@ -2579,9 +2579,20 @@ def session_summary(session: Session, transcript: Transcript | None) -> str:
 
 def row_detail(session: Session, transcript: Transcript | None, haiku: "Summary | None" = None) -> str:
     """The detail for `row_layout`: Haiku's line while it is for the state the row is in, else the summary, or `waitingFor` when there is none."""
-    if haiku and haiku.text and haiku.category == category(session) and haiku.category in SUMMARY_CATEGORIES:
+    if haiku and haiku.text and haiku.category == summary_state(session, transcript):
         return haiku.text
     return session_summary(session, transcript) or session.waiting_for
+
+
+INTERRUPTED_STATE = f"{WORKING}/interrupted"
+
+
+def summary_state(session: Session, transcript: Transcript | None) -> str:
+    """The state a Haiku line is for: the category, or `INTERRUPTED_STATE` for a working session that was interrupted, which `claude agents` still lists as working."""
+    cat = category(session)
+    if cat == WORKING and (idle(session) or (transcript is not None and transcript.latest == "interrupted")):
+        return INTERRUPTED_STATE
+    return cat
 
 
 SUMMARY_MODEL = "haiku"
@@ -2644,7 +2655,8 @@ def summary_excerpt(session: Session, transcript: Transcript | None) -> str:
         return ""
     if cat == NEEDS_INPUT and session.waiting_for:
         parts.insert(0, f"Waiting for: {_cap(session.waiting_for, SUMMARY_SHORT_CAP)}")
-    return "\n".join([f"State: {SUMMARY_WORDS[cat]}", *parts])
+    state = "interrupted" if summary_state(session, transcript) == INTERRUPTED_STATE else SUMMARY_WORDS[cat]
+    return "\n".join([f"State: {state}", *parts])
 
 
 @dataclass(frozen=True)
@@ -2711,13 +2723,13 @@ def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
     ), None
 
 
-def summary_due(session: Session, excerpt: str, last: "Summary | None", failures: int, failed_at: float | None, now: float) -> bool:
+def summary_due(session: Session, excerpt: str, last: "Summary | None", failures: int, failed_at: float | None, now: float, transcript: Transcript | None = None) -> bool:
     """Whether to ask Haiku about this session now: only when what it would be shown changed, a state change at once and otherwise every `SUMMARY_EVERY_SECONDS`, backing off after failures."""
     if not excerpt or (last is not None and last.excerpt == excerpt):
         return False
     if failed_at is not None and now - failed_at < retry_after(failures):
         return False
-    if last is None or last.category != category(session):
+    if last is None or last.category != summary_state(session, transcript):
         return True
     return now - last.at >= SUMMARY_EVERY_SECONDS
 

@@ -2273,6 +2273,21 @@ class Summarise(unittest.TestCase):
 
 
 class SummaryScratch(unittest.TestCase):
+    def test_a_folder_open_to_group_or_others_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
+            target = os.path.join(tmp, f"emx-summary-{os.getuid()}")
+            os.mkdir(target)
+            os.chmod(target, 0o755)
+            with self.assertRaises(OSError):
+                sidebar.summary_scratch()
+
+    def test_a_folder_of_another_user_is_refused(self):
+        other = os.stat_result((0o040700, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
+            with mock.patch.object(sidebar.os, "lstat", return_value=other):
+                with self.assertRaises(OSError):
+                    sidebar.summary_scratch()
+
     def test_it_is_one_private_empty_folder_reused_across_calls(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
             first = sidebar.summary_scratch()
@@ -2436,6 +2451,32 @@ class HaikuRows(AppCase):
         self.app.refresh()
         self.app.draw()
         self.assertIn("Sleep for 9 seconds", self.screen())
+        self.assertNotIn("Wrote the parser", self.screen())
+
+    def test_an_interrupted_row_drops_the_line_written_before_the_interrupt(self):
+        self.poll(core.Session("a", "emx-test-a", "/p/alpha", "working", "idle", "", None, True, "u-a"))
+        self.app.poller.summaries.found = {"a": core.Summary("Reading the config files", core.WORKING, "x", 0.0)}
+        self.app.poller.summaries.changed = True
+        self.app.poller.transcripts.found = {"a": core.Transcript(prompt="Fix it", latest="interrupted")}
+        self.app.poller.transcripts.changed = True
+        self.app.refresh()
+        self.app.draw()
+        self.assertIn("interrupted", self.screen())
+        self.assertNotIn("Reading the config files", self.screen())
+
+    def test_the_closing_and_armed_labels_win_over_a_line_on_screen(self):
+        self.poll(session("a", "/p/alpha", state="done"))
+        self.app.poller.summaries.found = {"a": core.Summary("Wrote the parser", core.DONE, "x", 0.0)}
+        self.app.poller.summaries.changed = True
+        self.app.refresh()
+        self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
+        self.app.draw()
+        self.assertIn("ctrl+x again to close", self.screen())
+        self.assertNotIn("Wrote the parser", self.screen())
+        self.app.confirm = None
+        self.app.closing["a"] = None
+        self.app.draw()
+        self.assertIn("closing…", self.screen())
         self.assertNotIn("Wrote the parser", self.screen())
 
     def test_without_summaries_today_s_line_shows(self):

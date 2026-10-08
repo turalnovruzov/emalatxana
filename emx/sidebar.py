@@ -732,8 +732,8 @@ def summary_scratch() -> str:
     path = os.path.join(tempfile.gettempdir(), f"emx-summary-{os.getuid()}")
     os.makedirs(path, mode=0o700, exist_ok=True)
     info = os.lstat(path)
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise OSError(f"{path} is not a folder of yours")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise OSError(f"{path} is not a private folder of yours")
     return path
 
 
@@ -916,7 +916,7 @@ class Summaries(threading.Thread):
         for sid, session in wanted.items():
             excerpt = core.summary_excerpt(session, transcripts.get(sid))
             count, failed_at = self.failures.get(sid, (0, None))
-            if core.summary_due(session, excerpt, found.get(sid), count, failed_at, now):
+            if core.summary_due(session, excerpt, found.get(sid), count, failed_at, now, transcripts.get(sid)):
                 due.append((self.tried.get(sid, 0.0), sid, session, excerpt))
         with self.lock:
             for sid in set(self.found) - set(wanted):
@@ -928,6 +928,7 @@ class Summaries(threading.Thread):
         if not due:
             return
         _, sid, session, excerpt = min(due, key=lambda d: d[0])
+        state = core.summary_state(session, transcripts.get(sid))
         self.tried[sid] = now
         if self.scratch is None:
             self.scratch = summary_scratch()
@@ -941,7 +942,7 @@ class Summaries(threading.Thread):
             self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
             if sid in self.wanted:
                 # Kept even when empty, so the unchanged excerpt isn't asked about again every tick.
-                self.found[sid] = core.Summary(call.text, core.category(session), excerpt, time.monotonic())
+                self.found[sid] = core.Summary(call.text, state, excerpt, time.monotonic())
                 self.changed = True
 
     def take(self):

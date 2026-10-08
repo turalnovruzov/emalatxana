@@ -2973,6 +2973,16 @@ class RowDetail(unittest.TestCase):
         self.assertEqual(got, core.row_detail(st("working"), working))
         self.assertNotEqual(got, "Wrote the parser")
 
+    def test_a_line_written_before_the_interrupt_gives_way_to_interrupted_until_a_new_one_arrives(self):
+        interrupted = core.Transcript(prompt="Fix it", reply="Reading files", latest="interrupted")
+        idle = mk(state="working", status="idle")
+        before = self.haiku("Reading the config files", core.WORKING)
+        self.assertEqual(core.row_detail(idle, interrupted, before), "interrupted")
+        after = self.haiku("Stopped before editing", core.INTERRUPTED_STATE)
+        self.assertEqual(core.row_detail(idle, interrupted, after), "Stopped before editing")
+        replying = core.Transcript(latest="reply", reply="Hi", reply_line="Hi")
+        self.assertEqual(core.row_detail(mk(state="working"), replying, after), "Hi")
+
     def test_every_state_shows_haikus_line(self):
         for state, cat in (("blocked", core.NEEDS_INPUT), ("working", core.WORKING), ("done", core.DONE), ("stopped", core.STOPPED)):
             self.assertEqual(core.row_detail(st(state), None, self.haiku("Line", cat)), "Line", state)
@@ -3085,6 +3095,20 @@ class SummaryDue(unittest.TestCase):
 
     def test_the_first_is_due(self):
         self.assertTrue(self.due(last=None))
+
+    def test_an_interrupt_is_due_at_once_and_its_excerpt_says_so(self):
+        t = core.Transcript(prompt="Fix it", reply="Reading files", latest="reply")
+        working = mk(state="working")
+        idle = mk(state="working", status="idle")
+        before = core.summary_excerpt(working, t)
+        after = core.summary_excerpt(idle, t)
+        self.assertNotEqual(before, after)
+        self.assertIn("State: interrupted", after)
+        last = core.Summary("line", core.WORKING, before, 100.0)
+        self.assertFalse(core.summary_due(working, before, last, 0, None, 101.0, t))
+        self.assertTrue(core.summary_due(idle, after, last, 0, None, 101.0, t))
+        interrupted = core.Transcript(prompt="Fix it", latest="interrupted")
+        self.assertTrue(core.summary_due(working, core.summary_excerpt(working, interrupted), last, 0, None, 101.0, interrupted))
 
     def test_a_failure_backs_off(self):
         self.assertFalse(self.due(last=None, failures=1, failed_at=200.0 - core.retry_after(1) + 1))
