@@ -492,14 +492,16 @@ class Focus(AppCase):
         self.assertEqual(self.app.cursor, ("session", "c"))
         self.assertEqual(self.app.tmux.cleared, [])
 
-    def test_the_left_mark_seen_before_the_panel_is_active_waits_for_it(self):
+    def test_a_left_mark_seen_while_the_panel_is_inactive_is_dropped_and_never_moves_the_cursor(self):
+        # ← marked the panel, then Ctrl+\ took focus back to main before the panel read it.
         self.leave_panel()
         self.app.tmux.back = True
         self.app.read_focus()
-        self.assertEqual((self.app.focused, self.app.tmux.cleared), (False, []))
+        self.assertEqual((self.app.focused, self.app.tmux.cleared), (False, ["%1"]))
         self.app.tmux.panel_active = True
         self.app.read_focus()
-        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.assertIs(self.app.focused, True)
+        self.assertEqual(self.app.cursor, ("session", "c"))
         self.assertEqual(self.app.tmux.cleared, ["%1"])
 
     def test_a_mark_tmux_fails_to_clear_still_records_focus(self):
@@ -701,11 +703,44 @@ class AutoRestore(AppCase):
         self.restore_cycles(["agent-view", "named-viewer", "agent-view"])
         self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
 
+    def age_last_restore(self):
+        pane, _, count = self.app.last_restore
+        self.app.last_restore = (pane, time.monotonic() - core.RESTORE_BACKOFF_SECONDS - 1, count)
+
     def test_after_the_backoff_window_the_agent_view_is_restored_again(self):
         self.restore_cycles(["agent-view"])
-        self.app.last_restore = ("%2", time.monotonic() - core.RESTORE_BACKOFF_SECONDS - 1)
+        self.age_last_restore()
         self.restore_cycles(["", "agent-view"])
         self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
+
+    def test_the_agent_view_back_after_a_second_restore_stops_restoring_whatever_the_time(self):
+        self.restore_cycles(["agent-view"])
+        self.age_last_restore()
+        self.restore_cycles(["", "agent-view"])
+        self.age_last_restore()
+        self.restore_cycles(["", "agent-view"])
+        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
+        self.assertIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
+
+    def test_the_restored_notice_goes_by_itself(self):
+        self.show("agent-view")
+        self.app.check_main(self.app.main_pane)
+        self.settle()
+        self.assertIn("brought the session back", self.app.notice)
+        self.app.refresh()
+        self.assertIn("brought the session back", self.app.notice)
+        self.app.notice_until = time.monotonic() - 1
+        self.app.refresh()
+        self.assertEqual(self.app.notice, "")
+
+    def test_a_later_notice_is_not_cut_short_by_the_restored_notices_timer(self):
+        self.show("agent-view")
+        self.app.check_main(self.app.main_pane)
+        self.settle()
+        self.app.say("Session started.")
+        self.app.refresh()
+        self.assertEqual(self.app.notice, "Session started.")
+        self.assertIsNone(self.app.notice_until)
 
 
 if __name__ == "__main__":

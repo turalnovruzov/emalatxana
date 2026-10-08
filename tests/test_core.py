@@ -1168,6 +1168,14 @@ class CameBack(unittest.TestCase):
         self.assertFalse(core.came_back(active=True, marked=False))
 
 
+class NoticeExpiry(unittest.TestCase):
+    def test_a_timed_notice_goes_at_its_end_and_an_untimed_one_stays(self):
+        self.assertFalse(core.notice_expired(None, 1e9))
+        self.assertFalse(core.notice_expired(10.0, 9.9))
+        self.assertTrue(core.notice_expired(10.0, 10.0))
+        self.assertTrue(core.notice_expired(10.0, 11.0))
+
+
 class FocusStyle(unittest.TestCase):
     def test_selection_bar_and_title_follow_focus(self):
         self.assertIsNone(core.selection_bar(False, True))
@@ -1192,18 +1200,37 @@ class AutoRestore(unittest.TestCase):
                 self.assertIsNone(self.decide(state))
 
     def test_the_agent_view_back_soon_after_emxs_own_restore_gives_up(self):
-        soon = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS + 1)
+        soon = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS + 1, 1)
         self.assertEqual(self.decide(last_restore=soon), core.GIVE_UP)
         self.assertIsNone(self.decide(last_restore=soon, tried=True))
         self.assertIsNone(self.decide("unknown", last_restore=soon))
 
     def test_a_restore_long_ago_or_of_another_pane_does_not_hold_it_back(self):
-        long_ago = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS - 1)
+        long_ago = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS - 1, 1)
         self.assertEqual(self.decide(last_restore=long_ago), core.RESTORE)
-        self.assertEqual(self.decide(last_restore=("%7", self.NOW)), core.RESTORE)
+        self.assertEqual(self.decide(last_restore=("%7", self.NOW, 1)), core.RESTORE)
+
+    def test_the_agent_view_back_after_a_second_restore_gives_up_however_long_ago(self):
+        long_ago = self.NOW - 10 * core.RESTORE_BACKOFF_SECONDS
+        self.assertEqual(self.decide(last_restore=("%2", long_ago, 2)), core.GIVE_UP)
+        self.assertEqual(self.decide(last_restore=("%7", long_ago, 2)), core.RESTORE)
+
+    def test_restores_of_one_pane_add_up_and_another_pane_starts_again(self):
+        first = core.record_restore(None, "%2", 1.0)
+        self.assertEqual(first, ("%2", 1.0, 1))
+        self.assertEqual(core.record_restore(first, "%2", 9.0), ("%2", 9.0, 2))
+        self.assertEqual(core.record_restore(first, "%7", 9.0), ("%7", 9.0, 1))
+
+    def test_his_r_is_always_carried_out_and_emxs_restore_only_while_the_agent_view_shows(self):
+        self.assertTrue(core.restore_still_wanted(False, None))
+        self.assertTrue(core.restore_still_wanted(False, "ok"))
+        self.assertTrue(core.restore_still_wanted(True, "agent_view"))
+        for state in ("ok", "mismatch", "unknown", None):
+            with self.subTest(state=state):
+                self.assertFalse(core.restore_still_wanted(True, state))
 
     def test_an_ok_read_of_the_restored_pane_ends_the_backoff(self):
-        last = ("%2", self.NOW)
+        last = ("%2", self.NOW, 1)
         self.assertIsNone(core.last_restore_after(last, "%2", "ok"))
         for pane, state in (("%2", "agent_view"), ("%2", "unknown"), ("%2", "mismatch"), ("%7", "ok")):
             with self.subTest(pane=pane, state=state):

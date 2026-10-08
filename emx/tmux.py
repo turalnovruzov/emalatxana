@@ -126,12 +126,17 @@ class Tmux:
 
         The ids are baked in rather than read from options at keypress time,
         because tmux does not format-expand every -t target; the sidebar
-        rebinds after each switch, when the main pane's id changes.
+        rebinds after each switch, when the main pane's id changes. Only ←
+        may move the panel's cursor, so on the way to the sidebar this drops
+        any BACK_OPT mark a ← left behind before the panel could read it; the
+        mark goes first, or the panel could see itself active and marked.
+        Unsetting an option that is not set succeeds, so the drop never ends
+        the command list before the select.
         """
         self.run(
             "bind-key", "-n", key,
             "if-shell", "-F", f"#{{==:#{{pane_id}},{sidebar}}}",
-            f"select-pane -t {main}", f"select-pane -t {sidebar}",
+            f"select-pane -t {main}", f"set-option -p -u -t {sidebar} {BACK_OPT} ; select-pane -t {sidebar}",
         )
 
     def bind_left(self, sidebar: str, check: str, prompt_x: int) -> None:

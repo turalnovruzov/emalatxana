@@ -1047,7 +1047,7 @@ def cursor_on_focus(items: list, cursor, groups, main_sid: str):
 
 
 def came_back(active: bool, marked: bool) -> bool:
-    """Whether the panel has just been reached by ←: the binding marks it before selecting it, so the mark counts only once the panel is active."""
+    """Whether the panel has just been reached by ←: the binding marks it and selects it in one command list, so a mark on an inactive panel was left behind (focus moved on before the panel read it) and does not count."""
     return active and marked
 
 
@@ -1065,6 +1065,7 @@ def title_style(focused: bool) -> str:
 
 RESTORE, GIVE_UP = "restore", "give_up"
 RESTORE_BACKOFF_SECONDS = 5.0
+RESTORES_BEFORE_GIVING_UP = 2
 
 
 def auto_restore(state: str, pane_id: str, tried: bool, checking: bool, last_restore: tuple | None, now: float) -> str | None:
@@ -1074,17 +1075,41 @@ def auto_restore(state: str, pane_id: str, tried: bool, checking: bool, last_res
     session, and the session itself is untouched. A different session showing
     ("mismatch") is left to him, and so is a viewer emx already tried, so a
     refusal is said once rather than every half second. `last_restore` is
-    (pane id, time) of emx's latest automatic restore, kept until an "ok" read
-    of that pane (`last_restore_after`). The agent view back on that pane
-    within RESTORE_BACKOFF_SECONDS means the detection is probably wrong, and
+    (pane id, time, count) of emx's latest automatic restores of one pane
+    (`record_restore`), kept until an "ok" read of that pane
+    (`last_restore_after`). The agent view back on that pane within
+    RESTORE_BACKOFF_SECONDS, or back after RESTORES_BEFORE_GIVING_UP restores
+    with no "ok" read between them, means the detection is probably wrong, and
     restoring again would respawn main and take his focus on every cycle, so
     emx gives up and leaves the "press r" warning to him.
     """
     if state != "agent_view" or tried or checking:
         return None
-    if last_restore is not None and last_restore[0] == pane_id and now - last_restore[1] < RESTORE_BACKOFF_SECONDS:
-        return GIVE_UP
+    if last_restore is not None and last_restore[0] == pane_id:
+        _, at, count = last_restore
+        if now - at < RESTORE_BACKOFF_SECONDS or count >= RESTORES_BEFORE_GIVING_UP:
+            return GIVE_UP
     return RESTORE
+
+
+def record_restore(last_restore: tuple | None, pane_id: str, now: float) -> tuple:
+    """`last_restore` after emx restores `pane_id` at `now`: restores of the same pane add up until an "ok" read resets them."""
+    count = last_restore[2] + 1 if last_restore is not None and last_restore[0] == pane_id else 1
+    return (pane_id, now, count)
+
+
+def restore_still_wanted(auto: bool, state: str | None) -> bool:
+    """Whether a check's answer may still respawn main: always for his r, and for emx's own restore only while main still shows the agent view.
+
+    Otherwise he has moved on inside Claude Code meanwhile (picked a session,
+    or went back to work), and `state` (main's view now) says so.
+    """
+    return not auto or state == "agent_view"
+
+
+def notice_expired(until: float | None, now: float) -> bool:
+    """Whether a notice shown only for a while (`until` is when it ends, None for one that stays) is due to go."""
+    return until is not None and now >= until
 
 
 def last_restore_after(last_restore: tuple | None, pane_id: str, state: str) -> tuple | None:

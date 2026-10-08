@@ -21,6 +21,7 @@ LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
 GIT_SECONDS = 5
 BACK_KEY = "C-\\"
+RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
     "→ open  ← back  n new  ^s view  ? keys",
     "→ open ← back n new ^s view ? keys",
@@ -335,6 +336,7 @@ class App:
         self.list_error = ""
         self.notice = ""
         self.notice_error = False
+        self.notice_until = None
         self.cursor = None
         self.wanted_cursor = None
         self.help = False
@@ -357,8 +359,10 @@ class App:
         self.focused = None
         self.pending_keys = []
 
-    def say(self, text: str, error: bool = False) -> None:
+    def say(self, text: str, error: bool = False, seconds: float | None = None) -> None:
+        """Show a notice; with `seconds` it goes by itself after that long, unless another replaces it first."""
         self.notice, self.notice_error = text, error
+        self.notice_until = time.monotonic() + seconds if seconds is not None else None
 
     def save_prefs(self) -> None:
         try:
@@ -468,9 +472,9 @@ class App:
             self.take_focus(sidebar)
 
     def take_focus(self, sidebar: Pane) -> None:
-        """Focus as tmux reports it. The ← binding marks the panel before selecting it; the mark is cleared once seen here with focus."""
+        """Focus as tmux reports it. The ← binding marks the panel before selecting it; a mark is cleared as soon as it is seen, and moves the cursor only when the panel is active."""
         back = core.came_back(sidebar.active, sidebar.back)
-        if back:
+        if sidebar.back:
             try:
                 self.tmux.clear_back(sidebar.id)
             except TmuxError as exc:
@@ -629,8 +633,8 @@ class App:
             if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
                 self.say("The main pane changed while emx was checking, so it wasn't restarted.")
                 return
-            if checker.auto and self.view_state(main) != "agent_view":
-                # He has moved on inside Claude Code meanwhile (picked a session, or went back to work).
+            state = self.view_state(main) if checker.auto else None
+            if not core.restore_still_wanted(checker.auto, state):
                 self.say("")
                 return
             if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
@@ -638,10 +642,10 @@ class App:
             self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
             self.flagged_viewers -= {pane_id}
             if checker.auto:
-                self.last_restore = (pane_id, time.monotonic())
+                self.last_restore = core.record_restore(self.last_restore, pane_id, time.monotonic())
                 self.tmux.select(self.me)
                 self.set_focus(True, back=True)
-                self.say("Main showed Claude Code's agent view, so emx brought the session back.")
+                self.say("Main showed Claude Code's agent view, so emx brought the session back.", seconds=RESTORED_NOTICE_SECONDS)
             else:
                 self.tmux.select(pane_id)
                 self.say("Viewer restarted.")
@@ -960,6 +964,8 @@ class App:
             fresh_list = self.take_poll()
             self.take_placements()
             now = time.monotonic()
+            if core.notice_expired(self.notice_until, now):
+                self.say("")
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:
                 self.last_housekeep = now
                 self.housekeep(fresh_list)

@@ -62,9 +62,13 @@ class LeftBinding(unittest.TestCase):
     def attach(self):
         pid, fd = pty.fork()
         if pid == 0:
-            env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-            env["TERM"] = "xterm-256color"
-            os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
+            # A failed exec must not leave a forked copy of the test run going on.
+            try:
+                env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+                env["TERM"] = "xterm-256color"
+                os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
+            finally:
+                os._exit(127)
         self.addCleanup(self.reap, pid, fd)
         self.wait_for(lambda: self.tmux.run("list-clients", "-F", "#{client_name}").strip(), "an attached client")
         return self.tmux.run("list-clients", "-F", "#{client_name}").strip()
@@ -125,6 +129,28 @@ class LeftBinding(unittest.TestCase):
         self.wait_for(lambda: self.typed("main"), "the key in main")
         self.assertEqual(self.typed("main"), LEFT)
         self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+
+    def press_toggle(self):
+        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        self.tmux.run("send-keys", "-K", "-c", self.client, "C-\\")
+        self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
+
+    def test_the_toggle_binding_parses(self):
+        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " C-\\\\ " in line]
+        listed = os.path.join(self.dir, "listed.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        self.tmux.run("source-file", "-n", listed)
+
+    def test_the_toggle_to_the_panel_drops_a_left_mark_left_behind(self):
+        self.tmux.set_pane_option(self.sidebar, BACK_OPT, "1")
+        self.press_toggle()
+        self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "")
+
+    def test_the_toggle_to_the_panel_works_with_no_mark_to_drop(self):
+        self.press_toggle()
+        self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "")
 
     def test_with_the_panel_gone_the_key_reaches_the_pane(self):
         self.tmux.bind_left(self.sidebar, "true", 2)
