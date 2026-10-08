@@ -212,10 +212,9 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
     return f"{name} isn't running. Press Enter on it to reopen it."
 
 
-STOP, REMOVE = "stop", "remove"
 CONFIRM_SECONDS = 2.0
-_CLOSE_SUBCOMMAND = {STOP: "stop", REMOVE: "rm"}
-_CLOSE_WORDS = {STOP: ("Stopping", "Stopped"), REMOVE: ("Removing", "Removed")}
+CLOSING_LABEL = "closing…"
+GROUP_CLOSE_REFUSAL = "Ctrl+X closes a project's group from the project view."
 
 
 @dataclass(frozen=True)
@@ -227,67 +226,102 @@ class Confirm:
     running: bool
     at: float
 
-    @property
-    def action(self) -> str:
-        return close_action(self.running)
 
+@dataclass(frozen=True)
+class GroupConfirm:
+    """A first Ctrl+X on a project header: a Confirm for every session in the group, folded ones too, taken at that press."""
 
-def close_action(running: bool) -> str:
-    """A session with a live process is stopped, keeping its conversation; any other (stopped, or done with its process gone) is removed."""
-    return STOP if running else REMOVE
+    key: str
+    sessions: tuple
+    at: float
 
 
 def close_args(claude: str, confirm: Confirm) -> list:
-    """Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides."""
-    return [claude, _CLOSE_SUBCOMMAND[confirm.action], confirm.id]
+    """The commands that close the session, in order: a running one is stopped first, then removed.
 
-
-def confirm_label(confirm: Confirm) -> str:
-    return f"ctrl+x again to {confirm.action}"
-
-
-def confirm_holds(confirm: Confirm | None, cursor, session: Session | None, now: float) -> bool:
-    """Whether an armed confirm still stands: the cursor is on its row, the panel still lists the session in the same running state, and CONFIRM_SECONDS have not passed.
-
-    The cursor can move without a key (a poll regrouping, ← from main), so
-    this is checked on every refresh, not only on keys.
+    Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides.
     """
+    remove = [claude, "rm", confirm.id]
+    return [[claude, "stop", confirm.id], remove] if confirm.running else [remove]
+
+
+def close_targets(confirm) -> tuple:
+    return confirm.sessions if isinstance(confirm, GroupConfirm) else (confirm,)
+
+
+def confirm_label(confirm) -> str:
+    if isinstance(confirm, GroupConfirm):
+        return group_confirm_label(len(confirm.sessions))
+    return "ctrl+x again to close"
+
+
+def group_confirm_label(count: int) -> str:
+    return f"ctrl+x again to close {count} session{'' if count == 1 else 's'}"
+
+
+def group_closable(view: str, key: str) -> bool:
+    """Only a project's header closes its group: Pinned and the state groups gather sessions from many places."""
+    return view == PROJECT and key != PINNED
+
+
+def confirm_holds(confirm, cursor, row, now: float) -> bool:
+    """Whether an armed confirm still stands: the cursor is on its row or header, the panel still lists what it took in the same running state, and CONFIRM_SECONDS have not passed.
+
+    `row` is the session for a Confirm and the group for a GroupConfirm. The
+    cursor can move without a key (a poll regrouping, ← from main), so this
+    is checked on every refresh, not only on keys.
+    """
+    if confirm is None or row is None or not 0 <= now - confirm.at < CONFIRM_SECONDS:
+        return False
+    if isinstance(confirm, GroupConfirm):
+        return (
+            cursor == ("group", confirm.key)
+            and getattr(row, "key", None) == confirm.key
+            and {(s.id, s.running) for s in row.sessions} == {(c.id, c.running) for c in confirm.sessions}
+        )
     return (
-        confirm is not None
-        and cursor == ("session", confirm.id)
-        and session is not None
-        and session.id == confirm.id
-        and session.running == confirm.running
-        and 0 <= now - confirm.at < CONFIRM_SECONDS
+        cursor == ("session", confirm.id)
+        and getattr(row, "id", None) == confirm.id
+        and row.running == confirm.running
     )
 
 
-def press_close(confirm: Confirm | None, cursor, session: Session | None, now: float) -> tuple:
+def press_close(confirm, cursor, row, now: float, view: str | None = None) -> tuple:
     """What a Ctrl+X does: (confirm to keep armed, confirm to act on).
 
-    `session` is the panel's row under the cursor. A second press on the
-    same row while the first still holds acts on the first press's confirm;
-    any other press on a session row arms a new one, so a late second press
-    only re-arms. On a group header, or with no row, it does nothing.
+    `row` is the panel's session under the cursor, or the group whose header
+    it is on. A second press on the same row or header while the first still
+    holds acts on the first press's confirm; any other press arms a new one,
+    so a late second press only re-arms. A header arms only when it is a
+    project's (`group_closable`); with no row it does nothing.
     """
-    if not cursor or cursor[0] != "session" or session is None or session.id != cursor[1]:
+    if not cursor or row is None:
         return None, None
-    if confirm_holds(confirm, cursor, session, now):
+    if cursor[0] == "group":
+        view = PROJECT if view is None else view
+        if getattr(row, "key", None) != cursor[1] or not group_closable(view, row.key) or not row.sessions:
+            return None, None
+        if isinstance(confirm, GroupConfirm) and confirm_holds(confirm, cursor, row, now):
+            return None, confirm
+        return GroupConfirm(row.key, tuple(Confirm(s.id, s.name, s.running, now) for s in row.sessions), now), None
+    if cursor[0] != "session" or getattr(row, "id", None) != cursor[1]:
+        return None, None
+    if isinstance(confirm, Confirm) and confirm_holds(confirm, cursor, row, now):
         return None, confirm
-    return Confirm(session.id, session.name, session.running, now), None
+    return Confirm(row.id, row.name, row.running, now), None
 
 
-def confirm_after_key(confirm: Confirm | None, close_key: bool, passive: bool) -> Confirm | None:
+def confirm_after_key(confirm, close_key: bool, passive: bool):
     """Any key other than Ctrl+X cancels a confirm; `passive` events (a terminal resize) are not his keypress and leave it."""
     return confirm if close_key or passive else None
 
 
 def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
-    """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one stop or remove runs at a time."""
+    """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one close runs at a time."""
     if busy is not None:
-        return f"Still {_CLOSE_WORDS[busy.action][0].lower()} {busy.name}…"
+        return f"Still closing {busy.name}…"
     if list_failing:
-        return "Can't list sessions right now, so emx won't stop or remove one."
+        return "Can't list sessions right now, so emx won't close one."
     return None
 
 
@@ -305,7 +339,7 @@ def open_blocked(starting: bool, cursor=None) -> str | None:
 
 
 def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) -> bool:
-    """Whether a confirmed stop or remove may run, judged on a listing a worker took just before running it (`checked_row`).
+    """Whether a confirmed close may run, judged on a listing a worker took just before running it (`checked_row`).
 
     The panel's row can be a poll old: a session shown stopped may have been
     resumed elsewhere since, and removing it would delete a live session.
@@ -314,25 +348,48 @@ def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) 
 
 
 def close_refusal(confirm: Confirm, session: Session | None, fresh: bool) -> str:
-    verb = confirm.action
     if not fresh:
-        return f"Couldn't list sessions to check {confirm.name}, so emx didn't {verb} it."
+        return f"Couldn't list sessions to check {confirm.name}, so emx didn't close it."
     if session is None:
-        return f"{confirm.name} isn't listed any more, so emx didn't {verb} it."
+        return f"{confirm.name} isn't listed any more, so emx didn't close it."
     now = "running again" if session.running else "no longer running"
-    return f"{confirm.name} is {now}, so emx didn't {verb} it."
+    return f"{confirm.name} is {now}, so emx didn't close it."
 
 
-def closing_text(confirm: Confirm) -> str:
-    return f"{_CLOSE_WORDS[confirm.action][0]} {confirm.name}…"
+def closing_text(confirm) -> str:
+    targets = close_targets(confirm)
+    return f"Closing {targets[0].name}…" if len(targets) == 1 else f"Closing {len(targets)} sessions…"
 
 
 def closed_text(confirm: Confirm, output: str = "") -> str:
-    """After a remove, whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
-    done = f"{_CLOSE_WORDS[confirm.action][1]} {confirm.name}."
+    """Whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
     lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
-    extra = one_line("\n".join(lines[1:])) if confirm.action == REMOVE else ""
+    extra = one_line("\n".join(lines[1:]))
+    done = f"Closed {confirm.name}."
     return f"{done} {extra}" if extra else done
+
+
+def stopped_not_removed_text(confirm: Confirm, error: str) -> str:
+    return f"Stopped {confirm.name}, but didn't remove it: {error}"
+
+
+def closing_after(closing: Mapping, finished: Mapping, listed_ids) -> dict:
+    """The ids whose rows read `closing…`, after a close finished (`finished` maps an id to whether it closed) or a listing landed (`listed_ids`, None when none did).
+
+    `closing` maps an id to None while its close runs and True once it
+    closed. A failed close leaves at once, and its row shows what it is now;
+    a closed one leaves once a listing lacks it. A listing with no sessions
+    at all counts as no listing, so one glitchy poll never brings a closed
+    row back as it was.
+    """
+    listed = set(listed_ids or ())
+    kept = {}
+    for sid, done in closing.items():
+        done = finished.get(sid, done)
+        if done is False or (done and listed and sid not in listed):
+            continue
+        kept[sid] = done
+    return kept
 
 
 # Claude Code 2.1.294 takes a line typed at once with its Enter as a paste once the line is 63 or more UTF-16 units
