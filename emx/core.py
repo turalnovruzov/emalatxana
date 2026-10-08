@@ -1093,17 +1093,20 @@ def _row(name: str, extra: str, status: str, age: str, age_x: int, pad: int = 0)
 
 
 ROW_INDENT = ROW_LEAD + 2
+DETAIL_LINES = 2
 
 
 def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
     """A session row as lines of (x, text, part), the parts `row_layout` names.
 
     A row `row_layout` shows whole, at the column `align` or else without it,
-    is that one line. Any other row wraps rather than losing a part: the name
-    starts the first line, which keeps the age at its right, and the
-    worktree label, state word and detail follow on the line they fit,
-    continuing on lines indented to ROW_INDENT. Words split only when longer
-    than a line. A pane too narrow to indent gets `row_layout`'s line.
+    is that one line. Any other row wraps: the name starts the first line,
+    which keeps the age at its right, and the worktree label, state word and
+    detail follow on the line they fit, continuing on lines indented to
+    ROW_INDENT. Words split only when longer than a line. The name, label and
+    state word always show whole; the detail takes at most DETAIL_LINES lines
+    of its own, past whatever it shares with the state word, and ends in "…"
+    when that is not enough. A pane too narrow to indent gets `row_layout`'s line.
     """
     for column in dict.fromkeys((align, 0)):
         parts = row_layout(name, worktree, word, detail, age, width, column)
@@ -1122,7 +1125,7 @@ def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width:
     if word:
         flow.unit(word, "status", 2, ROW_LEAD + align + 2 if align else 0)
     if detail:
-        flow.words(detail, "status", 1 if word else 2, "· " if word else "")
+        flow.words(detail, "status", 1 if word else 2, "· " if word else "", DETAIL_LINES)
     if age:
         flow.lines[0].append((age_x, age, "age"))
     return flow.lines
@@ -1175,17 +1178,35 @@ class _Flow:
         else:
             self.words(text, part, gap)
 
-    def words(self, text: str, part: str, gap: int, lead: str = "") -> None:
-        """A part wrapped at spaces, its first words on the current line when they fit, there after `lead`."""
+    def words(self, text: str, part: str, gap: int, lead: str = "", most: int = 0) -> None:
+        """A part wrapped at spaces, its first words on the current line when they fit, there after `lead`.
+
+        With `most`, the part starts at most that many lines of its own, the
+        last of them cut to end in "…" when the rest does not fit there.
+        """
         busy = bool(self.lines[-1])
         start = self.x + (gap if busy else 0)
         first = self.end - start - display_width(lead if busy else "")
         chunks = _flow_words(text, first, self.rest, busy)
+        if most and len(chunks) > most + 1:
+            kept = chunks[:most]
+            chunks = kept + [fit(_after(text, "".join(kept)), self.rest)]
         if chunks[0]:
             self.place(start, (lead if busy else "") + chunks[0], part)
         for chunk in chunks[1:]:
             self.newline()
             self.place(self.x, chunk, part)
+
+
+def _after(text: str, shown: str) -> str:
+    """What of `text` is left once the non-space characters of `shown`, its start, are taken, with spaces collapsed."""
+    taken = sum(1 for ch in shown if not ch.isspace())
+    for i, ch in enumerate(text):
+        if taken == 0:
+            return " ".join(text[i:].split())
+        if not ch.isspace():
+            taken -= 1
+    return ""
 
 
 def _flow_words(text: str, first: int, rest: int, busy: bool) -> list:

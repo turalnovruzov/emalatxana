@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 from emx import core
 
@@ -615,27 +616,74 @@ class RowLines(unittest.TestCase):
             "     nice",
         ])
 
-    def test_every_part_is_whole_somewhere_and_every_line_fits(self):
+    def test_name_branch_and_state_are_whole_and_only_a_summary_past_two_lines_is_cut(self):
         for width in range(0, 71):
             for name in self.NAMES:
                 for detail in self.DETAILS:
                     for worktree in ("", "feature/3-grouped-panel"):
                         with self.subTest(width=width, name=name, detail=detail, worktree=worktree):
-                            lines = self.lines(width, name=name, worktree=worktree, detail=detail)
-                            texts = []
-                            for parts in lines:
-                                line = rendered(parts)
-                                self.assertLessEqual(core.display_width(line), max(0, width - 1))
-                                texts += [t for _, t, p in parts if p != "age"]
-                            if len(lines) > 1:
-                                self.assertEqual(lines[0][-1], (width - 1 - 3, "12m", "age"))
-                                for parts in lines[1:]:
-                                    self.assertGreaterEqual(parts[0][0], core.ROW_INDENT)
-                            if width - 1 - core.ROW_INDENT >= 2:
-                                joined = "".join(" ".join(texts).split()).replace("·", "")
-                                for whole in (name, core.WORKTREE_MARK + worktree if worktree else "", "Needs input", detail):
-                                    self.assertIn("".join(whole.split()), joined)
-                                self.assertNotIn("…", " ".join(texts))
+                            self.check_sweep(width, name, worktree, detail)
+
+    def check_sweep(self, width, name, worktree, detail):
+        lines = self.lines(width, name=name, worktree=worktree, detail=detail)
+        by_part = {"name": [], "extra": [], "status": []}
+        word_ends = None
+        for i, parts in enumerate(lines):
+            self.assertLessEqual(core.display_width(rendered(parts)), max(0, width - 1))
+            for _, text, part in parts:
+                if part != "age":
+                    by_part[part].append(text)
+            if word_ends is None and len("".join(" ".join(by_part["status"]).split())) >= len("Needsinput"):
+                word_ends = i
+        if len(lines) > 1:
+            self.assertEqual(lines[0][-1], (width - 1 - 3, "12m", "age"))
+            for parts in lines[1:]:
+                self.assertGreaterEqual(parts[0][0], core.ROW_INDENT)
+        if width - 1 - core.ROW_INDENT < 2:
+            return
+        squeeze = lambda texts: "".join(" ".join(texts).split())
+        self.assertEqual(squeeze(by_part["name"]), squeeze([name]))
+        self.assertEqual(squeeze(by_part["extra"]), squeeze([core.WORKTREE_MARK + worktree] if worktree else []))
+        status = squeeze(by_part["status"])
+        self.assertTrue(status.startswith("Needsinput"), status)
+        shown = status[len("Needsinput"):].removeprefix("·")
+        self.assertLessEqual(len(lines) - 1 - word_ends, core.DETAIL_LINES)
+        if shown == squeeze([detail]):
+            return
+        self.assertTrue(shown.endswith("…"), shown)
+        self.assertTrue(squeeze([detail]).startswith(shown[:-1]), shown)
+        with mock.patch.object(core, "DETAIL_LINES", 99):
+            uncut = self.lines(width, name=name, worktree=worktree, detail=detail)
+        self.assertGreater(len(uncut), len(lines))
+
+    def test_the_summary_takes_two_lines_of_its_own_then_ends_in_an_ellipsis(self):
+        done = "I ran the command, and it created the empty file `made-by-emx-test-n.txt` in the working directory."
+        got = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=done, age="1m")]
+        self.assertEqual(got, [
+            "   emx-test-19-short  Done · I ran   1m",
+            "     the command, and it created the",
+            "     empty file `made-by-emx-test-n.tx…",
+        ])
+
+    def test_a_summary_that_fits_its_two_lines_is_not_cut(self):
+        fits = "I ran the command, and it created the empty file here"
+        got = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=fits, age="1m")]
+        self.assertEqual(got, [
+            "   emx-test-19-short  Done · I ran   1m",
+            "     the command, and it created the",
+            "     empty file here",
+        ])
+        once_more = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=fits + " x", age="1m")]
+        self.assertEqual(once_more[-1], "     empty file here x")
+
+    def test_a_summary_starting_on_its_own_line_gets_two_lines(self):
+        wait = "approve Bash: python3 -m unittest discover -s tests -v and then some more words"
+        got = [rendered(p) for p in self.lines(34, detail=wait)]
+        self.assertEqual(got, [
+            "   emx-test-perm  Needs input 12m",
+            "     approve Bash: python3 -m",
+            "     unittest discover -s tests…",
+        ])
 
     def test_the_armed_label_wraps_too(self):
         self.assertEqual(core.confirm_lines("ctrl+x again to stop", 40), [[(3, "ctrl+x again to stop", "confirm")]])
