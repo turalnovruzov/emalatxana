@@ -215,6 +215,7 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
 CONFIRM_SECONDS = 2.0
 CLOSING_LABEL = "closing…"
 GROUP_CLOSE_REFUSAL = "Ctrl+X closes a project's group from the project view."
+PINNED_CLOSE_REFUSAL = "Ctrl+X can't close the Pinned group; close its sessions one at a time."
 
 
 @dataclass(frozen=True)
@@ -262,6 +263,11 @@ def group_confirm_label(count: int) -> str:
 def group_closable(view: str, key: str) -> bool:
     """Only a project's header closes its group: Pinned and the state groups gather sessions from many places."""
     return view == PROJECT and key != PINNED
+
+
+def group_close_refusal(key: str) -> str:
+    """What Ctrl+X says on a header that can't close its group: Pinned sits in the project view too, so it gets its own line."""
+    return PINNED_CLOSE_REFUSAL if key == PINNED else GROUP_CLOSE_REFUSAL
 
 
 def confirm_holds(confirm, cursor, row, now: float) -> bool:

@@ -2132,6 +2132,11 @@ class CloseConfirm(unittest.TestCase):
         self.assertTrue(core.group_closable(core.PROJECT, "/r/app"))
         self.assertEqual(core.GROUP_CLOSE_REFUSAL, "Ctrl+X closes a project's group from the project view.")
 
+    def test_the_pinned_header_gets_its_own_refusal(self):
+        self.assertEqual(core.group_close_refusal(core.PINNED),
+                         "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+        self.assertEqual(core.group_close_refusal(core.WORKING), core.GROUP_CLOSE_REFUSAL)
+
     def test_labels_read_close_and_count(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
         self.assertEqual(core.confirm_label(armed), "ctrl+x again to close")

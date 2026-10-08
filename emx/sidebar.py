@@ -1211,7 +1211,7 @@ class App:
                 return
             if not core.group_closable(self.view(), row.key):
                 self.confirm = None
-                self.say(core.GROUP_CLOSE_REFUSAL)
+                self.say(core.group_close_refusal(row.key))
                 return
         else:
             row = self.session(cursor[1])
