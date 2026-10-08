@@ -9,6 +9,7 @@ SESSION = "emx"
 ROLE = "@emx_role"
 SESSION_OPT = "@emx_session"
 VERSION_OPT = "@emx_version"
+LEFT_OPT = "@emx_left"
 
 
 class TmuxError(RuntimeError):
@@ -24,6 +25,7 @@ class Pane:
     session: str
     width: int
     window_width: int
+    active: bool = False
 
 
 _PANE_FORMAT = "\t".join(
@@ -35,6 +37,7 @@ _PANE_FORMAT = "\t".join(
         "#{" + SESSION_OPT + "}",
         "#{pane_width}",
         "#{window_width}",
+        "#{pane_active}",
     ]
 )
 
@@ -74,11 +77,11 @@ class Tmux:
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")
-            if len(parts) != 7:
+            if len(parts) != 8:
                 continue
-            pid, window, dead, role, session, width, window_width = parts
+            pid, window, dead, role, session, width, window_width, active = parts
             panes.append(
-                Pane(pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0))
+                Pane(pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0), active == "1")
             )
         return panes
 
@@ -124,6 +127,29 @@ class Tmux:
             "if-shell", "-F", f"#{{==:#{{pane_id}},{sidebar}}}",
             f"select-pane -t {main}", f"select-pane -t {sidebar}",
         )
+
+    def bind_left(self, sidebar: str, check: str, prompt_x: int) -> None:
+        """Bind ← (no prefix) so that in a session viewer on an empty prompt it moves focus to the sidebar.
+
+        `check` is a shell command that exits 0 for that case; tmux appends
+        the pane, cursor and width, so the check needs no tmux call to find
+        them. It runs only when the cursor is shown at `prompt_x`, where an
+        empty prompt puts it: anywhere else ← goes straight to the pane, so
+        moving through typed text never waits on a process. Whenever the check
+        fails or can't run, ← reaches the pane as usual. The command is kept in
+        an option, not in the binding, so its paths need no tmux quoting.
+        """
+        self.run("set-option", "-g", LEFT_OPT, check)
+        decide = (
+            f'if-shell "#{{{LEFT_OPT}}} #{{pane_id}} #{{cursor_x}} #{{cursor_y}} #{{cursor_flag}} #{{pane_width}}" '
+            f'"select-pane -t {sidebar}" "send-keys Left"'
+        )
+        at_prompt = f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{cursor_flag}},#{{==:#{{cursor_x}},{prompt_x}}}}}}}"
+        self.run("bind-key", "-n", "Left", "if-shell", "-F", at_prompt, decide, "send-keys Left")
+
+    def cursor_lines(self, pane: str, y: int) -> list:
+        """The styled text of line `y` of the pane's screen and the line under it."""
+        return self.run("capture-pane", "-p", "-e", "-t", pane, "-S", str(y), "-E", str(y + 1)).split("\n")[:2]
 
     def capture(self, pane: str) -> str:
         return self.run("capture-pane", "-p", "-t", pane)

@@ -961,6 +961,114 @@ def _names_match(shown: str, expected: str) -> bool:
     return shown == expected
 
 
+PROMPT_TEXT_X = 2
+
+
+def empty_prompt(line: str, below: str, cursor_x: int, cursor_shown: bool, pane_width: int) -> bool:
+    """Whether the cursor sits in Claude Code's empty input box, where ← would open its agent view.
+
+    `line` is the cursor's line and `below` the line under it, both captured
+    with their styling (`capture-pane -e`). The box is empty when its `❯`
+    starts the line, the cursor is right after it, nothing after it is typed
+    text, and the box's pane-wide bottom rule follows at once. The example
+    Claude Code shows in an empty box (`Try "…"`) is drawn dim, which is the
+    only thing that tells it from the same words typed and the cursor moved
+    back to the start. A dialog or menu indents its `❯`, and a second line of
+    input sits between the first and the rule.
+    """
+    if not cursor_shown or cursor_x != PROMPT_TEXT_X:
+        return False
+    cells = _styled_cells(line)
+    if not cells or cells[0][0] != "❯" or (len(cells) > 1 and not cells[1][0].isspace()):
+        return False
+    if any(not ch.isspace() and not dim for ch, dim in cells[PROMPT_TEXT_X:]):
+        return False
+    rule = strip_ansi(below).rstrip()
+    return bool(_FULL_RULE.match(rule)) and display_width(rule) == pane_width
+
+
+_SGR = re.compile(r"\x1b\[([0-9;:]*)m")
+
+
+def _styled_cells(line: str) -> list:
+    """(character, dim) for each character of a `capture-pane -e` line, with the escape sequences applied and dropped."""
+    cells, dim, at = [], False, 0
+    while at < len(line):
+        escape = _ANSI.match(line, at)
+        if escape is None:
+            cells.append((line[at], dim))
+            at += 1
+            continue
+        sgr = _SGR.fullmatch(escape.group(0))
+        if sgr is not None:
+            dim = _dim_after(sgr.group(1), dim)
+        at = escape.end()
+    return cells
+
+
+def _dim_after(params: str, dim: bool) -> bool:
+    """Apply one SGR's parameters to the dim flag. A colour's own numbers (`38;5;2`, `38;2;r;g;b`) are skipped, so a 2 among them is not read as dim."""
+    parts = params.split(";")
+    i = 0
+    while i < len(parts):
+        p = parts[i]
+        if p in ("", "0", "22"):
+            dim = False
+        elif p == "2":
+            dim = True
+        elif p in ("38", "48", "58") and i + 1 < len(parts):
+            i += {"5": 2, "2": 4}.get(parts[i + 1], 0)
+        i += 1
+    return dim
+
+
+def focus_report(keys: list) -> bool | None:
+    """True for a focus-in report (ESC [ I), False for focus-out (ESC [ O), None for any other keys."""
+    if len(keys) == 3 and keys[0] == "\x1b" and keys[1] == "[" and keys[2] in ("I", "O"):
+        return keys[2] == "I"
+    return None
+
+
+def may_be_focus_report(keys: list) -> bool:
+    """Whether `keys` could still grow into a focus report, so the next key is worth reading."""
+    return keys in (["\x1b"], ["\x1b", "["])
+
+
+def cursor_on_focus(items: list, cursor, groups, main_sid: str):
+    """Where the panel's cursor goes when focus arrives from the main pane: on the session showing there, as `claude agents` does on ←.
+
+    A session folded out of sight leaves it on its group's header; with no
+    listed session in main the cursor stays put.
+    """
+    target = ("session", main_sid)
+    if not main_sid or cursor_group(target, groups) is None:
+        return cursor
+    return settle_cursor(items, target, groups)
+
+
+def selection_bar(selected: bool, focused: bool) -> str | None:
+    """Which bar a panel row is drawn on: none, the bright one while the panel has focus, or the dim one."""
+    if not selected:
+        return None
+    return "focused" if focused else "unfocused"
+
+
+def title_style(focused: bool) -> str:
+    """The panel's top line is bold while the panel has focus and dim otherwise."""
+    return "bold" if focused else "dim"
+
+
+def auto_restore(state: str, tried: bool, checking: bool) -> bool:
+    """Whether emx brings the main pane's session back by itself.
+
+    Only the agent view qualifies: Claude Code opened it in place of the
+    session, and the session itself is untouched. A different session showing
+    ("mismatch") is left to him, and so is a viewer emx already tried once,
+    so a refusal is said once rather than every half second.
+    """
+    return state == "agent_view" and not tried and not checking
+
+
 def latch_off_main(flagged: frozenset, pane_id: str, state: str) -> tuple:
     """Track viewers caught showing something other than their own session.
 
