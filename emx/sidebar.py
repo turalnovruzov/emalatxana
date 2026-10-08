@@ -311,10 +311,9 @@ class Closer(threading.Thread):
     or, with no close started, took the Esc or was swapped into main by
     him, which makes it his like a viewer he opens; so an interrupt's
     `claude attach` still starting can't land after the stop and resume
-    the session. Not covered: a window tmux
-    made for a `new_hidden_window` that then failed, since no pane id came
-    back. `current` is the session being closed now. `result` is (all
-    closed, message, {id: closed}).
+    the session. Not covered: a window tmux made for a `new_hidden_window`
+    that then failed, since no pane id came back. `current` is the session
+    being closed now. `result` is (all closed, message, {id: closed}).
     """
 
     def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
