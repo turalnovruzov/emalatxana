@@ -16,12 +16,14 @@ A headless spike on Claude Code 2.1.293 and tmux 3.7c, run on throwaway sessions
 
 ## Decision
 
-We build `emx` on **tmux** (a private server, its own socket and config) for the panes and switching, with the launcher and sidebar written in **Python 3 using only the standard library** (curses for the sidebar). Session data comes only from the `claude` CLI: `claude agents --json`, `claude attach`, `claude --bg`. emx never resumes, moves or stops a session.
+We build `emx` on **tmux** (a private server, its own socket and config) for the panes and switching, with the launcher and sidebar written in **Python 3 using only the standard library** (curses for the sidebar). Session data comes only from the `claude` CLI: `claude agents --json`, `claude attach`, `claude --bg`. emx never moves a conversation between sessions, and never resumes, stops or removes a session on its own.
+
+*Amended 2026-10-08 (#4, Tural's word):* emx may stop a session (`claude stop`) or remove one that is no longer running (`claude rm`), but only on his confirmed double Ctrl+X on that session's row, matching `claude agents`. Only his explicit open reopens a stopped session. See `docs/conventions.md`.
 
 ## Consequences
 
 - tmux becomes a runtime requirement. Nothing gets pip-installed, so the dependency check has no manifest to read.
-- Switching only swaps viewers, so the tool cannot lose a conversation. Closing emx leaves every session running.
+- Switching only swaps viewers, so the tool cannot lose a conversation except by his confirmed remove. Closing emx leaves every session running.
 - The sidebar draws itself with curses, which means more hand-written UI code than a TUI library would need.
 - Not verified headless: the iTerm2→tmux leg of Shift+Enter, wheel scroll and flicker. These are checked by hand.
 

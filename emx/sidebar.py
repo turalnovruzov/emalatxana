@@ -23,8 +23,9 @@ GIT_SECONDS = 5
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
-    "→ open  ← back  n new  ^s view  ? keys",
-    "→ open ← back n new ^s view ? keys",
+    "→ open  ← back  n new  ^x close  ^s view  ? keys",
+    "→ open ← back n new ^x close ^s view ? keys",
+    "→ open ← back n new ^x close ? keys",
     "→ open ← back ? keys",
     "→ open ? keys",
     "? keys",
@@ -35,6 +36,7 @@ HELP = (
     ("↑↓ j k", "move"),
     ("↵ click", "fold a group; a click opens a session"),
     ("n", "new session"),
+    ("^x ^x", "stop the session; on a stopped one, remove it"),
     ("^s", "by project / by state"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
@@ -48,6 +50,9 @@ ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 FOCUS_REPORTS_ON, FOCUS_REPORTS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
 CTRL_S = "\x13"
+CTRL_X = "\x18"
+CONFIRM_FOOTER = "ctrl+x to confirm"
+CLOSE_SECONDS = 30
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 MAX_QUEUED_KEYS = 64
@@ -178,6 +183,48 @@ def wait_until_running(claude: str, sid: str) -> tuple:
                 return None, f"claude agents lists session {sid}, but it isn't running, so no viewer was opened"
             return None, f"claude --bg reported session {sid}, but claude agents doesn't list it, so no viewer was opened"
         time.sleep(LISTED_CHECK_SECONDS)
+
+
+def close_session(claude: str, confirm: core.Confirm) -> tuple:
+    """Run `claude stop` or `claude rm` on the confirmed session: (its output, None), or (None, its whole message on one line). Never raises."""
+    args = core.close_args(claude, confirm)
+    try:
+        done = subprocess.run(
+            args, capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
+            timeout=CLOSE_SECONDS,
+        )
+    except FileNotFoundError:
+        return None, f"can't find the claude command ({claude})"
+    except subprocess.TimeoutExpired:
+        return None, f"claude {args[1]} timed out"
+    except OSError as exc:
+        return None, f"can't run claude: {exc}"
+    if done.returncode != 0:
+        return None, core.one_line(done.stderr) or core.one_line(done.stdout) or (
+            f"claude {args[1]} exited with {done.returncode}"
+        )
+    return done.stdout, None
+
+
+class Closer(threading.Thread):
+    """Stops or removes a confirmed session off the main thread, after checking a fresh listing still shows it as he saw it."""
+
+    def __init__(self, claude: str, confirm: core.Confirm):
+        super().__init__(daemon=True)
+        self.claude, self.confirm = claude, confirm
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            sessions, _ = fetch_sessions(self.claude)
+            session, fresh = core.checked_row(sessions, self.confirm.id)
+            if not core.close_still_applies(self.confirm, session, fresh):
+                self.result = (False, core.close_refusal(self.confirm, session, fresh))
+                return
+            output, error = close_session(self.claude, self.confirm)
+            self.result = (error is None, error or core.closed_text(self.confirm, output))
+        except Exception as exc:
+            self.result = (False, f"{self.confirm.action} failed: {core.error_line(exc)}")
 
 
 class Starter(threading.Thread):
@@ -353,6 +400,8 @@ class App:
         self.poller = Poller(claude)
         self.starter = None
         self.checker = None
+        self.closer = None
+        self.confirm = None
         self.flagged_viewers = frozenset()
         self.auto_tried = frozenset()
         self.last_restore = None
@@ -455,6 +504,8 @@ class App:
             main_sid = main.session if main is not None and not self.main_is_off() else ""
             self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
             self.wanted_cursor = None
+        if not focused:
+            self.confirm = None
         self.focused = focused
 
     def read_focus(self) -> None:
@@ -537,8 +588,12 @@ class App:
         self.fresh = {sid: t for sid, t in self.fresh.items() if sid not in live and now - t < FRESH_GRACE_SECONDS}
         viewers = {p.session for p in panes if p.session and p.session not in self.fresh}
         self.misses, close = core.stale_viewers(viewers, live, self.misses)
+        self.close_viewers(panes, main, close)
+
+    def close_viewers(self, panes: list, main: Pane | None, sids) -> None:
+        """Kill the viewers of these sessions; one in main is first swapped out for the placeholder, so the layout keeps its two columns."""
         for pane in panes:
-            if pane.session not in close:
+            if pane.session not in sids:
                 continue
             if main is not None and pane.id == main.id:
                 placeholder = next((p for p in panes if p.role == "placeholder"), None)
@@ -652,6 +707,38 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
+    def press_close(self) -> None:
+        session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
+        if session is None:
+            return
+        blocked = core.close_blocked(bool(self.list_error), self.closer.confirm if self.closer else None)
+        if blocked:
+            self.confirm = None
+            self.say(blocked)
+            return
+        self.confirm, act = core.press_close(self.confirm, self.cursor, session, time.monotonic())
+        if act is None:
+            return
+        self.closer = Closer(self.claude, act)
+        self.closer.start()
+        self.say(core.closing_text(act))
+
+    def finish_close(self) -> None:
+        closer = self.closer
+        if closer is None or closer.is_alive():
+            return
+        self.closer = None
+        done, message = closer.result or (False, f"{closer.confirm.action} failed")
+        self.say(message, error=not done)
+        self.poller.wake.set()
+        if done and closer.confirm.action == core.REMOVE:
+            try:
+                panes = self.tmux.panes()
+                _, main = self.layout_panes(panes)
+                self.close_viewers(panes, main, {closer.confirm.id})
+            except TmuxError as exc:
+                self.say(f"tmux: {exc}", error=True)
+
     def flip_side(self) -> None:
         try:
             sidebar, main = self.layout_panes(self.tmux.panes())
@@ -750,6 +837,7 @@ class App:
         self.activate(self.row_map.get(y))
 
     def handle_key(self, key) -> None:
+        self.confirm = core.confirm_after_key(self.confirm, key == CTRL_X, key == curses.KEY_RESIZE)
         if key == curses.KEY_MOUSE:
             self.handle_mouse()
         elif key == curses.KEY_RESIZE:
@@ -770,6 +858,8 @@ class App:
                 self.activate(self.cursor)
         elif key == CTRL_S:
             self.toggle_view()
+        elif key == CTRL_X:
+            self.press_close()
         elif key == "n":
             self.open_prompt()
         elif key == "r":
@@ -815,7 +905,8 @@ class App:
             if self.prompt["hint"]:
                 lines += [(t, curses.A_DIM) for t in core.wrap_words(self.prompt["hint"], width)[:3]]
             lines.append(("Enter next · Esc cancel", curses.A_DIM))
-        footer = next((f for f in FOOTERS if core.display_width(f) <= width - 1), FOOTERS[-1])
+        footers = (CONFIRM_FOOTER,) if self.confirm is not None else FOOTERS
+        footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
         lines.append((footer, curses.A_DIM))
         return lines
 
@@ -897,7 +988,10 @@ class App:
                 session = self.session(line[1])
                 if session is not None:
                     in_main = session.id == main_sid
-                    self.draw_session(y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame)
+                    armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
+                    self.draw_session(
+                        y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame, armed,
+                    )
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
         view = self.view()
@@ -915,6 +1009,7 @@ class App:
 
     def draw_session(
         self, y: int, s, selected: str | None, in_main: bool, width: int, align: int, now_ms: float, frame: int,
+        armed: core.Confirm | None = None,
     ) -> None:
         cat = core.category(s)
         stopped = cat == core.STOPPED
@@ -929,6 +1024,10 @@ class App:
             self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
         glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
         self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+        if armed is not None:
+            self.put(y, core.ROW_LEAD, core.fit(core.confirm_label(armed), width - 1 - core.ROW_LEAD),
+                     pal.attr("error", selected) | curses.A_BOLD)
+            return
         word = "" if self.view() == core.BY_STATE else core.state_word(s)
         age = core.session_age(s, now_ms)
         parts = core.row_layout(s.name, self.worktree(s), word, s.waiting_for, age, width, align)
@@ -961,9 +1060,14 @@ class App:
         try:
             self.finish_start()
             self.finish_check()
+            self.finish_close()
             fresh_list = self.take_poll()
             self.take_placements()
             now = time.monotonic()
+            if self.confirm is not None and not core.confirm_holds(
+                self.confirm, self.cursor, self.session(self.confirm.id), now,
+            ):
+                self.confirm = None
             if core.notice_expired(self.notice_until, now):
                 self.say("")
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:

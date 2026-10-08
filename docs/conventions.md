@@ -121,6 +121,19 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: removing SGR codes changes what the test proves, so redact only inside the same styled span. SGR colour parameters such as `38;5;2` are not dim.
 
+### emx stops or removes a session only on a confirmed double Ctrl+X on that row
+
+1. **Rule**: `claude stop` and `claude rm` run only when `core.press_close` hands back a `Confirm`: a second Ctrl+X on the same session row within `CONFIRM_SECONDS` of the first, with that row still in the running state it had at the first press. The id, name and command come from the `Confirm` taken at the first press, never from the cursor at the second. A worker (`Closer`) then takes a fresh listing and runs the command only if `core.close_still_applies`. No other key, trigger or automatic path stops or removes a session, and no call passes `--discard-unpushed` or `--force-remove-worktree`.
+2. **Why**: stopping ends his work in progress, and `claude rm` deletes the session and its worktree. A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session.
+3. **Minimal example**:
+   ```python
+   self.confirm, act = core.press_close(self.confirm, self.cursor, row, time.monotonic())
+   if act is not None:
+       self.closer = Closer(self.claude, act)   # lists, re-checks, then stop or rm
+       self.closer.start()
+   ```
+4. **Gotcha**: the cursor and the row can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys. And the command follows `running`, not the shown state: a Done row whose process has exited is removed, not stopped.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
