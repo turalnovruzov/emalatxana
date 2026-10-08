@@ -2751,7 +2751,7 @@ def clean_summary(text: str) -> str:
     return first if len(first) <= SUMMARY_MAX_CHARS else first[: SUMMARY_MAX_CHARS - 1].rstrip() + "…"
 
 
-HAIKU_REFUSED = "Haiku wouldn't suggest a name for this session; type one instead."
+HAIKU_DECLINED = "Haiku declined to answer."
 
 
 def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
@@ -2763,9 +2763,9 @@ def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
     if not isinstance(data, dict):
         return None, "claude -p printed an unexpected answer"
     result = data.get("result")
-    if data.get("stop_reason") == "refusal":
-        return None, HAIKU_REFUSED
     if data.get("is_error") or not isinstance(result, str) or not result.strip():
+        if data.get("stop_reason") == "refusal":
+            return None, HAIKU_DECLINED
         if isinstance(result, str) and result.strip():
             return None, first_message(result)
         errors = data.get("errors")
@@ -2849,6 +2849,8 @@ def name_excerpt(current: str, unnamed: bool, requests: list, gap_at: int | None
         if i == gap_at:
             body.append(NAME_GAP)
         body.append(line)
+    if gap_at == len(lines):
+        body.append(NAME_GAP)
     header = [f"Current name: {'none' if unnamed else _cap(current, RENAME_MAX)}"]
     recent = list(offered)[-NAME_OFFERED_MAX:]
     if recent:
@@ -2879,7 +2881,8 @@ def _left_out(count: int) -> str:
 def clean_name(text: str, sid: str, current: str, offered) -> str | None:
     """The name in Haiku's answer when emx would type it as a rename and it is new to this box, else None."""
     first = next((line for line in strip_ansi(text).splitlines() if line.strip()), "")
-    name = first.strip().strip("\"'`“”‘’").strip()
+    quotes = "\"'`“”‘’*_ \t"
+    name = re.sub(r"^name\s*:\s*", "", first.strip(quotes), flags=re.IGNORECASE).strip(quotes)
     rename, _ = rename_request(sid, current, name)
     if rename is None or rename.new in offered:
         return None

@@ -2246,6 +2246,26 @@ class RenameSuggest(AppCase):
         self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
         self.assertEqual(self.app.rename_edit["hint"], "claude -p timed out")
 
+    def test_a_retry_after_a_failure_says_it_is_asking_again(self):
+        self.answers = [(None, "claude -p timed out")]
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertIn("claude -p timed out", [t for t, _ in self.app.bottom_lines(39)])
+        self.release.clear()
+        self.keys("\t")
+        shown = [t for t, _ in self.app.bottom_lines(39)]
+        self.assertIn(sidebar.NAME_ASKING, shown)
+        self.assertNotIn("claude -p timed out", shown)
+        self.answered()
+
+    def test_an_answer_that_arrived_since_the_last_frame_is_shown_and_tab_starts_nothing(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.app.namer.join(5)
+        self.keys("\t")
+        self.assertEqual(self.app.rename_edit["text"], "fix-login-flow")
+        self.assertEqual(len(self.asked), 1)
+        self.assertIsNone(self.app.namer)
+
     def test_tab_in_a_new_box_while_an_old_call_finishes_says_so(self):
         self.release.clear()
         self.keys(sidebar.CTRL_R, "\t", "\x1b", sidebar.CTRL_R, "\t")
@@ -2516,6 +2536,13 @@ class SuggestName(unittest.TestCase):
                            (completed(1, BUDGET_STOP_JSON), "Reached maximum budget ($0.00001)")):
             with self.subTest(want=want), mock.patch.object(sidebar.subprocess, "run", return_value=done):
                 self.assertEqual(sidebar.suggest_name("claude", "x", "/tmp"), (None, want))
+
+    def test_a_refusal_is_the_name_line(self):
+        refused = json.dumps({"is_error": True, "stop_reason": "refusal", "result": "API Error: can't help. Start a new session."})
+        for code in (0, 1):
+            with self.subTest(code=code), mock.patch.object(sidebar.subprocess, "run", return_value=completed(code, refused)):
+                self.assertEqual(sidebar.suggest_name("claude", "x", "/tmp"), (None, sidebar.NAME_REFUSED))
+        self.assertEqual(sidebar.NAME_REFUSED, "Haiku wouldn't suggest a name for this session; type one instead.")
 
     def test_the_excerpt_goes_on_stdin_and_the_call_runs_in_the_folder_given(self):
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:

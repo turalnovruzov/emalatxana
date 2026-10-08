@@ -3101,6 +3101,10 @@ class NameExcerpt(unittest.TestCase):
         self.assertLess(text.index(core.NAME_GAP), text.index("three"))
         self.assertNotIn(core.NAME_GAP, self.excerpt(["one", "two", "three"]))
 
+    def test_a_gap_after_the_last_request_is_still_marked(self):
+        text = self.excerpt(["one", "two"], gap_at=2)
+        self.assertGreater(text.index(core.NAME_GAP), text.index("two"))
+
     def test_a_very_long_session_keeps_the_first_and_the_latest(self):
         requests = [f"request {i:03d} " + "z" * 488 for i in range(200)]
         text = self.excerpt(requests)
@@ -3142,6 +3146,11 @@ class CleanName(unittest.TestCase):
     def test_the_first_line_without_quotes(self):
         self.assertEqual(core.clean_name("\"fix-login-flow\"\n", "s1", "emx-test-s1", ()), "fix-login-flow")
         self.assertEqual(core.clean_name("\n`tea poem and csv parser`\nmore", "s1", "s1", ()), "tea poem and csv parser")
+
+    def test_markdown_emphasis_and_a_name_label_are_dropped(self):
+        for text in ("**tea poem**", "__tea poem__", "Name: tea poem", "**Name:** tea poem", "name:tea poem"):
+            with self.subTest(text=text):
+                self.assertEqual(core.clean_name(text, "s1", "emx-test-s1", ()), "tea poem")
 
     def test_a_name_emx_would_not_type_or_already_offered_gives_none(self):
         for text in ("", "  \n", "emx-test-s1", "fix login", "bad\x01name", "ends with\\", "n" * (core.RENAME_MAX + 1),
@@ -3210,11 +3219,22 @@ class SummaryOutput(unittest.TestCase):
                               "errors": ["Reached maximum budget ($0.00001)"]})
         self.assertEqual(core.parse_summary_output(stopped, 1), (None, "Reached maximum budget ($0.00001)"))
 
-    def test_a_refusal_is_emxs_own_line_not_the_clis_advice(self):
+    def test_a_refusal_is_emxs_own_neutral_line_not_the_clis_advice(self):
         refused = json.dumps({"type": "result", "subtype": "success", "is_error": True, "stop_reason": "refusal", "num_turns": 2,
                               "result": "API Error: Haiku 5.5 can't help with this. Start a new session to continue."})
-        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_REFUSED))
-        self.assertNotIn("new session", core.HAIKU_REFUSED)
+        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_DECLINED))
+        self.assertNotIn("new session", core.HAIKU_DECLINED)
+        self.assertNotIn("name", core.HAIKU_DECLINED)
+
+    def test_a_refusal_with_no_result_is_the_same_line(self):
+        refused = json.dumps({"stop_reason": "refusal", "is_error": False, "result": ""})
+        self.assertEqual(core.parse_summary_output(refused, 1), (None, core.HAIKU_DECLINED))
+
+    def test_a_usable_result_survives_a_refusal_stop_reason(self):
+        kept = json.dumps({"stop_reason": "refusal", "is_error": False, "result": "tea poem"})
+        call, err = core.parse_summary_output(kept, 1)
+        self.assertIsNone(err)
+        self.assertEqual(call.text, "tea poem")
 
     def test_cleaning_takes_the_first_line_without_controls_quotes_or_full_stop(self):
         self.assertEqual(core.clean_summary("\x1b[31m\"Fixing tests.\"\x07\nsecond"), "Fixing tests")

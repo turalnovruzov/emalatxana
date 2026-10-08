@@ -746,7 +746,8 @@ def summarise(claude: str, excerpt: str, cwd: str) -> tuple:
 
 def suggest_name(claude: str, excerpt: str, cwd: str) -> tuple:
     """(core.SummaryCall, None) from one `claude -p` call that has Haiku suggest a session name from `excerpt`, or (None, one-line error). Never raises."""
-    return _run_haiku(core.name_args(claude), excerpt, cwd)
+    call, error = _run_haiku(core.name_args(claude), excerpt, cwd)
+    return (call, error) if error != core.HAIKU_DECLINED else (None, NAME_REFUSED)
 
 
 def _run_haiku(args: list, text: str, cwd: str) -> tuple:
@@ -799,6 +800,7 @@ def read_requests(path: str) -> tuple:
 NAME_NO_TRANSCRIPT = "emx hasn't found this session's transcript yet."
 NAME_UNREADABLE = "emx couldn't read this session's transcript."
 NAME_NO_REQUESTS = "No requests of yours in this session yet."
+NAME_REFUSED = "Haiku wouldn't suggest a name for this session; type one instead."
 NAME_UNFIT = "Haiku's name didn't fit; Tab for another."
 
 
@@ -1699,6 +1701,7 @@ class App:
             self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["old"] == sid, edit["offered"],
         )
         self.namer_gen = edit["gen"]
+        edit["hint"] = ""
         edit["asking"] = (edit["gen"], edit["text"])
         self.namer.start()
 
@@ -1998,7 +2001,7 @@ class App:
             return lines + self.prompt_lines(width, room)
         if self.rename_edit is not None:
             hint = self.rename_edit["hint"] or (NAME_ASKING if self.rename_edit.get("asking") else "")
-            lines +=[(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
+            lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(RENAME_FOOTER, width)[:2]]
         if self.find is not None:
             lines += [("Find a session:", curses.A_BOLD)]

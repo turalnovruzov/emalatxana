@@ -41,7 +41,7 @@ Measured on Claude Code 2.1.295, 2026-10-08, through `sidebar.suggest_name` with
 - **Output tokens are 7 to 349 for a name of a few words.** `--effort low` does not stop Haiku using some tokens before it answers.
 - **Refusals are paid twice.** The random character text, which no person would type, sometimes trips Haiku's safety refusal (`stop_reason: "refusal"`). The CLI then tries once more (`num_turns: 2`) and both requests are paid.
   - The dearest call, $0.0125, was refused, then answered.
-  - Three re-runs were refused twice and returned no name for $0.0125 each, so the box shows the CLI's error line.
+  - Three re-runs were refused twice and returned no name for $0.0125 each, so the box shows emx's own line, that Haiku wouldn't suggest a name and he can type one.
   - Coherent CJK phrases and English were never refused.
 - **The budget**: $0.04, over three times the dearest measured cold cap-hit call. As with summaries, the CLI checks it only after an answer, so it stops a second turn but does not cap one call. With the final value, 9 re-run cold cap-hit calls (3 English, 3 CJK phrases, 3 random CJK) all ran without a budget stop. The 6 English and phrase calls named the session, and the 3 random-CJK calls were the refusals above.
 - **What bounds a call**: no flag caps a call's cost or output length. The input caps above, the instruction (one name of 2 to 5 words) and the 30 s timeout do.
