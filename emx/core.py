@@ -553,9 +553,7 @@ def short_path(path: str, width: int, home: str | None = None) -> str:
     `…/name`), so it is never cut mid-word; only a last folder too long by
     itself is cut.
     """
-    home = (os.path.expanduser("~") if home is None else home).rstrip("/")
-    if home and (path == home or path.startswith(home + "/")):
-        path = "~" + path[len(home):]
+    path = tilde_path(path, os.path.expanduser("~") if home is None else home)
     if display_width(path) <= width:
         return path
     parts = path.split("/")
@@ -874,6 +872,11 @@ def normalize_prefs(raw) -> dict:
         prefs["panel_width"] = _clamp(value, MIN_PANEL, MAX_WIDTH)
     if isinstance(raw.get("last_folder"), str) and raw["last_folder"]:
         prefs["last_folder"] = raw["last_folder"]
+    recent = raw.get("recent_folders")
+    if isinstance(recent, list):
+        recent = list(dict.fromkeys(f for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
+        if recent:
+            prefs["recent_folders"] = recent
     if raw.get("view") in VIEWS:
         prefs["view"] = raw["view"]
     collapsed = raw.get("collapsed")
@@ -942,27 +945,162 @@ def resolve_folder(text: str, base: str) -> str:
     return os.path.normpath(expanded)
 
 
-def complete_dir(text: str, base: str) -> tuple:
-    """Tab-complete a directory path. Returns (new_text, matching_names); the text keeps the form he typed, `~` included."""
-    if text == "~":
-        return "~/", []
+RECENT_FOLDERS = 20
+PICKER_ROWS = 8
+SESSIONS, RECENT, LISTED = "sessions", "recent", "listed"
+_BOUNDARY = "/-_. "
+
+
+def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -> str | None:
+    """Where `n` starts a session without asking, as `claude agents` does, or None to open the folder picker.
+
+    A session row means that session's own folder, and a header in the
+    project view its group's folder. A by-state header has no folder, so the
+    last folder used stands in. With no sessions at all there is nothing to
+    go on, so he picks.
+    """
+    if not sessions:
+        return None
+    if cursor and cursor[0] == "session":
+        session = next((s for s in sessions if s.id == cursor[1]), None)
+        if session is not None and session.cwd:
+            return session.cwd
+    if cursor and cursor[0] == "group" and view == PROJECT and cursor[1]:
+        return cursor[1]
+    return last_folder or None
+
+
+def remember_folder(prefs: dict, folder: str) -> dict:
+    """`prefs` after a session started in `folder`: it becomes the last folder and the newest of the recent ones."""
+    recent = [folder] + [f for f in prefs.get("recent_folders", ()) if f != folder]
+    return {**prefs, "last_folder": folder, "recent_folders": recent[:RECENT_FOLDERS]}
+
+
+def tilde_path(path: str, home: str) -> str:
+    home = home.rstrip("/")
+    if home and (path == home or path.startswith(home + "/")):
+        return "~" + path[len(home):]
+    return path
+
+
+def fuzzy_match(query: str, text: str) -> tuple | None:
+    """How well `query` matches `text` as a case-insensitive subsequence, as fzf and zsh do: a sort key, smaller is better, or None for no match.
+
+    The matched letters are the tightest window ending at the earliest
+    complete match, taken back to front. The key ranks more letters next to
+    each other first, then a match that starts a folder name (the last one
+    counts as the prefix), then more letters at word starts, then the shorter
+    text.
+    """
+    q, t = query.lower(), text.lower()
+    if not q:
+        return (0, 0, 0, len(text))
+    at = -1
+    for ch in q:
+        at = t.find(ch, at + 1)
+        if at < 0:
+            return None
+    picked = []
+    for ch in reversed(q):
+        at = t.rfind(ch, 0, at + 1)
+        picked.append(at)
+        at -= 1
+    picked.reverse()
+    together = sum(1 for a, b in zip(picked, picked[1:]) if b == a + 1)
+    starts = sum(1 for i in picked if _word_start(text, i))
+    last = text.rstrip("/").rfind("/") + 1
+    prefix = picked[0] >= last and _word_start(text, picked[0])
+    return (-together, not prefix, -starts, len(text))
+
+
+def _word_start(text: str, i: int) -> bool:
+    return i == 0 or text[i - 1] in _BOUNDARY or (text[i - 1].islower() and text[i].isupper())
+
+
+@dataclass(frozen=True)
+class Suggestion:
+    path: str
+    shown: str
+    source: str
+
+
+def picker_query(text: str, home: str) -> tuple:
+    """(folder to list, what to match its subfolders against) for the picker's typed text.
+
+    A bare word lists the home folder, as a relative path resolves there.
+    """
+    text = text.strip()
+    if text == "~" or text.startswith("~/"):
+        text = home.rstrip("/") + "/" + text[2:]
     head, sep, tail = text.rpartition("/")
-    listing = resolve_folder(head + sep, base) if sep else base
-    try:
-        names = sorted(
-            entry.name
-            for entry in os.scandir(listing)
-            if entry.name.startswith(tail)
-            and (tail.startswith(".") or not entry.name.startswith("."))
-            and entry.is_dir()
-        )
-    except OSError:
-        return text, []
-    if not names:
-        return text, []
-    if len(names) == 1:
-        return head + sep + names[0] + "/", names
-    return head + sep + os.path.commonprefix(names), names
+    if not sep:
+        return home, tail
+    return resolve_folder(head + sep, home), tail
+
+
+def folder_suggestions(text: str, session_folders, recent_folders, listed: tuple | None, home: str, limit: int = PICKER_ROWS) -> list:
+    """The picker's rows for `text`: folders with sessions, then recent folders, then subfolders of the folder being typed.
+
+    Each source keeps its own order while nothing is typed, and is ranked by
+    `fuzzy_match` once something is. Folders already offered by an earlier
+    source are not offered again. `listed` is (folder, names of its
+    subfolders) from a listing taken off the curses thread, or None while
+    there is none yet. Hidden folders show only when the typed name starts
+    with a dot.
+    """
+    query = text.strip()
+    rows, seen = [], set()
+
+    def add(source: str, candidates) -> None:
+        ranked = []
+        for order, (path, target) in enumerate(candidates):
+            key = os.path.normpath(path)
+            if key in seen:
+                continue
+            match = fuzzy_match(match_on, target) if match_on else (order,)
+            if match is not None:
+                ranked.append((match, order, key))
+        for _, _, key in sorted(ranked)[: limit - len(rows)]:
+            seen.add(key)
+            rows.append(Suggestion(key, tilde_path(key, home), source))
+
+    def known(folders):
+        return [(f, f if query.startswith("/") else tilde_path(os.path.normpath(f), home)) for f in folders if f]
+
+    match_on = query
+    add(SESSIONS, known(session_folders))
+    add(RECENT, known(recent_folders))
+    if listed is not None:
+        parent, tail = picker_query(text, home)
+        if listed[0] == parent:
+            names = sorted(listed[1], key=lambda n: (n.lower(), n))
+            match_on = tail
+            add(LISTED, [(os.path.join(parent, n), n) for n in names if tail.startswith(".") or not n.startswith(".")])
+    return rows
+
+
+def completed_text(suggestion: Suggestion) -> str:
+    """The picker's text after Tab completes a suggestion: its path with a slash, so the listing moves inside it."""
+    return suggestion.shown.rstrip("/") + "/"
+
+
+def folder_exists(folder: str, known, listed: tuple | None) -> bool | None:
+    """Whether `folder` is a folder, judged without touching the filesystem: a folder emx already knows, or one its parent's listing names. None while that listing hasn't come in."""
+    folder = os.path.normpath(folder)
+    if folder == "/" or folder in {os.path.normpath(k) for k in known if k}:
+        return True
+    if listed is None or listed[0] != os.path.dirname(folder):
+        return None
+    return os.path.basename(folder) in listed[1]
+
+
+def session_folders(sessions, groups, view: str) -> list:
+    """The folders the panel already shows, for the picker: each project group's folder in panel order, then any session's own folder not among them."""
+    folders = [g.key for g in groups if g.key] if view == PROJECT else []
+    for s in sessions:
+        if s.cwd and s.cwd not in folders:
+            folders.append(s.cwd)
+    return folders
 
 
 def new_session_args(claude: str, message: str) -> list:

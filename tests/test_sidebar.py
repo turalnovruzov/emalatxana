@@ -962,5 +962,208 @@ class CloseSession(AppCase):
         self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
+class FakeListings:
+    def __init__(self, cache=None):
+        self.cache = dict(cache or {})
+        self.asked = []
+
+    def get(self, folder):
+        self.asked.append(folder)
+        return self.cache.get(folder)
+
+
+class NewSession(AppCase):
+    """`n` starts where the cursor is; Tab picks another folder from suggestions, never touching the filesystem on this thread."""
+
+    def setUp(self):
+        super().setUp()
+        self.started = []
+        test = self
+
+        class FakeStarter:
+            def __init__(self, claude, folder, message):
+                test.started.append((folder, message))
+
+            def start(self):
+                pass
+
+        patch = mock.patch.object(sidebar, "Starter", FakeStarter)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.app.home = "/h/me"
+        self.app.listings = FakeListings()
+        self.poll(session("a", "/p/alpha/sub"), session("b", "/p/beta"))
+        self.app.refresh()
+
+    def keys(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def type(self, text):
+        self.keys(*text)
+
+    def test_n_then_enter_starts_an_empty_session_in_the_cursors_session_folder(self):
+        self.app.cursor = ("session", "a")
+        self.keys("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/p/alpha/sub"))
+        self.keys("\n")
+        self.assertEqual(self.started, [("/p/alpha/sub", "")])
+        self.assertIsNone(self.app.prompt)
+
+    def test_on_a_group_header_the_groups_folder_and_the_message_goes_with_it(self):
+        self.app.cursor = ("group", "/p/beta")
+        self.keys("n")
+        self.type("hi there")
+        self.keys("\r")
+        self.assertEqual(self.started, [("/p/beta", "hi there")])
+
+    def test_the_prompt_names_the_folder_and_shows_tab(self):
+        self.app.cursor = ("session", "a")
+        self.keys("n")
+        drawn = [text for text, _ in self.app.bottom_lines(39)]
+        self.assertIn("New session in /p/alpha/sub", drawn)
+        self.assertTrue(any("Tab folder" in line for line in drawn), drawn)
+
+    def test_a_by_state_header_uses_the_last_folder_else_opens_the_picker(self):
+        self.app.toggle_view()
+        self.app.cursor = ("group", core.WORKING)
+        self.keys("n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.app.prefs["last_folder"] = "/p/last"
+        self.keys("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/p/last"))
+
+    def test_with_no_sessions_n_opens_the_picker_and_esc_cancels(self):
+        self.poll()
+        self.app.refresh()
+        self.keys("n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.assertEqual(self.started, [])
+
+    def test_tab_picks_a_suggestion_with_the_arrows_and_keeps_the_message(self):
+        self.app.listings.cache["/h/me"] = ["Emx-Lab", "notes"]
+        self.app.cursor = ("session", "b")
+        self.keys("n")
+        self.type("draft")
+        self.keys("\t")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.type("EmX")
+        self.keys(curses.KEY_DOWN)
+        self.assertEqual(self.app.prompt["picked"], "/h/me/Emx-Lab")
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"], self.app.prompt["text"]),
+                         ("message", "/h/me/Emx-Lab", "draft"))
+        self.keys("\n")
+        self.assertEqual(self.started, [("/h/me/Emx-Lab", "draft")])
+
+    def test_esc_in_the_picker_goes_back_to_the_message_and_a_second_esc_cancels(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n")
+        self.type("draft")
+        self.keys("\t", "x", "\x1b")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"], self.app.prompt["text"]),
+                         ("message", "/p/beta", "draft"))
+        self.keys("\x1b")
+        self.assertIsNone(self.app.prompt)
+        self.assertEqual(self.started, [])
+
+    def test_the_highlight_stays_on_the_folder_he_chose_when_the_rows_move(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("p")
+        self.keys(curses.KEY_DOWN, curses.KEY_DOWN)
+        chosen = self.app.prompt["picked"]
+        self.assertEqual([r.path for r in self.app.suggestions()].index(chosen), 1)
+        self.poll(session("a", "/p/alpha/sub"), session("b", "/p/beta"), session("c", "/p/a"))
+        self.app.refresh()
+        self.assertEqual([r.path for r in self.app.suggestions()].index(chosen), 2)
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["folder"], chosen)
+
+    def test_tab_completes_the_highlighted_or_first_suggestion(self):
+        self.app.listings.cache["/h/me"] = ["Work"]
+        self.app.listings.cache["/h/me/Work"] = ["inner"]
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("wo")
+        self.keys("\t")
+        self.assertEqual(self.app.prompt["text"], "~/Work/")
+        rows = self.app.suggestions()
+        self.assertEqual([r.path for r in rows if r.source == core.LISTED], ["/h/me/Work/inner"])
+
+    def test_a_typed_path_is_accepted_only_once_a_listing_shows_it_is_a_folder(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        self.type("/q/new")
+        self.keys("\n")
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        self.assertIn("Still reading", self.app.prompt["hint"])
+        self.app.listings.cache["/q"] = ["other"]
+        self.keys("\n")
+        self.assertIn("Not a folder", self.app.prompt["hint"])
+        self.app.listings.cache["/q"] = ["new"]
+        self.keys("\n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["folder"]), ("message", "/q/new"))
+
+    def test_the_picker_never_touches_the_filesystem_on_this_thread(self):
+        self.app.cursor = ("session", "b")
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("scanned")), \
+                mock.patch.object(sidebar.os.path, "isdir", side_effect=AssertionError("stat")):
+            self.keys("n", "\t")
+            self.type("~/some/path")
+            self.app.draw()
+            self.keys(curses.KEY_DOWN, "\t", "\n")
+
+    def test_a_started_folder_becomes_recent_and_last(self):
+        self.app.starter = mock.Mock(folder="/p/gamma", result=(session("new1", "/p/gamma"), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertEqual(self.app.prefs["recent_folders"][0], "/p/gamma")
+        self.assertEqual(core.load_prefs(self.app.prefs_file)["last_folder"], "/p/gamma")
+
+    def test_the_help_says_where_n_starts(self):
+        self.assertIn("Tab", dict(sidebar.HELP)["n"])
+
+
+class FolderListingsOffThread(unittest.TestCase):
+    def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
+        release = threading.Event()
+        calls = []
+
+        def hang(folder):
+            calls.append(folder)
+            release.wait(5)
+            return ["late"]
+
+        listings = sidebar.Listings()
+        with mock.patch.object(sidebar, "list_subdirs", side_effect=hang):
+            began = time.monotonic()
+            for _ in range(20):
+                self.assertIsNone(listings.get("/hung"))
+            self.assertLess(time.monotonic() - began, 0.5)
+            for i in range(sidebar.MAX_LISTINGS + 3):
+                listings.get(f"/other{i}")
+            time.sleep(0.05)
+            self.assertEqual(calls.count("/hung"), 1)
+            self.assertEqual(len(calls), sidebar.MAX_LISTINGS)
+            release.set()
+            deadline = time.monotonic() + 2
+            while listings.get("/hung") is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(listings.get("/hung"), ["late"])
+
+    def test_list_subdirs_lists_folders_only_and_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            for n in ("Alpha", ".hidden"):
+                os.mkdir(os.path.join(d, n))
+            Path(d, "file").write_text("")
+            self.assertEqual(sorted(sidebar.list_subdirs(d)), [".hidden", "Alpha"])
+            self.assertEqual(sidebar.list_subdirs(os.path.join(d, "missing")), [])
+
+
 if __name__ == "__main__":
     unittest.main()
