@@ -47,7 +47,7 @@ There is no separate test lane: **you write the tests your steps name**, and the
 - **Report the number of checks collected, every time.** Zero collected is a **red** state, not a clean run.
 - **Never weaken, delete, loosen, or skip an assertion to make a change pass.** A skip is a red state **and a finding you report**. If an assertion fails because the code is wrong, that is the assertion doing its job; if the assertion itself is wrong, say so explicitly and show why, and do not quietly rewrite it into agreement.
 - **Report skips as a count too**, and the target is zero.
-- **Never assert a rule nobody stated.** If neither the README, the issue, the plan nor his recorded words say it, that is a question for Tural through the lead, not an assertion you add.
+- **Never assert a rule nobody stated.** If neither the README, the issue nor his recorded words say it (a plan naming an assertion does not make it stated), that is a question for Tural through the lead, not an assertion you add.
 - **Test what the plan specified**, what the code claims, and what is structurally checkable: shapes, ranges, error paths, degenerate inputs.
 
 ## How you report
