@@ -303,10 +303,12 @@ class Closer(threading.Thread):
 
     A running session is stopped, then removed. `wait_for` holds the
     Interrupters of any of them, cancelled when the close began. The close
-    waits for them to end, and an Interrupter that ends cancelled has killed
-    any hidden viewer it opened, so no `claude attach` it started can land after the
-    stop and resume the session; if that kill failed and the pane is still
-    there, nothing is closed. `current` is the session being closed now.
+    waits for them to end, and an Interrupter cancelled while it still ran
+    has killed any hidden viewer it opened, so that viewer's `claude attach`
+    can't land after the stop and resume the session; if that kill failed
+    and the pane is still listed, nothing is closed. Not covered: a hidden
+    viewer left by an interrupt that had already ended (timed out or
+    failed) before the close began. `current` is the session being closed now.
     `result` is (all closed, message, {id: closed}).
     """
 
