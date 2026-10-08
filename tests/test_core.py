@@ -348,8 +348,11 @@ class CodeVersion(unittest.TestCase):
     def test_moving_bytes_between_name_and_content_changes_it(self):
         self.assertNotEqual(core.code_version([("a", b"bc")]), core.code_version([("ab", b"c")]))
 
-    def test_bytecode_and_dotfiles_do_not_count(self):
-        for rel in ("emx/__pycache__/core.cpython-314.pyc", "emx/core.pyc", "emx/.DS_Store", ".hidden/x.py"):
+    def test_bytecode_dotfiles_and_editor_backups_do_not_count(self):
+        for rel in (
+            "emx/__pycache__/core.cpython-314.pyc", "emx/core.pyc", "emx/.DS_Store", ".hidden/x.py",
+            "emx/cli.py~", "emx/emx.tmux.conf~",
+        ):
             with self.subTest(rel=rel):
                 self.assertFalse(core.counts_for_version(rel))
         for rel in ("bin/emx", "emx/cli.py", "emx/emx.tmux.conf"):

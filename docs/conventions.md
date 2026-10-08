@@ -15,7 +15,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    tmux.some_action(pane)        # a Tmux method; it adds -L <socket>
    # never: subprocess.run(["tmux", ...])
    ```
-4. **Gotcha**: `-f` (emx's config file) only takes effect when the server starts, so changing the config does nothing to a running workspace until its server restarts. And the socket name must never be `default` or empty, because that is his everyday server; the launcher refuses those values.
+4. **Gotcha**: `-f` (emx's config file) only takes effect when the server starts. A running workspace picks up config changes only because the launcher re-sources the file when the code stamp changes. Re-sourcing applies added and changed lines but never undoes a removed one (that still needs a server restart), `set -a` appends again on every source unless the list is reset first, and a line tmux rejects fails `source-file` even though server start tolerated it. And the socket name must never be `default` or empty, because that is the user's everyday server; the launcher refuses those values.
 
 ### `emx/core.py` stays pure
 
@@ -50,6 +50,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    core.main_view_state(text, "emx-test-named", width)
    ```
 4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes.
+
+### tmux targets for a session name the session exactly: `=name:`
+
+1. **Rule**: when a tmux command takes a target and we mean the emx session, we write `-t "={SESSION}:"`. The `=` asks for an exact match, and the trailing colon makes tmux read it as a session, not a pane or window.
+2. **Why**: `show-options -q` hides target errors. `-t =emx` (no colon) returns an empty string with exit 0, which reads as "option unset", so the version check would upgrade on every launch with no error anywhere.
+3. **Minimal example**:
+   ```python
+   self.run("show-options", "-qv", "-t", f"={SESSION}:", name)
+   # never: "-t", f"={SESSION}"   (silently empty under -q)
+   ```
+4. **Gotcha**: `-q` also hides a session that does not exist (`=emxx:` returns `''` with exit 0 too), so an empty value never proves the option is unset. Read it only after `has_session()`.
 
 ## The contract for this file
 

@@ -180,10 +180,12 @@ def width_action(applied: tuple | None, actual: tuple) -> str | None:
 
 
 def counts_for_version(relpath: str) -> bool:
-    """Whether a file under the code tree feeds the version stamp. Bytecode and dotfiles appear on their own, and would change the stamp with no code change."""
+    """Whether a file under the code tree feeds the version stamp. Bytecode, dotfiles and editor backups appear on their own, and would change the stamp with no code change."""
     parts = relpath.replace(os.sep, "/").split("/")
     return not (
-        "__pycache__" in parts or any(p.startswith(".") for p in parts) or relpath.endswith(".pyc")
+        "__pycache__" in parts
+        or any(p.startswith(".") for p in parts)
+        or relpath.endswith((".pyc", "~"))
     )
 
 
@@ -205,9 +207,9 @@ def relaunch_plan(panes, upgrade: bool) -> tuple:
     `panes` are objects with .id, .window, .dead, .role and .session. Without
     an upgrade only a dead sidebar is revived. With one, every sidebar is
     respawned on the new code and every spacer (made only by releases before
-    the reading-width cap was removed) is dropped. A pane holding a session is never chosen, whatever
-    its role, and neither is the last pane of a window, so the server and
-    every viewer survive.
+    the reading-width cap was removed) is dropped. A pane holding a session
+    is never chosen, whatever its role, and neither is the last pane of a
+    window, so the server and every viewer survive.
     """
     panes = list(panes)
     ours = [p for p in panes if not p.session]

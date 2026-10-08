@@ -77,6 +77,8 @@ def refresh_workspace(tmux: Tmux) -> None:
     for pane in drop:
         tmux.kill_pane(pane)
     for pane in respawn:
+        # Respawning kills a session start still in flight in the old sidebar; accepted, as that
+        # window is a few seconds and the session itself is unaffected.
         tmux.respawn(pane, self_command("sidebar", tmux.socket))
     if upgrade:
         tmux.source_config()
@@ -94,13 +96,18 @@ def launch() -> int:
         return 2
     tmux = Tmux(socket, CONFIG)
     try:
-        if tmux.has_session():
-            refresh_workspace(tmux)
-        else:
+        running = tmux.has_session()
+        if not running:
             create_workspace(tmux)
     except (TmuxError, OSError) as exc:
         print(f"emx: {exc}", file=sys.stderr)
         return 1
+    if running:
+        # Best effort: a failed upgrade must not lock him out of a workspace that still runs.
+        try:
+            refresh_workspace(tmux)
+        except (TmuxError, OSError) as exc:
+            print(f"emx: couldn't update the running workspace: {' '.join(str(exc).split())}", file=sys.stderr)
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={SESSION}"), env)
     return 1
