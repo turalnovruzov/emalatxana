@@ -83,7 +83,7 @@ The repo is private, but it may be made public later and the tool stays separate
 
 **A new library, a new third-party service, or a major version bump requires Tural's word before it lands.** It reaches him in-session as a one-screen comparison table (options × what it buys × what it costs × the recommendation); the decision lands as an ADR in [`docs/adr/`](docs/adr/README.md).
 
-Dependencies are gated in conversation: no `ask` rules sit in [`.claude/settings.json`](.claude/settings.json). [`.claude/hooks/dependency-record-check.sh`](.claude/hooks/dependency-record-check.sh) reports at `SessionStart` any dependency with no record in `docs/adr/` or [`docs/stack.md`](docs/stack.md): a report, not a gate, Python manifests and lockfiles only; extending it to the manifest the first stack decision brings is part of that decision's change. **No stack call has been made**; do not pre-populate `docs/stack.md`.
+Dependencies are gated in conversation: no `ask` rules sit in [`.claude/settings.json`](.claude/settings.json). [`.claude/hooks/dependency-record-check.sh`](.claude/hooks/dependency-record-check.sh) reports at `SessionStart` any dependency with no record in `docs/adr/` or [`docs/stack.md`](docs/stack.md): a report, not a gate, Python manifests and lockfiles only. **The stack is tmux plus the Python standard library** ([ADR 0001](docs/adr/0001-tmux-and-python-standard-library.md)), so there is no manifest yet; a decision that brings one extends the check in the same change. `docs/stack.md` holds decisions made, never plans.
 
 ## Verification
 
