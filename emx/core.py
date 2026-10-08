@@ -943,6 +943,22 @@ def whats_new_text(version: str, lines: list) -> str:
     return "\n".join([f"New in emx {version}:"] + [f"· {line}" for line in lines])
 
 
+def whats_new_since(text: str, recorded, current: str) -> str:
+    """The changelog lines of every version after `recorded` up to `current`, newest first, each under its own heading."""
+    last, now = parse_version(recorded), parse_version(current)
+    if last is None or now is None:
+        return ""
+    newer = sorted((v for v in changelog_versions(text) if last < parse_version(v) <= now), key=parse_version, reverse=True)
+    return "\n".join(whats_new_text(v, lines) for v in newer if (lines := changelog_entry(text, v)))
+
+
+def cut_with_pointer(lines: list, limit: int, pointer: str) -> list:
+    """`lines` as they are when they fit `limit`, else the first limit - 1 and a last line saying how many more there are and where."""
+    if len(lines) <= limit:
+        return lines
+    return lines[:limit - 1] + [f"… {len(lines) - limit + 1} more in {pointer}"]
+
+
 def display_width(text: str) -> int:
     return sum(_char_width(ch) for ch in text)
 

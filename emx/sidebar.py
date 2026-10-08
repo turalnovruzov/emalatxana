@@ -714,9 +714,9 @@ class App:
         due = core.whats_new_due(self.prefs.get("last_version"), __version__)
         if due is None:
             return
-        lines = core.changelog_entry(read_changelog(), __version__) if due == core.SHOW_NEW else []
-        if lines:
-            self.whats_new = core.whats_new_text(__version__, lines)
+        text = core.whats_new_since(read_changelog(), self.prefs.get("last_version"), __version__) if due == core.SHOW_NEW else ""
+        if text:
+            self.whats_new = text
             self.say(self.whats_new, seconds=WHATS_NEW_SECONDS)
         self.prefs = {**self.prefs, "last_version": __version__}
         # Saved after the note, so a failure to save replaces it with the error.
@@ -1421,7 +1421,12 @@ class App:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
         if self.notice:
             attr = self.color("error") if self.notice_error else curses.A_DIM
-            lines += [(t, attr) for t in core.wrap_words(self.notice, width)[:6]]
+            shown = core.wrap_words(self.notice, width)
+            if self.notice == self.whats_new:
+                shown = core.cut_with_pointer(shown, max(6, (height or 0) // 2), "CHANGELOG.md")
+            else:
+                shown = shown[:6]
+            lines += [(t, attr) for t in shown]
         if self.prompt is not None:
             # The prompt's own hint line stands in for the footer, whose keys don't apply while typing.
             room = None if height is None else height - 2 - len(lines)

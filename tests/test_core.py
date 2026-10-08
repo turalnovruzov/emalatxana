@@ -2873,6 +2873,24 @@ class Versions(unittest.TestCase):
     def test_whats_new_text(self):
         self.assertEqual(core.whats_new_text("1.2.0", ["a", "b"]), "New in emx 1.2.0:\n· a\n· b")
 
+    def test_a_skipped_version_s_lines_show_too(self):
+        text = core.whats_new_since(CHANGELOG, "1.0.0", "1.2.0")
+        self.assertEqual(
+            text,
+            "New in emx 1.2.0:\n· Something new.\n· Another thing,\n· across two lines.\nNew in emx 1.1.1:\n· A fix.",
+        )
+        self.assertNotIn("first release", text)
+
+    def test_only_versions_up_to_the_running_one_show(self):
+        self.assertEqual(core.whats_new_since(CHANGELOG, "1.0.0", "1.1.1"), "New in emx 1.1.1:\n· A fix.")
+        self.assertEqual(core.whats_new_since(CHANGELOG, "1.2.0", "1.2.0"), "")
+        self.assertEqual(core.whats_new_since(CHANGELOG, None, "1.2.0"), "")
+
+    def test_cut_with_pointer_counts_what_it_hides(self):
+        lines = [str(n) for n in range(10)]
+        self.assertEqual(core.cut_with_pointer(lines, 10, "X"), lines)
+        self.assertEqual(core.cut_with_pointer(lines, 6, "X"), ["0", "1", "2", "3", "4", "… 5 more in X"])
+
     def test_the_shipped_changelog_leads_with_the_code_version(self):
         root = Path(__file__).resolve().parent.parent
         text = (root / "CHANGELOG.md").read_text(encoding="utf-8")

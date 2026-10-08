@@ -1,6 +1,7 @@
 import curses
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from emx import core, sidebar
+from emx import cli, core, sidebar
 from emx.tmux import Pane, TmuxError
 
 
@@ -2361,6 +2362,39 @@ class WhatsNew(AppCase):
     def test_it_shows_under_the_list(self):
         app = self.start("1.0.0")
         self.assertEqual([t for t, _ in app.bottom_lines(38)][:2], ["New in emx 1.1.0:", "· Shiny thing."])
+
+    def test_prefs_without_a_record_stay_quiet_and_record(self):
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "side": "left"})
+        app = self.start()
+        self.assertEqual(app.notice, "")
+        self.assertEqual(self.recorded(), "1.1.0")
+
+    def test_a_skipped_version_s_lines_show_too(self):
+        log = "# Changelog\n\n## 1.2.0\n\n- Newest.\n\n## 1.1.0\n\n- Middle.\n\n## 1.0.0\n\n- First.\n"
+        app = self.start("1.0.0", version="1.2.0", log=log)
+        self.assertEqual(app.notice, "New in emx 1.2.0:\n· Newest.\nNew in emx 1.1.0:\n· Middle.")
+
+    def test_the_shipped_1_0_0_note_is_whole_or_says_what_is_cut(self):
+        log = cli.read_changelog()
+        app = self.start("0.9.0", version="1.0.0", log=log)
+        note = [t for t, _ in app.bottom_lines(39, 40)][:-1]
+        self.assertLessEqual(len(note), max(6, 40 // 2))
+        joined = " ".join(note)
+        whole = all(line in joined for line in core.changelog_entry(log, "1.0.0"))
+        self.assertTrue(whole or re.fullmatch(r"… \d+ more in CHANGELOG\.md", note[-1]), note)
+
+    def test_a_cut_note_says_how_much_is_missing(self):
+        log = "# Changelog\n\n## 1.1.0\n\n" + "".join(f"- Line number {n}.\n" for n in range(30))
+        app = self.start("1.0.0", log=log)
+        lines = [t for t, _ in app.bottom_lines(39, 20)]
+        self.assertEqual(lines[:2], ["New in emx 1.1.0:", "· Line number 0."])
+        self.assertEqual(lines[9], "… 22 more in CHANGELOG.md")
+
+    def test_other_notices_keep_six_lines(self):
+        app = self.start()
+        app.say("word " * 200)
+        notes = [t for t, _ in app.bottom_lines(39, 40) if t.startswith("word")]
+        self.assertEqual(len(notes), 6)
 
     def test_a_failed_save_shows_the_error_instead(self):
         core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": "1.0.0"})
