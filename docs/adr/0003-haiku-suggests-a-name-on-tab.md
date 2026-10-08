@@ -50,7 +50,8 @@ Measured on Claude Code 2.1.295, 2026-10-08, through `sidebar.suggest_name` with
   - In the real panel with a throwaway five-request session, Tab to name took 1.9 to 2.2 s.
 - **The ceiling**: name calls run only on his Tab, at most one at a time per panel, next to the summary worker. So ADR 0002's "calls are serial" now holds for summaries only. The dearest name measured is $0.0125 (a refused-then-answered call). A cancelled box's call still finishes and is paid.
 - **What isn't read**: only the session's current `<sessionId>.jsonl`. Requests from before a `/clear`, or kept in another file after a resume, are not seen.
-- **No transcript is left behind**: `ls ~/.claude/projects | grep -c emx-summary` was 0 before and after the measurement.
+- **Not measured**: a history made only of emoji, which may take more tokens per character than the mixed text above.
+- **No transcript is left behind**: the measurement calls ran in their own throwaway folders, and the panel's in emx's scratch folder. Afterwards `~/.claude/projects` held no folder named after either, only the one for the throwaway session the live check ran in.
 
 ## Alternatives considered
 

@@ -2464,6 +2464,7 @@ class NamerWorker(unittest.TestCase):
         with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("called claude")) as run:
             self.assertEqual(self.run_namer(None), (None, sidebar.NAME_NO_TRANSCRIPT, None))
             self.assertEqual(self.run_namer(os.path.join(self.dir, "replies.jsonl")), (None, sidebar.NAME_NO_REQUESTS, None))
+            self.assertEqual(self.run_namer(self.dir), (None, sidebar.NAME_UNREADABLE, None))
         run.assert_not_called()
 
     def test_a_name_already_offered_did_not_fit(self):
