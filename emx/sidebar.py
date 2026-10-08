@@ -533,6 +533,9 @@ class App:
                 return
             self.checker = Checker(self.claude, (main.session, main.id))
             self.checker.start()
+        elif not core.check_still_applies(self.checker.asked, main.id, main.session):
+            self.say("The previous restart check is still finishing; press r again in a moment.")
+            return
         sid = self.checker.asked[0]
         shown = self.session(sid)
         self.say(f"Checking {shown.name if shown else sid} is still running…")

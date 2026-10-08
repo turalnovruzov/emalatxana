@@ -11,7 +11,7 @@ import textwrap
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 DEFAULT_PREFS = {"side": "right", "panel_width": 40}
 SIDES = ("left", "right")
@@ -196,7 +196,7 @@ class Placement:
     worktree: str = ""
 
 
-def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home: str = "", real=None) -> Placement:
+def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home: str = "", real: Callable[[str], str] | None = None) -> Placement:
     """Which repository a session's folder belongs to, from git's own answers.
 
     `rev_parse` is the output of `git rev-parse --path-format=absolute
@@ -476,10 +476,11 @@ def name_column(rows, width: int) -> int:
 
     The column is the widest `row_label` within half the row. A worktree
     label too wide for that counts as half the row when its branch can
-    shorten to fit, since `row_layout` shortens the branch to the column; a
-    label too wide even so is left out, so one long name doesn't push every
-    row. A row alone in its group has nothing to line up with, so it gets no
-    column and keeps its whole branch.
+    shorten to fit, since `row_layout` shortens the branch to the column; one
+    too wide even so counts its name alone, since `row_layout` then drops the
+    branch. A name too wide by itself is left out, so one long name doesn't
+    push every row. A row alone in its group has nothing to line up with, so
+    it gets no column and keeps its whole branch.
     """
     rows = list(rows)
     if len(rows) < 2:
@@ -489,8 +490,11 @@ def name_column(rows, width: int) -> int:
     for name, worktree in rows:
         label = display_width(row_label(name, worktree))
         shortest = display_width(name) + 1 + display_width(WORKTREE_MARK) + _branch_floor(worktree)
-        if label > cap and worktree and shortest <= cap:
-            label = cap
+        if label > cap and worktree:
+            if shortest <= cap:
+                label = cap
+            elif display_width(name) <= cap:
+                label = display_width(name)
         widths.append(label)
     return max((w for w in widths if w <= cap), default=0)
 
@@ -506,13 +510,14 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     right-aligned one column in from the edge. The status starts `align`
     columns after the name's start when the row can afford it, so states
     line up within a group; a worktree's branch shortens to stay inside that
-    column, as `name_column` assumes. As space runs out, in order: the status detail
-    shortens; the worktree's branch shortens, down to BRANCH_MIN, then goes;
-    the state word goes whole, never cut, since the glyph's colour still
-    shows the state; a name too long to leave even STATUS_MIN columns is cut,
-    down to NAME_MIN, to keep the state word; and last the status goes and
-    the name is cut to whatever is left. An empty `word` (the by-state view,
-    whose header already says it) leaves the detail alone as the status.
+    column, or goes when it can't, as `name_column` assumes. As space runs
+    out, in order: the status detail shortens; the worktree's branch
+    shortens, down to BRANCH_MIN, then goes; the state word goes whole, never
+    cut, since the glyph's colour still shows the state; a name too long to
+    leave even STATUS_MIN columns is cut, down to NAME_MIN, to keep the state
+    word; and last the status goes and the name is cut to whatever is left.
+    An empty `word` (the by-state view, whose header already says it) leaves
+    the detail alone as the status.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -527,7 +532,7 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     if worktree:
         spare = room - name_w - 1 - gap - word_w - display_width(WORKTREE_MARK)
         in_column = align - name_w - 1 - display_width(WORKTREE_MARK)
-        if align and in_column >= _branch_floor(worktree):
+        if align:
             spare = min(spare, in_column)
         if spare >= _branch_floor(worktree):
             extra = WORKTREE_MARK + fit(worktree, spare)

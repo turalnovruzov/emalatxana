@@ -502,15 +502,22 @@ class RowLayout(unittest.TestCase):
         self.assertEqual(core.row_label("emx-test-wt", ""), "emx-test-wt")
 
     def test_states_line_up_in_a_group_with_a_worktree_row(self):
-        for branch in ("feat-x", "feature/3-grouped-panel"):
-            group = [("emx-test-a", ""), ("emx-test-wt", branch)]
-            for width in (40, 50, 60):
+        groups = [
+            [("emx-test-a", ""), ("emx-test-wt", "feat-x")],
+            [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")],
+            [("emx-test-wt1", "feature/3-grouped-panel"), ("emx-test-wt2", "fix/x")],
+        ]
+        for group in groups:
+            for width in range(26, 81):
                 column = core.name_column(group, width)
-                with self.subTest(branch=branch, width=width, column=column):
+                with self.subTest(group=group, width=width, column=column):
                     rows = [self.row(width, name=n, worktree=w, word="Working", align=column) for n, w in group]
-                    status_x = {next(x for x, _, p in parts if p == "status") for parts in rows}
-                    self.assertEqual(status_x, {3 + column + 2})
-                    self.assertIn("⎇", rendered(rows[1]))
+                    status_x = [next((x for x, _, p in parts if p == "status"), None) for parts in rows]
+                    if None not in status_x:
+                        self.assertEqual(len(set(status_x)), 1, [rendered(r) for r in rows])
+                    if group[0][1] == "" and width in (40, 50, 60):
+                        self.assertEqual(status_x, [3 + column + 2] * len(rows))
+                        self.assertIn("⎇", rendered(rows[-1]))
         long = [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")]
         self.assertIn("⎇ feature/3-gro…  Working", rendered(self.row(60, "emx-test-wt", "feature/3-grouped-panel", "Working",
                                                                       align=core.name_column(long, 60))))

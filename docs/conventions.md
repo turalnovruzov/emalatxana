@@ -64,18 +64,40 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every `claude attach` asks `core.attach_allowed` first
 
-1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is checked against a fresh listing.
+1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`core.checked_row`), never on one taken on the curses thread.
 2. **Why**: attaching to a stopped session resumes it, and he must be the only one who reopens a session he stopped.
 3. **Minimal example**:
    ```python
+   # worker thread (Checker): one listing, taken now
+   self.result = fetch_sessions(self.claude)
+
+   # curses thread: judges, never lists
+   sessions, _ = checker.result or (None, "listing sessions failed")
+   checked = core.checked_row(sessions, sid)          # (session, fresh)
    if trigger == core.OPEN:
-       session, fresh = self.session(sid), False   # the row he clicked
+       session, fresh = self.session(sid), False      # the row he clicked
    else:
-       session, fresh = self.fresh_row(sid)        # one listing, taken now
+       session, fresh = checked or (None, False)
+       fresh = fresh and not self.list_error
    if core.attach_allowed(session, trigger, fresh):
        self.tmux.respawn(pane, core.viewer_command(self.claude, sid))
    ```
-4. **Gotcha**: the panel's rows come from the last poll, which can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone.
+4. **Gotcha**: the panel's rows come from the last poll, which can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile.
+
+### `claude` and git calls never run on the curses thread
+
+1. **Rule**: any call to the `claude` CLI or git runs on a worker thread (`Poller`, `Resolver`, `Starter`, `Checker`). The curses thread starts it, checks `is_alive()` from `refresh()`, and takes `.result`. It never calls `list_rows`, `fetch_sessions` or `run_git` itself.
+2. **Why**: `claude agents` can take up to its 15 s timeout. On the curses thread that freezes the panel, and every key he presses meanwhile is lost or queued.
+3. **Minimal example**:
+   ```python
+   self.checker = Checker(self.claude, (main.session, main.id))
+   self.checker.start()
+   # later, in refresh():
+   checker = self.checker
+   if checker is not None and not checker.is_alive():
+       sessions, _ = checker.result or (None, "listing sessions failed")
+   ```
+4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls.
 
 ## The contract for this file
 
