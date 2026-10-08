@@ -16,7 +16,9 @@ A headless spike on Claude Code 2.1.293 and tmux 3.7c, run on throwaway sessions
 
 ## Decision
 
-We build `emx` on **tmux** (a private server, its own socket and config) for the panes and switching, with the launcher and sidebar written in **Python 3 using only the standard library** (curses for the sidebar). Session data comes only from the `claude` CLI: `claude agents --json`, `claude attach`, `claude --bg`. emx never resumes, moves or stops a session.
+We build `emx` on **tmux** (a private server, its own socket and config) for the panes and switching, with the launcher and sidebar written in **Python 3 using only the standard library** (curses for the sidebar). Session data comes only from the `claude` CLI: `claude agents --json`, `claude attach`, `claude --bg`. emx never moves a conversation between sessions, and never resumes, stops or removes a session on its own.
+
+*Amended 2026-10-08 (#4, Tural's word):* emx may stop a session (`claude stop`) or remove a stopped one (`claude rm`), but only on his confirmed double Ctrl+X on that session's row, matching `claude agents`. Only his explicit open reopens a stopped session. See `docs/conventions.md`.
 
 ## Consequences
 
