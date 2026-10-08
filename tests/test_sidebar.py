@@ -2370,7 +2370,49 @@ class WhatsNew(AppCase):
         self.assertIn("read-only", app.notice)
 
 
+class AttrScr(RecordingScr):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drawn = []
+
+    def addstr(self, y, x, text, attr=0):
+        super().addstr(y, x, text, attr)
+        self.drawn.append((y, x, text, attr))
+
+
+class TonePalette:
+    def attr(self, tone, selected=False):
+        return 1000 + sum(map(ord, tone))
+
+
+def nearest_256(r, g, b):
+    levels = (0, 95, 135, 175, 215, 255)
+    colours = {16 + 36 * i + 6 * j + k: (levels[i], levels[j], levels[k]) for i in range(6) for j in range(6) for k in range(6)}
+    colours |= {232 + n: (8 + 10 * n,) * 3 for n in range(24)}
+    return min(colours, key=lambda c: sum((a - b) ** 2 for a, b in zip(colours[c], (r, g, b))))
+
+
 class TopLine(AppCase):
+    def drawn_top_line(self, focused):
+        scr = AttrScr()
+        app = sidebar.App(scr, tmux=None, claude="claude")
+        app.palette = TonePalette()
+        app.focused = focused
+        app.draw_top_line(38)
+        return {text: attr for y, x, text, attr in scr.drawn if y == 0}
+
+    def test_the_logo_is_copper_the_name_bold_the_version_dim(self):
+        drawn = self.drawn_top_line(True)
+        self.assertEqual(drawn["⚒"], TonePalette().attr("copper"))
+        self.assertEqual(drawn["emalatxana"], curses.A_BOLD)
+        self.assertEqual(drawn[sidebar.__version__], curses.A_DIM)
+
+    def test_the_name_dims_when_the_panel_loses_focus(self):
+        self.assertEqual(self.drawn_top_line(False)["emalatxana"], curses.A_DIM)
+
+    def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
+        self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
+
     def test_the_top_line_draws_the_logo_then_the_counts(self):
         scr = RecordingScr()
         app = sidebar.App(scr, tmux=None, claude="claude")
