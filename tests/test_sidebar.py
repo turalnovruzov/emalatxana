@@ -2282,10 +2282,9 @@ class SummaryScratch(unittest.TestCase):
                 sidebar.summary_scratch()
 
     def test_a_folder_of_another_user_is_refused(self):
-        other = os.stat_result((0o040700, 0, 0, 1, os.getuid() + 1, 0, 0, 0, 0, 0))
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
-            with mock.patch.object(sidebar.os, "lstat", return_value=other):
-                with self.assertRaises(OSError):
+            with mock.patch.object(sidebar.os, "getuid", return_value=os.getuid() + 1):
+                with self.assertRaisesRegex(OSError, "not a private folder"):
                     sidebar.summary_scratch()
 
     def test_it_is_one_private_empty_folder_reused_across_calls(self):
@@ -2390,6 +2389,19 @@ class SummariesWorker(unittest.TestCase):
             for _ in range(3):
                 self.worker.step()
         self.assertEqual(len(self.worker.calls), 1)
+
+    def test_a_refused_scratch_folder_makes_no_call_backs_off_and_keeps_the_line(self):
+        self.worker.step()
+        self.worker.take()
+        self.transcripts.found = {"a": core.Transcript(prompt="Other", latest="prompt")}
+        self.worker.scratch = None
+        with mock.patch.object(sidebar, "summary_scratch", side_effect=OSError("refused")):
+            with mock.patch.object(core, "SUMMARY_EVERY_SECONDS", 0):
+                for _ in range(4):
+                    self.worker.step()
+        self.assertEqual(len(self.excerpts), 1)
+        self.assertEqual(self.worker.failures["a"][0], 1)
+        self.assertEqual(self.worker.found["a"].text, "Line 1")
 
     def test_the_session_with_nothing_to_say_is_never_called(self):
         self.transcripts.found = {}

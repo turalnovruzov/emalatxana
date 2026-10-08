@@ -930,9 +930,12 @@ class Summaries(threading.Thread):
         _, sid, session, excerpt = min(due, key=lambda d: d[0])
         state = core.summary_state(session, transcripts.get(sid))
         self.tried[sid] = now
-        if self.scratch is None:
-            self.scratch = summary_scratch()
-        call, error = summarise(self.claude, excerpt, self.scratch)
+        try:
+            if self.scratch is None:
+                self.scratch = summary_scratch()
+            call, error = summarise(self.claude, excerpt, self.scratch)
+        except OSError as exc:
+            call, error = None, f"no private folder to run in: {exc}"
         with self.lock:
             if call is None:
                 count = self.failures.get(sid, (0, None))[0]
