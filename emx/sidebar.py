@@ -10,8 +10,8 @@ import textwrap
 import threading
 import time
 
-from emx import core
-from emx.cli import self_command
+from emx import __version__, core
+from emx.cli import read_changelog, self_command
 from emx.tmux import ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
@@ -25,6 +25,7 @@ MAX_LISTINGS = 4
 TRANSCRIPT_SECONDS = 3
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
+WHATS_NEW_SECONDS = 60
 FOOTERS = (
     "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
     "→ open ← back ␣ peek n new ^f find ^t pin ^r rename ^x close ^s view ? keys",
@@ -89,6 +90,7 @@ TONES = {
     "accent": (75, curses.COLOR_CYAN),
     "path": (244, curses.COLOR_WHITE),
     "error": (203, curses.COLOR_RED),
+    "copper": (173, curses.COLOR_YELLOW),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
@@ -704,6 +706,21 @@ class App:
         self.transcripts = {}
         self.peeking = False
         self.peek_wrapped = (None, [])
+        self.whats_new = None
+        self.note_new_version()
+
+    def note_new_version(self) -> None:
+        """Record the version this panel runs, showing its changelog lines when it is newer than the one recorded."""
+        due = core.whats_new_due(self.prefs.get("last_version"), __version__)
+        if due is None:
+            return
+        lines = core.changelog_entry(read_changelog(), __version__) if due == core.SHOW_NEW else []
+        if lines:
+            self.whats_new = core.whats_new_text(__version__, lines)
+            self.say(self.whats_new, seconds=WHATS_NEW_SECONDS)
+        self.prefs = {**self.prefs, "last_version": __version__}
+        # Saved after the note, so a failure to save replaces it with the error.
+        self.save_prefs()
 
     def say(self, text: str, error: bool = False, seconds: float | None = None) -> None:
         """Show a notice; with `seconds` it goes by itself after that long, unless another replaces it first."""
@@ -1320,6 +1337,10 @@ class App:
         self.activate(item)
 
     def handle_key(self, key) -> None:
+        if self.whats_new is not None and key != curses.KEY_RESIZE:
+            if self.notice == self.whats_new:
+                self.say("")
+            self.whats_new = None
         self.confirm = core.confirm_after_key(self.confirm, key == CTRL_X, key == curses.KEY_RESIZE)
         if self.peeking and key not in PEEK_KEYS and key != curses.KEY_RESIZE:
             self.peeking = False
@@ -1464,7 +1485,7 @@ class App:
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
-        self.draw_summary(w)
+        self.draw_top_line(w)
         self.put(1, 0, "─" * w, self.palette.attr("muted"))
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 2, h - len(bottom)
@@ -1516,15 +1537,15 @@ class App:
         self.put(bottom - 1, 0, "╰" + "─" * max(0, box - 2) + "╯", muted)
         return rows
 
-    def draw_summary(self, width: int) -> None:
-        if not self.loaded:
-            placed = core.fit_parts([("…", None)], width - 2)
-        else:
-            placed = core.summary_line(self.sessions, width - 2)
+    def draw_top_line(self, width: int) -> None:
         style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        for x, text, cat in placed:
-            tone = "muted" if cat in (None, core.STOPPED) else CATEGORY_TONE[cat]
-            self.put(0, 1 + x, text, self.palette.attr(tone) | style)
+        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM}
+        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded):
+            if tag in logo:
+                attr = logo[tag]
+            else:
+                attr = self.palette.attr("muted" if tag in (None, core.STOPPED) else CATEGORY_TONE[tag]) | style
+            self.put(0, 1 + x, text, attr)
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, "Keys", curses.A_BOLD)

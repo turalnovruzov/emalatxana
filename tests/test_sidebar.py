@@ -2174,5 +2174,99 @@ class Peek(AppCase):
         self.assertIn("space", dict(sidebar.HELP))
 
 
+
+class WhatsNew(AppCase):
+    """The first panel to run a newer version shows its changelog lines once, then records the version."""
+
+    LOG = "# Changelog\n\n## 1.1.0\n\n- Shiny thing.\n\n## 1.0.0\n\n- First.\n"
+
+    def start(self, recorded=None, version="1.1.0", log=LOG):
+        if recorded is not None:
+            core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": recorded})
+        with mock.patch.object(sidebar, "__version__", version), mock.patch.object(sidebar, "read_changelog", return_value=log):
+            app = sidebar.App(FakeScr(), tmux=None, claude="claude")
+        app.housekeep = lambda fresh_list: None
+        return app
+
+    def recorded(self):
+        return core.load_prefs(core.prefs_path()).get("last_version")
+
+    def test_a_newer_version_shows_its_lines_once_and_records_itself(self):
+        app = self.start("1.0.0")
+        self.assertEqual(app.notice, "New in emx 1.1.0:\n· Shiny thing.")
+        self.assertEqual(self.recorded(), "1.1.0")
+        self.assertEqual(self.start().notice, "")
+
+    def test_the_first_run_records_quietly(self):
+        core.prefs_path().unlink(missing_ok=True)
+        app = self.start()
+        self.assertEqual(app.notice, "")
+        self.assertEqual(self.recorded(), "1.1.0")
+
+    def test_the_same_or_an_older_version_shows_nothing_and_keeps_the_record(self):
+        for version in ("1.1.0", "1.0.5"):
+            with self.subTest(version=version):
+                app = self.start("1.1.0", version=version)
+                self.assertEqual(app.notice, "")
+                self.assertEqual(self.recorded(), "1.1.0")
+
+    def test_no_changelog_lines_still_records(self):
+        app = self.start("1.0.0", log="")
+        self.assertEqual(app.notice, "")
+        self.assertEqual(self.recorded(), "1.1.0")
+
+    def test_other_prefs_are_kept(self):
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "side": "left", "pinned": ["a"], "last_version": "1.0.0"})
+        self.start()
+        self.assertEqual(
+            core.load_prefs(core.prefs_path()),
+            {**core.DEFAULT_PREFS, "side": "left", "pinned": ["a"], "last_version": "1.1.0"},
+        )
+
+    def test_any_key_dismisses_it_and_still_does_its_job(self):
+        app = self.start("1.0.0")
+        app.poller.result = ([session("a", "/p/alpha"), session("b", "/p/beta")], None)
+        app.refresh()
+        app.handle_key(curses.KEY_RESIZE)
+        self.assertTrue(app.notice.startswith("New in emx"))
+        cursor = app.cursor
+        app.handle_key("j")
+        self.assertEqual(app.notice, "")
+        self.assertNotEqual(app.cursor, cursor)
+
+    def test_a_key_after_another_notice_replaced_it_leaves_that_notice(self):
+        app = self.start("1.0.0")
+        app.say("Pinned x.")
+        app.handle_key("j")
+        self.assertEqual(app.notice, "Pinned x.")
+
+    def test_it_goes_by_itself_after_a_while(self):
+        app = self.start("1.0.0")
+        self.assertAlmostEqual(app.notice_until - time.monotonic(), sidebar.WHATS_NEW_SECONDS, delta=5)
+        app.notice_until = time.monotonic() - 1
+        app.refresh()
+        self.assertEqual(app.notice, "")
+
+    def test_it_shows_under_the_list(self):
+        app = self.start("1.0.0")
+        self.assertEqual([t for t, _ in app.bottom_lines(38)][:2], ["New in emx 1.1.0:", "· Shiny thing."])
+
+    def test_a_failed_save_shows_the_error_instead(self):
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": "1.0.0"})
+        with mock.patch.object(core, "save_prefs", side_effect=OSError("read-only")):
+            app = self.start()
+        self.assertTrue(app.notice_error)
+        self.assertIn("read-only", app.notice)
+
+
+class TopLine(AppCase):
+    def test_the_top_line_draws_the_logo_then_the_counts(self):
+        scr = RecordingScr()
+        app = sidebar.App(scr, tmux=None, claude="claude")
+        app.housekeep = lambda fresh_list: None
+        app.poller.result = ([session("a", "/p/alpha")], None)
+        app.refresh()
+        self.assertEqual(scr.cells[0], f" ⚒ emalatxana {sidebar.__version__}".ljust(30) + "1 working")
+
 if __name__ == "__main__":
     unittest.main()

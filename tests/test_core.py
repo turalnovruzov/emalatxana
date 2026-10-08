@@ -5,7 +5,7 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from emx import core
+from emx import __version__, core
 
 ROWS = [
     {"id": "bg-1", "kind": "background", "name": "alpha", "cwd": "/tmp/x/proj", "state": "working", "status": "busy"},
@@ -375,11 +375,47 @@ class Summary(unittest.TestCase):
             line = line.ljust(x) + text
         return line
 
-    def test_summary_line_uses_short_words_before_cutting(self):
-        self.assertEqual(self.text(core.summary_line(self.SESSIONS, 60)), "1 waiting · 2 working · 1 done · 1 stopped")
-        self.assertEqual(self.text(core.summary_line(self.SESSIONS, 38)), "1 wait · 2 work · 1 done · 1 stop")
-        self.assertEqual(self.text(core.summary_line(self.SESSIONS, 28)), "1 wait · 2 work · 1 done · …")
-        self.assertEqual(self.text(core.summary_line([], 28)), "no sessions")
+    def test_the_top_line_gives_up_words_then_version_then_name_then_counts(self):
+        cases = {
+            62: "⚒ emalatxana 1.0.0  1 waiting · 2 working · 1 done · 1 stopped",
+            61: "⚒ emalatxana 1.0.0          1 wait · 2 work · 1 done · 1 stop",
+            53: "⚒ emalatxana 1.0.0  1 wait · 2 work · 1 done · 1 stop",
+            52: "⚒ emalatxana       1 wait · 2 work · 1 done · 1 stop",
+            47: "⚒ emalatxana  1 wait · 2 work · 1 done · 1 stop",
+            46: "⚒            1 wait · 2 work · 1 done · 1 stop",
+            36: "⚒  1 wait · 2 work · 1 done · 1 stop",
+            35: "⚒  1 wait · 2 work · 1 done · 1 st…",
+            4: "⚒  …",
+            3: "⚒",
+            1: "⚒",
+            0: "",
+        }
+        for width, want in cases.items():
+            with self.subTest(width=width):
+                self.assertEqual(self.text(core.top_line(self.SESSIONS, "1.0.0", width)), want)
+
+    def test_one_count_fits_beside_the_whole_logo_in_a_default_panel(self):
+        placed = core.top_line([mk(state="working"), mk(state="working")], "1.0.0", 38)
+        self.assertEqual(self.text(placed), "⚒ emalatxana 1.0.0           2 working")
+        self.assertEqual([tag for _, _, tag in placed], ["logo", "name", "version", core.WORKING])
+
+    def test_the_top_line_before_the_first_listing_and_with_no_sessions(self):
+        self.assertEqual(self.text(core.top_line([], "1.0.0", 38, loaded=False)), "⚒ emalatxana 1.0.0                   …")
+        self.assertEqual(self.text(core.top_line([], "1.0.0", 38)), "⚒ emalatxana 1.0.0         no sessions")
+
+    def test_the_top_line_never_overflows_and_always_keeps_the_logo(self):
+        self.assertEqual(core.display_width(core.LOGO), 1)
+        for sessions in ([], self.SESSIONS):
+            for loaded in (True, False):
+                for width in range(0, 81):
+                    with self.subTest(sessions=len(sessions), loaded=loaded, width=width):
+                        placed = core.top_line(sessions, "10.20.30", width, loaded)
+                        end = max((x + core.display_width(t) for x, t, _ in placed), default=0)
+                        self.assertLessEqual(end, width)
+                        if width:
+                            self.assertEqual(placed[0], (0, core.LOGO, "logo"))
+                        xs = [x for x, _, _ in placed]
+                        self.assertEqual(xs, sorted(xs))
 
     def test_fit_parts_never_exceeds_width(self):
         parts = [("1 waiting", 1), ("22 working", 2), ("3 done", 3)]
@@ -714,6 +750,16 @@ class Prefs(unittest.TestCase):
     def test_normalize_clamps(self):
         self.assertEqual(core.normalize_prefs({"panel_width": 5})["panel_width"], core.MIN_PANEL)
         self.assertEqual(core.normalize_prefs({"panel_width": 10**9})["panel_width"], core.MAX_WIDTH)
+
+    def test_last_version_survives_a_save(self):
+        prefs = {**core.DEFAULT_PREFS, "last_version": "1.2.3"}
+        core.save_prefs(self.path, prefs)
+        self.assertEqual(core.load_prefs(self.path), prefs)
+
+    def test_normalize_drops_a_last_version_that_is_not_semver(self):
+        for bad in ("", "1.2", "v1.2.3", 123, None):
+            with self.subTest(bad=bad):
+                self.assertNotIn("last_version", core.normalize_prefs({"last_version": bad}))
 
     def test_normalize_non_dict(self):
         for raw in (None, [], "s", 3):
@@ -2574,6 +2620,80 @@ class PeekHeight(unittest.TestCase):
         self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 4, 5), 4)
         self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 3, 5), 0)
 
+
+
+CHANGELOG = """# Changelog
+
+Intro text.
+
+## 1.2.0 — 2026-11-01
+
+- Something new.
+- Another thing,
+  across two lines.
+
+## v1.1.1
+
+* A fix.
+
+## 1.0.0
+
+- The first release.
+"""
+
+
+class Versions(unittest.TestCase):
+    def test_parse_version_takes_plain_semver_only(self):
+        self.assertEqual(core.parse_version("1.0.0"), (1, 0, 0))
+        self.assertEqual(core.parse_version("10.20.300"), (10, 20, 300))
+        for bad in (None, "", "1.0", "1.0.0.0", "v1.0.0", "1.0.0-rc1", " 1.0.0", "1.0.0\n", "a.b.c", 1, ["1.0.0"]):
+            with self.subTest(bad=bad):
+                self.assertIsNone(core.parse_version(bad))
+
+    def test_versions_compare_as_numbers_not_text(self):
+        self.assertGreater(core.parse_version("1.10.0"), core.parse_version("1.9.9"))
+        self.assertGreater(core.parse_version("2.0.0"), core.parse_version("1.99.99"))
+        self.assertGreater(core.parse_version("1.0.10"), core.parse_version("1.0.9"))
+
+    def test_whats_new_shows_only_for_a_newer_version(self):
+        self.assertEqual(core.whats_new_due("1.0.0", "1.1.0"), core.SHOW_NEW)
+        self.assertEqual(core.whats_new_due("1.9.0", "1.10.0"), core.SHOW_NEW)
+        self.assertEqual(core.whats_new_due("1.1.0", "2.0.0"), core.SHOW_NEW)
+        self.assertIsNone(core.whats_new_due("1.1.0", "1.1.0"))
+
+    def test_a_first_run_or_an_unreadable_record_only_records(self):
+        for recorded in (None, "", "garbage", 3):
+            with self.subTest(recorded=recorded):
+                self.assertEqual(core.whats_new_due(recorded, "1.0.0"), core.RECORD_ONLY)
+
+    def test_an_older_checkout_neither_shows_nor_lowers_the_record(self):
+        self.assertIsNone(core.whats_new_due("1.2.0", "1.1.0"))
+
+    def test_code_with_a_broken_version_does_nothing(self):
+        self.assertIsNone(core.whats_new_due("1.0.0", "dev"))
+
+    def test_changelog_entry_is_that_version_only_without_markers(self):
+        self.assertEqual(core.changelog_entry(CHANGELOG, "1.2.0"), ["Something new.", "Another thing,", "across two lines."])
+        self.assertEqual(core.changelog_entry(CHANGELOG, "1.1.1"), ["A fix."])
+        self.assertEqual(core.changelog_entry(CHANGELOG, "1.0.0"), ["The first release."])
+        self.assertEqual(core.changelog_entry(CHANGELOG, "9.9.9"), [])
+        self.assertEqual(core.changelog_entry("", "1.0.0"), [])
+
+    def test_changelog_versions_newest_first(self):
+        self.assertEqual(core.changelog_versions(CHANGELOG), ["1.2.0", "1.1.1", "1.0.0"])
+
+    def test_whats_new_text(self):
+        self.assertEqual(core.whats_new_text("1.2.0", ["a", "b"]), "New in emx 1.2.0:\n· a\n· b")
+
+    def test_the_shipped_changelog_leads_with_the_code_version(self):
+        root = Path(__file__).resolve().parent.parent
+        text = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+        versions = core.changelog_versions(text)
+        self.assertEqual(versions[0], __version__)
+        self.assertTrue(core.changelog_entry(text, __version__))
+        parsed = [core.parse_version(v) for v in versions]
+        self.assertEqual(parsed, sorted(parsed, reverse=True))
+        self.assertEqual(len(set(parsed)), len(parsed))
 
 if __name__ == "__main__":
     unittest.main()
