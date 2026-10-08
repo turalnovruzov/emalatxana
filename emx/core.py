@@ -316,9 +316,9 @@ def closed_text(confirm: Confirm, output: str = "") -> str:
     return f"{done} {extra}" if extra else done
 
 
-# Claude Code 2.1.294 takes a line of 63 or more characters typed at once with its Enter as a paste: the Enter
-# doesn't submit, and the text stays in the prompt. `/rename ` and a 54-character name (62) was the longest line
-# seen to submit; names stop a little short of that.
+# Claude Code 2.1.294 takes a line typed at once with its Enter as a paste once the line is 63 or more UTF-16 units
+# (an emoji is two): the Enter doesn't submit, and the text stays in the prompt. Lines of 62 submitted, in ASCII,
+# CJK and emoji alike; names stop a little short of that.
 RENAME_MAX = 50
 # How long after `/rename` is typed the viewer may show the new name while the listing still shows the old one.
 RENAME_PENDING_SECONDS = 30.0
@@ -351,17 +351,22 @@ def name_char_allowed(ch: str) -> bool:
     return len(ch) == 1 and unicodedata.category(ch) not in ("Cc", "Cs", "Zl", "Zp")
 
 
+def typed_length(text: str) -> int:
+    """How long Claude Code counts `text`: in UTF-16 units, so an emoji outside the basic plane counts two."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def rename_request(sid: str, old: str, text: str) -> tuple:
     """(Rename, None) for the name he typed, (None, why not) for one emx won't type, or (None, None) when it is unchanged."""
     name = text.strip()
     if not name:
         return None, "Type a name, or Esc to cancel."
-    if not all(name_char_allowed(ch) for ch in name):
-        return None, "A name can't hold control characters or line breaks."
-    if len(name) > RENAME_MAX:
-        return None, f"A name can be at most {RENAME_MAX} characters."
     if name == old:
         return None, None
+    if not all(name_char_allowed(ch) for ch in name):
+        return None, "A name can't hold control characters or line breaks."
+    if typed_length(name) > RENAME_MAX:
+        return None, f"A name can be at most {RENAME_MAX} characters, and an emoji counts as two."
     return Rename(sid, old, name), None
 
 
@@ -421,19 +426,19 @@ def viewer_identity(session: Session, sessions, captured: str, pane_width: int) 
     is: the name, cut to fit with an ellipsis, or no name at all for an
     unnamed session. Two sessions can share a name, a cut name can fit
     several, and every unnamed session draws the same bare rule, so the
-    screen proves the session only when no other listed session fits it.
-    A stopped session can't be on screen without being reopened.
+    screen proves the session only when no other running session fits it:
+    a stopped one can't be on screen without being reopened.
     """
     if main_view_state(captured, "", pane_width) == "agent_view":
         return "other"
     shown = rule_name(captured, pane_width)
     if shown is None:
         return "other"
-    others = [s for s in sessions if s.id != session.id]
+    others = [s for s in sessions if s.id != session.id and s.running]
     if session.name == session.id:
         if shown:
             return "other"
-        return "ambiguous" if any(s.name == s.id and s.running for s in others) else "ok"
+        return "ambiguous" if any(s.name == s.id for s in others) else "ok"
     if not shown or not _names_match(shown, session.name):
         return "other"
     return "ambiguous" if any(s.name != s.id and _names_match(shown, s.name) for s in others) else "ok"

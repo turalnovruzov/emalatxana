@@ -1968,11 +1968,21 @@ class RenameChecks(unittest.TestCase):
                 self.assertTrue(error)
         self.assertEqual(core.rename_request("a", "old", "x" * core.RENAME_MAX)[0].new, "x" * core.RENAME_MAX)
 
-    def test_an_unchanged_name_is_no_request_and_no_error(self):
+    def test_an_unchanged_name_is_no_request_and_no_error_even_when_too_long_to_type(self):
         self.assertEqual(core.rename_request("a", "old", " old "), (None, None))
+        long = "x" * (core.RENAME_MAX + 10)
+        self.assertEqual(core.rename_request("a", long, long), (None, None))
 
     def test_the_longest_line_stays_under_what_claude_code_takes_for_a_paste(self):
-        self.assertLess(len(core.rename_line("x" * core.RENAME_MAX)) + 1, 64)
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+        for unit in ("x", "あ", "\U0001f600", family):
+            with self.subTest(unit=unit):
+                longest = unit * (core.RENAME_MAX // core.typed_length(unit))
+                self.assertIsNotNone(core.rename_request("a", "old", longest)[0])
+                self.assertLess(core.typed_length(core.rename_line(longest)), 63)
+                self.assertIsNone(core.rename_request("a", "old", longest + unit)[0])
+        self.assertEqual(core.typed_length("\U0001f600"), 2)
+        self.assertEqual(core.typed_length(family), 8)
 
     def test_the_line_typed_is_exactly_the_slash_command(self):
         self.assertEqual(core.rename_line("my name"), "/rename my name")
@@ -2040,6 +2050,10 @@ class RenameChecks(unittest.TestCase):
         cut = renamed_rule("emx-test-a-rather…")
         self.assertEqual(self.identity(long, self.others, cut), "ok")
         self.assertEqual(self.identity(long, self.others + [named("d", "emx-test-a-rather-short")], cut), "ambiguous")
+
+    def test_a_stopped_session_with_the_same_name_is_no_twin(self):
+        stopped_twin = named("d", "emx-test-named", state="stopped", running=False)
+        self.assertEqual(self.identity(self.session, self.others + [stopped_twin], "named-viewer"), "ok")
 
     def test_the_screen_must_show_this_sessions_empty_prompt_outside_any_mode(self):
         sessions = [self.session] + self.others
