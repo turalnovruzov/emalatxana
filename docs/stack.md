@@ -14,5 +14,5 @@ What is in use in this repo, and why each piece is here. This is the record the 
 
 | What | Why it's here | Decision record |
 |---|---|---|
-
-Nothing decided yet.
+| tmux (≥ 3.7) | Panes, the narrow main column, and instant switching via `swap-pane` between live `claude attach` viewers | [0001](./adr/0001-tmux-and-python-standard-library.md) |
+| Python 3, standard library only | The `emx` launcher and the curses session sidebar; nothing pip-installed | [0001](./adr/0001-tmux-and-python-standard-library.md) |

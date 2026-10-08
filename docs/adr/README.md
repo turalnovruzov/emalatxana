@@ -23,8 +23,7 @@ When **not** to write one:
 
 | # | Title | Status |
 |---|---|---|
-
-No records yet.
+| [0001](./0001-tmux-and-python-standard-library.md) | tmux and the Python Standard Library | Accepted |
 
 ---
 
