@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 
 from emx import core
@@ -310,6 +311,92 @@ class StaleViewers(unittest.TestCase):
     def test_accepts_sets_and_generators(self):
         _, close = core.stale_viewers({"a", "b"}, (x for x in ["a"]), {"b": 1})
         self.assertEqual(close, ["b"])
+
+
+@dataclass(frozen=True)
+class P:
+    id: str
+    window: str = "@1"
+    role: str = ""
+    session: str = ""
+    dead: bool = False
+
+
+def old_release(side="right"):
+    """The panes a workspace from the release with the reading-width cap holds after one session was opened."""
+    home = [P("%2", role="spacer"), P("%3", session="s1"), P("%1", role="sidebar")]
+    if side == "left":
+        home.reverse()
+    return home + [P("%0", window="@2", role="placeholder"), P("%4", window="@3", session="s2")]
+
+
+class CodeVersion(unittest.TestCase):
+    FILES = [("bin/emx", b"launcher"), ("emx/core.py", b"core"), ("emx/emx.tmux.conf", b"conf")]
+
+    def test_order_does_not_matter(self):
+        self.assertEqual(core.code_version(self.FILES), core.code_version(list(reversed(self.FILES))))
+
+    def test_a_content_change_changes_it(self):
+        changed = [*self.FILES[:2], ("emx/emx.tmux.conf", b"conf2")]
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version(changed))
+
+    def test_a_rename_or_new_file_changes_it(self):
+        renamed = [("bin/emx", b"launcher"), ("emx/core2.py", b"core"), ("emx/emx.tmux.conf", b"conf")]
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version(renamed))
+        self.assertNotEqual(core.code_version(self.FILES), core.code_version([*self.FILES, ("emx/x.py", b"")]))
+
+    def test_moving_bytes_between_name_and_content_changes_it(self):
+        self.assertNotEqual(core.code_version([("a", b"bc")]), core.code_version([("ab", b"c")]))
+
+    def test_bytecode_and_dotfiles_do_not_count(self):
+        for rel in ("emx/__pycache__/core.cpython-314.pyc", "emx/core.pyc", "emx/.DS_Store", ".hidden/x.py"):
+            with self.subTest(rel=rel):
+                self.assertFalse(core.counts_for_version(rel))
+        for rel in ("bin/emx", "emx/cli.py", "emx/emx.tmux.conf"):
+            with self.subTest(rel=rel):
+                self.assertTrue(core.counts_for_version(rel))
+
+    def test_needs_upgrade(self):
+        self.assertTrue(core.needs_upgrade("", "abc"))
+        self.assertTrue(core.needs_upgrade("old", "abc"))
+        self.assertFalse(core.needs_upgrade("abc", "abc"))
+
+
+class RelaunchPlan(unittest.TestCase):
+    def test_upgrade_from_old_release_respawns_sidebar_and_drops_spacer(self):
+        for side in ("left", "right"):
+            with self.subTest(side=side):
+                self.assertEqual(core.relaunch_plan(old_release(side), upgrade=True), (["%1"], ["%2"]))
+
+    def test_viewers_and_placeholder_never_touched(self):
+        respawn, drop = core.relaunch_plan(old_release(), upgrade=True)
+        self.assertFalse({"%0", "%3", "%4"} & set(respawn + drop))
+
+    def test_same_version_only_revives_a_dead_sidebar(self):
+        self.assertEqual(core.relaunch_plan(old_release(), upgrade=False), ([], []))
+        panes = [P("%1", role="sidebar", dead=True), P("%3", session="s1")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=False), (["%1"], []))
+
+    def test_current_layout_upgrade_only_respawns_sidebar(self):
+        panes = [P("%3", session="s1"), P("%1", role="sidebar"), P("%0", window="@2", role="placeholder")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), (["%1"], []))
+
+    def test_a_pane_holding_a_session_is_never_chosen_whatever_its_role(self):
+        panes = [P("%1", role="sidebar", session="s1", dead=True), P("%2", role="spacer", session="s2"), P("%3")]
+        for upgrade in (True, False):
+            with self.subTest(upgrade=upgrade):
+                self.assertEqual(core.relaunch_plan(panes, upgrade=upgrade), ([], []))
+
+    def test_never_drops_the_last_pane_of_a_window(self):
+        panes = [P("%1", role="sidebar"), P("%3"), P("%5", window="@4", role="spacer")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), (["%1"], []))
+
+    def test_two_spacers_alone_in_a_window_keep_one(self):
+        panes = [P("%5", window="@4", role="spacer"), P("%6", window="@4", role="spacer")]
+        self.assertEqual(core.relaunch_plan(panes, upgrade=True), ([], ["%5"]))
+
+    def test_no_panes(self):
+        self.assertEqual(core.relaunch_plan([], upgrade=True), ([], []))
 
 
 def viewer_screen(rule_line, prompt="❯ ", width=40, transcript=("some answer text", "❯ an earlier message", "")):

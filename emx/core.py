@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -176,6 +177,50 @@ def width_action(applied: tuple | None, actual: tuple) -> str | None:
     if actual[1] != applied[1]:
         return "adopt-panel"
     return None
+
+
+def counts_for_version(relpath: str) -> bool:
+    """Whether a file under the code tree feeds the version stamp. Bytecode and dotfiles appear on their own, and would change the stamp with no code change."""
+    parts = relpath.replace(os.sep, "/").split("/")
+    return not (
+        "__pycache__" in parts or any(p.startswith(".") for p in parts) or relpath.endswith(".pyc")
+    )
+
+
+def code_version(files) -> str:
+    """A stamp for the code a workspace runs, from (relative_path, bytes) pairs in any order."""
+    digest = hashlib.sha256()
+    for name, data in sorted(files):
+        digest.update(name.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data)
+    return digest.hexdigest()[:16]
+
+
+def needs_upgrade(stamp: str, current: str) -> bool:
+    return not stamp or stamp != current
+
+
+def relaunch_plan(panes, upgrade: bool) -> tuple:
+    """What the launcher does to a running workspace: (sidebar_ids_to_respawn, spacer_ids_to_kill).
+
+    `panes` are objects with .id, .window, .dead, .role and .session. Without
+    an upgrade only a dead sidebar is revived. With one, every sidebar is
+    respawned on the new code and every spacer (made only by releases before
+    the reading-width cap was removed) is dropped. A pane holding a session is never chosen, whatever
+    its role, and neither is the last pane of a window, so the server and
+    every viewer survive.
+    """
+    panes = list(panes)
+    ours = [p for p in panes if not p.session]
+    respawn = [p.id for p in ours if p.role == "sidebar" and (upgrade or p.dead)]
+    drop = []
+    if upgrade:
+        for p in ours:
+            if p.role != "spacer":
+                continue
+            others = [q for q in panes if q.window == p.window and q.id != p.id and q.id not in drop]
+            if others:
+                drop.append(p.id)
+    return respawn, drop
 
 
 def prefs_path(env: Mapping | None = None) -> Path:

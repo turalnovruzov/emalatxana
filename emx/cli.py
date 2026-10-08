@@ -8,8 +8,8 @@ import shutil
 import signal
 import sys
 
-from emx.core import load_prefs, prefs_path
-from emx.tmux import ROLE, SESSION, Tmux, TmuxError
+from emx import core
+from emx.tmux import ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin", "emx")
@@ -19,7 +19,8 @@ PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 
 USAGE = """usage: emx
 
-Opens the emx workspace in a private tmux server, or reattaches if it is running.
+Opens the emx workspace in a private tmux server, or reattaches if it is running,
+first moving a running workspace onto this version of emx.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude")."""
 
 
@@ -41,7 +42,7 @@ def self_command(*args: str) -> str:
 
 def create_workspace(tmux: Tmux) -> None:
     cols, lines = shutil.get_terminal_size((200, 50))
-    side = load_prefs(prefs_path())["side"]
+    side = core.load_prefs(core.prefs_path())["side"]
     main = tmux.run(
         "new-session", "-d", "-s", SESSION, "-n", SESSION, "-x", str(cols), "-y", str(lines),
         "-P", "-F", "#{pane_id}", self_command("blank", PLACEHOLDER_TEXT),
@@ -53,12 +54,34 @@ def create_workspace(tmux: Tmux) -> None:
         self_command("sidebar", tmux.socket),
     ).strip()
     tmux.set_pane_option(sidebar, ROLE, "sidebar")
+    tmux.set_session_option(VERSION_OPT, code_version())
 
 
-def revive_sidebar(tmux: Tmux) -> None:
-    for pane in tmux.panes():
-        if pane.role == "sidebar" and pane.dead:
-            tmux.respawn(pane.id, self_command("sidebar", tmux.socket))
+def code_version() -> str:
+    root = os.path.dirname(HERE)
+    files = []
+    for path in [BIN] + [os.path.join(d, f) for d, _, names in os.walk(HERE) for f in names]:
+        rel = os.path.relpath(path, root).replace(os.sep, "/")
+        if core.counts_for_version(rel):
+            with open(path, "rb") as fh:
+                files.append((rel, fh.read()))
+    return core.code_version(files)
+
+
+def refresh_workspace(tmux: Tmux) -> None:
+    """Bring a running workspace onto this code: a sidebar process keeps running the code it started with until respawned."""
+    version = code_version()
+    upgrade = core.needs_upgrade(tmux.session_option(VERSION_OPT), version)
+    respawn, drop = core.relaunch_plan(tmux.panes(), upgrade)
+    # Spacers go first: a sidebar takes any other pane in its window as the main pane.
+    for pane in drop:
+        tmux.kill_pane(pane)
+    for pane in respawn:
+        tmux.respawn(pane, self_command("sidebar", tmux.socket))
+    if upgrade:
+        tmux.source_config()
+        # Stamped last, so an upgrade that fails partway is retried on the next launch.
+        tmux.set_session_option(VERSION_OPT, version)
 
 
 def launch() -> int:
@@ -72,10 +95,10 @@ def launch() -> int:
     tmux = Tmux(socket, CONFIG)
     try:
         if tmux.has_session():
-            revive_sidebar(tmux)
+            refresh_workspace(tmux)
         else:
             create_workspace(tmux)
-    except TmuxError as exc:
+    except (TmuxError, OSError) as exc:
         print(f"emx: {exc}", file=sys.stderr)
         return 1
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
