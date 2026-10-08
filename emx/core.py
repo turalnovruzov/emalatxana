@@ -9,7 +9,8 @@ import re
 import shlex
 import textwrap
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -38,6 +39,7 @@ class Session:
     waiting_for: str
     started_at: float | None = None
     running: bool = True
+    session_id: str = ""
 
 
 def parse_agents(text: str) -> list:
@@ -75,6 +77,7 @@ def background_sessions(rows: list) -> list:
                 waiting_for=_text(row.get("waitingFor")),
                 started_at=_number(row.get("startedAt")),
                 running=_is_running(row),
+                session_id=_text(row.get("sessionId")),
             )
         )
     return sessions
@@ -703,7 +706,7 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
+def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0, tail: str = "") -> list:
     """Where a session row's parts go: (x, text, part) for "name", "extra", "status" and "age".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
@@ -720,7 +723,8 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     while its name is whole, and keeps it on a cut name when the whole name
     alone would have fitted.
     An empty `word` (the by-state view, whose header already says it) leaves
-    the detail alone as the status.
+    the detail alone as the status. A `tail` follows the detail only when the
+    whole of it fits.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -758,18 +762,20 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
 
     lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
     status_room = room - lead_w - 2
-    status = _fit_status(word, detail, status_room) if keep_word else ""
+    status = _fit_status(word, detail, status_room, tail) if keep_word else ""
     pad = max(0, align - lead_w)
-    if status and pad and _fit_status(word, detail, status_room - pad) and status_room - pad >= word_w:
-        status = _fit_status(word, detail, status_room - pad)
+    if status and pad and _fit_status(word, detail, status_room - pad, tail) and status_room - pad >= word_w:
+        status = _fit_status(word, detail, status_room - pad, tail)
     else:
         pad = 0
     return _row(shown, extra, status, age, age_x, pad)
 
 
-def _fit_status(word: str, detail: str, room: int) -> str:
+def _fit_status(word: str, detail: str, room: int, tail: str = "") -> str:
     """The whole status if it fits, else its detail cut short; a detail that would keep fewer than DETAIL_MIN columns is left out."""
-    status = f"{word} · {detail}" if word and detail else word or detail
+    status = " · ".join(p for p in (word, detail) if p)
+    if tail and detail and display_width(f"{status} · {tail}") <= room:
+        return f"{status} · {tail}"
     if display_width(status) <= room:
         return status
     if detail and room >= (display_width(word) + 3 if word else 0) + DETAIL_MIN:
@@ -1590,3 +1596,291 @@ def latch_off_main(flagged: frozenset, pane_id: str, state: str) -> tuple:
     elif state == "ok":
         flagged = flagged - {pane_id}
     return frozenset(flagged), pane_id in flagged
+
+
+TRANSCRIPT_FIRST_BYTES = 128 * 1024
+TRANSCRIPT_MAX_BYTES = 2 * 1024 * 1024
+PEEK_BODY_LINES = 8
+PEEK_MIN_LIST_ROWS = 3
+_FILE_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit")
+_TOOL_ARGS = ("command", "pattern", "url", "query", "description", "prompt", "skill")
+_INTERRUPTED = "[Request interrupted"
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """What the tail of a session's transcript says it did last.
+
+    `tool` is the latest tool call on one line (`Bash: npm test`, or the
+    question for AskUserQuestion), `tool_about` the description the call gave
+    of itself, and `tool_lines` the call in full for the peek. `pending`
+    means that call has no result yet. `answered` means `reply` came after
+    the latest prompt. `latest` says which of "prompt", "reply", "tool" and
+    "interrupted" came last. Times are epoch milliseconds.
+    """
+
+    prompt: str = ""
+    prompt_at: float | None = None
+    reply: str = ""
+    reply_at: float | None = None
+    answered: bool = False
+    tool: str = ""
+    tool_about: str = ""
+    tool_lines: tuple = ()
+    tool_at: float | None = None
+    question: bool = False
+    pending: bool = False
+    latest: str = ""
+
+
+def transcript_dir(cwd: str) -> str:
+    """The folder under `~/.claude/projects` holding the transcripts of sessions started in `cwd`: every character but a letter or digit becomes a dash.
+
+    Claude Code shortens a very long name its own way, so a miss here is
+    looked up by the transcript's file name instead.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
+
+
+def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
+    """What the session did last, from JSONL text at the end of its transcript, or None when nothing in it says. Never raises.
+
+    `partial` says the text starts mid-file, so its first line is cut and is
+    dropped. Lines that aren't JSON objects, subagent (sidechain) entries,
+    meta entries and the tag-wrapped text Claude Code adds to the user's turn
+    are skipped; its interrupt marker ends the turn. One reply can span several assistant entries (thinking, then
+    a tool call), so blocks are read in order across entries.
+    """
+    lines = text.splitlines()
+    if partial:
+        lines = lines[1:]
+    prompt = reply = tool = None
+    results, seq, marks = set(), 0, {}
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("isSidechain") is True:
+            continue
+        kind, message = entry.get("type"), entry.get("message")
+        if kind not in ("user", "assistant") or not isinstance(message, dict):
+            continue
+        at = _iso_ms(entry.get("timestamp"))
+        content = message.get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for block in blocks if isinstance(blocks, list) else ():
+            if not isinstance(block, dict):
+                continue
+            seq += 1
+            btype = block.get("type")
+            if kind == "user":
+                if btype == "tool_result":
+                    results.add(block.get("tool_use_id"))
+                elif btype == "text" and not entry.get("isMeta"):
+                    said = _text(block.get("text")).strip()
+                    if said.startswith(_INTERRUPTED):
+                        marks["interrupted"] = seq
+                    elif said and not said.startswith("<"):
+                        prompt, marks["prompt"] = (said, at), seq
+            elif btype == "text":
+                said = _text(block.get("text")).strip()
+                if said:
+                    reply, marks["reply"] = (said, at), seq
+            elif btype == "tool_use" and isinstance(block.get("name"), str):
+                given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                tool, marks["tool"] = (block["name"], given, at, block.get("id")), seq
+    if prompt is None and reply is None and tool is None:
+        return None
+    seen = Transcript(latest=max(marks, key=marks.get))
+    if prompt is not None:
+        seen = replace(seen, prompt=prompt[0], prompt_at=prompt[1])
+    if reply is not None:
+        seen = replace(seen, reply=reply[0], reply_at=reply[1], answered=marks["reply"] > marks.get("prompt", 0))
+    if tool is not None:
+        name, given, at, use_id = tool
+        line, about, full = describe_tool(name, given)
+        seen = replace(
+            seen, tool=line, tool_about=about, tool_lines=full, tool_at=at,
+            question=name == "AskUserQuestion", pending=use_id not in results,
+        )
+    return seen
+
+
+def tail_bytes(found: Transcript | None, read: int, size: int) -> int | None:
+    """How many bytes from the end of a transcript of `size` bytes to read next, after reading the last `read` and finding `found`, or None to stop.
+
+    Claude Code can write a single line of over 100 KB after a reply, so a
+    tail that says nothing doubles, up to TRANSCRIPT_MAX_BYTES; a session
+    whose last reply is further back than that shows no summary.
+    """
+    if size <= 0:
+        return None
+    if read <= 0:
+        return min(size, TRANSCRIPT_FIRST_BYTES)
+    if found is not None or read >= size or read >= TRANSCRIPT_MAX_BYTES:
+        return None
+    return min(size, read * 2, TRANSCRIPT_MAX_BYTES)
+
+
+def _iso_ms(value) -> float | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
+    except ValueError:
+        return None
+
+
+def describe_tool(name: str, given: Mapping) -> tuple:
+    """(one line, the call's own description, the call in full as lines for the peek) for a tool call."""
+    if name == "AskUserQuestion":
+        return _describe_question(given)
+    if name == "Bash":
+        command = _text(given.get("command")).strip()
+        about = _text(given.get("description")).strip()
+        line = f"Bash: {first_line(command)}" if command else "Bash"
+        return line, about, tuple(([about] if about else []) + [f"$ {command}" if command else "Bash"])
+    if name in _FILE_TOOLS:
+        path = _text(given.get("file_path") or given.get("notebook_path")).strip()
+        line = f"{name}: {os.path.basename(path) or path}" if path else name
+        return line, "", (f"{name}: {path}" if path else name,)
+    arg = next((given[k].strip() for k in _TOOL_ARGS if isinstance(given.get(k), str) and given[k].strip()), "")
+    if not arg:
+        arg = next((v.strip() for v in given.values() if isinstance(v, str) and v.strip()), "")
+    return (f"{name}: {first_line(arg)}" if arg else name), "", (f"{name}: {arg}" if arg else name,)
+
+
+def _describe_question(given: Mapping) -> tuple:
+    questions = given.get("questions")
+    lines, first = [], ""
+    for q in questions if isinstance(questions, list) else ():
+        if not isinstance(q, dict):
+            continue
+        asked = _text(q.get("question")).strip()
+        if asked:
+            lines.append(asked)
+            first = first or first_line(asked)
+        options = q.get("options")
+        for i, option in enumerate(options if isinstance(options, list) else (), start=1):
+            label = _text(option.get("label") if isinstance(option, dict) else option).strip()
+            if label:
+                lines.append(f"  {i}. {label}")
+    return first or "AskUserQuestion", "", tuple(lines) or ("AskUserQuestion",)
+
+
+def first_line(text: str) -> str:
+    """The first line with words on it, without a Markdown heading's hashes or runs of spaces."""
+    for line in text.splitlines():
+        line = " ".join(line.strip().lstrip("#").split())
+        if line:
+            return line
+    return ""
+
+
+def session_summary(session: Session, transcript: Transcript | None) -> str:
+    """The short line a row shows after its state word, or "" when the transcript says nothing that fits the state.
+
+    The state comes from `claude agents`, never from the transcript, which
+    only supplies the words: a waiting session's open question or the tool
+    call waiting for approval, a working one's latest tool call or words, a
+    done one's first line of its reply to the latest prompt. A stopped
+    session shows none.
+    """
+    t = transcript
+    if t is None:
+        return ""
+    cat = category(session)
+    if cat == NEEDS_INPUT:
+        if t.latest != "tool" or not t.pending:
+            return ""
+        return t.tool if t.question else f"approve {t.tool}"
+    if cat == WORKING:
+        if t.latest == "tool":
+            return first_line(t.tool_about) or t.tool
+        if t.latest == "interrupted":
+            return "interrupted"
+        return first_line(t.reply) if t.latest == "reply" else ""
+    if cat == DONE and t.answered:
+        return first_line(t.reply)
+    return ""
+
+
+def row_detail(session: Session, transcript: Transcript | None) -> tuple:
+    """(detail, tail) for `row_layout`: the summary, then `waitingFor` when it adds something; with no summary, `waitingFor` alone, as before."""
+    summary = session_summary(session, transcript)
+    if not summary:
+        return session.waiting_for, ""
+    waiting = session.waiting_for
+    return summary, waiting if waiting and waiting not in summary else ""
+
+
+@dataclass(frozen=True)
+class Peek:
+    """What Space shows for a session: a title with its state and how long it has been in it, and (text, style) lines, style being "body", "code" or "dim"."""
+
+    title: str
+    lines: tuple
+
+
+def peek_content(session: Session, transcript: Transcript | None, now_ms: float) -> Peek:
+    """The peek: a waiting session's open question or the tool call waiting for approval, a done or stopped one's last reply, a working one's latest activity."""
+    t = transcript or Transcript()
+    cat = category(session)
+    waiting = [(session.waiting_for, "dim")] if session.waiting_for else []
+    lines, since = [], None
+    if cat == NEEDS_INPUT and t.latest == "tool" and t.pending:
+        lines, since = _tool_peek(t) + waiting, t.tool_at
+    elif cat == NEEDS_INPUT:
+        lines = waiting
+    elif cat == WORKING:
+        since = t.prompt_at
+        if t.latest == "tool":
+            lines = _tool_peek(t)
+        elif t.latest == "reply":
+            lines = [(t.reply, "body")]
+        elif t.latest == "interrupted":
+            lines = [("Interrupted.", "body")] + [(line, "dim") for line in t.tool_lines]
+        elif t.prompt:
+            lines = [("Started on:", "dim"), (t.prompt, "body")]
+    elif t.reply and (t.answered or cat == STOPPED):
+        lines = [(t.reply, "body")]
+        since = t.reply_at if cat == DONE else None
+    title = CATEGORY_LABELS[cat]
+    if since is not None:
+        age = format_age((now_ms - since) / 1000)
+        title += f" · {age} ago" if cat == DONE else f" · for {age}"
+    return Peek(title, tuple(lines) or (("Nothing to show yet.", "dim"),))
+
+
+def _tool_peek(t: Transcript) -> list:
+    if t.question:
+        return [(line, "body") for line in t.tool_lines]
+    return [(line, "body" if line == t.tool_about else "code") for line in t.tool_lines]
+
+
+def peek_lines(peek: Peek, width: int, rows: int) -> list:
+    """The peek's body as (text, style) lines at most `width` columns wide, and at most `rows` of them; a body cut short ends in "…"."""
+    if width <= 0 or rows <= 0:
+        return []
+    out = []
+    for text, style in peek.lines:
+        # A reply can run to pages; wrapping only what could show keeps a redraw cheap.
+        text = "\n".join(line[: width * (rows + 1)] for line in text.splitlines()[: rows + 1])
+        wrapped = wrap(text, width) if style == "code" else wrap_words(text, width)
+        out += [(line, style) for line in wrapped]
+    while out and not out[-1][0].strip():
+        out.pop()
+    if len(out) <= rows:
+        return out
+    return out[: rows - 1] + [("…", "dim")]
+
+
+def peek_height(available: int, body: int) -> int:
+    """Rows the peek box takes from the `available` rows under the panel's top lines: two borders, its title and at most PEEK_BODY_LINES of body.
+
+    It never leaves the list fewer than PEEK_MIN_LIST_ROWS, so the cursor's
+    row stays in view; 0 when not even one body line fits.
+    """
+    rows = min(3 + max(1, min(body, PEEK_BODY_LINES)), available - PEEK_MIN_LIST_ROWS)
+    return rows if rows >= 4 else 0

@@ -1,0 +1,42 @@
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "file-history-snapshot"}
+{"type": "attachment", "uuid": "bc1fa76e-d339-4b67-a59e-498087f76240", "parentUuid": null, "isSidechain": false, "timestamp": "2026-10-08T09:43:27.151Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "file-history-snapshot"}
+{"type": "user", "uuid": "e4686505-68c4-492f-850b-8997492ce496", "parentUuid": "bc1fa76e-d339-4b67-a59e-498087f76240", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.206Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "user", "content": "Reply with exactly three short lines: 'Alpha done.', then 'Beta line', then 'Gamma line'. Do not use any tools."}}
+{"type": "attachment", "uuid": "63545ee5-a8fa-41a9-bc69-054ad4277557", "parentUuid": "e4686505-68c4-492f-850b-8997492ce496", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "environment"}}
+{"type": "attachment", "uuid": "ae87c61e-9254-4734-b00c-4eb95f213286", "parentUuid": "63545ee5-a8fa-41a9-bc69-054ad4277557", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "model"}}
+{"type": "attachment", "uuid": "0c319db4-7d13-41e1-98e9-42c30b75081a", "parentUuid": "ae87c61e-9254-4734-b00c-4eb95f213286", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "deferred_tools_delta"}}
+{"type": "attachment", "uuid": "cbab35ee-bdb1-4e81-b0d5-41f8b40fd8f8", "parentUuid": "0c319db4-7d13-41e1-98e9-42c30b75081a", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "agent_listing_delta"}}
+{"type": "attachment", "uuid": "8aa4f374-a754-483d-9d0f-5bc6e1c59df2", "parentUuid": "cbab35ee-bdb1-4e81-b0d5-41f8b40fd8f8", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "mcp_instructions_delta"}}
+{"type": "attachment", "uuid": "b11233a7-71f6-4a8b-b982-fb07b9b97aae", "parentUuid": "8aa4f374-a754-483d-9d0f-5bc6e1c59df2", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "skill_listing"}}
+{"type": "attachment", "uuid": "ebf94273-5792-4eba-a246-81f4922d1e8e", "parentUuid": "b11233a7-71f6-4a8b-b982-fb07b9b97aae", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.205Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "total_tokens_reminder"}}
+{"type": "attachment", "uuid": "19a6d597-d45f-4c6c-891d-a013b2a9809f", "parentUuid": "ebf94273-5792-4eba-a246-81f4922d1e8e", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.650Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "atis-latch"}
+{"type": "attachment", "uuid": "9fdffc51-d23a-4eb4-84a7-ac100f0f8daf", "parentUuid": "19a6d597-d45f-4c6c-891d-a013b2a9809f", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.682Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "instructions"}}
+{"type": "attachment", "uuid": "ff829970-430f-49ab-be83-42646dc3b0a2", "parentUuid": "9fdffc51-d23a-4eb4-84a7-ac100f0f8daf", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.682Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "session_context"}}
+{"type": "attachment", "uuid": "cfadaba1-3cc8-4f4f-add3-126170f1d708", "parentUuid": "ff829970-430f-49ab-be83-42646dc3b0a2", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.682Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "date"}}
+{"type": "attachment", "uuid": "051f6c5c-3081-426d-b8a3-389584baa190", "parentUuid": "cfadaba1-3cc8-4f4f-add3-126170f1d708", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.684Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "credential_org"}}
+{"type": "attachment", "uuid": "34770915-42b0-462e-9fee-a5f2fad0091c", "parentUuid": "051f6c5c-3081-426d-b8a3-389584baa190", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.684Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "remote_session_change"}}
+{"type": "attachment", "uuid": "d680ebf9-2009-436c-aad4-6c7be3107f0d", "parentUuid": "34770915-42b0-462e-9fee-a5f2fad0091c", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.685Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "advisor_tool"}}
+{"type": "attachment", "uuid": "13b3ff0e-aaa4-4dcf-be7c-bf720c4002a8", "parentUuid": "d680ebf9-2009-436c-aad4-6c7be3107f0d", "isSidechain": false, "timestamp": "2026-10-08T09:43:27.685Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "prompt_snapshot"}}
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "atis-latch"}
+{"type": "assistant", "uuid": "cd520ea6-b1b2-4f2e-8c2a-e7144fd561c0", "parentUuid": "13b3ff0e-aaa4-4dcf-be7c-bf720c4002a8", "isSidechain": false, "timestamp": "2026-10-08T09:43:28.872Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "Alpha done.\nBeta line\nGamma line"}]}}
+{"type": "attachment", "uuid": "2c6bba4d-b56f-41c7-b9ba-fa0dd5e7d686", "parentUuid": "cd520ea6-b1b2-4f2e-8c2a-e7144fd561c0", "isSidechain": false, "timestamp": "2026-10-08T09:43:28.896Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "prompt_snapshot"}}
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "atis-latch"}
+{"type": "attachment", "uuid": "46f68d1e-6c51-400e-a183-313221d3d1e4", "parentUuid": "2c6bba4d-b56f-41c7-b9ba-fa0dd5e7d686", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.468Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "system", "subtype": "stop_hook_summary", "uuid": "91e76cb5-4a95-4d3e-bfe3-ed739464e10f", "parentUuid": "46f68d1e-6c51-400e-a183-313221d3d1e4", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.470Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>"}
+{"type": "system", "subtype": "turn_duration", "uuid": "05b6310e-32a4-407c-b04d-eba9019a2c5b", "parentUuid": "91e76cb5-4a95-4d3e-bfe3-ed739464e10f", "isSidechain": false, "isMeta": false, "timestamp": "2026-10-08T09:43:30.474Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "durationMs": 3693}

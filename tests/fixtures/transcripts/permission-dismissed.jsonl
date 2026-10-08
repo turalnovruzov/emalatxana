@@ -1,0 +1,43 @@
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "file-history-snapshot"}
+{"type": "attachment", "uuid": "8ea752d0-cc4c-441b-a5e9-19b45d82d02c", "parentUuid": null, "isSidechain": false, "timestamp": "2026-10-08T09:43:30.502Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "file-history-snapshot"}
+{"type": "user", "uuid": "23688e08-4c42-40c6-8ed4-06ca69100bed", "parentUuid": "8ea752d0-cc4c-441b-a5e9-19b45d82d02c", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "user", "content": "Run this shell command with the Bash tool: echo emx-perm-check > out.txt"}}
+{"type": "attachment", "uuid": "32a552c0-51b3-4fe2-8392-81966edf1892", "parentUuid": "23688e08-4c42-40c6-8ed4-06ca69100bed", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.524Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "environment"}}
+{"type": "attachment", "uuid": "8bee7d93-33fc-42d3-8af7-2c2403400ae2", "parentUuid": "32a552c0-51b3-4fe2-8392-81966edf1892", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.524Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "model"}}
+{"type": "attachment", "uuid": "100186b7-8f37-4c1b-a3d2-f961975aa0ab", "parentUuid": "8bee7d93-33fc-42d3-8af7-2c2403400ae2", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "deferred_tools_delta"}}
+{"type": "attachment", "uuid": "25511727-8082-4d8b-8125-a71373864c58", "parentUuid": "100186b7-8f37-4c1b-a3d2-f961975aa0ab", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "agent_listing_delta"}}
+{"type": "attachment", "uuid": "60f7a6cf-3b94-4ed3-8e3f-d067e7225749", "parentUuid": "25511727-8082-4d8b-8125-a71373864c58", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "mcp_instructions_delta"}}
+{"type": "attachment", "uuid": "0c53e855-0278-405c-8ace-bfb4f91b023e", "parentUuid": "60f7a6cf-3b94-4ed3-8e3f-d067e7225749", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "skill_listing"}}
+{"type": "attachment", "uuid": "a8cac6e5-d37d-4aa9-8db6-aeb7cb29f963", "parentUuid": "0c53e855-0278-405c-8ace-bfb4f91b023e", "isSidechain": false, "timestamp": "2026-10-08T09:43:30.525Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "total_tokens_reminder"}}
+{"type": "attachment", "uuid": "db10cce7-8a3b-49f7-a6fe-245c7ad94b88", "parentUuid": "a8cac6e5-d37d-4aa9-8db6-aeb7cb29f963", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.063Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "atis-latch"}
+{"type": "attachment", "uuid": "2644d7d0-2e59-4418-8312-39328596e2e2", "parentUuid": "db10cce7-8a3b-49f7-a6fe-245c7ad94b88", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.096Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "instructions"}}
+{"type": "attachment", "uuid": "ce7927f8-762c-44a5-a0f9-c95389826242", "parentUuid": "2644d7d0-2e59-4418-8312-39328596e2e2", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.096Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "session_context"}}
+{"type": "attachment", "uuid": "5c20ff61-e6a6-4bf7-955d-42a540e7e664", "parentUuid": "ce7927f8-762c-44a5-a0f9-c95389826242", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.096Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "date"}}
+{"type": "attachment", "uuid": "eeeb87bf-bb37-48cd-9832-0fc74227f750", "parentUuid": "5c20ff61-e6a6-4bf7-955d-42a540e7e664", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.097Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "credential_org"}}
+{"type": "attachment", "uuid": "12cbfe69-7b33-4b4b-af5f-e1e46efecae2", "parentUuid": "eeeb87bf-bb37-48cd-9832-0fc74227f750", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.098Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "remote_session_change"}}
+{"type": "attachment", "uuid": "1cfa4848-8bcd-44ca-9243-3028a8c53297", "parentUuid": "12cbfe69-7b33-4b4b-af5f-e1e46efecae2", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.099Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "advisor_tool"}}
+{"type": "attachment", "uuid": "dbc553f1-1b39-4398-8a76-6aeb1fa46b60", "parentUuid": "1cfa4848-8bcd-44ca-9243-3028a8c53297", "isSidechain": false, "timestamp": "2026-10-08T09:43:31.100Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "prompt_snapshot"}}
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "atis-latch"}
+{"type": "assistant", "uuid": "14647dd2-d6c6-4a42-ab70-68a0c8620c50", "parentUuid": "dbc553f1-1b39-4398-8a76-6aeb1fa46b60", "isSidechain": false, "timestamp": "2026-10-08T09:43:32.519Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "assistant", "stop_reason": "tool_use", "content": [{"type": "thinking", "thinking": ""}]}}
+{"type": "assistant", "uuid": "96ddd590-c9bf-48e6-88f0-d678fa51227f", "parentUuid": "14647dd2-d6c6-4a42-ab70-68a0c8620c50", "isSidechain": false, "timestamp": "2026-10-08T09:43:33.103Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "assistant", "stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "toolu_01BzdCdm588csu22FKtnicfX", "name": "Bash", "input": {"command": "echo emx-perm-check > out.txt", "description": "Write test string to out.txt"}}]}}
+{"type": "user", "uuid": "bd8cfa32-a96a-4a9e-b217-cfe5cfcd00a0", "parentUuid": "96ddd590-c9bf-48e6-88f0-d678fa51227f", "isSidechain": false, "timestamp": "2026-10-08T09:58:08.080Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_01BzdCdm588csu22FKtnicfX", "content": "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed.\n\nNote: The user's next message may contain a correction or preference. Pay close attention — if they explain what went wrong or how they'd prefer you to work, consider saving that to memory for future sessions.", "is_error": true}]}}
+{"type": "attachment", "uuid": "5138a6b7-8169-4ee0-96bd-08fc571c6b8d", "parentUuid": "bd8cfa32-a96a-4a9e-b217-cfe5cfcd00a0", "isSidechain": false, "timestamp": "2026-10-08T09:58:08.082Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "prompt_snapshot"}}
+{"type": "user", "uuid": "ccb60214-95b0-4fe0-9a9e-8d7c951b92ec", "parentUuid": "5138a6b7-8169-4ee0-96bd-08fc571c6b8d", "isSidechain": false, "timestamp": "2026-10-08T09:58:08.083Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user for tool use]"}]}}
+{"type": "system", "subtype": "turn_duration", "uuid": "c75695bd-7671-4300-bf49-1f86f1849c49", "parentUuid": "ccb60214-95b0-4fe0-9a9e-8d7c951b92ec", "isSidechain": false, "isMeta": false, "timestamp": "2026-10-08T09:58:08.086Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "durationMs": 3418}
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "atis-latch"}

@@ -22,11 +22,15 @@ LISTED_CHECK_SECONDS = 0.5
 GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
 MAX_LISTINGS = 4
+TRANSCRIPT_SECONDS = 3
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
+    "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
+    "→ open ← back ␣ peek n new ^f find ^t pin ^x close ^s view ? keys",
     "→ open  ← back  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
     "→ open ← back n new ^f find ^t pin ^x close ^s view ? keys",
+    "→ open ← back ␣ peek n new ^x close ^s view ? keys",
     "→ open  ← back  n new  ^x close  ^s view  ? keys",
     "→ open ← back n new ^x close ^s view ? keys",
     "→ open ← back n new ^x close ? keys",
@@ -39,6 +43,7 @@ HELP = (
     ("←", "back here, from an empty prompt"),
     ("↑↓ j k", "move"),
     ("↵ click", "fold a group; a click opens a session"),
+    ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
     ("^x ^x", "stop the session; on a stopped one, remove it"),
     ("^f /", "find a session by name or folder"),
@@ -61,6 +66,9 @@ CTRL_F = "\x06"
 CTRL_T = "\x14"
 CONFIRM_FOOTER = "ctrl+x to confirm"
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
+PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
+PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
+PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
 CLOSE_SECONDS = 30
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
@@ -405,8 +413,119 @@ class Resolver(threading.Thread):
             return dict(self.placements)
 
 
+def claude_home() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def read_transcript(path: str, size: int) -> core.Transcript | None:
+    """What the end of the transcript at `path` says (`core.parse_transcript`), reading only as much of its tail as `core.tail_bytes` asks for, or None. Never raises, and never writes."""
+    found, read = None, 0
+    try:
+        with open(path, "rb") as f:
+            while (want := core.tail_bytes(found, read, size)) is not None:
+                f.seek(size - want)
+                text = f.read(want).decode("utf-8", errors="replace")
+                found, read = core.parse_transcript(text, partial=want < size), want
+    except (OSError, ValueError):
+        return None
+    return found
+
+
+class Transcripts(threading.Thread):
+    """Reads each listed session's transcript on its own thread, so a large file or a slow disk never holds up listing or drawing.
+
+    A session is read again at most every TRANSCRIPT_SECONDS, and only when
+    its file's size or time changed. The transcript is looked for where
+    Claude Code keeps it for the session's folder; failing that, by its file
+    name in each project folder, which is retried later, backing off, rather
+    than on every pass.
+    """
+
+    def __init__(self, root: str):
+        super().__init__(daemon=True)
+        self.root = root
+        self.lock = threading.Lock()
+        self.wanted = {}
+        self.found = {}
+        self.stamps = {}
+        self.paths = {}
+        self.misses = {}
+        self.changed = False
+
+    def want(self, sessions) -> None:
+        with self.lock:
+            self.wanted = {s.id: (s.cwd, s.session_id) for s in sessions if s.session_id}
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.read_all()
+            except Exception:
+                pass
+            time.sleep(TRANSCRIPT_SECONDS)
+
+    def read_all(self) -> None:
+        with self.lock:
+            wanted = dict(self.wanted)
+        for sid, (cwd, uuid) in wanted.items():
+            try:
+                self.read_one(sid, cwd, uuid)
+            except Exception:
+                continue
+        with self.lock:
+            gone = set(self.found) - set(wanted)
+            for sid in gone:
+                self.found.pop(sid, None)
+                self.stamps.pop(sid, None)
+            self.changed = self.changed or bool(gone)
+
+    def read_one(self, sid: str, cwd: str, uuid: str) -> None:
+        path = self.locate(cwd, uuid)
+        if path is None:
+            return
+        info = os.stat(path)
+        stamp = (path, info.st_mtime_ns, info.st_size)
+        if self.stamps.get(sid) == stamp:
+            return
+        found = read_transcript(path, info.st_size)
+        with self.lock:
+            self.stamps[sid] = stamp
+            if self.found.get(sid) != found:
+                self.found[sid] = found
+                self.changed = True
+
+    def locate(self, cwd: str, uuid: str) -> str | None:
+        name = uuid + ".jsonl"
+        direct = os.path.join(self.root, "projects", core.transcript_dir(cwd), name)
+        if os.path.isfile(direct):
+            return direct
+        known = self.paths.get(uuid)
+        if known and os.path.isfile(known):
+            return known
+        tries, after = self.misses.get(uuid, (0, 0.0))
+        if after > time.monotonic():
+            return None
+        with os.scandir(os.path.join(self.root, "projects")) as folders:
+            for folder in folders:
+                path = os.path.join(folder.path, name)
+                if folder.is_dir() and os.path.isfile(path):
+                    self.paths[uuid] = path
+                    self.misses.pop(uuid, None)
+                    return path
+        self.misses[uuid] = (tries + 1, time.monotonic() + core.retry_after(tries + 1))
+        return None
+
+    def take(self):
+        """A copy of what each session's transcript says when any of it changed since the last take, else None."""
+        with self.lock:
+            if not self.changed:
+                return None
+            self.changed = False
+            return dict(self.found)
+
+
 class Poller(threading.Thread):
-    """Lists sessions, and hands each folder to the resolver without waiting for it."""
+    """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either."""
 
     def __init__(self, claude: str):
         super().__init__(daemon=True)
@@ -415,16 +534,19 @@ class Poller(threading.Thread):
         self.wake = threading.Event()
         self.result = None
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
+        self.transcripts = Transcripts(claude_home())
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.claude)
         if error:
             return None, error
         self.resolver.want(s.cwd for s in sessions)
+        self.transcripts.want(sessions)
         return sessions, None
 
     def run(self) -> None:
         self.resolver.start()
+        self.transcripts.start()
         while True:
             try:
                 result = self.poll()
@@ -485,6 +607,8 @@ class App:
         self.last_restore = None
         self.focused = None
         self.pending_keys = []
+        self.transcripts = {}
+        self.peeking = False
 
     def say(self, text: str, error: bool = False, seconds: float | None = None) -> None:
         """Show a notice; with `seconds` it goes by itself after that long, unless another replaces it first."""
@@ -1046,6 +1170,8 @@ class App:
 
     def handle_key(self, key) -> None:
         self.confirm = core.confirm_after_key(self.confirm, key == CTRL_X, key == curses.KEY_RESIZE)
+        if self.peeking and key not in PEEK_KEYS and key != curses.KEY_RESIZE:
+            self.peeking = False
         if key == curses.KEY_MOUSE:
             self.handle_mouse()
         elif key == curses.KEY_RESIZE:
@@ -1057,6 +1183,10 @@ class App:
         elif self.help or key == "?":
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
+        elif self.peeking and key in PEEK_KEYS:
+            self.peek_key(key)
+        elif key == " ":
+            self.peeking = self.peeked() is not None
         elif key in (curses.KEY_UP, "k"):
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, -1), None
         elif key in (curses.KEY_DOWN, "j"):
@@ -1119,7 +1249,7 @@ class App:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
-        footers = (CONFIRM_FOOTER,) if self.confirm is not None else FOOTERS
+        footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
         lines.append((footer, curses.A_DIM))
         return lines
@@ -1185,11 +1315,38 @@ class App:
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
         else:
-            self.draw_list(list_top, list_bottom, w)
+            peek_rows = self.draw_peek(list_top, list_bottom, w) if self.peeking else 0
+            self.draw_list(list_top, list_bottom - peek_rows, w)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
+
+    def draw_peek(self, top: int, bottom: int, width: int) -> int:
+        """Draw the peek box at the foot of the list area and return how many rows it took (0 when it doesn't fit)."""
+        session = self.peeked()
+        if session is None:
+            return 0
+        peek = core.peek_content(session, self.transcripts.get(session.id), time.time() * 1000)
+        inner = width - 5
+        rows = core.peek_height(bottom - top, len(core.peek_lines(peek, inner, core.PEEK_BODY_LINES)))
+        if rows == 0 or inner <= 0:
+            return 0
+        body = core.peek_lines(peek, inner, rows - 3)
+        y, box = bottom - rows, width - 1
+        muted = self.palette.attr("muted")
+        label = core.fit(session.name, box - 6)
+        self.put(y, 0, "╭─ " + label + " " + "─" * max(0, box - 5 - core.display_width(label)) + "╮", muted)
+        tone = "muted" if core.category(session) == core.STOPPED else CATEGORY_TONE[core.category(session)]
+        lines = [(core.fit(peek.title, inner), self.palette.attr(tone) | curses.A_BOLD)]
+        lines += [(text, curses.A_DIM if style == "dim" else self.palette.attr(PEEK_TONES[style])) for text, style in body]
+        for i in range(rows - 2):
+            self.put(y + 1 + i, 0, "│", muted)
+            self.put(y + 1 + i, box - 1, "│", muted)
+            if i < len(lines):
+                self.put(y + 1 + i, 2, lines[i][0], lines[i][1])
+        self.put(bottom - 1, 0, "╰" + "─" * max(0, box - 2) + "╯", muted)
+        return rows
 
     def draw_summary(self, width: int) -> None:
         if not self.loaded:
@@ -1286,7 +1443,8 @@ class App:
             return
         word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
-        parts = core.row_layout(s.name, self.worktree(s), word, s.waiting_for, age, width, align)
+        detail, tail = core.row_detail(s, self.transcripts.get(s.id))
+        parts = core.row_layout(s.name, self.worktree(s), word, detail, age, width, align, tail)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
         for x, text, part in parts:
             emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
@@ -1315,6 +1473,24 @@ class App:
             self.placements = placements
             self.regroup()
 
+    def take_transcripts(self) -> None:
+        found = self.poller.transcripts.take()
+        if found is not None:
+            self.transcripts = found
+
+    def peeked(self):
+        """The session the peek shows: the one under the cursor."""
+        if not self.cursor or self.cursor[0] != "session":
+            return None
+        return self.session(self.cursor[1])
+
+    def peek_key(self, key) -> None:
+        if key in (" ", "\x1b"):
+            self.peeking = False
+        else:
+            delta = -1 if key in (curses.KEY_UP, "k") else 1
+            self.cursor, self.wanted_cursor = core.find_move(self.items(), self.cursor, delta), None
+
     def refresh(self) -> None:
         try:
             self.finish_start()
@@ -1322,6 +1498,9 @@ class App:
             self.finish_close()
             fresh_list = self.take_poll()
             self.take_placements()
+            self.take_transcripts()
+            if self.peeking and self.peeked() is None:
+                self.peeking = False
             now = time.monotonic()
             if self.confirm is not None and not core.confirm_holds(
                 self.confirm, self.cursor, self.session(self.confirm.id), now,

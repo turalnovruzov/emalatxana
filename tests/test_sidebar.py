@@ -1552,5 +1552,202 @@ class FolderListingsOffThread(unittest.TestCase):
             self.assertEqual(listings.get(os.path.join(d, "file")), [])
 
 
+def transcript_line(kind, content, at="2026-10-08T09:00:00Z"):
+    return json.dumps({"type": kind, "timestamp": at, "message": {"role": kind, "content": content}})
+
+
+class ReadTranscript(unittest.TestCase):
+    def test_finds_a_reply_behind_a_huge_line_reading_only_the_tail_and_never_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, "s.jsonl")
+            early = transcript_line("assistant", [{"type": "text", "text": "Too early."}])
+            reply = transcript_line("assistant", [{"type": "text", "text": "Done here."}])
+            padding = json.dumps({"type": "attachment", "x": "p" * core.TRANSCRIPT_FIRST_BYTES})
+            filler = "\n".join([early] + [padding] * 3)
+            path.write_text(filler + "\n" + reply + "\n" + padding + "\n")
+            before = os.stat(path)
+            with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
+                found = sidebar.read_transcript(str(path), before.st_size)
+            self.assertEqual(found.reply, "Done here.")
+            self.assertEqual([c.args[1] for c in opened.call_args_list], ["rb"])
+            self.assertEqual(os.stat(path).st_mtime_ns, before.st_mtime_ns)
+
+    def test_a_missing_or_garbled_file_gives_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(sidebar.read_transcript(os.path.join(d, "missing.jsonl"), 10))
+            Path(d, "bad.jsonl").write_bytes(b"\xff\xfe{not json\n")
+            self.assertIsNone(sidebar.read_transcript(os.path.join(d, "bad.jsonl"), 13))
+
+
+class TranscriptReader(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.reader = sidebar.Transcripts(self.root)
+
+    def write(self, folder, uuid, *lines):
+        os.makedirs(os.path.join(self.root, "projects", folder), exist_ok=True)
+        path = os.path.join(self.root, "projects", folder, f"{uuid}.jsonl")
+        with open(path, "a") as f:
+            f.write("".join(line + "\n" for line in lines))
+        return path
+
+    def row(self, sid, cwd, uuid):
+        return core.Session(sid, sid, cwd, "done", "", "", None, True, uuid)
+
+    def test_reads_the_transcript_where_claude_code_keeps_it_for_the_folder(self):
+        self.write("-tmp-a-proj", "u1", transcript_line("assistant", [{"type": "text", "text": "Hi."}]))
+        self.reader.want([self.row("s1", "/tmp/a.proj", "u1"), self.row("s2", "/tmp/b", "")])
+        self.reader.read_all()
+        self.assertEqual({sid: t.reply for sid, t in self.reader.take().items()}, {"s1": "Hi."})
+        self.assertIsNone(self.reader.take())
+
+    def test_a_transcript_elsewhere_is_found_by_its_file_name_and_a_miss_backs_off(self):
+        self.write("-some-shortened-name-1234", "u1", transcript_line("user", "go"))
+        self.write("-other", "u9", transcript_line("user", "not this one"))
+        self.assertTrue(self.reader.locate("/tmp/x", "u1").endswith("-some-shortened-name-1234/u1.jsonl"))
+        self.assertIsNone(self.reader.locate("/tmp/x", "u2"))
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched again")):
+            self.assertIsNone(self.reader.locate("/tmp/x", "u2"))
+
+    def test_an_unchanged_file_is_not_read_again(self):
+        path = self.write("-tmp-a", "u1", transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", "u1")])
+        with mock.patch.object(sidebar, "read_transcript", wraps=sidebar.read_transcript) as reads:
+            self.reader.read_all()
+            self.reader.read_all()
+            self.assertEqual(reads.call_count, 1)
+            self.write("-tmp-a", "u1", transcript_line("assistant", [{"type": "text", "text": "Went."}]))
+            self.reader.read_all()
+            self.assertEqual(reads.call_count, 2)
+        self.assertEqual(self.reader.take()["s1"].reply, "Went.")
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_session_no_longer_listed_is_forgotten(self):
+        self.write("-tmp-a", "u1", transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", "u1")])
+        self.reader.read_all()
+        self.reader.take()
+        self.reader.want([])
+        self.reader.read_all()
+        self.assertEqual(self.reader.take(), {})
+
+    def test_the_poller_hands_its_sessions_to_the_reader(self):
+        poller = sidebar.Poller("claude")
+        rows = [self.row("s1", "/tmp/a", "u1")]
+        with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
+            poller.poll()
+        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", "u1")})
+
+
+class RecordingScr(FakeScr):
+    def __init__(self, height=20, width=40):
+        super().__init__()
+        self.size = (height, width)
+        self.cells = {}
+
+    def getmaxyx(self):
+        return self.size
+
+    def addstr(self, y, x, text, attr=0):
+        self.cells[y] = self.cells.get(y, "").ljust(x)[:x] + text
+
+    def erase(self):
+        self.cells = {}
+
+
+def blocked(sid, cwd, waiting="permission prompt"):
+    return core.Session(sid, f"emx-test-{sid}", cwd, "blocked", "waiting", waiting, None, True, f"u-{sid}")
+
+
+PERMISSION = core.parse_transcript("\n".join([
+    transcript_line("user", "run it"),
+    transcript_line("assistant", [{"type": "tool_use", "id": "t1", "name": "Bash",
+                                   "input": {"command": "npm test", "description": "Run the tests"}}]),
+]))
+
+
+class Peek(AppCase):
+    """Space peeks at the session under the cursor; ↑↓ move the peek to the next session; Space or Esc close it."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr()
+        self.app.scr = self.scr
+        self.poll(blocked("a", "/p/alpha"), session("b", "/p/alpha"), session("c", "/p/beta", state="done"))
+        self.app.poller.transcripts.found = {"a": PERMISSION}
+        self.app.poller.transcripts.changed = True
+        self.app.refresh()
+
+    def screen(self):
+        return [self.scr.cells.get(y, "") for y in range(self.scr.size[0])]
+
+    def test_the_row_shows_the_request_after_the_state_word(self):
+        self.app.draw()
+        row = next(line for line in self.screen() if "emx-test-a" in line)
+        self.assertIn("Needs input · approve", row)
+
+    def test_space_on_a_session_opens_the_peek_and_it_is_drawn_boxed_and_read_only(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.app.draw()
+        text = "\n".join(self.screen())
+        for want in ("╭─ emx-test-a", "Needs input · for", "Run the tests", "$ npm test", "permission prompt", "╰", "␣ Esc close"):
+            self.assertIn(want, text)
+        self.assertTrue(any(line.startswith(" ✻ emx-test-a") for line in self.screen()))
+
+    def test_space_on_a_header_does_nothing(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.app.handle_key(" ")
+        self.assertFalse(self.app.peeking)
+
+    def test_arrows_move_the_peek_to_the_next_session_past_headers(self):
+        self.assertEqual(self.app.items()[1:3], [("session", "b"), ("session", "a")])
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.app.handle_key(curses.KEY_DOWN)
+        self.assertEqual((self.app.cursor, self.app.peeking), (("session", "c"), True))
+        self.app.handle_key("k")
+        self.assertEqual(self.app.cursor, ("session", "a"))
+
+    def test_space_or_esc_closes_it_and_any_other_key_closes_it_and_still_acts(self):
+        for close in (" ", "\x1b"):
+            self.app.cursor = ("session", "a")
+            self.app.handle_key(" ")
+            self.app.handle_key(close)
+            self.assertFalse(self.app.peeking)
+        self.app.handle_key(" ")
+        self.app.handle_key(curses.KEY_RIGHT)
+        self.assertFalse(self.app.peeking)
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+
+    def test_the_peek_closes_when_its_session_goes(self):
+        self.app.cursor = ("session", "c")
+        self.app.handle_key(" ")
+        self.poll(blocked("a", "/p/alpha"))
+        self.app.refresh()
+        self.assertFalse(self.app.peeking)
+
+    def test_it_fits_a_short_pane_and_keeps_the_cursor_row_in_view(self):
+        self.app.cursor = ("session", "c")
+        self.app.handle_key(" ")
+        for height in (6, 9, 12, 20):
+            self.scr.size = (height, 40)
+            self.app.draw()
+            screen = self.screen()
+            self.assertEqual(len([y for y in self.scr.cells if y >= height]), 0)
+            self.assertTrue(any("emx-test-c" in line for line in screen[2:]), (height, screen))
+            boxed = [line for line in screen if line.startswith("╭")]
+            if boxed:
+                bottom = screen.index(boxed[0])
+                self.assertTrue(screen[bottom + sum(1 for line in screen[bottom:] if line[:1] in "╭│")].startswith("╰"))
+
+    def test_the_footer_and_help_mention_it(self):
+        self.assertIn("␣ peek", sidebar.FOOTERS[0])
+        self.assertIn("space", dict(sidebar.HELP))
+
+
 if __name__ == "__main__":
     unittest.main()

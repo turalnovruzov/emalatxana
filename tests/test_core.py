@@ -1939,5 +1939,272 @@ class ErrorLine(unittest.TestCase):
         self.assertEqual(core.error_line(KeyError()), "KeyError")
 
 
+TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts"
+
+
+def real_transcript(name):
+    """A transcript from a throwaway Claude Code 2.1.294 session (each line records its `version`).
+
+    Only allowed fields were copied, the temp folder became `<tmp>` and the
+    session id `<uuid>`; attachments keep just their type. `working` is the
+    first 48 lines of the session `working-finished` came from, as the file
+    stood while its second `sleep` ran.
+    """
+    return (TRANSCRIPTS / f"{name}.jsonl").read_text(encoding="utf-8")
+
+
+def ms(iso):
+    return core._iso_ms(iso)
+
+
+def entry(kind, content, at="2026-10-08T09:00:00Z", **extra):
+    return json.dumps({"type": kind, "timestamp": at, "message": {"role": kind, "content": content}, **extra})
+
+
+class ParseRealTranscripts(unittest.TestCase):
+    def test_the_fixtures_come_from_one_claude_code_version_and_hold_nothing_private(self):
+        for path in TRANSCRIPTS.glob("*.jsonl"):
+            text = path.read_text(encoding="utf-8")
+            with self.subTest(path=path.name):
+                versions = {json.loads(line).get("version") for line in text.splitlines()} - {None}
+                self.assertEqual(versions, {"2.1.294"})
+                for private in ("/Users/", "/private/tmp/", "@", "claude.ai/code", "organization", "signature"):
+                    self.assertNotIn(private, text)
+
+    def test_a_done_session_reply(self):
+        t = core.parse_transcript(real_transcript("done"))
+        self.assertEqual((t.latest, t.reply, t.answered), ("reply", "Alpha done.\nBeta line\nGamma line", True))
+        self.assertEqual(t.reply_at, ms("2026-10-08T09:43:28.872Z"))
+        self.assertFalse(t.pending)
+
+    def test_a_permission_request_is_the_pending_bash_call_after_a_thinking_only_entry(self):
+        t = core.parse_transcript(real_transcript("permission"))
+        self.assertEqual((t.latest, t.pending, t.question), ("tool", True, False))
+        self.assertEqual(t.tool, "Bash: echo emx-perm-check > out.txt")
+        self.assertEqual(t.tool_about, "Write test string to out.txt")
+        self.assertEqual(t.tool_lines, ("Write test string to out.txt", "$ echo emx-perm-check > out.txt"))
+        self.assertEqual(t.tool_at, ms("2026-10-08T09:43:33.103Z"))
+
+    def test_a_question_lists_its_options(self):
+        t = core.parse_transcript(real_transcript("question"))
+        self.assertEqual((t.question, t.pending, t.tool), (True, True, "Which colour do you prefer?"))
+        self.assertEqual(t.tool_lines, ("Which colour do you prefer?", "  1. Red", "  2. Blue"))
+
+    def test_a_working_session_is_on_its_running_tool_call(self):
+        t = core.parse_transcript(real_transcript("working"))
+        self.assertEqual((t.latest, t.pending, t.tool, t.tool_about), ("tool", True, "Bash: sleep 9", "Sleep for 9 seconds"))
+        self.assertEqual(t.prompt_at, ms("2026-10-08T09:47:23.943Z"))
+
+    def test_a_dismissed_permission_request_ends_the_turn_as_interrupted(self):
+        t = core.parse_transcript(real_transcript("permission-dismissed"))
+        self.assertEqual((t.latest, t.pending, t.tool), ("interrupted", False, "Bash: echo emx-perm-check > out.txt"))
+        self.assertEqual(t.prompt, "Run this shell command with the Bash tool: echo emx-perm-check > out.txt")
+
+    def test_finished_tool_calls_are_not_pending(self):
+        t = core.parse_transcript(real_transcript("working-finished"))
+        self.assertEqual((t.latest, t.pending, t.reply, t.answered), ("reply", False, "Slept three times.", True))
+
+
+class ParseTranscriptNeverRaises(unittest.TestCase):
+    def test_garbage_gives_none(self):
+        for text in ["", "\n\n", "not json", "[1,2]", '"text"', "null", '{"type": "user"}', '{"type": "user", "message": 3}',
+                     '{"type": "assistant", "message": {"content": 7}}', '{"type": "assistant", "message": {"content": [1, null]}}']:
+            with self.subTest(text=text):
+                self.assertIsNone(core.parse_transcript(text))
+
+    def test_bad_lines_among_good_ones_are_skipped(self):
+        text = "\n".join(["{broken", entry("user", "do it"), "[]", entry("assistant", [{"type": "text", "text": "Did it."}])])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.prompt, t.reply, t.answered), ("do it", "Did it.", True))
+
+    def test_odd_values_inside_entries_never_raise(self):
+        text = "\n".join([
+            entry("assistant", [{"type": "tool_use", "name": "Bash", "input": "not a dict"}], at=5),
+            entry("assistant", [{"type": "tool_use", "name": "AskUserQuestion", "input": {"questions": [3, {"options": [None, 4]}]}}]),
+            entry("assistant", [{"type": "text", "text": None}], at="yesterday"),
+        ])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.tool, t.tool_lines), ("AskUserQuestion", ("  2. 4",)))
+
+    def test_a_cut_first_line_is_dropped(self):
+        whole = entry("assistant", [{"type": "text", "text": "Earlier."}])
+        text = whole[len(whole) // 2:] + "\n" + entry("user", "next")
+        self.assertEqual(core.parse_transcript(text, partial=True).latest, "prompt")
+        self.assertIsNone(core.parse_transcript(whole[5:], partial=True))
+
+    def test_sidechain_meta_and_tag_wrapped_entries_are_skipped(self):
+        text = "\n".join([
+            entry("user", "real prompt"),
+            entry("user", "subagent prompt", isSidechain=True),
+            entry("user", "meta", isMeta=True),
+            entry("user", "<command-name>/clear</command-name>"),
+            entry("user", [{"type": "text", "text": "[Request interrupted by user]"}]),
+        ])
+        self.assertEqual(core.parse_transcript(text).prompt, "real prompt")
+
+    def test_a_reply_before_the_latest_prompt_is_not_its_answer(self):
+        text = "\n".join([entry("assistant", [{"type": "text", "text": "Old."}]), entry("user", "new question")])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.reply, t.answered, t.latest), ("Old.", False, "prompt"))
+
+
+class TailBytes(unittest.TestCase):
+    def test_starts_small_and_doubles_while_nothing_is_found(self):
+        size = 10 * core.TRANSCRIPT_FIRST_BYTES
+        self.assertEqual(core.tail_bytes(None, 0, size), core.TRANSCRIPT_FIRST_BYTES)
+        self.assertEqual(core.tail_bytes(None, core.TRANSCRIPT_FIRST_BYTES, size), 2 * core.TRANSCRIPT_FIRST_BYTES)
+        self.assertIsNone(core.tail_bytes(core.Transcript(latest="reply"), core.TRANSCRIPT_FIRST_BYTES, size))
+
+    def test_stops_at_the_whole_file_or_the_cap(self):
+        self.assertEqual(core.tail_bytes(None, 0, 100), 100)
+        self.assertIsNone(core.tail_bytes(None, 100, 100))
+        huge = 100 * core.TRANSCRIPT_MAX_BYTES
+        self.assertEqual(core.tail_bytes(None, core.TRANSCRIPT_MAX_BYTES - 1, huge), core.TRANSCRIPT_MAX_BYTES)
+        self.assertIsNone(core.tail_bytes(None, core.TRANSCRIPT_MAX_BYTES, huge))
+        self.assertIsNone(core.tail_bytes(None, 0, 0))
+
+    def test_a_reply_behind_a_line_bigger_than_the_first_read_is_found(self):
+        reply = entry("assistant", [{"type": "text", "text": "Found me."}])
+        padding = json.dumps({"type": "attachment", "attachment": {"type": "prompt_snapshot", "x": "p" * core.TRANSCRIPT_FIRST_BYTES}})
+        data = (reply + "\n" + padding + "\n").encode()
+        found, read = None, 0
+        while (want := core.tail_bytes(found, read, len(data))) is not None:
+            found, read = core.parse_transcript(data[-want:].decode(), partial=want < len(data)), want
+        self.assertEqual(found.reply, "Found me.")
+        self.assertEqual(read, len(data))
+
+
+class TranscriptDir(unittest.TestCase):
+    def test_every_character_but_letters_and_digits_becomes_a_dash(self):
+        self.assertEqual(core.transcript_dir("/private/tmp/emx10.f3TLDx/proj"), "-private-tmp-emx10-f3TLDx-proj")
+        self.assertEqual(core.transcript_dir("/r/app/.claude/worktrees/feature+10-x"), "-r-app--claude-worktrees-feature-10-x")
+
+
+def st(state, waiting=""):
+    return mk(state=state, waiting_for=waiting)
+
+
+class SessionSummary(unittest.TestCase):
+    def test_each_state_on_real_transcripts(self):
+        cases = [
+            ("permission", st("blocked", "permission prompt"), "approve Bash: echo emx-perm-check > out.txt"),
+            ("question", st("blocked", "input needed"), "Which colour do you prefer?"),
+            ("working", st("working"), "Sleep for 9 seconds"),
+            ("done", st("done"), "Alpha done."),
+            ("working-finished", st("done"), "Slept three times."),
+            # After Esc on its permission prompt, 2.1.294 still lists the session as working.
+            ("permission-dismissed", st("working"), "interrupted"),
+            ("permission-dismissed", st("blocked", "permission prompt"), ""),
+        ]
+        for name, session, want in cases:
+            with self.subTest(name=name):
+                self.assertEqual(core.session_summary(session, core.parse_transcript(real_transcript(name))), want)
+
+    def test_the_listing_decides_the_state_and_a_mismatch_shows_nothing(self):
+        done = core.parse_transcript(real_transcript("done"))
+        self.assertEqual(core.session_summary(st("blocked", "permission prompt"), done), "")
+        waiting = core.parse_transcript(real_transcript("permission"))
+        self.assertEqual(core.session_summary(st("done"), waiting), "")
+        self.assertEqual(core.session_summary(st("stopped"), done), "")
+        self.assertEqual(core.session_summary(st("done"), None), "")
+
+    def test_a_working_session_without_a_description_shows_the_call(self):
+        t = core.parse_transcript(entry("assistant", [{"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/a/b/notes.md"}}]))
+        self.assertEqual(core.session_summary(st("working"), t), "Read: notes.md")
+        t = core.parse_transcript(entry("assistant", [{"type": "text", "text": "\n## Looking at it\nmore"}]))
+        self.assertEqual(core.session_summary(st("working"), t), "Looking at it")
+
+
+class RowDetail(unittest.TestCase):
+    def test_waiting_for_follows_the_summary_or_stands_alone(self):
+        perm = core.parse_transcript(real_transcript("permission"))
+        self.assertEqual(core.row_detail(st("blocked", "permission prompt"), perm),
+                         ("approve Bash: echo emx-perm-check > out.txt", "permission prompt"))
+        self.assertEqual(core.row_detail(st("blocked", "permission prompt"), None), ("permission prompt", ""))
+        self.assertEqual(core.row_detail(st("done"), core.parse_transcript(real_transcript("done"))), ("Alpha done.", ""))
+
+    def test_the_tail_shows_only_when_all_of_it_fits(self):
+        def row(width):
+            return rendered(core.row_layout("emx-test-perm", "", "Needs input", "approve Bash: ls", "12m", width, tail="permission prompt"))
+        self.assertEqual(row(80), "   emx-test-perm  Needs input · approve Bash: ls · permission prompt" + " " * 8 + "12m")
+        self.assertEqual(row(60), "   emx-test-perm  Needs input · approve Bash: ls" + " " * 8 + "12m")
+        self.assertEqual(row(44), "   emx-test-perm  Needs input · approv… 12m")
+        self.assertEqual(row(30), "   emx-test-perm" + " " * 10 + "12m")
+
+
+class PeekContent(unittest.TestCase):
+    NOW = ms("2026-10-08T09:45:33.103Z")
+
+    def peek(self, name, session):
+        return core.peek_content(session, core.parse_transcript(real_transcript(name)), self.NOW)
+
+    def test_a_permission_request_with_how_long_it_has_waited(self):
+        p = self.peek("permission", st("blocked", "permission prompt"))
+        self.assertEqual(p.title, "Needs input · for 2m")
+        self.assertEqual(p.lines, (("Write test string to out.txt", "body"), ("$ echo emx-perm-check > out.txt", "code"),
+                                   ("permission prompt", "dim")))
+
+    def test_a_question_and_its_options(self):
+        p = self.peek("question", st("blocked", "input needed"))
+        self.assertEqual([t for t, _ in p.lines], ["Which colour do you prefer?", "  1. Red", "  2. Blue", "input needed"])
+
+    def test_a_done_reply_and_how_long_ago(self):
+        p = self.peek("done", st("done"))
+        self.assertEqual(p.title, "Done · 2m ago")
+        self.assertEqual(p.lines, (("Alpha done.\nBeta line\nGamma line", "body"),))
+
+    def test_working_shows_the_latest_activity_and_time_since_the_prompt(self):
+        p = core.peek_content(st("working"), core.parse_transcript(real_transcript("working")), ms("2026-10-08T09:47:53.943Z"))
+        self.assertEqual(p.title, "Working · for 30s")
+        self.assertEqual([t for t, _ in p.lines], ["Sleep for 9 seconds", "$ sleep 9"])
+
+    def test_an_interrupted_turn_says_so_and_shows_the_call_it_stopped(self):
+        p = self.peek("permission-dismissed", st("working"))
+        self.assertEqual(p.lines, (("Interrupted.", "body"), ("Write test string to out.txt", "dim"),
+                                   ("$ echo emx-perm-check > out.txt", "dim")))
+
+    def test_nothing_known(self):
+        self.assertEqual(core.peek_content(st("working"), None, self.NOW), core.Peek("Working", (("Nothing to show yet.", "dim"),)))
+        self.assertEqual(core.peek_content(st("blocked", "input needed"), None, self.NOW).lines, (("input needed", "dim"),))
+
+    def test_a_stopped_session_shows_its_last_reply_with_no_time(self):
+        p = self.peek("done", st("stopped"))
+        self.assertEqual((p.title, p.lines[0][0][:11]), ("Stopped", "Alpha done."))
+
+
+class PeekLines(unittest.TestCase):
+    def test_wraps_to_the_width_and_cuts_to_the_rows(self):
+        peek = core.Peek("t", (("one two three four five six", "body"), ("$ " + "x" * 25, "code")))
+        self.assertEqual(core.peek_lines(peek, 10, 10), [
+            ("one two", "body"), ("three four", "body"), ("five six", "body"),
+            ("$ xxxxxxxx", "code"), ("x" * 10, "code"), ("x" * 7, "code"),
+        ])
+        self.assertEqual(core.peek_lines(peek, 10, 3), [("one two", "body"), ("three four", "body"), ("…", "dim")])
+        self.assertEqual(core.peek_lines(peek, 0, 3), [])
+        self.assertEqual(core.peek_lines(peek, 10, 0), [])
+
+    def test_a_very_long_reply_is_cut_without_wrapping_all_of_it(self):
+        peek = core.Peek("t", (("word " * 200000 + "\n" + "line\n" * 100000, "body"),))
+        lines = core.peek_lines(peek, 30, 4)
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[-1], ("…", "dim"))
+
+    def test_every_line_fits_its_width(self):
+        peek = core.Peek("t", (("界" * 30, "body"), ("$ " + "界" * 30, "code")))
+        for width in range(2, 15):
+            for text, _ in core.peek_lines(peek, width, 50):
+                self.assertLessEqual(core.display_width(text), width)
+
+
+class PeekHeight(unittest.TestCase):
+    def test_body_plus_title_and_borders_capped_and_leaving_list_rows(self):
+        self.assertEqual(core.peek_height(40, 2), 5)
+        self.assertEqual(core.peek_height(40, 50), 3 + core.PEEK_BODY_LINES)
+        self.assertEqual(core.peek_height(40, 0), 4)
+        self.assertEqual(core.peek_height(10, 50), 10 - core.PEEK_MIN_LIST_ROWS)
+        self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 4, 5), 4)
+        self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 3, 5), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

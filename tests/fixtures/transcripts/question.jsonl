@@ -1,0 +1,32 @@
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "file-history-snapshot"}
+{"type": "attachment", "uuid": "94c1e564-f6e8-443c-9f56-776e40053d4a", "parentUuid": null, "isSidechain": false, "timestamp": "2026-10-08T09:44:27.684Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "file-history-snapshot"}
+{"type": "user", "uuid": "fed8d011-71c8-4c47-b60c-9593f98fbddf", "parentUuid": "94c1e564-f6e8-443c-9f56-776e40053d4a", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.704Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "user", "content": "Use the AskUserQuestion tool to ask me which colour I prefer, with options Red and Blue. Do nothing else."}}
+{"type": "attachment", "uuid": "7d8a7b6e-6fb8-47b0-9727-718512d3f871", "parentUuid": "fed8d011-71c8-4c47-b60c-9593f98fbddf", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "environment"}}
+{"type": "attachment", "uuid": "8bf647d4-ff84-411d-9f03-64d68526eb63", "parentUuid": "7d8a7b6e-6fb8-47b0-9727-718512d3f871", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "model"}}
+{"type": "attachment", "uuid": "1ac489c0-840a-4e39-b26a-bc3c0247bffc", "parentUuid": "8bf647d4-ff84-411d-9f03-64d68526eb63", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "deferred_tools_delta"}}
+{"type": "attachment", "uuid": "12b8c7cd-3ba1-46c6-a4a8-c17c2ee5c718", "parentUuid": "1ac489c0-840a-4e39-b26a-bc3c0247bffc", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "agent_listing_delta"}}
+{"type": "attachment", "uuid": "c01b3b71-2653-406c-a18a-8073b015a756", "parentUuid": "12b8c7cd-3ba1-46c6-a4a8-c17c2ee5c718", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "mcp_instructions_delta"}}
+{"type": "attachment", "uuid": "d69085dc-c591-489e-b863-932a9d6bd14f", "parentUuid": "c01b3b71-2653-406c-a18a-8073b015a756", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "skill_listing"}}
+{"type": "attachment", "uuid": "a7c2d1a6-7653-4b01-8239-2e4274a0365d", "parentUuid": "d69085dc-c591-489e-b863-932a9d6bd14f", "isSidechain": false, "timestamp": "2026-10-08T09:44:27.703Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "total_tokens_reminder"}}
+{"type": "attachment", "uuid": "c8105df0-3b4e-498a-8ca6-0484a06c3eb1", "parentUuid": "a7c2d1a6-7653-4b01-8239-2e4274a0365d", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.169Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "hook_success"}}
+{"type": "atis-latch"}
+{"type": "attachment", "uuid": "13adc750-57f0-46f0-a1e4-e49880e5e7f3", "parentUuid": "c8105df0-3b4e-498a-8ca6-0484a06c3eb1", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.222Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "instructions"}}
+{"type": "attachment", "uuid": "3d4698ec-9666-41da-8ead-2b766f5083e1", "parentUuid": "13adc750-57f0-46f0-a1e4-e49880e5e7f3", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.222Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "session_context"}}
+{"type": "attachment", "uuid": "fca985d1-6309-4a1b-ad89-af038c137a24", "parentUuid": "3d4698ec-9666-41da-8ead-2b766f5083e1", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.222Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "date"}}
+{"type": "attachment", "uuid": "dd30ce6f-9b31-4a36-8c83-17823e4b57b0", "parentUuid": "fca985d1-6309-4a1b-ad89-af038c137a24", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.224Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "credential_org"}}
+{"type": "attachment", "uuid": "d5c78ae5-8444-4043-9dc1-d14ef70b469a", "parentUuid": "dd30ce6f-9b31-4a36-8c83-17823e4b57b0", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.224Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "remote_session_change"}}
+{"type": "attachment", "uuid": "0e3ccc19-37b2-4d6b-80f4-aa42a173d26e", "parentUuid": "d5c78ae5-8444-4043-9dc1-d14ef70b469a", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.225Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "advisor_tool"}}
+{"type": "attachment", "uuid": "90855aa0-58f2-47da-929d-ff63904babcf", "parentUuid": "0e3ccc19-37b2-4d6b-80f4-aa42a173d26e", "isSidechain": false, "timestamp": "2026-10-08T09:44:28.226Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "attachment": {"type": "prompt_snapshot"}}
+{"type": "last-prompt"}
+{"type": "custom-title"}
+{"type": "agent-name"}
+{"type": "mode"}
+{"type": "permission-mode"}
+{"type": "atis-latch"}
+{"type": "assistant", "uuid": "34d27be6-f3ee-4cce-8a6f-b69cf37ffb0b", "parentUuid": "90855aa0-58f2-47da-929d-ff63904babcf", "isSidechain": false, "timestamp": "2026-10-08T09:44:35.354Z", "version": "2.1.294", "cwd": "<tmp>/proj", "sessionId": "<uuid>", "message": {"role": "assistant", "stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "toolu_01RpJSDVfBg4SwydykqGXsu9", "name": "AskUserQuestion", "input": {"questions": [{"question": "Which colour do you prefer?", "header": "Colour", "multiSelect": false, "options": [{"label": "Red", "description": "You prefer red."}, {"label": "Blue", "description": "You prefer blue."}]}]}}]}}
