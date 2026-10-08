@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -3160,6 +3161,135 @@ class InterruptSession(AppCase):
         interrupter = self.close_while_the_hidden_viewer_comes_up()
         self.assertTrue(interrupter.ended)
         self.assertIn(("run", ["claude", "stop", "working"]), self.app.tmux.events)
+
+    def hidden_viewer_he_swaps_into_main(self, placeholder=True):
+        """The placeholder (%4) waits in its own window, the first capture of the hidden viewer finds it swapped into main, and swap and kill move and drop panes as tmux does."""
+        tmux = self.app.tmux
+        if placeholder:
+            tmux.list.append(Pane("%4", "@4", False, "placeholder", "", 100, 100))
+        captured = tmux.capture
+
+        def capture(pane):
+            if "swap" not in self.kinds():
+                tmux.list = [replace(p, window="@1") if p.id == "%5" else p for p in tmux.list]
+            return captured(pane)
+
+        def swap(source, target):
+            tmux.events.append(("swap", source, target))
+            where = {p.id: p.window for p in tmux.list}
+            moved = {source: where[target], target: where[source]}
+            tmux.list = [replace(p, window=moved.get(p.id, p.window)) for p in tmux.list]
+
+        def kill(pane):
+            tmux.events.append(("kill", pane))
+            tmux.list = [p for p in tmux.list if p.id != pane]
+
+        tmux.capture, tmux.swap, tmux.kill_pane = capture, swap, kill
+
+    def test_a_close_while_he_has_the_hidden_viewer_in_main_swaps_the_placeholder_in_then_kills_it_before_the_stop(self):
+        self.hidden_viewer_he_swaps_into_main()
+        interrupter = self.close_while_the_hidden_viewer_comes_up()
+        events = self.app.tmux.events
+        swap = events.index(("swap", "%4", "%5"))
+        kill = events.index(("kill", "%5"))
+        stop = events.index(("run", ["claude", "stop", "working"]))
+        self.assertLess(swap, kill)
+        self.assertLess(kill, stop)
+        self.assertTrue(interrupter.ended)
+        _, main = self.app.layout_panes(self.app.tmux.panes())
+        self.assertEqual(main.id, "%4")
+        self.app.refresh()
+        self.assertEqual(self.app.notice, "Closed emx-test-working.")
+
+    def test_a_close_with_the_hidden_viewer_in_main_and_no_placeholder_kills_nothing_and_closes_nothing(self):
+        self.hidden_viewer_he_swaps_into_main(placeholder=False)
+        interrupter = self.close_while_the_hidden_viewer_comes_up()
+        self.assertNotIn("kill", self.kinds())
+        self.assertNotIn("run", self.kinds())
+        self.assertFalse(interrupter.ended)
+        _, main = self.app.layout_panes(self.app.tmux.panes())
+        self.assertEqual(main.id, "%5")
+        self.app.refresh()
+        self.assertEqual(self.app.notice,
+                         "emx couldn't close the viewer it opened for emx-test-working, so it didn't close it.")
+
+    def test_the_closers_retry_of_a_leftover_in_main_swaps_the_placeholder_in_then_kills_it_before_the_stop(self):
+        tmux = self.app.tmux
+        listed = tmux.panes
+
+        def panes():
+            if "new_hidden_window" in self.kinds():
+                raise sidebar.TmuxError("server busy")
+            return listed()
+
+        tmux.panes = panes
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertFalse(interrupter.ended)
+        tmux.panes = listed
+        tmux.list = [replace(p, window="@1") if p.id == "%5" else p for p in tmux.list]
+        self.hidden_viewer_he_swaps_into_main()
+
+        def run(args, **kw):
+            tmux.events.append(("run", args))
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.app.start_close(core.Confirm("working", "emx-test-working", True, 0.0))
+            self.app.closer.join(5)
+            self.app.refresh()
+        swap = tmux.events.index(("swap", "%4", "%5"))
+        kill = tmux.events.index(("kill", "%5"))
+        stop = tmux.events.index(("run", ["claude", "stop", "working"]))
+        self.assertLess(swap, kill)
+        self.assertLess(kill, stop)
+        self.assertTrue(interrupter.ended)
+        _, main = self.app.layout_panes(tmux.panes())
+        self.assertEqual(main.id, "%4")
+
+    def group_close(self):
+        return core.GroupConfirm("/p", (core.Confirm("working", "emx-test-working", True, 0.0),
+                                        core.Confirm("b", "emx-test-b", True, 0.0)), 0.0)
+
+    def test_a_group_close_held_back_by_a_running_interrupt_says_none_of_the_group_was_closed(self):
+        _, release = self.held_interrupts()
+        self.press(sidebar.CTRL_X)
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run), mock.patch.object(sidebar, "INTERRUPT_JOIN_SECONDS", 0):
+            self.app.start_close(self.group_close())
+            self.app.closer.join(5)
+            self.app.refresh()
+        release.set()
+        self.assertEqual(ran, [])
+        self.assertEqual(self.app.notice, "emx is still interrupting emx-test-working, so it didn't close any of them.")
+
+    def test_a_group_close_held_back_by_a_hidden_viewer_that_wont_die_says_none_of_the_group_was_closed(self):
+        tmux = self.app.tmux
+
+        def refuse(pane):
+            tmux.events.append(("kill", pane))
+            raise sidebar.TmuxError("server busy")
+
+        tmux.kill_pane = refuse
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertFalse(interrupter.ended)
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.app.start_close(self.group_close())
+            self.app.closer.join(5)
+            self.app.refresh()
+        self.assertEqual(ran, [])
+        self.assertEqual(self.app.notice,
+                         "emx couldn't close the viewer it opened for emx-test-working, so it didn't close any of them.")
 
     def held_interrupts(self):
         """Interrupter.attempt replaced by one that records whose it is and waits for `release`, so several can be alive at once."""

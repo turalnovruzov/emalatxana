@@ -305,11 +305,13 @@ class Closer(threading.Thread):
     Interrupters of any of them still running, cancelled when the close
     began, and those that ended earlier possibly leaving the hidden viewer
     they meant to kill. The close waits for them to end and tries each
-    kill again; while such a pane is still listed, nothing is closed. Any
-    other hidden viewer an interrupt opened is gone, or came up and took
-    the Esc, or was swapped into main by him, which makes it his like a
-    viewer he opens; so an interrupt's `claude attach` still starting can't
-    land after the stop and resume the session. Not covered: a window tmux
+    kill again; while such a pane is still listed, nothing is closed. A
+    cancelled one he swapped into main is swapped out for the placeholder
+    before its kill. Any other hidden viewer an interrupt opened is gone,
+    or, with no close started, took the Esc or was swapped into main by
+    him, which makes it his like a viewer he opens; so an interrupt's
+    `claude attach` still starting can't land after the stop and resume
+    the session. Not covered: a window tmux
     made for a `new_hidden_window` that then failed, since no pane id came
     back. `current` is the session being closed now. `result` is (all
     closed, message, {id: closed}).
@@ -331,17 +333,18 @@ class Closer(threading.Thread):
 
     def attempt(self, finished: dict) -> tuple:
         deadline = time.monotonic() + INTERRUPT_JOIN_SECONDS
+        what = "it" if len(self.targets) == 1 else "any of them"
         for interrupter in self.wait_for:
             interrupter.join(max(0.0, deadline - time.monotonic()))
             name = interrupter.interrupt.name
             if interrupter.is_alive():
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx is still interrupting {name}, so it didn't close it.", finished
+                return False, f"emx is still interrupting {name}, so it didn't close {what}.", finished
             if not interrupter.ended:
-                interrupter.end_opened()
+                interrupter.end_opened(closing=True)
             if not interrupter.ended:
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close it.", finished
+                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close {what}.", finished
         messages = []
         for confirm in self.targets:
             self.current = confirm
@@ -451,7 +454,8 @@ class Interrupter(threading.Thread):
     is set when a close of the session starts: from then on it opens and
     sends nothing. Before it ends it kills the hidden viewer it opened,
     unless the Esc went into it after its prompt came up and no close
-    started, or, with no close started, he has meanwhile opened it in main.
+    started, or, with no close started, he has meanwhile opened it in main;
+    on a close, one in main is first swapped out for the placeholder.
     `ended` is False only if a pane it meant to kill may still be there.
     `result` is (stopped, message).
     """
@@ -475,29 +479,37 @@ class Interrupter(threading.Thread):
         finally:
             closing = self.cancel.is_set()
             if self.opened is not None and (closing or not self.sent):
-                self.end_opened(spare_main=not closing)
+                self.end_opened(closing)
 
-    def in_main(self) -> bool | None:
-        """Whether he has swapped the hidden viewer into main (Enter on its row while it came up), which makes it his; None when tmux can't tell."""
-        try:
-            windows = {p.id: p.window for p in self.tmux.panes()}
-        except TmuxError:
-            return None
-        return windows.get(self.opened) is not None and windows.get(self.opened) == windows.get(self.panel)
-
-    def end_opened(self, spare_main: bool = True) -> None:
+    def end_opened(self, closing: bool) -> None:
         """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it.
 
-        With `spare_main` a viewer he has swapped into main is left to him,
-        and one tmux can't place is left with `ended` False.
+        He may have swapped it into main (Enter on its row while it came
+        up). With no close that makes it his and it stays; on a close the
+        placeholder is swapped into main first, as `close_viewers` does, so
+        main keeps a pane. When tmux can't say where it is, there is no
+        placeholder, or the swap fails, nothing is killed and `ended` is
+        False, which holds the close back.
         """
-        if spare_main:
-            shown = self.in_main()
-            if shown is None:
+        try:
+            panes = self.tmux.panes()
+        except TmuxError:
+            self.ended = False
+            return
+        windows = {p.id: p.window for p in panes}
+        in_main = windows.get(self.opened) is not None and windows.get(self.opened) == windows.get(self.panel)
+        if in_main and not closing:
+            self.ended = True
+            return
+        if in_main:
+            placeholder = next((p for p in panes if p.role == "placeholder"), None)
+            if placeholder is None:
                 self.ended = False
                 return
-            if shown:
-                self.ended = True
+            try:
+                self.tmux.swap(placeholder.id, self.opened)
+            except TmuxError:
+                self.ended = False
                 return
         try:
             self.tmux.kill_pane(self.opened)
