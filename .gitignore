@@ -1,0 +1,11 @@
+# gate telemetry (local, per-session decisions with session ids; the repo is public)
+.codery/telemetry/
+
+# run directories of the system's own runs
+.codery/run/
+
+# git worktrees
+.worktrees/
+
+# macos
+.DS_Store
