@@ -292,8 +292,12 @@ def closing_text(confirm: Confirm) -> str:
     return f"{_CLOSE_WORDS[confirm.action][0]} {confirm.name}…"
 
 
-def closed_text(confirm: Confirm) -> str:
-    return f"{_CLOSE_WORDS[confirm.action][1]} {confirm.name}."
+def closed_text(confirm: Confirm, output: str = "") -> str:
+    """After a remove, whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
+    done = f"{_CLOSE_WORDS[confirm.action][1]} {confirm.name}."
+    lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
+    extra = one_line("\n".join(lines[1:])) if confirm.action == REMOVE else ""
+    return f"{done} {extra}" if extra else done
 
 
 @dataclass(frozen=True)

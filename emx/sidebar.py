@@ -186,7 +186,7 @@ def wait_until_running(claude: str, sid: str) -> tuple:
 
 
 def close_session(claude: str, confirm: core.Confirm) -> tuple:
-    """Run `claude stop` or `claude rm` on the confirmed session: (its output's first line, None), or (None, its whole message on one line). Never raises."""
+    """Run `claude stop` or `claude rm` on the confirmed session: (its output, None), or (None, its whole message on one line). Never raises."""
     args = core.close_args(claude, confirm)
     try:
         done = subprocess.run(
@@ -203,7 +203,7 @@ def close_session(claude: str, confirm: core.Confirm) -> tuple:
         return None, core.one_line(done.stderr) or core.one_line(done.stdout) or (
             f"claude {args[1]} exited with {done.returncode}"
         )
-    return core.first_message(done.stdout), None
+    return done.stdout, None
 
 
 class Closer(threading.Thread):
@@ -221,8 +221,8 @@ class Closer(threading.Thread):
             if not core.close_still_applies(self.confirm, session, fresh):
                 self.result = (False, core.close_refusal(self.confirm, session, fresh))
                 return
-            _, error = close_session(self.claude, self.confirm)
-            self.result = (error is None, error or core.closed_text(self.confirm))
+            output, error = close_session(self.claude, self.confirm)
+            self.result = (error is None, error or core.closed_text(self.confirm, output))
         except Exception as exc:
             self.result = (False, f"{self.confirm.action} failed: {core.error_line(exc)}")
 
@@ -504,6 +504,8 @@ class App:
             main_sid = main.session if main is not None and not self.main_is_off() else ""
             self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
             self.wanted_cursor = None
+        if not focused:
+            self.confirm = None
         self.focused = focused
 
     def read_focus(self) -> None:

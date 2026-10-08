@@ -1466,6 +1466,16 @@ class CloseConfirm(unittest.TestCase):
         self.assertEqual((core.closing_text(stop), core.closed_text(stop)), ("Stopping emx-test-a…", "Stopped emx-test-a."))
         self.assertEqual((core.closing_text(remove), core.closed_text(remove)), ("Removing emx-test-a…", "Removed emx-test-a."))
 
+    def test_a_removed_notice_carries_what_rm_printed_past_its_first_line(self):
+        stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
+        output = "\n\x1b[1mremoved a\x1b[0m\n\n  worktree directory left at /x/wt\n  (git no longer recognized it)\n"
+        self.assertEqual(
+            core.closed_text(remove, output), "Removed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)",
+        )
+        self.assertEqual(core.closed_text(remove, "removed a\n"), "Removed emx-test-a.")
+        self.assertEqual(core.closed_text(stop, "stopped a\nsomething else\n"), "Stopped emx-test-a.")
+
     def test_one_line_keeps_every_line_of_a_refusal(self):
         self.assertEqual(core.one_line("\x1b[31mrefused:\x1b[0m\n\n  2 unpushed commits\n"), "refused: 2 unpushed commits")
         self.assertEqual(core.one_line(""), "")

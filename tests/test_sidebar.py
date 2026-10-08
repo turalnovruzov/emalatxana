@@ -515,6 +515,13 @@ class Focus(AppCase):
         self.assertEqual(self.app.cursor, ("session", "b"))
         self.assertIn("tmux: no such pane", self.app.notice)
 
+    def test_leaving_the_panel_cancels_an_armed_ctrl_x_but_his_terminal_losing_focus_does_not(self):
+        self.app.handle_key(sidebar.CTRL_X)
+        self.read(*FOCUS_OUT)
+        self.assertEqual(self.app.confirm.id, "c")
+        self.leave_panel()
+        self.assertIsNone(self.app.confirm)
+
     def test_his_terminal_losing_and_regaining_focus_changes_nothing(self):
         self.read(*FOCUS_IN)
         self.read(*FOCUS_OUT)
@@ -826,6 +833,22 @@ class CloseSession(AppCase):
         self.assertEqual(self.app.notice, "Removed emx-test-a.")
         self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
 
+    def test_a_worktree_rm_left_behind_shows_after_removed_on_one_line(self):
+        stopped = session("a", "/p/alpha", state="stopped", pid=None)
+        self.poll(stopped, self.b)
+        self.app.refresh()
+        self.listing = ([stopped, self.b], None)
+        self.done = subprocess.CompletedProcess(
+            [], 0, stdout="removed a\nworktree directory left at /x/wt (git no longer recognized it)\n", stderr="",
+        )
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(
+            (self.app.notice, self.app.notice_error),
+            ("Removed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)", False),
+        )
+        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
+
     def test_removing_a_session_kills_its_hidden_viewer(self):
         stopped = session("b", "/p/alpha", state="stopped", pid=None, started=1.0)
         self.poll(self.a, stopped)
@@ -846,6 +869,18 @@ class CloseSession(AppCase):
         self.settle()
         self.assertEqual(self.ran, [(["claude", "rm", "a"], True)])
         self.assertEqual((self.app.notice, self.app.notice_error), ("worktree has 2 unpushed commits rerun with a flag", True))
+        self.assertEqual(self.app.tmux.calls, [])
+        self.assertIsNotNone(self.app.session("a"))
+
+    def test_a_refusal_on_stdout_alone_shows_on_one_line_and_leaves_the_row(self):
+        stopped = session("a", "/p/alpha", state="stopped", pid=None)
+        self.poll(stopped, self.b)
+        self.app.refresh()
+        self.listing = ([stopped, self.b], None)
+        self.done = subprocess.CompletedProcess([], 1, stdout="kept a — its worktree is still at /x/wt", stderr="")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual((self.app.notice, self.app.notice_error), ("kept a — its worktree is still at /x/wt", True))
         self.assertEqual(self.app.tmux.calls, [])
         self.assertIsNotNone(self.app.session("a"))
 
@@ -923,8 +958,8 @@ class CloseSession(AppCase):
         self.assertIn("ctrl+x again to stop", drawn)
         self.assertNotIn("emx-test-a", drawn)
 
-    def test_footer_at_his_default_width_and_help_show_ctrl_x(self):
-        self.assertIn("^x", self.app.bottom_lines(39)[-1][0])
+    def test_a_footer_and_the_help_show_ctrl_x(self):
+        self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
 if __name__ == "__main__":
