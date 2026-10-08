@@ -305,8 +305,8 @@ class Closer(threading.Thread):
     Interrupters of any of them still running, cancelled when the close
     began, and those that ended earlier possibly leaving the hidden viewer
     they meant to kill. The close waits for them to end and tries each
-    kill again; while such a pane is still listed, nothing is closed. A
-    cancelled one he swapped into main is swapped out for the placeholder
+    kill again; while such a pane is still listed, nothing is closed. Any
+    of these he swapped into main is swapped out for the placeholder
     before its kill. Any other hidden viewer an interrupt opened is gone,
     or, with no close started, took the Esc or was swapped into main by
     him, which makes it his like a viewer he opens; so an interrupt's
