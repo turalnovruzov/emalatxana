@@ -62,6 +62,21 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `-q` also hides a session that does not exist (`=emxx:` returns `''` with exit 0 too), so an empty value never proves the option is unset. Read it only after `has_session()`.
 
+### Every `claude attach` asks `core.attach_allowed` first
+
+1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is checked against a fresh listing.
+2. **Why**: attaching to a stopped session resumes it, and he must be the only one who reopens a session he stopped.
+3. **Minimal example**:
+   ```python
+   if trigger == core.OPEN:
+       session, fresh = self.session(sid), False   # the row he clicked
+   else:
+       session, fresh = self.fresh_row(sid)        # one listing, taken now
+   if core.attach_allowed(session, trigger, fresh):
+       self.tmux.respawn(pane, core.viewer_command(self.claude, sid))
+   ```
+4. **Gotcha**: the panel's rows come from the last poll, which can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

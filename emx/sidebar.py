@@ -43,6 +43,8 @@ ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
 CTRL_S = "\x13"
 FRAME_SECONDS = 0.15
+KEY_WAIT_MS = 200
+MAX_QUEUED_KEYS = 64
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
@@ -91,9 +93,14 @@ def fetch_sessions(claude: str) -> tuple:
 
 
 def run_git(cwd: str, *args: str) -> tuple:
-    """(stdout, None) from `git -C cwd ...`, or (None, one-line error). Never raises."""
-    if not cwd or not os.path.isdir(cwd):
-        return None, f"folder not found: {cwd}"
+    """(stdout, None) from `git -C cwd ...`, or (None, one-line error). Never raises.
+
+    The folder is not checked here: a stat on a hung mount would block the
+    caller with no timeout, while git meets it under one and fails on its own
+    for a folder that is gone.
+    """
+    if not cwd:
+        return None, "no folder"
     try:
         done = subprocess.run(
             ["git", "-C", cwd, *args], capture_output=True, encoding="utf-8", errors="replace",
@@ -106,12 +113,18 @@ def run_git(cwd: str, *args: str) -> tuple:
     return done.stdout, None
 
 
-def git_placement(cwd: str) -> core.Placement:
-    rev_parse, _ = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel")
-    branch = None
-    if rev_parse is not None:
-        branch, _ = run_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-    return core.placement_from_git(cwd, rev_parse, branch)
+def git_placement(cwd: str, home: str = "") -> tuple:
+    """(placement, None) for `cwd`, or (None, one-line error) when git failed, so the caller can ask again later. Never raises.
+
+    `home` is the real path of the home folder; see `core.placement_from_git`.
+    """
+    rev_parse, error = run_git(
+        cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel", "--show-prefix",
+    )
+    if error:
+        return None, error
+    branch, _ = run_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+    return core.placement_from_git(cwd, rev_parse, branch, home), None
 
 
 def start_session(claude: str, folder: str, message: str) -> tuple:
@@ -170,8 +183,73 @@ class Starter(threading.Thread):
         self.result = (sid, error)
 
 
+class Resolver(threading.Thread):
+    """Works out each folder's repository on its own thread, so a slow or hung git never holds up listing or drawing.
+
+    Until a folder resolves, its sessions group by the folder itself. A folder
+    git failed on is asked again later, backing off, never remembered as
+    failed.
+    """
+
+    def __init__(self, home: str):
+        super().__init__(daemon=True)
+        self.home = home
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.wanted = set()
+        self.placements = {}
+        self.failures = {}
+        self.changed = False
+
+    def want(self, cwds) -> None:
+        with self.lock:
+            new = set(cwds) - self.wanted
+            self.wanted |= new
+        if new:
+            self.wake.set()
+
+    def due(self, now: float) -> list:
+        with self.lock:
+            return sorted(
+                c for c in self.wanted
+                if c not in self.placements and self.failures.get(c, (0, 0.0))[1] <= now
+            )
+
+    def resolve(self, cwd: str) -> None:
+        try:
+            placement, _ = git_placement(cwd, self.home)
+        except Exception:
+            placement = None
+        with self.lock:
+            if placement is None:
+                tries = self.failures.get(cwd, (0, 0.0))[0] + 1
+                self.failures[cwd] = (tries, time.monotonic() + core.retry_after(tries))
+            else:
+                self.placements[cwd] = placement
+                self.failures.pop(cwd, None)
+                self.changed = True
+
+    def run(self) -> None:
+        while True:
+            try:
+                for cwd in self.due(time.monotonic()):
+                    self.resolve(cwd)
+            except Exception:
+                pass
+            self.wake.wait(core.RETRY_FIRST_SECONDS)
+            self.wake.clear()
+
+    def take(self):
+        """A copy of the placements when any resolved since the last take, else None."""
+        with self.lock:
+            if not self.changed:
+                return None
+            self.changed = False
+            return dict(self.placements)
+
+
 class Poller(threading.Thread):
-    """Lists sessions, and works out each new folder's repository here so git never holds up drawing."""
+    """Lists sessions, and hands each folder to the resolver without waiting for it."""
 
     def __init__(self, claude: str):
         super().__init__(daemon=True)
@@ -179,23 +257,22 @@ class Poller(threading.Thread):
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.result = None
-        self.placements = {}
+        self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.claude)
         if error:
-            return None, None, error
-        for s in sessions:
-            if s.cwd not in self.placements:
-                self.placements[s.cwd] = git_placement(s.cwd)
-        return sessions, dict(self.placements), None
+            return None, error
+        self.resolver.want(s.cwd for s in sessions)
+        return sessions, None
 
     def run(self) -> None:
+        self.resolver.start()
         while True:
             try:
                 result = self.poll()
             except Exception as exc:
-                result = None, None, f"listing sessions failed: {core.error_line(exc)}"
+                result = None, f"listing sessions failed: {core.error_line(exc)}"
             with self.lock:
                 self.result = result
             self.wake.wait(POLL_SECONDS)
@@ -223,6 +300,7 @@ class App:
         self.notice = ""
         self.notice_error = False
         self.cursor = None
+        self.wanted_cursor = None
         self.help = False
         self.palette = Palette()
         self.main_pane = None
@@ -233,6 +311,7 @@ class App:
         self.prompt = None
         self.row_map = {}
         self.scroll = 0
+        self.last_housekeep = 0.0
         self.poller = Poller(claude)
         self.starter = None
         self.flagged_viewers = frozenset()
@@ -272,7 +351,9 @@ class App:
 
     def regroup(self) -> None:
         self.groups = core.group_sessions(self.sessions, self.placements, self.view())
-        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups)
+        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor)
+        if self.cursor == self.wanted_cursor:
+            self.wanted_cursor = None
 
     def toggle_group(self, key: str) -> None:
         self.prefs = core.toggle_collapsed(self.prefs, self.view(), key)
@@ -291,7 +372,7 @@ class App:
     def activate(self, item) -> None:
         if not item:
             return
-        self.cursor = item
+        self.cursor, self.wanted_cursor = item, None
         if item[0] == "group":
             self.toggle_group(item[1])
         else:
@@ -371,7 +452,7 @@ class App:
             viewer = next((p for p in panes if p.session == sid), None)
             command = core.viewer_command(self.claude, sid)
             if viewer is None:
-                if not self.attach_allowed(sid, trigger):
+                if not self.confirm_attach(sid, trigger):
                     return
                 pane_id = self.tmux.new_hidden_window(command)
                 self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
@@ -379,7 +460,7 @@ class App:
                 pane_id = viewer.id
                 self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
                 if viewer.dead or respawn:
-                    if not self.attach_allowed(sid, trigger):
+                    if not self.confirm_attach(sid, trigger):
                         return
                     self.tmux.respawn(pane_id, command)
                     self.flagged_viewers -= {pane_id}
@@ -391,14 +472,31 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
-    def attach_allowed(self, sid: str, trigger: str) -> bool:
-        session = self.session(sid)
-        if core.attach_allowed(session, trigger):
-            return True
-        if session is None:
-            self.say(f"Session {sid} isn't in the latest list, so emx won't reopen it.", error=True)
+    def fresh_row(self, sid: str) -> tuple:
+        """(session, fresh): `sid`'s row in a listing taken now. fresh is False, with no row, when that listing fails or the panel's own polling is failing."""
+        if self.list_error:
+            return None, False
+        sessions, error = fetch_sessions(self.claude)
+        if error:
+            return None, False
+        return next((s for s in sessions if s.id == sid), None), True
+
+    def confirm_attach(self, sid: str, trigger: str) -> bool:
+        """Ask core whether `claude attach` may run, and say why not when it may not."""
+        if trigger == core.OPEN:
+            session, fresh = self.session(sid), False
         else:
-            self.say(f"{session.name} is stopped. Press Enter on it to reopen it.", error=True)
+            session, fresh = self.fresh_row(sid)
+        if core.attach_allowed(session, trigger, fresh):
+            return True
+        shown = self.session(sid)
+        name = shown.name if shown else sid
+        if trigger != core.OPEN and not fresh:
+            self.say(f"Couldn't list sessions to check {name} is still running, so emx left it alone.", error=True)
+        elif session is None:
+            self.say(f"{name} isn't listed any more, so emx won't open it.", error=True)
+        else:
+            self.say(f"{name} isn't running. Press Enter on it to reopen it.", error=True)
         return False
 
     def restart_viewer(self) -> None:
@@ -406,7 +504,7 @@ class App:
         if main is None or not main.session:
             self.say("No session is open in the main pane.")
             return
-        if not self.attach_allowed(main.session, core.RESTART):
+        if not self.confirm_attach(main.session, core.RESTART):
             return
         try:
             self.tmux.respawn(main.id, core.viewer_command(self.claude, main.session))
@@ -497,7 +595,7 @@ class App:
         self.prefs["last_folder"] = starter.folder
         self.save_prefs()
         self.fresh[sid] = time.monotonic()
-        self.cursor = ("session", sid)
+        self.wanted_cursor = ("session", sid)
         self.poller.wake.set()
         self.switch_to(sid, core.NEW)
         if not self.notice_error:
@@ -523,9 +621,9 @@ class App:
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
         elif key in (curses.KEY_UP, "k"):
-            self.cursor = core.move_cursor(self.items(), self.cursor, -1)
+            self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, -1), None
         elif key in (curses.KEY_DOWN, "j"):
-            self.cursor = core.move_cursor(self.items(), self.cursor, 1)
+            self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, 1), None
         elif key in ENTER_KEYS:
             self.activate(self.cursor)
         elif key == CTRL_S:
@@ -560,12 +658,12 @@ class App:
             # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
             verb = "isn't" if session and session.name != session.id else "may not be"
             warning = f"Main {verb} showing {name} — press r to go back"
-            lines += [(t, self.color("error")) for t in core.wrap(warning, width)[:3]]
+            lines += [(t, self.color("error")) for t in core.wrap_words(warning, width)[:3]]
         if self.list_error:
-            lines += [(t, self.color("error")) for t in core.wrap(f"! {self.list_error}", width)[:3]]
+            lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
         if self.notice:
             attr = self.color("error") if self.notice_error else curses.A_DIM
-            lines += [(t, attr) for t in core.wrap(self.notice, width)[:6]]
+            lines += [(t, attr) for t in core.wrap_words(self.notice, width)[:6]]
         if self.prompt is not None:
             title = "New session · folder (Tab completes):" if self.prompt["stage"] == "folder" else (
                 "First message (Enter for none):"
@@ -573,7 +671,7 @@ class App:
             lines.append((title, curses.A_BOLD))
             lines += [(t, 0) for t in core.wrap("> " + self.prompt["text"] + "▏", width)[-3:]]
             if self.prompt["hint"]:
-                lines += [(t, curses.A_DIM) for t in core.wrap(self.prompt["hint"], width)[:3]]
+                lines += [(t, curses.A_DIM) for t in core.wrap_words(self.prompt["hint"], width)[:3]]
             lines.append(("Enter next · Esc cancel", curses.A_DIM))
         footer = next((f for f in FOOTERS if core.display_width(f) <= width - 1), FOOTERS[-1])
         lines.append((footer, curses.A_DIM))
@@ -636,6 +734,10 @@ class App:
         main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
         cursor_group = core.cursor_group(self.cursor, self.groups)
         groups = {g.key: g for g in self.groups}
+        aligns = {}
+        for g in self.groups:
+            column = core.name_column((core.row_label(s.name, self.worktree(s)) for s in g.sessions), width)
+            aligns.update((s.id, column) for s in g.sessions)
         now_ms = time.time() * 1000
         frame = int(time.monotonic() / FRAME_SECONDS)
         for slot, line in enumerate(lines[self.scroll:self.scroll + height]):
@@ -651,7 +753,8 @@ class App:
             else:
                 session = self.session(line[1])
                 if session is not None:
-                    self.draw_session(y, session, selected, session.id == main_sid, width, now_ms, frame)
+                    in_main = session.id == main_sid
+                    self.draw_session(y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame)
 
     def draw_header(self, y: int, group, selected: bool, bold: bool, width: int) -> None:
         view = self.view()
@@ -664,7 +767,12 @@ class App:
                 attr |= curses.A_BOLD
             self.put(y, x, text, attr)
 
-    def draw_session(self, y: int, s, selected: bool, in_main: bool, width: int, now_ms: float, frame: int) -> None:
+    def worktree(self, s) -> str:
+        return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
+
+    def draw_session(
+        self, y: int, s, selected: bool, in_main: bool, width: int, align: int, now_ms: float, frame: int,
+    ) -> None:
         cat = core.category(s)
         stopped = cat == core.STOPPED
         pal = self.palette
@@ -678,8 +786,9 @@ class App:
             self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
         glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
         self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
-        worktree = self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
-        parts = core.row_layout(s.name, worktree, core.state_word(s), s.waiting_for, core.session_age(s, now_ms), width)
+        word = "" if self.view() == core.BY_STATE else core.state_word(s)
+        age = core.session_age(s, now_ms)
+        parts = core.row_layout(s.name, self.worktree(s), word, s.waiting_for, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
         for x, text, part in parts:
             emphasis = curses.A_BOLD if part == "name" and (selected or in_main) else 0
@@ -689,39 +798,61 @@ class App:
         result = self.poller.take()
         if result is None:
             return False
-        sessions, placements, error = result
+        sessions, error = result
         if error:
             self.list_error = error
             return False
         self.list_error = ""
         self.sessions = sessions
-        self.placements = placements
         self.loaded = True
         self.regroup()
         return True
 
+    def take_placements(self) -> None:
+        placements = self.poller.resolver.take()
+        if placements is not None:
+            self.placements = placements
+            self.regroup()
+
+    def refresh(self) -> None:
+        try:
+            self.finish_start()
+            fresh_list = self.take_poll()
+            self.take_placements()
+            now = time.monotonic()
+            if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:
+                self.last_housekeep = now
+                self.housekeep(fresh_list)
+            self.draw()
+        except Exception as exc:
+            self.say(f"emx error: {core.error_line(exc)}", error=True)
+
+    def read_input(self) -> None:
+        """Wait briefly for a key, then handle every key already queued, all before the next poll or redraw.
+
+        A click is mapped through the `row_map` of the frame on screen. Applying
+        a poll or redrawing between two queued events would send a later click
+        to whichever row has since moved under it.
+        """
+        try:
+            for _ in range(MAX_QUEUED_KEYS):
+                try:
+                    key = self.scr.get_wch()
+                except curses.error:
+                    return
+                self.scr.timeout(0)
+                try:
+                    self.handle_key(key)
+                except Exception as exc:
+                    self.say(f"emx error: {core.error_line(exc)}", error=True)
+        finally:
+            self.scr.timeout(KEY_WAIT_MS)
+
     def run(self) -> None:
         self.poller.start()
-        last_housekeep = 0.0
         while True:
-            try:
-                self.finish_start()
-                fresh_list = self.take_poll()
-                now = time.monotonic()
-                if fresh_list or now - last_housekeep >= HOUSEKEEP_SECONDS:
-                    last_housekeep = now
-                    self.housekeep(fresh_list)
-                self.draw()
-            except Exception as exc:
-                self.say(f"emx error: {core.error_line(exc)}", error=True)
-            try:
-                key = self.scr.get_wch()
-            except curses.error:
-                continue
-            try:
-                self.handle_key(key)
-            except Exception as exc:
-                self.say(f"emx error: {core.error_line(exc)}", error=True)
+            self.refresh()
+            self.read_input()
 
 
 def setup_curses(scr) -> None:
@@ -731,7 +862,7 @@ def setup_curses(scr) -> None:
     except curses.error:
         pass
     scr.keypad(True)
-    scr.timeout(200)
+    scr.timeout(KEY_WAIT_MS)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
 

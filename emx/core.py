@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import textwrap
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,8 +103,12 @@ GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
 
 
 def category(session: Session) -> str:
-    """A state this version doesn't know counts as working, so the row keeps plain colours."""
-    if not session.running:
+    """What the row shows, from `state` alone as `claude agents` does: a finished session whose process has exited is still Done.
+
+    Whether emx may reattach is `running`'s business, never this. A state this
+    version doesn't know counts as working, so the row keeps plain colours.
+    """
+    if session.state == "stopped":
         return STOPPED
     return _STATE_CATEGORY.get(session.state, WORKING)
 
@@ -141,20 +146,22 @@ def session_age(session: Session, now_ms: float) -> str:
 OPEN, RESTART, NEW = "open", "restart", "new"
 
 
-def attach_allowed(session: Session | None, trigger: str) -> bool:
+def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
     """Whether emx may run `claude attach` on `session` for `trigger`.
 
-    Attaching to a session with no live process resumes it. Only his explicit
-    open (Enter, or a click on its row) may do that; every other trigger,
-    including any added later, is refused for a stopped session. `session` is
-    its row in the latest poll; None means unlisted, and only a session emx
-    has just started may be attached before it shows up.
+    Attaching to a session with no live process resumes it, so only his
+    explicit open (Enter, or a click on its row) may do that, judged on the
+    row he can see. Every other trigger, including any added later, needs
+    `session` to come from a listing taken just before the attach, while the
+    panel's own polling is healthy (`fresh`), and to be running in it: the
+    panel's rows can be a poll old, or older while listing fails. None means
+    the session is not listed.
     """
     if session is None:
-        return trigger == NEW
-    if session.running:
-        return trigger in (OPEN, RESTART, NEW)
-    return trigger == OPEN
+        return False
+    if trigger == OPEN:
+        return True
+    return trigger in (RESTART, NEW) and fresh and session.running
 
 
 @dataclass(frozen=True)
@@ -163,24 +170,73 @@ class Placement:
     worktree: str = ""
 
 
-def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None) -> Placement:
+def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home: str = "") -> Placement:
     """Which repository a session's folder belongs to, from git's own answers.
 
     `rev_parse` is the output of `git rev-parse --path-format=absolute
-    --git-common-dir --show-toplevel` run in `cwd`, or None when git failed
-    (not a repo, folder gone, no git). `branch` is `git symbolic-ref --short
-    HEAD`, or None when HEAD is detached. A worktree's common dir is its main
-    repo's `.git`; any other layout (bare repo, submodule) groups by the
-    folder's own top level.
+    --git-common-dir --show-toplevel --show-prefix` run in `cwd`, or None
+    when git failed (not a repo, folder gone, no git). `branch` is `git
+    symbolic-ref --short HEAD`, or None when HEAD is detached. A worktree's
+    common dir is its main repo's `.git`; any other layout (bare repo,
+    submodule) groups by the folder's own top level. A repo whose top level
+    is `home` (the real path of the home folder) is a dotfiles repo rather
+    than a project, so each folder in it groups by itself.
+
+    git answers in real paths (`/private/tmp/...` for `/tmp/...`). The answer
+    is put back into the form `cwd` uses, so a group found by git and a group
+    keyed by a bare cwd never spell the same parent folder two ways.
     """
     lines = (rev_parse or "").splitlines()
     if len(lines) < 2 or not all(os.path.isabs(line) for line in lines[:2]):
         return Placement(cwd)
     common, top = os.path.normpath(lines[0]), os.path.normpath(lines[1])
     root = os.path.dirname(common) if os.path.basename(common) == ".git" else top
+    if home and root == os.path.normpath(home):
+        return Placement(cwd)
+    in_cwd_form = _cwd_form(cwd, top, lines[2] if len(lines) > 2 else None)
     if top == root:
-        return Placement(root)
-    return Placement(root, (branch or "").strip() or os.path.basename(top))
+        return Placement(in_cwd_form(root))
+    return Placement(in_cwd_form(root), (branch or "").strip() or os.path.basename(top))
+
+
+def _cwd_form(cwd: str, top: str, prefix: str | None):
+    """A function that rewrites a real path into `cwd`'s spelling.
+
+    `prefix` is where `cwd` sits under its real `top`, so cwd minus prefix is
+    the top as `cwd` spells it; the leading folders where that and `top`
+    differ (`/tmp` against `/private/tmp`) are the swap to make. With no
+    prefix, or one `cwd` does not end in, paths are left as git gave them.
+    """
+    cwd_parts, inner = _parts(cwd), _parts(prefix or "")
+    if (prefix is None or not os.path.isabs(cwd) or len(inner) > len(cwd_parts)
+            or cwd_parts[len(cwd_parts) - len(inner):] != inner):
+        return lambda path: path
+    cwd_top, top_parts = cwd_parts[: len(cwd_parts) - len(inner)], _parts(top)
+    shared = 0
+    while shared < min(len(cwd_top), len(top_parts)) and cwd_top[-1 - shared] == top_parts[-1 - shared]:
+        shared += 1
+    real_base, cwd_base = top_parts[: len(top_parts) - shared], cwd_top[: len(cwd_top) - shared]
+
+    def convert(path: str) -> str:
+        parts = _parts(path)
+        if parts[: len(real_base)] != real_base:
+            return path
+        return "/" + "/".join(cwd_base + parts[len(real_base):])
+
+    return convert
+
+
+def _parts(path: str) -> list:
+    return [p for p in os.path.normpath(path).split("/") if p not in ("", ".")] if path else []
+
+
+RETRY_FIRST_SECONDS = 5
+RETRY_MAX_SECONDS = 300
+
+
+def retry_after(failures: int) -> float:
+    """Seconds to wait before asking git about a folder again after `failures` failed tries in a row: doubling, capped."""
+    return float(min(RETRY_MAX_SECONDS, RETRY_FIRST_SECONDS * 2 ** max(0, failures - 1)))
 
 
 PROJECT, BY_STATE = "project", "state"
@@ -234,8 +290,14 @@ def move_cursor(items: list, cursor, delta: int):
     return items[max(0, min(len(items) - 1, items.index(cursor) + delta))]
 
 
-def settle_cursor(items: list, cursor, groups):
-    """Keep the cursor on its item; a session folded out of sight leaves it on its group's header."""
+def settle_cursor(items: list, cursor, groups, wanted=None):
+    """Keep the cursor on its item; a session folded out of sight leaves it on its group's header.
+
+    `wanted` is an item the cursor should move to once it is listed, such as
+    a session emx has just started; until then the cursor stays put.
+    """
+    if wanted is not None and wanted in items:
+        return wanted
     if cursor in items:
         return cursor
     if cursor and cursor[0] == "session":
@@ -331,29 +393,72 @@ def fit_left(text: str, width: int) -> str:
     return "…" + "".join(reversed(out))
 
 
+def wrap_words(text: str, width: int) -> list:
+    """Wrap at word boundaries. textwrap counts characters, so a line of wide characters, like a word longer than the line, is then split by display columns."""
+    if width <= 0:
+        return []
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        for line in textwrap.wrap(paragraph, width, break_on_hyphens=False) or [""]:
+            lines += wrap(line, width)
+    return lines
+
+
 def short_path(path: str, width: int, home: str | None = None) -> str:
+    """The path in `width` columns, `~` for the home folder.
+
+    A path too long loses whole folders from the front, keeping as many
+    trailing ones as fit (`~/…/parent/name`, then `…/parent/name`, down to
+    `…/name`), so it is never cut mid-word; only a last folder too long by
+    itself is cut.
+    """
     home = (os.path.expanduser("~") if home is None else home).rstrip("/")
     if home and (path == home or path.startswith(home + "/")):
         path = "~" + path[len(home):]
-    return fit_left(path, width)
+    if display_width(path) <= width:
+        return path
+    parts = path.split("/")
+    leads = ("~/…/", "…/") if parts[0] == "~" else ("…/",)
+    for keep in range(len(parts) - 2, 0, -1):
+        tail = "/".join(parts[-keep:])
+        for lead in leads:
+            if display_width(lead + tail) <= width:
+                return lead + tail
+    return fit(parts[-1], width) if parts[-1] else fit_left(path, width)
 
 
 ROW_LEAD = 3
 NAME_MIN = 12
 STATUS_MIN = 5
 DETAIL_MIN = 6
+BRANCH_MIN = 4
 WORKTREE_MARK = "⎇ "
 
 
-def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int) -> list:
+def row_label(name: str, worktree: str) -> str:
+    """A row's name with its worktree mark, as wide as `row_layout` draws it when there is room."""
+    return f"{name} {WORKTREE_MARK}{worktree}" if worktree else name
+
+
+def name_column(labels, width: int) -> int:
+    """How wide a group's name column is, so its states line up: the widest `row_label` within half the row. A longer one is left out, so one long name doesn't push every row."""
+    cap = max(0, width - ROW_LEAD) // 2
+    return max((w for w in map(display_width, labels) if w <= cap), default=0)
+
+
+def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
     """Where a session row's parts go: (x, text, part) for "name", "extra", "status" and "age".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
-    right-aligned one column in from the edge. As space runs out, in order:
-    the status detail shortens and the worktree goes; the state word
-    shortens; a name too long to leave even that is cut, down to NAME_MIN,
-    to keep the whole state word; and last the status goes and the name is
-    cut to whatever is left.
+    right-aligned one column in from the edge. The status starts `align`
+    columns after the name's start when the row can afford it, so states
+    line up within a group. As space runs out, in order: the status detail
+    shortens; the worktree's branch shortens, down to BRANCH_MIN, then goes;
+    the state word goes whole, never cut, since the glyph's colour still
+    shows the state; a name too long to leave even STATUS_MIN columns is cut,
+    down to NAME_MIN, to keep the state word; and last the status goes and
+    the name is cut to whatever is left. An empty `word` (the by-state view,
+    whose header already says it) leaves the detail alone as the status.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -361,39 +466,52 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     room = age_x - 1 - ROW_LEAD
     if room <= 0:
         return [(age_x, age, "age")] if age else []
-    status = f"{word} · {detail}" if detail else word
-    extra = WORKTREE_MARK + worktree if worktree else ""
-    name_w, word_w, extra_w = display_width(name), display_width(word), display_width(extra)
+    name_w, word_w = display_width(name), display_width(word)
+    gap = 2 if word else 0
 
-    if extra and name_w + 1 + extra_w + 2 + word_w <= room:
-        status_room = room - name_w - 1 - extra_w - 2
-        return _row(name, extra, _fit_status(status, word, status_room), age, age_x)
-    if name_w + 2 + word_w <= room:
-        return _row(name, "", _fit_status(status, word, room - name_w - 2), age, age_x)
-    if room - name_w - 2 >= STATUS_MIN:
-        return _row(name, "", fit(word, room - name_w - 2), age, age_x)
-    if room - 2 - word_w >= NAME_MIN:
-        return _row(fit(name, room - 2 - word_w), "", word, age, age_x)
-    return _row(fit(name, room), "", "", age, age_x)
+    extra = ""
+    if worktree:
+        spare = room - name_w - 1 - gap - word_w - display_width(WORKTREE_MARK)
+        if spare >= min(BRANCH_MIN, display_width(worktree)):
+            extra = WORKTREE_MARK + fit(worktree, spare)
+    if extra or name_w + gap + word_w <= room:
+        shown, keep_word = name, True
+    elif room - name_w - 2 >= STATUS_MIN:
+        shown, keep_word = name, False
+    elif word and room - 2 - word_w >= NAME_MIN:
+        shown, keep_word = fit(name, room - 2 - word_w), True
+    else:
+        return _row(fit(name, room), "", "", age, age_x)
+
+    lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
+    status_room = room - lead_w - 2
+    status = _fit_status(word, detail, status_room) if keep_word else ""
+    pad = max(0, align - lead_w)
+    if status and pad and _fit_status(word, detail, status_room - pad) and status_room - pad >= word_w:
+        status = _fit_status(word, detail, status_room - pad)
+    else:
+        pad = 0
+    return _row(shown, extra, status, age, age_x, pad)
 
 
-def _fit_status(status: str, word: str, room: int) -> str:
+def _fit_status(word: str, detail: str, room: int) -> str:
     """The whole status if it fits, else its detail cut short; a detail that would keep fewer than DETAIL_MIN columns is left out."""
+    status = f"{word} · {detail}" if word and detail else word or detail
     if display_width(status) <= room:
         return status
-    if room >= display_width(word) + 3 + DETAIL_MIN:
+    if detail and room >= (display_width(word) + 3 if word else 0) + DETAIL_MIN:
         return fit(status, room)
-    return word
+    return word if display_width(word) <= room else ""
 
 
-def _row(name: str, extra: str, status: str, age: str, age_x: int) -> list:
+def _row(name: str, extra: str, status: str, age: str, age_x: int, pad: int = 0) -> list:
     parts = [(ROW_LEAD, name, "name")]
     x = ROW_LEAD + display_width(name)
     if extra:
         parts.append((x + 1, extra, "extra"))
         x += 1 + display_width(extra)
     if status:
-        parts.append((x + 2, status, "status"))
+        parts.append((x + 2 + pad, status, "status"))
     if age:
         parts.append((age_x, age, "age"))
     return parts
@@ -402,13 +520,15 @@ def _row(name: str, extra: str, status: str, age: str, age_x: int) -> list:
 def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, home: str | None = None) -> list:
     """(x, text, part) for a group header: "arrow", then "dir" and "name" (the path, folder name last), then "count".
 
-    A long path is cut from the front, so the folder name is the last to go.
-    In the state view the name is the state's label and there is no dir.
+    The count shows only on a collapsed group, as in `claude agents`; an open
+    group's rows count themselves. A long path loses folders from the front,
+    so the folder name is the last to go. In the state view the name is the
+    state's label and there is no dir.
     """
     usable = width - 1
     arrow = "▸" if collapsed else "▾"
-    count_text = str(count)
-    room = usable - 2 - 1 - len(count_text)
+    count_text = str(count) if collapsed else ""
+    room = usable - 2 - (1 + len(count_text) if count_text else 0)
     if room <= 0:
         return [(0, fit(arrow, usable), "arrow")]
     if view == BY_STATE:
@@ -416,7 +536,7 @@ def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, 
     else:
         name = os.path.basename(key.rstrip("/")) or key or "?"
         shown = short_path(key.rstrip("/") or key, room, home) if key else name
-        if shown.endswith(name) and display_width(shown) > display_width(name):
+        if shown.endswith("/" + name) and display_width(shown) > display_width(name):
             dir_part = shown[: len(shown) - len(name)]
         else:
             dir_part, name = "", fit(name, room)
@@ -427,7 +547,8 @@ def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, 
         x += display_width(dir_part)
     parts.append((x, name, "name"))
     x += display_width(name)
-    parts.append((x + 1, count_text, "count"))
+    if count_text:
+        parts.append((x + 1, count_text, "count"))
     return parts
 
 

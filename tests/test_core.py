@@ -85,11 +85,15 @@ class RunningOrStopped(unittest.TestCase):
         self.assertEqual(stopped.started_at, 1791434634417.0)
 
     def test_no_pid_is_not_running_whatever_the_state(self):
-        for state in ("done", "working", "blocked", ""):
+        for state, shown in (("done", core.DONE), ("working", core.WORKING), ("blocked", core.NEEDS_INPUT), ("", core.WORKING)):
             with self.subTest(state=state):
                 (s,) = core.background_sessions([{"id": "a", "kind": "background", "state": state}])
                 self.assertFalse(s.running)
-                self.assertEqual(core.category(s), core.STOPPED)
+                self.assertEqual(core.category(s), shown)
+
+    def test_display_follows_state_only_stopped_shows_stopped(self):
+        (s,) = core.background_sessions([{"id": "a", "kind": "background", "state": "stopped"}])
+        self.assertEqual((s.running, core.category(s), core.state_word(s)), (False, core.STOPPED, "Stopped"))
 
     def test_stopped_state_with_a_pid_is_still_stopped(self):
         (s,) = core.background_sessions([{"id": "a", "kind": "background", "pid": 5, "state": "stopped"}])
@@ -109,7 +113,8 @@ class StateWords(unittest.TestCase):
             (mk(state="working"), core.WORKING, "Working"),
             (mk(state="blocked"), core.NEEDS_INPUT, "Needs input"),
             (mk(state="done"), core.DONE, "Done"),
-            (mk(state="done", running=False), core.STOPPED, "Stopped"),
+            (mk(state="done", running=False), core.DONE, "Done"),
+            (mk(state="stopped", running=False), core.STOPPED, "Stopped"),
             (mk(state="weird"), core.WORKING, "weird"),
             (mk(state="", status="busy"), core.WORKING, "busy"),
             (mk(state=""), core.WORKING, "Working"),
@@ -147,26 +152,35 @@ class ReopenRule(unittest.TestCase):
         stopped = mk(running=False, state="stopped")
         self.assertTrue(core.attach_allowed(stopped, core.OPEN))
         for trigger in (core.RESTART, core.NEW, "respawn", "housekeep", "upgrade", "", "OPEN"):
-            with self.subTest(trigger=trigger):
-                self.assertFalse(core.attach_allowed(stopped, trigger))
+            for fresh in (True, False):
+                with self.subTest(trigger=trigger, fresh=fresh):
+                    self.assertFalse(core.attach_allowed(stopped, trigger, fresh=fresh))
 
-    def test_done_session_without_a_process_counts_as_stopped(self):
+    def test_done_session_without_a_process_reopens_only_on_open(self):
         exited = core.background_sessions([{"id": "a", "kind": "background", "state": "done"}])[0]
-        self.assertFalse(core.attach_allowed(exited, core.RESTART))
+        self.assertFalse(core.attach_allowed(exited, core.RESTART, fresh=True))
         self.assertTrue(core.attach_allowed(exited, core.OPEN))
 
-    def test_running_session_attaches_for_known_triggers_only(self):
+    def test_running_session_attaches_for_known_triggers_on_a_fresh_listing(self):
         running = mk(state="working")
-        for trigger in (core.OPEN, core.RESTART, core.NEW):
+        self.assertTrue(core.attach_allowed(running, core.OPEN))
+        for trigger in (core.RESTART, core.NEW):
             with self.subTest(trigger=trigger):
-                self.assertTrue(core.attach_allowed(running, trigger))
-        self.assertFalse(core.attach_allowed(running, "respawn"))
+                self.assertTrue(core.attach_allowed(running, trigger, fresh=True))
+        self.assertFalse(core.attach_allowed(running, "respawn", fresh=True))
 
-    def test_unlisted_session_attaches_only_when_just_started(self):
-        self.assertTrue(core.attach_allowed(None, core.NEW))
-        for trigger in (core.OPEN, core.RESTART, "respawn"):
+    def test_a_row_from_an_old_poll_is_never_enough_except_for_open(self):
+        running = mk(state="working")
+        for trigger in (core.RESTART, core.NEW, "respawn"):
             with self.subTest(trigger=trigger):
-                self.assertFalse(core.attach_allowed(None, trigger))
+                self.assertFalse(core.attach_allowed(running, trigger))
+                self.assertFalse(core.attach_allowed(running, trigger, fresh=False))
+
+    def test_unlisted_session_never_attaches(self):
+        for trigger in (core.OPEN, core.RESTART, core.NEW, "respawn"):
+            for fresh in (True, False):
+                with self.subTest(trigger=trigger, fresh=fresh):
+                    self.assertFalse(core.attach_allowed(None, trigger, fresh=fresh))
 
 
 class PlacementFromGit(unittest.TestCase):
@@ -198,6 +212,43 @@ class PlacementFromGit(unittest.TestCase):
     def test_trailing_slashes_are_normalised(self):
         self.assertEqual(core.placement_from_git("/r/app", "/r/app/.git/\n/r/app/\n", "main"), core.Placement("/r/app"))
 
+    def test_folder_under_a_repo_at_home_groups_by_itself(self):
+        out = "/h/me/.git\n/h/me\nnotes/\n"
+        self.assertEqual(core.placement_from_git("/h/me/notes", out, "main", "/h/me"), core.Placement("/h/me/notes"))
+        self.assertEqual(core.placement_from_git("/h/me", "/h/me/.git\n/h/me\n\n", "main", "/h/me"), core.Placement("/h/me"))
+        self.assertEqual(core.placement_from_git("/h/me/notes", out, "main", "/h/me/"), core.Placement("/h/me/notes"))
+
+    def test_a_worktree_of_the_home_repo_groups_by_itself(self):
+        got = core.placement_from_git("/w/dots-wt", "/h/me/.git\n/w/dots-wt\n\n", "tweak", "/h/me")
+        self.assertEqual(got, core.Placement("/w/dots-wt"))
+
+    def test_a_repo_inside_home_still_groups_as_a_repo(self):
+        got = core.placement_from_git("/h/me/code/app/src", "/h/me/code/app/.git\n/h/me/code/app\nsrc/\n", "main", "/h/me")
+        self.assertEqual(got, core.Placement("/h/me/code/app"))
+        wt = core.placement_from_git("/h/me/wt/feat", "/h/me/code/app/.git\n/h/me/wt/feat\n\n", "feat", "/h/me")
+        self.assertEqual(wt, core.Placement("/h/me/code/app", "feat"))
+
+    def test_git_real_paths_come_back_in_the_cwd_form(self):
+        got = core.placement_from_git("/tmp/x/app/src", "/private/tmp/x/app/.git\n/private/tmp/x/app\nsrc/\n", "main")
+        self.assertEqual(got, core.Placement("/tmp/x/app"))
+        wt = core.placement_from_git("/tmp/x/feat", "/private/tmp/x/app/.git\n/private/tmp/x/feat\n\n", "feat")
+        self.assertEqual(wt, core.Placement("/tmp/x/app", "feat"))
+
+    def test_a_symlinked_folder_maps_only_what_sits_under_it(self):
+        out = "/data/repos/app/.git\n/data/repos/app\nlib/\n"
+        self.assertEqual(core.placement_from_git("/h/me/app/lib", out, "main"), core.Placement("/h/me/app"))
+        wt_elsewhere = "/data/repos/app/.git\n/scratch/feat\n\n"
+        self.assertEqual(core.placement_from_git("/h/me/feat", wt_elsewhere, "feat"), core.Placement("/data/repos/app", "feat"))
+
+    def test_a_prefix_the_cwd_does_not_end_in_leaves_git_paths_alone(self):
+        got = core.placement_from_git("/tmp/x/other", "/private/tmp/x/app/.git\n/private/tmp/x/app\nsrc/\n", "main")
+        self.assertEqual(got, core.Placement("/private/tmp/x/app"))
+
+    def test_retry_after_doubles_up_to_a_cap(self):
+        self.assertEqual([core.retry_after(n) for n in (1, 2, 3)], [5.0, 10.0, 20.0])
+        self.assertEqual(core.retry_after(50), float(core.RETRY_MAX_SECONDS))
+        self.assertEqual(core.retry_after(0), 5.0)
+
 
 class Grouping(unittest.TestCase):
     SESSIONS = [
@@ -205,7 +256,7 @@ class Grouping(unittest.TestCase):
         mk(id="a2", cwd="/w/feat", started_at=20.0, state="blocked"),
         mk(id="a1", cwd="/r/Alpha", started_at=30.0, state="done"),
         mk(id="a0", cwd="/r/Alpha/sub", started_at=None),
-        mk(id="b1", cwd="/x/beta", started_at=10.0, running=False),
+        mk(id="b1", cwd="/x/beta", started_at=10.0, state="stopped", running=False),
         mk(id="a3", cwd="/r/Alpha", started_at=20.0),
     ]
     PLACEMENTS = {
@@ -266,6 +317,13 @@ class Navigation(unittest.TestCase):
         self.assertEqual(core.settle_cursor(folded, None, self.GROUPS), ("group", "/a"))
         self.assertIsNone(core.settle_cursor([], ("session", "1"), []))
 
+    def test_a_wanted_session_takes_the_cursor_once_listed(self):
+        items = [i for i in core.panel_lines(self.GROUPS, frozenset()) if i]
+        here = ("session", "2")
+        self.assertEqual(core.settle_cursor(items, here, self.GROUPS, ("session", "new")), here)
+        self.assertEqual(core.settle_cursor(items, here, self.GROUPS, ("session", "3")), ("session", "3"))
+        self.assertEqual(core.settle_cursor(items, here, self.GROUPS, None), here)
+
     def test_cursor_group(self):
         self.assertEqual(core.cursor_group(("session", "3"), self.GROUPS), "/b")
         self.assertEqual(core.cursor_group(("group", "/a"), self.GROUPS), "/a")
@@ -274,7 +332,9 @@ class Navigation(unittest.TestCase):
 
 
 class Summary(unittest.TestCase):
-    SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="working"), mk(state="done"), mk(running=False)]
+    SESSIONS = [
+        mk(state="blocked"), mk(state="working"), mk(state="working"), mk(state="done"), mk(state="stopped", running=False),
+    ]
 
     def test_counts_nonzero_only_in_order(self):
         self.assertEqual(core.summary(self.SESSIONS), [
@@ -317,7 +377,25 @@ class Paths(unittest.TestCase):
         self.assertEqual(core.short_path("/h/me/code/app", 40, "/h/me"), "~/code/app")
         self.assertEqual(core.short_path("/h/me", 40, "/h/me/"), "~")
         self.assertEqual(core.short_path("/h/meow/app", 40, "/h/me"), "/h/meow/app")
-        self.assertEqual(core.short_path("/h/me/code/app", 7, "/h/me"), "…de/app")
+        self.assertEqual(core.short_path("/h/me/code/app", 7, "/h/me"), "~/…/app")
+
+    def test_short_path_cuts_only_at_slashes(self):
+        cases = [
+            ("/h/me/work/clients/acme/app", 20, "~/…/clients/acme/app"),
+            ("/h/me/work/clients/acme/app", 14, "~/…/acme/app"),
+            ("/h/me/work/clients/acme/app", 11, "…/acme/app"),
+            ("/h/me/work/clients/acme/app", 8, "~/…/app"),
+            ("/h/me/work/clients/acme/app", 5, "…/app"),
+            ("/srv/data/projects/app", 15, "…/projects/app"),
+            ("/srv/data/projects/app", 4, "app"),
+            ("/srv/data/projects/a-long-name", 6, "a-lon…"),
+        ]
+        for path, width, want in cases:
+            with self.subTest(path=path, width=width):
+                self.assertEqual(core.short_path(path, width, "/h/me"), want)
+        for width in range(0, 30):
+            got = core.short_path("/h/me/work/clients/acme/app", width, "/h/me")
+            self.assertLessEqual(core.display_width(got), width)
 
 
 def rendered(parts):
@@ -331,8 +409,8 @@ def rendered(parts):
 
 
 class RowLayout(unittest.TestCase):
-    def row(self, width, name="emx-test-perm", worktree="", word="Needs input", detail="", age="12m"):
-        return core.row_layout(name, worktree, word, detail, age, width)
+    def row(self, width, name="emx-test-perm", worktree="", word="Needs input", detail="", age="12m", align=0):
+        return core.row_layout(name, worktree, word, detail, age, width, align)
 
     def test_full_row_with_worktree(self):
         got = rendered(self.row(60, name="emx-test-wt", worktree="feat-x", word="Working"))
@@ -358,10 +436,51 @@ class RowLayout(unittest.TestCase):
         got = rendered(self.row(40, detail="approve Bash: touch x"))
         self.assertEqual(got, "   emx-test-perm  Needs input       12m")
 
-    def test_at_30_columns_the_status_shortens_before_the_name(self):
-        self.assertEqual(rendered(self.row(30)), "   emx-test-perm  Needs…  12m")
+    def test_at_30_columns_the_state_word_goes_whole_before_the_name_is_cut(self):
+        self.assertEqual(rendered(self.row(30)), "   emx-test-perm" + " " * 10 + "12m")
         self.assertEqual(rendered(self.row(30, name="emx-test-stopped", word="Stopped", age="2d")),
-                         "   emx-test-stopped  Stop… 2d")
+                         "   emx-test-stopped" + " " * 8 + "2d")
+
+    def test_the_state_word_is_never_cut(self):
+        for width in range(0, 70):
+            for name in ("x", "emx-test-perm", "emx-test-a-very-long-session-name"):
+                with self.subTest(width=width, name=name):
+                    statuses = [t for _, t, p in self.row(width, name=name, detail="approve it") if p == "status"]
+                    for status in statuses:
+                        self.assertTrue(status.startswith("Needs input"), status)
+
+    def test_worktree_mark_survives_at_40_by_shortening_its_branch(self):
+        got = rendered(self.row(40, name="emx-test-wt", worktree="feat-x"))
+        self.assertEqual(got, "   emx-test-wt ⎇ feat…  Needs input 12m")
+        got = rendered(self.row(40, name="emx-test-wt", worktree="feature/3-grouped-panel", word="Working"))
+        self.assertEqual(got, "   emx-test-wt ⎇ feature/…  Working 12m")
+
+    def test_states_line_up_to_the_column_given(self):
+        a = self.row(40, name="emx-test-a", word="Working", age="1m", align=13)
+        b = self.row(40, name="emx-test-long", word="Done", age="2m", align=13)
+        status_x = [next(x for x, _, p in parts if p == "status") for parts in (a, b)]
+        self.assertEqual(status_x, [3 + 13 + 2] * 2)
+        self.assertEqual(rendered(a), "   emx-test-a     Working" + " " * 12 + "1m")
+
+    def test_a_row_that_cannot_afford_the_alignment_ignores_it(self):
+        got = self.row(30, name="emx-test", word="Needs input", age="1m", align=13)
+        self.assertEqual(rendered(got), "   emx-test  Needs input" + " " * 3 + "1m")
+
+    def test_no_state_word_leaves_the_detail(self):
+        got = rendered(self.row(40, word="", detail="approve Bash: x"))
+        self.assertEqual(got, "   emx-test-perm  approve Bash: x   12m")
+        self.assertEqual(rendered(self.row(40, word="")), "   emx-test-perm" + " " * 20 + "12m")
+        got = rendered(self.row(30, word="", detail="approve Bash: touch x"))
+        self.assertEqual(got, "   emx-test-perm  approv… 12m")
+
+    def test_name_column(self):
+        self.assertEqual(core.name_column(["emx-test-a", "emx-test-long"], 40), 13)
+        self.assertEqual(core.name_column(["x", "emx-test-a-very-long-session-name"], 40), 1)
+        self.assertEqual(core.name_column(["emx-test-quick", "emx-test-stopped", "emx-test-a-very-long-session-name"], 40), 16)
+        self.assertEqual(core.name_column(["emx-test-a-very-long-session-name"], 40), 0)
+        self.assertEqual(core.name_column([], 40), 0)
+        self.assertEqual(core.row_label("emx-test-wt", "feat-x"), "emx-test-wt ⎇ feat-x")
+        self.assertEqual(core.row_label("emx-test-wt", ""), "emx-test-wt")
 
     def test_long_name_is_cut_to_keep_the_state_word(self):
         got = rendered(self.row(40, name="emx-test-a-very-long-session-name", age="3h"))
@@ -385,16 +504,32 @@ class RowLayout(unittest.TestCase):
 
 class HeaderLayout(unittest.TestCase):
     def test_project_header_keeps_the_folder_name_last_to_go(self):
-        got = core.header_layout(core.PROJECT, "/h/me/code/app", 3, False, 40, "/h/me")
-        self.assertEqual(got, [(0, "▾", "arrow"), (2, "~/code/", "dir"), (9, "app", "name"), (13, "3", "count")])
+        got = core.header_layout(core.PROJECT, "/h/me/code/app", 3, True, 40, "/h/me")
+        self.assertEqual(got, [(0, "▸", "arrow"), (2, "~/code/", "dir"), (9, "app", "name"), (13, "3", "count")])
         got = core.header_layout(core.PROJECT, "/very/long/path/to/the/project-name", 12, True, 24, "/h/me")
         self.assertEqual(rendered(got), "▸ …/the/project-name 12")
+        got = core.header_layout(core.PROJECT, "/x/a-really-long-project-folder", 1, True, 16, "/h/me")
+        self.assertEqual(rendered(got), "▸ a-really-l… 1")
+
+    def test_count_shows_only_when_collapsed(self):
+        got = core.header_layout(core.PROJECT, "/h/me/code/app", 3, False, 40, "/h/me")
+        self.assertEqual(got, [(0, "▾", "arrow"), (2, "~/code/", "dir"), (9, "app", "name")])
         got = core.header_layout(core.PROJECT, "/x/a-really-long-project-folder", 1, False, 16, "/h/me")
-        self.assertEqual(rendered(got), "▾ a-really-l… 1")
+        self.assertEqual(rendered(got), "▾ a-really-lon…")
+
+    def test_header_path_is_cut_at_slashes(self):
+        got = core.header_layout(core.PROJECT, "/h/me/work/clients/acme/app", 2, False, 16, "/h/me")
+        self.assertEqual(rendered(got), "▾ ~/…/acme/app")
+        got = core.header_layout(core.PROJECT, "/h/me/work/clients/acme/app", 2, False, 12, "/h/me")
+        self.assertEqual(rendered(got), "▾ ~/…/app")
+        got = core.header_layout(core.PROJECT, "/h/me/work/clients/acme/app", 2, False, 9, "/h/me")
+        self.assertEqual(rendered(got), "▾ …/app")
 
     def test_state_header(self):
         got = core.header_layout(core.BY_STATE, core.NEEDS_INPUT, 2, False, 40)
-        self.assertEqual(rendered(got), "▾ Needs input 2")
+        self.assertEqual(rendered(got), "▾ Needs input")
+        got = core.header_layout(core.BY_STATE, core.NEEDS_INPUT, 2, True, 40)
+        self.assertEqual(rendered(got), "▸ Needs input 2")
 
     def test_never_wider_than_the_pane_less_one(self):
         for width in range(0, 50):
@@ -420,6 +555,20 @@ class TextHelpers(unittest.TestCase):
     def test_wrap_respects_width(self):
         for w in (2, 3, 7):
             for line in core.wrap("abcdefghij\n日本語klm", w):
+                with self.subTest(w=w, line=line):
+                    self.assertLessEqual(core.display_width(line), w)
+
+    def test_wrap_words_breaks_between_words(self):
+        text = "Couldn't list sessions to check emx-test-c1 is still running"
+        self.assertEqual(core.wrap_words(text, 20), ["Couldn't list", "sessions to check", "emx-test-c1 is still", "running"])
+        self.assertEqual(core.wrap_words("a-very-long-unbroken-word", 10), ["a-very-lon", "g-unbroken", "-word"])
+        self.assertEqual(core.wrap_words("", 5), [""])
+        self.assertEqual(core.wrap_words("one\ntwo", 10), ["one", "two"])
+        self.assertEqual(core.wrap_words("abc", 0), [])
+
+    def test_wrap_words_respects_display_width(self):
+        for w in (2, 3, 7):
+            for line in core.wrap_words("日本語のテキスト and more 日本語", w):
                 with self.subTest(w=w, line=line):
                     self.assertLessEqual(core.display_width(line), w)
 
