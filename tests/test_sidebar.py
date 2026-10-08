@@ -2249,23 +2249,23 @@ class WrappedRows(AppCase):
         self.assertEqual(self.app.cursor, ("session", "a"))
 
     def test_arming_ctrl_x_keeps_the_rows_height(self):
-        self.app.cursor = ("session", "a")
+        self.app.cursor = ("session", "b")
         self.app.draw()
-        before = self.rows_of("a"), self.rows_of("b")
+        before = self.rows_of("b"), self.rows_of("a")
         self.app.handle_key(sidebar.CTRL_X)
         self.app.draw()
         self.assertIsNotNone(self.app.confirm)
-        self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
+        self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
         self.assertIn("ctrl+x again", self.screen()[before[0][0]])
 
     def test_a_rename_edit_on_a_wrapped_row_keeps_the_rows_height(self):
-        self.app.cursor = ("session", "a")
+        self.app.cursor = ("session", "b")
         self.app.draw()
-        before = self.rows_of("a"), self.rows_of("b")
-        self.app.rename_edit = {"id": "a", "old": "emx-test-a", "text": "emx-test-a", "hint": ""}
+        before = self.rows_of("b"), self.rows_of("a")
+        self.app.rename_edit = {"id": "b", "old": "emx-test-b", "text": "emx-test-b", "hint": ""}
         self.app.draw()
-        self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
-        self.assertIn("emx-test-a▏", self.screen()[before[0][0]])
+        self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
+        self.assertIn("emx-test-b▏", self.screen()[before[0][0]])
         for y in before[0][1:]:
             self.assertEqual(self.screen()[y].strip(), "", y)
 
