@@ -64,13 +64,13 @@ class Tmux:
 
     def has_session(self) -> bool:
         try:
-            self.run("has-session", "-t", f"={SESSION}")
+            self.run("has-session", "-t", f"={SESSION}:")
             return True
         except TmuxError:
             return False
 
     def panes(self) -> list:
-        out = self.run("list-panes", "-s", "-t", f"={SESSION}", "-F", _PANE_FORMAT)
+        out = self.run("list-panes", "-s", "-t", f"={SESSION}:", "-F", _PANE_FORMAT)
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")

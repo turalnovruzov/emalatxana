@@ -109,7 +109,7 @@ def launch() -> int:
         except (TmuxError, OSError) as exc:
             print(f"emx: couldn't update the running workspace: {' '.join(str(exc).split())}", file=sys.stderr)
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={SESSION}"), env)
+    os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
     return 1
 
 
