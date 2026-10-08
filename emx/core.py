@@ -2778,8 +2778,9 @@ NAME_INSTRUCTION = (
     "No quotes, no preamble, no markdown, nothing after the name. "
     "The name must differ from the current name and from every name listed as already suggested."
 )
-# Provisional; S5 of #21 sets it from measured calls (ADR 0003).
-NAME_MAX_BUDGET_USD = 0.02
+# At least 3x the dearest measured cold call with every cap hit ($0.0125, CJK text Haiku refused once, then answered),
+# so a long session never trips it; like SUMMARY_MAX_BUDGET_USD it does not cap one call (ADR 0003).
+NAME_MAX_BUDGET_USD = 0.04
 NAME_READ_MAX_BYTES = 16 * 1024 * 1024
 NAME_REQUEST_MAX_CHARS = 2000
 NAME_REQUESTS_MAX_CHARS = 24000
