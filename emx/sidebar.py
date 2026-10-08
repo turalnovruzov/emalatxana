@@ -390,6 +390,105 @@ class Renamer(threading.Thread):
             time.sleep(LISTED_CHECK_SECONDS)
 
 
+class Interrupter(threading.Thread):
+    """Interrupts a working session off the curses thread by sending Esc into its viewer, as `claude agents` does.
+
+    It sends only once a fresh listing shows the session running and
+    working, its viewer shows this session with the cursor at its prompt,
+    and tmux, in the same command that sends, finds none of that changed and
+    his focus still on the panel. With no viewer open it opens a hidden one
+    first, with no swap and no select, so his focus stays where it is. Then
+    it waits for the listing to show the session stopped working. `cancel`
+    is set when a close of the session starts: from then on it opens and
+    sends nothing. `result` is (stopped, message).
+    """
+
+    def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
+                 list_failing: bool):
+        super().__init__(daemon=True)
+        self.claude, self.tmux, self.interrupt = claude, tmux, interrupt
+        self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
+        self.cancel = threading.Event()
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.attempt()
+        except Exception as exc:
+            self.result = (False, f"interrupt failed: {core.error_line(exc)}")
+
+    def attempt(self) -> tuple:
+        interrupt = self.interrupt
+        sessions, _ = fetch_sessions(self.claude)
+        session, fresh = core.checked_row(sessions, interrupt.id)
+        refusal = core.interrupt_listing_refusal(interrupt, session, fresh)
+        if refusal == core.NOTHING_TO_INTERRUPT:
+            return True, core.nothing_to_interrupt_text(interrupt)
+        if refusal:
+            return False, refusal
+        try:
+            viewer = core.live_viewer(self.tmux.panes(), interrupt.id)
+            if viewer is not None:
+                pane = viewer.id
+                screen = self.screen(pane)
+                refusal = core.interrupt_screen_refusal(interrupt, session, sessions, screen)
+                if refusal:
+                    return False, refusal
+            else:
+                fresh = fresh and not self.list_failing
+                if self.cancel.is_set():
+                    return False, ""
+                if not core.attach_allowed(session, core.INTERRUPT, fresh):
+                    return False, core.refusal(interrupt.name, core.INTERRUPT, fresh, session)
+                pane = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
+                self.tmux.set_pane_option(pane, SESSION_OPT, interrupt.id)
+                screen = self.wait_for_prompt(pane, session, sessions)
+                if screen is None:
+                    return False, f"{interrupt.name}'s viewer didn't come up in time, so emx didn't interrupt it."
+            if self.cancel.is_set():
+                return False, ""
+            gate = core.type_gate(pane, self.panel, interrupt.id, screen.cursor_y, SESSION_OPT, cursor_x=screen.cursor_x)
+            if gate is None:
+                return False, f"emx can't check {interrupt.name}'s viewer safely, so it didn't interrupt it."
+            report = self.tmux.key_if(pane, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
+            refusal = core.gate_refusal(interrupt, report, screen.cursor_y, cursor_x=screen.cursor_x)
+            if refusal:
+                return False, refusal
+        except TmuxError as exc:
+            return False, f"tmux: {exc}"
+        stopped = self.wait_until_stopped()
+        return stopped, core.interrupted_text(interrupt, stopped)
+
+    def screen(self, pane: str) -> core.RenameScreen:
+        captured = self.tmux.capture(pane)
+        x, y, shown, width, in_mode = self.tmux.prompt_probe(pane)
+        return core.RenameScreen(captured, "", "", x, y, shown, width, in_mode, pane in self.flagged)
+
+    def wait_for_prompt(self, pane: str, session: core.Session, sessions) -> core.RenameScreen | None:
+        """The viewer just opened, once its screen passes the checks; None if it doesn't within LISTED_WAIT_SECONDS or a close starts."""
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while not self.cancel.is_set():
+            screen = self.screen(pane)
+            if core.interrupt_screen_refusal(self.interrupt, session, sessions, screen) is None:
+                return screen
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(LISTED_CHECK_SECONDS)
+        return None
+
+    def wait_until_stopped(self) -> bool:
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while not self.cancel.is_set():
+            sessions, _ = fetch_sessions(self.claude)
+            session, _ = core.checked_row(sessions, self.interrupt.id)
+            if session is not None and not core.interruptible(session):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LISTED_CHECK_SECONDS)
+        return False
+
+
 class Starter(threading.Thread):
     """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
 
@@ -691,6 +790,7 @@ class App:
         self.started = None
         self.checker = None
         self.closer = None
+        self.interrupter = None
         self.confirm = None
         self.find = None
         self.rename_edit = None
@@ -1036,10 +1136,34 @@ class App:
             return
         self.confirm, act = core.press_close(self.confirm, self.cursor, session, time.monotonic())
         if act is None:
+            if self.confirm is not None and core.interruptible(session):
+                self.start_interrupt(session)
             return
         self.closer = Closer(self.claude, act)
         self.closer.start()
         self.say(core.closing_text(act))
+
+    def start_interrupt(self, session: core.Session) -> None:
+        """One interrupt at a time: two Escs in quick succession open Claude Code's rewind."""
+        if self.interrupter is not None:
+            return
+        self.interrupter = Interrupter(
+            self.claude, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
+            bool(self.list_error),
+        )
+        self.interrupter.start()
+        self.say(f"Interrupting {session.name}…")
+
+    def finish_interrupt(self) -> None:
+        interrupter = self.interrupter
+        if interrupter is None or interrupter.is_alive():
+            return
+        self.interrupter = None
+        if interrupter.cancel.is_set():
+            return
+        done, message = interrupter.result or (False, "interrupt failed")
+        self.say(message, error=not done)
+        self.poller.wake.set()
 
     def finish_close(self) -> None:
         closer = self.closer
@@ -1665,7 +1789,7 @@ class App:
             if in_main:
                 self.put(y + i, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
             if i == 0:
-                self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+                self.put(y, 1, core.session_glyph(s, frame), attr(glyph_tone))
             for x, text, part in parts:
                 if part in ("confirm", "rename"):
                     tone = "error" if part == "confirm" else "accent"
@@ -1745,6 +1869,7 @@ class App:
             self.finish_start()
             self.finish_check()
             self.finish_close()
+            self.finish_interrupt()
             self.finish_rename()
             fresh_list = self.take_poll()
             self.take_placements()

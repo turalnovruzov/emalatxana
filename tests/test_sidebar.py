@@ -2456,5 +2456,250 @@ class TopLine(AppCase):
         self.assertEqual(scr.cells[0], f" ⚒ emalatxana {sidebar.__version__}".ljust(30) + "1 working")
 
 
+class InterruptTmux(RenameTmux):
+    """The panel (%1) has focus; main (%2) shows `working` mid-turn. Records every call in order, with the screen a capture returned."""
+
+    def __init__(self):
+        super().__init__()
+        self.list[1] = Pane("%2", "@1", False, "", "working", 100, 141)
+        self.view("working-streaming", "prompt-empty")
+        self.screen_name = "working-streaming"
+        self.screens = None
+        self.events = []
+        self.keys_sent = []
+
+    def view(self, screen, prompt):
+        super().view(screen, prompt)
+        self.screen_name = screen
+
+    def capture(self, pane):
+        if self.screens:
+            name = self.screens.pop(0)
+            self.screen, _ = fixture_screen(name)
+            self.screen_name = name
+        self.events.append(("capture", pane, self.screen_name))
+        return super().capture(pane)
+
+    def key_if(self, pane, gate, key, typed, report):
+        self.note()
+        self.gates.append(gate)
+        self.events.append(("key_if", pane, key))
+        if self.gate_says == typed:
+            self.keys_sent.append((pane, key))
+        return self.gate_says
+
+    def new_hidden_window(self, command):
+        self.note()
+        self.events.append(("new_hidden_window", command))
+        self.list.append(Pane("%5", "@3", False, "", "", 100, 100))
+        return "%5"
+
+    def set_pane_option(self, pane, name, value):
+        self.events.append(("set_pane_option", pane, name, value))
+        self.list = [Pane(p.id, p.window, p.dead, p.role, value, p.width, p.window_width) if p.id == pane else p
+                     for p in self.list]
+
+    def swap(self, source, target):
+        self.events.append(("swap", source, target))
+
+    def select(self, pane):
+        self.events.append(("select", pane))
+
+    def kill_pane(self, pane):
+        self.events.append(("kill", pane))
+
+
+def idle_row(sid, cwd):
+    return core.Session(sid, f"emx-test-{sid}", cwd, "working", "idle", "", 0.0, True)
+
+
+class InterruptSession(AppCase):
+    """One Ctrl+X on a working row sends Esc into its viewer, off the curses thread, after a fresh listing and the screen checks, and arms the close."""
+
+    def setUp(self):
+        super().setUp()
+        self.working = session("working", "/p/alpha")
+        self.poll(self.working, session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.tmux = InterruptTmux()
+        self.app.cursor = ("session", "working")
+        self.listings = [[self.working]]
+        self.after = idle_row("working", "/p/alpha")
+        self.fetched = []
+        test = self
+
+        def fetch(claude):
+            test.fetched.append(threading.current_thread() is threading.main_thread())
+            if test.listings:
+                rows = test.listings.pop(0)
+                return (None, "claude agents timed out") if rows is None else (rows, None)
+            return [test.after], None
+
+        for p in (
+            mock.patch.object(sidebar, "fetch_sessions", fetch),
+            mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0.01),
+            mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0.2),
+            mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("ran a command in a test")),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def press(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def settle(self):
+        for worker in (self.app.interrupter, self.app.closer):
+            if worker is not None:
+                worker.join(5)
+        self.app.refresh()
+
+    def kinds(self):
+        return [e[0] for e in self.app.tmux.events]
+
+    def test_one_ctrl_x_on_a_working_row_sends_escape_through_key_if_off_the_curses_thread(self):
+        self.press(sidebar.CTRL_X)
+        self.assertEqual(self.app.notice, "Interrupting emx-test-working…")
+        self.settle()
+        self.assertEqual(self.app.tmux.keys_sent, [("%2", "Escape")])
+        self.assertEqual(self.app.tmux.gates, [core.type_gate("%2", "%1", "working", 26, sidebar.SESSION_OPT, cursor_x=2)])
+        self.assertNotIn(True, self.app.tmux.threads)
+        self.assertNotIn(True, self.fetched)
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Interrupted emx-test-working.", False))
+        self.assertNotIn("new_hidden_window", self.kinds())
+        self.assertNotIn("swap", self.kinds())
+        self.assertNotIn("select", self.kinds())
+
+    def test_it_also_arms_the_close(self):
+        self.press(sidebar.CTRL_X)
+        self.assertIsInstance(self.app.confirm, core.Confirm)
+        self.assertEqual(self.app.confirm.id, "working")
+        self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
+        self.settle()
+
+    def test_a_draft_in_the_prompt_still_interrupts(self):
+        self.app.tmux.view("working-streaming", "prompt-text")
+        x, y = PROMPT_CURSORS["cursors"]["prompt-text"]["x"], PROMPT_CURSORS["cursors"]["prompt-text"]["y"]
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.app.tmux.keys_sent, [("%2", "Escape")])
+        self.assertEqual(self.app.tmux.gates, [core.type_gate("%2", "%1", "working", y, sidebar.SESSION_OPT, cursor_x=x)])
+
+    def test_an_idle_or_waiting_row_gets_no_escape_and_only_arms(self):
+        for row in (idle_row("working", "/p/alpha"), session("working", "/p/alpha", state="blocked"),
+                    session("working", "/p/alpha", state="done")):
+            with self.subTest(state=row.state, status=row.status):
+                self.app.confirm = None
+                self.poll(row, session("b", "/p/beta"))
+                self.app.refresh()
+                self.press(sidebar.CTRL_X)
+                self.assertIsNone(self.app.interrupter)
+                self.assertEqual(self.app.confirm.id, "working")
+        self.assertEqual(self.app.tmux.events, [])
+        self.assertEqual(self.fetched, [])
+
+    def test_a_scrolled_back_or_other_session_viewer_gets_nothing_and_says_why(self):
+        cases = {
+            "scrolled back": lambda tmux: setattr(tmux, "in_mode", True),
+            "isn't showing its prompt": lambda tmux: tmux.view("named-viewer", "prompt-empty"),
+        }
+        for want, arrange in cases.items():
+            with self.subTest(want=want):
+                self.app.tmux = InterruptTmux()
+                arrange(self.app.tmux)
+                self.listings = [[self.working]]
+                self.app.confirm = None
+                self.press(sidebar.CTRL_X)
+                self.settle()
+                self.assertEqual(self.app.tmux.keys_sent, [])
+                self.assertNotIn("key_if", self.kinds())
+                self.assertIn(want, self.app.notice)
+                self.assertTrue(self.app.notice_error)
+
+    def test_a_second_press_inside_the_window_starts_the_close_not_a_second_escape(self):
+        self.press(sidebar.CTRL_X)
+        first = self.app.interrupter
+        first.join(5)
+        self.press(sidebar.CTRL_X)
+        self.assertIs(self.app.interrupter, first)
+        self.assertIsNotNone(self.app.closer)
+        self.settle()
+        self.assertEqual(self.kinds().count("key_if"), 1)
+
+    def test_the_interrupted_row_reads_idle_with_a_still_glyph(self):
+        scr = RecordingScr(20, 60)
+        self.app.scr = scr
+        self.poll(idle_row("working", "/p/alpha"), session("b", "/p/beta"))
+        self.app.refresh()
+        row = next(line for line in scr.cells.values() if "emx-test-working" in line)
+        self.assertTrue(row.startswith(" ✻ emx-test-working"), row)
+        self.assertIn("Idle", row)
+        self.assertNotIn("Working", row)
+        with mock.patch.object(sidebar.time, "monotonic", return_value=12345.6):
+            self.app.draw()
+        self.assertTrue(next(line for line in scr.cells.values() if "emx-test-working" in line).startswith(" ✻ "))
+
+    def no_viewer(self):
+        tmux = self.app.tmux
+        tmux.list = [p for p in tmux.list if p.session != "working"]
+
+    def test_with_no_viewer_a_hidden_viewer_is_opened_and_gets_the_escape(self):
+        self.no_viewer()
+        self.app.tmux.screens = ["agent-view", "agent-view", "working-streaming"]
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        tmux = self.app.tmux
+        opened = [e for e in tmux.events if e[0] == "new_hidden_window"]
+        self.assertEqual(opened, [("new_hidden_window", core.viewer_command("claude", "working"))])
+        self.assertIn(("set_pane_option", "%5", sidebar.SESSION_OPT, "working"), tmux.events)
+        self.assertNotIn("swap", self.kinds())
+        self.assertNotIn("select", self.kinds())
+        at = self.kinds().index("key_if")
+        captures = [e for e in tmux.events[:at] if e[0] == "capture"]
+        self.assertEqual(captures[-1], ("capture", "%5", "working-streaming"))
+        self.assertEqual([e for e in captures if e[2] != "working-streaming"],
+                         [("capture", "%5", "agent-view"), ("capture", "%5", "agent-view")])
+        self.assertEqual(tmux.keys_sent, [("%5", "Escape")])
+        self.assertNotIn(True, tmux.threads)
+        self.assertEqual(self.app.notice, "Interrupted emx-test-working.")
+
+    def test_with_no_viewer_a_stopped_or_unlisted_session_or_a_failing_listing_opens_nothing(self):
+        cases = {
+            "isn't running": [session("working", "/p/alpha", state="stopped", pid=None)],
+            "isn't listed": [session("b", "/p/beta")],
+            "Couldn't list": None,
+        }
+        for want, listing in cases.items():
+            with self.subTest(want=want):
+                self.app.tmux = InterruptTmux()
+                self.no_viewer()
+                self.listings = [listing]
+                self.app.confirm = None
+                self.press(sidebar.CTRL_X)
+                self.settle()
+                self.assertNotIn("new_hidden_window", self.kinds())
+                self.assertNotIn("key_if", self.kinds())
+                self.assertIn(want, self.app.notice)
+                self.assertIn("emx-test-working", self.app.notice)
+
+    def test_a_hidden_viewer_that_never_shows_the_prompt_gets_no_escape(self):
+        self.no_viewer()
+        self.app.tmux.screens = ["agent-view"] * 1000
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertIn("new_hidden_window", self.kinds())
+        self.assertNotIn("key_if", self.kinds())
+        self.assertEqual(self.app.notice, "emx-test-working's viewer didn't come up in time, so emx didn't interrupt it.")
+        self.assertTrue(self.app.notice_error)
+
+    def test_an_escape_that_does_not_stop_it_says_so(self):
+        self.after = self.working
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.app.tmux.keys_sent, [("%2", "Escape")])
+        self.assertEqual(self.app.notice, "emx-test-working is still working; emx sent Esc but it didn't stop.")
+        self.assertTrue(self.app.notice_error)
+
+
 if __name__ == "__main__":
     unittest.main()
