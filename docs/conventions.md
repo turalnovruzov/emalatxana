@@ -49,7 +49,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    text, width = real_screen("agent-view")   # agent-view.w100.txt
    core.main_view_state(text, "emx-test-named", width)
    ```
-4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes. Transcript fixtures under `tests/fixtures/transcripts/` follow the same rule: throwaway sessions only, allowlisted fields only, and the Claude Code version asserted.
+4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes. Transcript fixtures under `tests/fixtures/transcripts/` follow the same rule: throwaway sessions only, allowlisted entry and message fields, and the Claude Code version asserted.
 
 ### tmux targets for a session name the session exactly: `=name:`
 

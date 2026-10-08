@@ -1187,6 +1187,11 @@ class App:
             self.handle_mouse()
         elif key == curses.KEY_RESIZE:
             self.housekeep(fresh_list=False)
+            if self.peeking and not self.peek_fits():
+                self.peeking = False
+                if not self.notice:
+                    # A notice that took the room is kept rather than replaced by this one.
+                    self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
         elif self.prompt is not None:
             self.prompt_key(key)
         elif self.find is not None:
@@ -1326,27 +1331,25 @@ class App:
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
         else:
-            peek_rows = self.draw_peek(list_top, list_bottom, w) if self.peeking else 0
+            peek_rows = self.draw_peek(list_bottom, w, core.peek_room(h, w, len(bottom))) if self.peeking else 0
             self.draw_list(list_top, list_bottom - peek_rows, w)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
 
-    def draw_peek(self, top: int, bottom: int, width: int) -> int:
-        """Draw the peek box at the foot of the list area and return how many rows it took (0 when it doesn't fit)."""
+    def draw_peek(self, bottom: int, width: int, room: int) -> int:
+        """Draw the peek box ending above row `bottom`, in the `room` rows `core.peek_room` gives, and return how many rows it took (0 when it doesn't fit)."""
         session = self.peeked()
-        if session is None:
+        if session is None or room <= 0:
             return 0
         peek = core.peek_content(session, self.transcripts.get(session.id), time.time() * 1000)
         inner = width - 5
-        if inner <= 0:
-            return 0
         # Wrapping a long reply is the costly part, so it is done again only when the body or the width changes.
         if self.peek_wrapped[0] != (peek.lines, inner):
             self.peek_wrapped = ((peek.lines, inner), core.peek_lines(peek, inner, core.PEEK_BODY_LINES + 1))
         wrapped = self.peek_wrapped[1]
-        rows = core.peek_height(bottom - top, len(wrapped))
+        rows = core.peek_height(room, len(wrapped))
         if rows == 0:
             return 0
         body = core.cut_lines(wrapped, rows - 3)
@@ -1460,8 +1463,8 @@ class App:
             return
         word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
-        detail, tail = core.row_detail(s, self.transcripts.get(s.id))
-        parts = core.row_layout(s.name, self.worktree(s), word, detail, age, width, align, tail)
+        detail = core.row_detail(s, self.transcripts.get(s.id))
+        parts = core.row_layout(s.name, self.worktree(s), word, detail, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
         for x, text, part in parts:
             emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
@@ -1512,8 +1515,7 @@ class App:
     def peek_fits(self) -> bool:
         """Whether the pane, at its size now, has room for the peek box under the list."""
         h, w = self.scr.getmaxyx()
-        available = h - len(self.bottom_lines(max(1, w - 1), h)) - 2
-        return w - 5 > 0 and core.peek_height(available, 1) > 0
+        return core.peek_height(core.peek_room(h, w, len(self.bottom_lines(max(1, w - 1), h))), 1) > 0
 
     def peek_key(self, key) -> None:
         if key in (" ", "\x1b"):
@@ -1532,11 +1534,6 @@ class App:
             self.take_transcripts()
             if self.peeking and self.peeked() is None:
                 self.peeking = False
-            elif self.peeking and not self.peek_fits():
-                self.peeking = False
-                if not self.notice:
-                    # A notice that took the room is kept rather than replaced by this one.
-                    self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
             now = time.monotonic()
             if self.confirm is not None and not core.confirm_holds(
                 self.confirm, self.cursor, self.session(self.confirm.id), now,
@@ -1547,6 +1544,9 @@ class App:
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:
                 self.last_housekeep = now
                 self.housekeep(fresh_list)
+            if self.peeking and not self.peek_fits():
+                # Lines under the list squeezed the box to nothing; the pane is not too short, so no notice says it is.
+                self.peeking = False
             self.draw()
         except Exception as exc:
             self.say(f"emx error: {core.error_line(exc)}", error=True)

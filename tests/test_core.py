@@ -2025,7 +2025,7 @@ class ParseRealTranscripts(unittest.TestCase):
         t = core.parse_transcript(real_transcript("parallel-permission"))
         self.assertEqual((t.latest, t.pending, t.tool), ("prompt", False, ""))
         blocked = st("blocked", "permission prompt")
-        self.assertEqual(core.row_detail(blocked, t), ("permission prompt", ""))
+        self.assertEqual(core.row_detail(blocked, t), "permission prompt")
         self.assertEqual(core.peek_content(blocked, t, 0).lines, (("permission prompt", "dim"),))
 
     def test_a_dismissed_parallel_batch_leaves_nothing_pending(self):
@@ -2075,10 +2075,14 @@ class ParseTranscriptNeverRaises(unittest.TestCase):
     def test_only_known_wrapper_tags_are_skipped_not_every_prompt_starting_with_a_tag(self):
         for wrapped in ("<command-name>/clear</command-name>", "<local-command-stdout>ok</local-command-stdout>",
                         "<bash-input>ls</bash-input>", "<task-notification>done</task-notification>",
-                        "<system-reminder>note</system-reminder>"):
+                        "<system-reminder>note</system-reminder>", "<ide_opened_file>The user opened a.py</ide_opened_file>"):
             with self.subTest(wrapped=wrapped):
                 self.assertEqual(core.parse_transcript("\n".join([entry("user", "real"), entry("user", wrapped)])).prompt, "real")
         self.assertEqual(core.parse_transcript(entry("user", "<div> renders blank, why?")).prompt, "<div> renders blank, why?")
+
+    def test_an_ide_context_block_is_skipped_and_the_prompt_beside_it_kept(self):
+        ide = {"type": "text", "text": "<ide_selection>The user selected lines 1-3 of a.py</ide_selection>"}
+        self.assertEqual(core.parse_transcript(entry("user", [ide, {"type": "text", "text": "explain this"}])).prompt, "explain this")
 
     def test_a_compaction_summary_is_skipped(self):
         text = "\n".join([entry("user", "real prompt"), entry("user", "This session is being continued...", isCompactSummary=True)])
@@ -2112,7 +2116,7 @@ class ParallelToolCalls(unittest.TestCase):
         self.assertEqual(core.session_summary(st("blocked", "permission prompt"), t), "approve Bash: rm x")
 
     def test_of_several_waiting_calls_the_earliest_is_the_one_asked_about(self):
-        # On screen, 2.1.294 asked about `touch first.txt` first (see the parallel-permission fixtures).
+        # 2.1.294 doesn't write a pending parallel batch at all, so this order is an assumption, not observed.
         text = "\n".join([entry("user", "go"),
                           entry("assistant", [call("t1", "Bash", {"command": "touch first.txt"})]),
                           entry("assistant", [call("t2", "Bash", {"command": "touch second.txt"})])])
@@ -2135,7 +2139,7 @@ class ParallelToolCalls(unittest.TestCase):
 class SessionIds(unittest.TestCase):
     def test_only_a_uuid_shape_passes(self):
         self.assertTrue(core.is_session_id("816e8d5e-c8a9-4b40-914c-b0d248df02d1".upper()))
-        for bad in ("", "u1", "../../etc/passwd", "816e8d5e-c8a9-4b40-914c-b0d248df02d", "816e8d5e-c8a9-4b40-914c-b0d248df02d1/",
+        for bad in ("", "u1", "-" * 36, "../../etc/passwd", "816e8d5e-c8a9-4b40-914c-b0d248df02d", "816e8d5e-c8a9-4b40-914c-b0d248df02d1/",
                     "816e8d5e-c8a9-4b40-914c-b0d248df02d1\n", None):
             with self.subTest(bad=bad):
                 self.assertFalse(core.is_session_id(bad))
@@ -2212,18 +2216,10 @@ class RowDetail(unittest.TestCase):
     def test_the_summary_replaces_waiting_for_which_stands_in_only_when_there_is_none(self):
         perm = core.parse_transcript(real_transcript("permission"))
         self.assertEqual(core.row_detail(st("blocked", "permission prompt"), perm),
-                         ("approve Bash: echo emx-perm-check > out.txt", ""))
-        self.assertEqual(core.row_detail(st("blocked", "permission prompt"), None), ("permission prompt", ""))
-        self.assertEqual(core.row_detail(st("done"), core.parse_transcript(real_transcript("done"))), ("Alpha done.", ""))
-        self.assertEqual(core.row_detail(st("done", "idle"), core.parse_transcript(real_transcript("done"))), ("Alpha done.", ""))
-
-    def test_the_tail_shows_only_when_all_of_it_fits(self):
-        def row(width):
-            return rendered(core.row_layout("emx-test-perm", "", "Needs input", "approve Bash: ls", "12m", width, tail="permission prompt"))
-        self.assertEqual(row(80), "   emx-test-perm  Needs input · approve Bash: ls · permission prompt" + " " * 8 + "12m")
-        self.assertEqual(row(60), "   emx-test-perm  Needs input · approve Bash: ls" + " " * 8 + "12m")
-        self.assertEqual(row(44), "   emx-test-perm  Needs input · approv… 12m")
-        self.assertEqual(row(30), "   emx-test-perm" + " " * 10 + "12m")
+                         "approve Bash: echo emx-perm-check > out.txt")
+        self.assertEqual(core.row_detail(st("blocked", "permission prompt"), None), "permission prompt")
+        self.assertEqual(core.row_detail(st("done"), core.parse_transcript(real_transcript("done"))), "Alpha done.")
+        self.assertEqual(core.row_detail(st("done", "idle"), core.parse_transcript(real_transcript("done"))), "Alpha done.")
 
 
 class PeekContent(unittest.TestCase):
@@ -2296,6 +2292,16 @@ class CutLines(unittest.TestCase):
         self.assertEqual(core.cut_lines(lines, 3), lines)
         self.assertEqual(core.cut_lines(lines, 2), [("a", "body"), ("…", "dim")])
         self.assertEqual(core.cut_lines(lines, 0), [])
+
+
+class PeekRoom(unittest.TestCase):
+    def test_the_rows_between_the_top_lines_and_the_bottom_lines_or_none_when_too_narrow(self):
+        self.assertEqual(core.peek_room(20, 40, 1), 17)
+        self.assertEqual(core.peek_room(20, 6, 1), 17)
+        self.assertEqual(core.peek_room(20, 5, 1), 0)
+        self.assertEqual(core.peek_room(5, 40, 4), 0)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 1), 1), 4)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 2), 1), 0)
 
 
 class PeekHeight(unittest.TestCase):

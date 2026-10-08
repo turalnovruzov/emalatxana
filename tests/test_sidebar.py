@@ -1801,10 +1801,36 @@ class Peek(AppCase):
         self.app.handle_key(" ")
         self.scr.size = (8, 40)
         self.app.handle_key(curses.KEY_RESIZE)
-        self.app.refresh()
         self.assertFalse(self.app.peeking)
         self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
+        self.app.draw()
         self.assertFalse(any(line.startswith("╭") for line in self.screen()))
+
+    def box_rows(self):
+        return sum(1 for line in self.screen() if line[:1] in ("╭", "│", "╰"))
+
+    def test_an_error_line_draws_the_peek_shorter_and_leaves_it_open(self):
+        self.app.cursor = ("session", "a")
+        self.scr.size = (11, 40)
+        self.app.handle_key(" ")
+        self.app.draw()
+        before = self.box_rows()
+        self.app.list_error = "listing broken"
+        self.app.refresh()
+        self.assertTrue(self.app.peeking)
+        self.assertTrue(0 < self.box_rows() < before, (before, self.screen()))
+
+    def test_an_error_squeezing_the_box_to_nothing_closes_it_without_calling_the_pane_short(self):
+        self.app.cursor = ("session", "a")
+        self.scr.size = (11, 40)
+        self.app.handle_key(" ")
+        self.app.list_error = "listing broken " * 6
+        self.app.refresh()
+        self.assertFalse(self.app.peeking)
+        self.assertNotEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
+        screen = self.screen()
+        self.assertFalse(any(line.startswith("╭") for line in screen))
+        self.assertFalse(any("␣ Esc close" in line for line in screen))
 
     def test_a_long_body_is_wrapped_once_per_change_not_per_draw(self):
         self.app.cursor = ("session", "a")

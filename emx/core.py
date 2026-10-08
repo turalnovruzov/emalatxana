@@ -706,7 +706,7 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0, tail: str = "") -> list:
+def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
     """Where a session row's parts go: (x, text, part) for "name", "extra", "status" and "age".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
@@ -723,8 +723,7 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     while its name is whole, and keeps it on a cut name when the whole name
     alone would have fitted.
     An empty `word` (the by-state view, whose header already says it) leaves
-    the detail alone as the status. A `tail` follows the detail only when the
-    whole of it fits.
+    the detail alone as the status.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -762,20 +761,18 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
 
     lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
     status_room = room - lead_w - 2
-    status = _fit_status(word, detail, status_room, tail) if keep_word else ""
+    status = _fit_status(word, detail, status_room) if keep_word else ""
     pad = max(0, align - lead_w)
-    if status and pad and _fit_status(word, detail, status_room - pad, tail) and status_room - pad >= word_w:
-        status = _fit_status(word, detail, status_room - pad, tail)
+    if status and pad and _fit_status(word, detail, status_room - pad) and status_room - pad >= word_w:
+        status = _fit_status(word, detail, status_room - pad)
     else:
         pad = 0
     return _row(shown, extra, status, age, age_x, pad)
 
 
-def _fit_status(word: str, detail: str, room: int, tail: str = "") -> str:
+def _fit_status(word: str, detail: str, room: int) -> str:
     """The whole status if it fits, else its detail cut short; a detail that would keep fewer than DETAIL_MIN columns is left out."""
     status = " · ".join(p for p in (word, detail) if p)
-    if tail and detail and display_width(f"{status} · {tail}") <= room:
-        return f"{status} · {tail}"
     if display_width(status) <= room:
         return status
     if detail and room >= (display_width(word) + 3 if word else 0) + DETAIL_MIN:
@@ -1605,8 +1602,8 @@ PEEK_MIN_LIST_ROWS = 3
 _FILE_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit")
 _TOOL_ARGS = ("command", "pattern", "url", "query", "description", "prompt", "skill")
 _INTERRUPTED = "[Request interrupted"
-_WRAPPER_TAGS = ("<command-", "<local-command-", "<bash-", "<task-notification>", "<system-reminder>")
-_SESSION_ID = re.compile(r"[0-9a-fA-F-]{36}")
+_WRAPPER_TAGS = ("<command-", "<local-command-", "<bash-", "<task-notification>", "<system-reminder>", "<ide_")
+_SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
 
 @dataclass(frozen=True)
@@ -1662,8 +1659,9 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
     One reply can span several assistant entries (thinking, then a tool
     call), so blocks are read in order across entries.
 
-    Of a batch of parallel tool calls, Claude Code asks about the earliest
-    one still waiting first, so that one is reported while any is unresolved.
+    On 2.1.294 a parallel batch still waiting for approval isn't written at
+    all. Should one appear, the earliest call still waiting is reported, on
+    the assumption that Claude Code asks about the calls in order.
     """
     lines = text.splitlines()
     if partial:
@@ -1825,9 +1823,9 @@ def session_summary(session: Session, transcript: Transcript | None) -> str:
     return ""
 
 
-def row_detail(session: Session, transcript: Transcript | None) -> tuple:
-    """(detail, tail) for `row_layout`: the summary, or `waitingFor` when there is none; the tail is always empty."""
-    return session_summary(session, transcript) or session.waiting_for, ""
+def row_detail(session: Session, transcript: Transcript | None) -> str:
+    """The detail for `row_layout`: the summary, or `waitingFor` when there is none."""
+    return session_summary(session, transcript) or session.waiting_for
 
 
 @dataclass(frozen=True)
@@ -1896,6 +1894,11 @@ def cut_lines(lines: list, rows: int) -> list:
     if len(lines) <= rows:
         return lines
     return lines[: rows - 1] + [("…", "dim")]
+
+
+def peek_room(height: int, width: int, bottom_count: int) -> int:
+    """Rows the peek box and the list share in a pane `height` by `width`, under the panel's two top lines and above its `bottom_count` lines; 0 when the box is too narrow to hold text."""
+    return max(0, height - 2 - bottom_count) if width - 5 > 0 else 0
 
 
 def peek_height(available: int, body: int) -> int:
