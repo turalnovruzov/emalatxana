@@ -302,14 +302,17 @@ class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
     A running session is stopped, then removed. `wait_for` holds the
-    Interrupters of any of them, cancelled when the close began. The close
-    waits for them to end, and an Interrupter cancelled while it still ran
-    has killed any hidden viewer it opened, so that viewer's `claude attach`
-    can't land after the stop and resume the session; if that kill failed
-    and the pane is still listed, nothing is closed. Not covered: a hidden
-    viewer left by an interrupt that had already ended (timed out or
-    failed) before the close began. `current` is the session being closed now.
-    `result` is (all closed, message, {id: closed}).
+    Interrupters of any of them still running, cancelled when the close
+    began, and those that ended earlier without killing the hidden viewer
+    they meant to. The close waits for them to end and tries each failed
+    kill again; while such a pane is still listed, nothing is closed. Any
+    other hidden viewer an interrupt opened is gone, or came up and took
+    the Esc, or was swapped into main by him, which makes it his like a
+    viewer he opens; so an interrupt's `claude attach` still starting can't
+    land after the stop and resume the session. Not covered: a window tmux
+    made for a `new_hidden_window` that then failed, since no pane id came
+    back. `current` is the session being closed now. `result` is (all
+    closed, message, {id: closed}).
     """
 
     def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
@@ -334,6 +337,8 @@ class Closer(threading.Thread):
             if interrupter.is_alive():
                 finished.update((t.id, False) for t in self.targets)
                 return False, f"emx is still interrupting {name}, so it didn't close it.", finished
+            if not interrupter.ended:
+                interrupter.end_opened()
             if not interrupter.ended:
                 finished.update((t.id, False) for t in self.targets)
                 return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close it.", finished
@@ -444,9 +449,11 @@ class Interrupter(threading.Thread):
     first, with no swap and no select, so his focus stays where it is. Then
     it waits for the listing to show the session stopped working. `cancel`
     is set when a close of the session starts: from then on it opens and
-    sends nothing, and before it ends it kills the hidden viewer it opened
-    (`ended` is False only if that pane may still be there). `result` is
-    (stopped, message).
+    sends nothing. Before it ends it kills the hidden viewer it opened,
+    unless the Esc went into it after its prompt came up and no close
+    started, or, with no close started, he has meanwhile opened it in main.
+    `ended` is False only if a pane it meant to kill may still be there.
+    `result` is (stopped, message).
     """
 
     def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
@@ -456,6 +463,7 @@ class Interrupter(threading.Thread):
         self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
         self.cancel = threading.Event()
         self.opened = None
+        self.sent = False
         self.ended = True
         self.result = None
 
@@ -465,13 +473,35 @@ class Interrupter(threading.Thread):
         except Exception as exc:
             self.result = (False, f"interrupt failed: {core.error_line(exc)}")
         finally:
-            if self.opened is not None and self.cancel.is_set():
-                self.end_opened()
+            closing = self.cancel.is_set()
+            if self.opened is not None and (closing or not self.sent):
+                self.end_opened(spare_main=not closing)
 
-    def end_opened(self) -> None:
-        """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it."""
+    def in_main(self) -> bool | None:
+        """Whether he has swapped the hidden viewer into main (Enter on its row while it came up), which makes it his; None when tmux can't tell."""
+        try:
+            windows = {p.id: p.window for p in self.tmux.panes()}
+        except TmuxError:
+            return None
+        return windows.get(self.opened) is not None and windows.get(self.opened) == windows.get(self.panel)
+
+    def end_opened(self, spare_main: bool = True) -> None:
+        """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it.
+
+        With `spare_main` a viewer he has swapped into main is left to him,
+        and one tmux can't place is left with `ended` False.
+        """
+        if spare_main:
+            shown = self.in_main()
+            if shown is None:
+                self.ended = False
+                return
+            if shown:
+                self.ended = True
+                return
         try:
             self.tmux.kill_pane(self.opened)
+            self.ended = True
         except TmuxError:
             try:
                 self.ended = all(p.id != self.opened for p in self.tmux.panes())
@@ -517,6 +547,7 @@ class Interrupter(threading.Thread):
             refusal = core.gate_refusal(interrupt, report, screen.cursor_y, cursor_x=screen.cursor_x)
             if refusal:
                 return False, refusal
+            self.sent = True
         except TmuxError as exc:
             return False, f"tmux: {exc}"
         stopped = self.wait_until_stopped()
@@ -859,6 +890,7 @@ class App:
         self.checker = None
         self.closer = None
         self.interrupters = {}
+        self.unended = {}
         self.closing = {}
         self.confirm = None
         self.find = None
@@ -1255,6 +1287,7 @@ class App:
         wait_for = tuple(self.interrupters[sid] for sid in sorted(ids) if sid in self.interrupters)
         for interrupter in wait_for:
             interrupter.cancel.set()
+        wait_for += tuple(i for sid in sorted(ids) for i in self.unended.get(sid, ()))
         self.closing.update((sid, None) for sid in ids)
         self.closer = Closer(self.claude, targets, wait_for)
         self.closer.start()
@@ -1276,6 +1309,8 @@ class App:
             if interrupter.is_alive():
                 continue
             del self.interrupters[sid]
+            if not interrupter.ended:
+                self.unended.setdefault(sid, []).append(interrupter)
             if interrupter.cancel.is_set():
                 continue
             done, message = interrupter.result or (False, "interrupt failed")
@@ -1287,6 +1322,8 @@ class App:
         if closer is None or closer.is_alive():
             return
         self.closer = None
+        self.unended = {sid: left for sid, workers in self.unended.items()
+                        if (left := [i for i in workers if not i.ended])}
         done, message, finished = closer.result or (False, "close failed", {t.id: False for t in closer.targets})
         self.say(message, error=not done)
         self.closing = core.closing_after(self.closing, finished, None)

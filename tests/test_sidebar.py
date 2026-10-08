@@ -2925,6 +2925,116 @@ class InterruptSession(AppCase):
         self.assertEqual(self.app.notice, "emx-test-working's viewer didn't come up in time, so emx didn't interrupt it.")
         self.assertTrue(self.app.notice_error)
 
+    def interrupt_hidden(self, *screens):
+        """Ctrl+X with no viewer open, the hidden viewer showing `screens` in turn; returns the Interrupter once it has ended."""
+        self.no_viewer()
+        self.app.tmux.screens = list(screens)
+        self.press(sidebar.CTRL_X)
+        interrupter = self.app.interrupters["working"]
+        self.settle()
+        return interrupter
+
+    def test_a_hidden_viewer_that_times_out_before_its_prompt_is_killed(self):
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertIn(("kill", "%5"), self.app.tmux.events)
+        self.assertNotIn("key_if", self.kinds())
+        self.assertTrue(interrupter.ended)
+        self.assertEqual(self.app.notice, "emx-test-working's viewer didn't come up in time, so emx didn't interrupt it.")
+
+    def test_an_error_after_the_hidden_viewer_opens_kills_it(self):
+        failures = {
+            "tmux: server busy": sidebar.TmuxError("server busy"),
+            "interrupt failed: boom": RuntimeError("boom"),
+        }
+        for want, failure in failures.items():
+            with self.subTest(want=want):
+                self.app.tmux = InterruptTmux()
+
+                def capture(pane, failure=failure):
+                    raise failure
+
+                self.app.tmux.capture = capture
+                self.listings = [[self.working]]
+                self.app.confirm = None
+                interrupter = self.interrupt_hidden()
+                self.assertIn(("new_hidden_window", core.viewer_command("claude", "working")), self.app.tmux.events)
+                self.assertEqual(self.app.tmux.events[-1], ("kill", "%5"))
+                self.assertTrue(interrupter.ended)
+                self.assertIn(want, self.app.notice)
+
+    def test_a_refusal_after_the_hidden_viewer_comes_up_kills_it(self):
+        self.app.tmux.gate_says = "0 0 1 2 26 working"
+        interrupter = self.interrupt_hidden("working-streaming")
+        self.assertEqual(self.app.tmux.keys_sent, [])
+        self.assertIn("Focus left the panel", self.app.notice)
+        self.assertEqual(self.app.tmux.events[-1], ("kill", "%5"))
+        self.assertTrue(interrupter.ended)
+
+    def test_a_successful_interrupt_keeps_its_hidden_viewer(self):
+        interrupter = self.interrupt_hidden("agent-view", "working-streaming")
+        self.assertEqual(self.app.tmux.keys_sent, [("%5", "Escape")])
+        self.assertNotIn("kill", self.kinds())
+        self.assertTrue(interrupter.ended)
+        self.assertEqual(self.app.notice, "Interrupted emx-test-working.")
+
+    def test_a_hidden_viewer_he_opened_in_main_while_it_came_up_is_left_to_him(self):
+        tmux = self.app.tmux
+        captured = tmux.capture
+
+        def capture(pane):
+            tmux.list = [Pane(p.id, "@1", p.dead, p.role, p.session, p.width, p.window_width) if p.id == "%5" else p
+                         for p in tmux.list]
+            return captured(pane)
+
+        tmux.capture = capture
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertNotIn("kill", self.kinds())
+        self.assertTrue(interrupter.ended)
+
+    def test_a_hidden_viewer_whose_kill_failed_after_a_timeout_is_killed_by_the_next_close_or_blocks_it(self):
+        tmux = self.app.tmux
+        kills = []
+
+        def refuse(pane):
+            kills.append(pane)
+            raise sidebar.TmuxError("server busy")
+
+        tmux.kill_pane = refuse
+        interrupter = self.interrupt_hidden(*["agent-view"] * 1000)
+        self.assertEqual(kills, ["%5"])
+        self.assertFalse(interrupter.ended)
+        self.assertEqual(self.app.interrupters, {})
+        confirm = core.Confirm("working", "emx-test-working", True, 0.0)
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.app.start_close(confirm)
+            self.assertEqual(self.app.closer.wait_for, (interrupter,))
+            self.app.closer.join(5)
+            self.app.refresh()
+            self.assertEqual(kills, ["%5", "%5"])
+            self.assertEqual(ran, [])
+            self.assertEqual(self.app.notice,
+                             "emx couldn't close the viewer it opened for emx-test-working, so it didn't close it.")
+            self.assertEqual(self.app.unended, {"working": [interrupter]})
+
+            def kill(pane):
+                kills.append(pane)
+                tmux.list = [p for p in tmux.list if p.id != pane]
+
+            tmux.kill_pane = kill
+            self.app.start_close(confirm)
+            self.app.closer.join(5)
+            self.app.refresh()
+        self.assertEqual(kills, ["%5", "%5", "%5"])
+        self.assertTrue(interrupter.ended)
+        self.assertEqual(ran, [["claude", "stop", "working"], ["claude", "rm", "working"]])
+        self.assertEqual(self.app.unended, {})
+
     def test_a_close_started_before_the_escape_cancels_it_and_waits_for_it(self):
         self.no_viewer()
         ran = []
