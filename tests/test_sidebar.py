@@ -354,6 +354,13 @@ class RestartOffThread(AppCase):
         self.assertEqual(self.app.notice, "Viewer restarted.")
         self.assertIsNone(self.app.checker)
 
+    def test_a_session_being_closed_is_not_restarted(self):
+        self.press_r()
+        self.app.closing["s1"] = None
+        self.answer_arrives()
+        self.assertEqual(self.app.tmux.respawned, [])
+        self.assertEqual(self.app.notice, "Still closing emx-test-s1…")
+
     def test_a_session_stopped_since_the_poll_is_left_alone(self):
         self.answer = ([session("s1", "/p/alpha", state="stopped", pid=None)], None)
         self.press_r()
@@ -660,6 +667,23 @@ class AutoRestore(AppCase):
         self.app.check_main(self.app.main_pane)
         self.assertIsNone(self.app.checker)
         self.assertIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
+
+    def test_a_session_being_closed_is_not_restored(self):
+        self.app.closing["s1"] = None
+        self.show("agent-view")
+        self.app.check_main(self.app.main_pane)
+        self.assertIsNone(self.app.checker)
+        self.assertEqual(self.app.tmux.respawned, [])
+
+    def test_a_close_that_starts_while_the_restore_lists_stops_the_restore(self):
+        self.show("agent-view")
+        self.app.check_main(self.app.main_pane)
+        self.assertTrue(self.app.checker.auto)
+        self.app.closing["s1"] = None
+        self.settle()
+        self.assertEqual(self.app.tmux.respawned, [])
+        self.assertEqual(self.app.tmux.selected, [])
+        self.assertEqual(self.app.notice, "Still closing emx-test-s1…")
 
     def test_another_session_showing_is_left_to_him(self):
         self.app.sessions = [core.Session("s1", "emx-test-named", "/p/alpha", "working", "", "", 0.0, True)]

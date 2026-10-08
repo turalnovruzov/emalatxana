@@ -1030,6 +1030,8 @@ class App:
         self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
         self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
         self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
+        if main.session in self.closing:
+            return
         action = core.auto_restore(
             state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
         )
@@ -1128,8 +1130,13 @@ class App:
         `checked` is (session, fresh) from a listing a worker thread took just
         now (`core.checked_row`); this thread never lists, so a slow `claude
         agents` can't freeze the panel. A trigger other than OPEN without one
-        is refused.
+        is refused, and so is a RESTART of a session being closed: its
+        attach could land after the stop and resume it.
         """
+        if trigger == core.RESTART and sid in self.closing:
+            shown = self.session(sid)
+            self.say(core.still_closing(shown.name if shown else sid))
+            return False
         if trigger == core.OPEN:
             session, fresh = self.session(sid), False
         else:
