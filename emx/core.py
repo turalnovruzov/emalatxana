@@ -190,6 +190,112 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
     return f"{name} isn't running. Press Enter on it to reopen it."
 
 
+STOP, REMOVE = "stop", "remove"
+CONFIRM_SECONDS = 2.0
+_CLOSE_SUBCOMMAND = {STOP: "stop", REMOVE: "rm"}
+_CLOSE_WORDS = {STOP: ("Stopping", "Stopped"), REMOVE: ("Removing", "Removed")}
+
+
+@dataclass(frozen=True)
+class Confirm:
+    """A first Ctrl+X on a session row, waiting for the second. Everything the second press acts on is taken here, never from the cursor then."""
+
+    id: str
+    name: str
+    running: bool
+    at: float
+
+    @property
+    def action(self) -> str:
+        return close_action(self.running)
+
+
+def close_action(running: bool) -> str:
+    """A session with a live process is stopped, keeping its conversation; any other (stopped, or done with its process gone) is removed."""
+    return STOP if running else REMOVE
+
+
+def close_args(claude: str, confirm: Confirm) -> list:
+    """Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides."""
+    return [claude, _CLOSE_SUBCOMMAND[confirm.action], confirm.id]
+
+
+def confirm_label(confirm: Confirm) -> str:
+    return f"ctrl+x again to {confirm.action}"
+
+
+def confirm_holds(confirm: Confirm | None, cursor, session: Session | None, now: float) -> bool:
+    """Whether an armed confirm still stands: the cursor is on its row, the panel still lists the session in the same running state, and CONFIRM_SECONDS have not passed.
+
+    The cursor can move without a key (a poll regrouping, ← from main), so
+    this is checked on every refresh, not only on keys.
+    """
+    return (
+        confirm is not None
+        and cursor == ("session", confirm.id)
+        and session is not None
+        and session.id == confirm.id
+        and session.running == confirm.running
+        and 0 <= now - confirm.at < CONFIRM_SECONDS
+    )
+
+
+def press_close(confirm: Confirm | None, cursor, session: Session | None, now: float) -> tuple:
+    """What a Ctrl+X does: (confirm to keep armed, confirm to act on).
+
+    `session` is the panel's row under the cursor. A second press on the
+    same row while the first still holds acts on the first press's confirm;
+    any other press on a session row arms a new one, so a late second press
+    only re-arms. On a group header, or with no row, it does nothing.
+    """
+    if not cursor or cursor[0] != "session" or session is None or session.id != cursor[1]:
+        return None, None
+    if confirm_holds(confirm, cursor, session, now):
+        return None, confirm
+    return Confirm(session.id, session.name, session.running, now), None
+
+
+def confirm_after_key(confirm: Confirm | None, close_key: bool, passive: bool) -> Confirm | None:
+    """Any key other than Ctrl+X cancels a confirm; `passive` events (a terminal resize) are not his keypress and leave it."""
+    return confirm if close_key or passive else None
+
+
+def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
+    """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one stop or remove runs at a time."""
+    if busy is not None:
+        return f"Still {_CLOSE_WORDS[busy.action][0].lower()} {busy.name}…"
+    if list_failing:
+        return "Can't list sessions right now, so emx won't stop or remove one."
+    return None
+
+
+def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) -> bool:
+    """Whether a confirmed stop or remove may run, judged on a listing a worker took just before running it (`checked_row`).
+
+    The panel's row can be a poll old: a session shown stopped may have been
+    resumed elsewhere since, and removing it would delete a live session.
+    """
+    return fresh and session is not None and session.running == confirm.running
+
+
+def close_refusal(confirm: Confirm, session: Session | None, fresh: bool) -> str:
+    verb = confirm.action
+    if not fresh:
+        return f"Couldn't list sessions to check {confirm.name}, so emx didn't {verb} it."
+    if session is None:
+        return f"{confirm.name} isn't listed any more, so emx didn't {verb} it."
+    now = "running again" if session.running else "no longer running"
+    return f"{confirm.name} is {now}, so emx didn't {verb} it."
+
+
+def closing_text(confirm: Confirm) -> str:
+    return f"{_CLOSE_WORDS[confirm.action][0]} {confirm.name}…"
+
+
+def closed_text(confirm: Confirm) -> str:
+    return f"{_CLOSE_WORDS[confirm.action][1]} {confirm.name}."
+
+
 @dataclass(frozen=True)
 class Placement:
     repo: str
@@ -659,6 +765,11 @@ def first_message(text: str) -> str:
         if line.strip():
             return line.strip()
     return ""
+
+
+def one_line(text: str) -> str:
+    """All of a CLI message on one line, for a refusal whose reason may come after its first line."""
+    return " ".join(line.strip() for line in strip_ansi(text).splitlines() if line.strip())
 
 
 @dataclass(frozen=True)

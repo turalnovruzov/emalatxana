@@ -1357,6 +1357,120 @@ class RestartCheck(unittest.TestCase):
         self.assertTrue(core.refusal("emx-test-a", core.OPEN, False, None).startswith("emx-test-a isn't listed"))
 
 
+class CloseConfirm(unittest.TestCase):
+    """Ctrl+X twice on one row stops a running session or removes a stopped one; anything else in between cancels."""
+
+    def setUp(self):
+        self.running = mk(id="a", name="emx-test-a")
+        self.stopped = mk(id="a", name="emx-test-a", state="stopped", running=False)
+        self.on_a = ("session", "a")
+
+    def test_which_command_for_which_state(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertEqual((armed.action, core.close_args("claude", armed)), (core.STOP, ["claude", "stop", "a"]))
+        self.assertEqual(core.confirm_label(armed), "ctrl+x again to stop")
+        armed, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
+        self.assertEqual((armed.action, core.close_args("claude", armed)), (core.REMOVE, ["claude", "rm", "a"]))
+        self.assertEqual(core.confirm_label(armed), "ctrl+x again to remove")
+
+    def test_a_done_session_whose_process_has_gone_is_removed(self):
+        armed, _ = core.press_close(None, self.on_a, mk(id="a", state="done", running=False), 0.0)
+        self.assertEqual(armed.action, core.REMOVE)
+
+    def test_the_remove_never_discards_or_forces(self):
+        armed, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
+        self.assertFalse(any(a.startswith("--") for a in core.close_args("claude", armed)))
+
+    def test_the_second_press_within_the_window_acts_on_the_first_press(self):
+        armed, act = core.press_close(None, self.on_a, self.running, 10.0)
+        self.assertIsNone(act)
+        kept, act = core.press_close(armed, self.on_a, self.running, 10.0 + core.CONFIRM_SECONDS - 0.01)
+        self.assertEqual((kept, act), (None, armed))
+
+    def test_a_late_second_press_only_rearms(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 10.0)
+        rearmed, act = core.press_close(armed, self.on_a, self.running, 10.0 + core.CONFIRM_SECONDS)
+        self.assertIsNone(act)
+        self.assertEqual(rearmed.at, 10.0 + core.CONFIRM_SECONDS)
+
+    def test_a_press_on_another_row_arms_that_row_and_never_acts(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        b = mk(id="b", name="emx-test-b")
+        rearmed, act = core.press_close(armed, ("session", "b"), b, 0.5)
+        self.assertIsNone(act)
+        self.assertEqual(rearmed.id, "b")
+
+    def test_a_group_header_or_no_row_does_nothing(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        for cursor, row in ((("group", "/p"), None), (None, None), (self.on_a, None), (("session", "b"), self.running)):
+            with self.subTest(cursor=cursor, row=row):
+                self.assertEqual(core.press_close(armed, cursor, row, 0.5), (None, None))
+
+    def test_the_confirm_holds_only_on_its_row_in_its_state_inside_the_window(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertTrue(core.confirm_holds(armed, self.on_a, self.running, 1.0))
+        cases = {
+            "cursor moved": (("session", "b"), self.running, 1.0),
+            "cursor on a header": (("group", "/p"), self.running, 1.0),
+            "no longer listed": (self.on_a, None, 1.0),
+            "stopped meanwhile": (self.on_a, self.stopped, 1.0),
+            "timed out": (self.on_a, self.running, core.CONFIRM_SECONDS),
+            "clock went back": (self.on_a, self.running, -1.0),
+        }
+        for why, (cursor, row, now) in cases.items():
+            with self.subTest(why):
+                self.assertFalse(core.confirm_holds(armed, cursor, row, now))
+        self.assertFalse(core.confirm_holds(None, self.on_a, self.running, 0.0))
+
+    def test_a_state_change_since_the_first_press_rearms_instead_of_acting(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        rearmed, act = core.press_close(armed, self.on_a, self.stopped, 0.5)
+        self.assertIsNone(act)
+        self.assertEqual(rearmed.action, core.REMOVE)
+
+    def test_the_acted_id_and_name_are_the_armed_ones(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        renamed = mk(id="a", name="emx-test-renamed")
+        _, act = core.press_close(armed, self.on_a, renamed, 0.5)
+        self.assertEqual((act.id, act.name), ("a", "emx-test-a"))
+
+    def test_any_other_key_cancels_but_a_resize_does_not(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertIsNone(core.confirm_after_key(armed, close_key=False, passive=False))
+        self.assertIs(core.confirm_after_key(armed, close_key=True, passive=False), armed)
+        self.assertIs(core.confirm_after_key(armed, close_key=False, passive=True), armed)
+
+    def test_blocked_while_listing_fails_or_another_close_runs(self):
+        busy, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertIsNone(core.close_blocked(False, None))
+        self.assertIn("Can't list sessions", core.close_blocked(True, None))
+        self.assertEqual(core.close_blocked(False, busy), "Still stopping emx-test-a…")
+
+    def test_a_close_runs_only_if_a_fresh_listing_still_shows_the_row_as_he_saw_it(self):
+        stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
+        self.assertTrue(core.close_still_applies(stop, self.running, True))
+        self.assertTrue(core.close_still_applies(remove, self.stopped, True))
+        self.assertFalse(core.close_still_applies(remove, self.running, True))
+        self.assertIn("running again", core.close_refusal(remove, self.running, True))
+        self.assertFalse(core.close_still_applies(stop, self.stopped, True))
+        self.assertIn("no longer running", core.close_refusal(stop, self.stopped, True))
+        self.assertFalse(core.close_still_applies(stop, None, True))
+        self.assertIn("isn't listed", core.close_refusal(stop, None, True))
+        self.assertFalse(core.close_still_applies(stop, self.running, False))
+        self.assertIn("Couldn't list", core.close_refusal(stop, None, False))
+
+    def test_notices(self):
+        stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
+        self.assertEqual((core.closing_text(stop), core.closed_text(stop)), ("Stopping emx-test-a…", "Stopped emx-test-a."))
+        self.assertEqual((core.closing_text(remove), core.closed_text(remove)), ("Removing emx-test-a…", "Removed emx-test-a."))
+
+    def test_one_line_keeps_every_line_of_a_refusal(self):
+        self.assertEqual(core.one_line("\x1b[31mrefused:\x1b[0m\n\n  2 unpushed commits\n"), "refused: 2 unpushed commits")
+        self.assertEqual(core.one_line(""), "")
+
+
 class ErrorLine(unittest.TestCase):
     def test_first_line_of_message(self):
         self.assertEqual(core.error_line(RuntimeError("first\nsecond")), "first")

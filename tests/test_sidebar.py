@@ -743,5 +743,189 @@ class AutoRestore(AppCase):
         self.assertIsNone(self.app.notice_until)
 
 
+
+class CloseTmux:
+    """The sidebar (%1), main (%2) showing `a`, a hidden viewer (%3) of `b` and the placeholder (%4) in its own window."""
+
+    def __init__(self):
+        self.list = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 121),
+            Pane("%2", "@1", False, "", "a", 80, 121),
+            Pane("%3", "@2", False, "", "b", 80, 80),
+            Pane("%4", "@3", False, "placeholder", "", 80, 80),
+        ]
+        self.calls = []
+
+    def panes(self):
+        return list(self.list)
+
+    def swap(self, source, target):
+        self.calls.append(("swap", source, target))
+
+    def kill_pane(self, pane):
+        self.calls.append(("kill", pane))
+
+
+class CloseSession(AppCase):
+    """Ctrl+X twice on one row stops or removes that session, on a worker thread, after a fresh listing agrees with the row."""
+
+    def setUp(self):
+        super().setUp()
+        self.a, self.b = session("a", "/p/alpha"), session("b", "/p/alpha", started=1.0)
+        self.poll(self.a, self.b)
+        self.app.refresh()
+        self.app.tmux = CloseTmux()
+        self.app.cursor = ("session", "a")
+        self.listing = ([self.a, self.b], None)
+        self.ran = []
+        self.done = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+        def run(args, **kw):
+            self.ran.append((args, threading.current_thread() is not threading.main_thread()))
+            return self.done
+
+        def fetch(claude):
+            self.assertIsNot(threading.current_thread(), threading.main_thread())
+            return self.listing
+
+        for p in (mock.patch.object(sidebar.subprocess, "run", run), mock.patch.object(sidebar, "fetch_sessions", fetch)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def press(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def settle(self):
+        if self.app.closer is not None:
+            self.app.closer.join(5)
+        self.app.refresh()
+
+    def test_double_ctrl_x_stops_a_running_session_off_the_curses_thread(self):
+        self.press(sidebar.CTRL_X)
+        self.assertEqual(self.app.confirm.id, "a")
+        self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
+        self.assertEqual(self.ran, [])
+        self.press(sidebar.CTRL_X)
+        self.assertEqual(self.app.notice, "Stopping emx-test-a…")
+        self.assertIsNone(self.app.confirm)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True)])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Stopped emx-test-a.", False))
+        self.assertTrue(self.app.poller.wake.is_set())
+        self.assertEqual(self.app.tmux.calls, [])
+
+    def test_double_ctrl_x_on_a_stopped_session_removes_it_and_closes_its_viewer_in_main(self):
+        stopped = session("a", "/p/alpha", state="stopped", pid=None)
+        self.poll(stopped, self.b)
+        self.app.refresh()
+        self.listing = ([stopped, self.b], None)
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "rm", "a"], True)])
+        self.assertEqual(self.app.notice, "Removed emx-test-a.")
+        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
+
+    def test_removing_a_session_kills_its_hidden_viewer(self):
+        stopped = session("b", "/p/alpha", state="stopped", pid=None, started=1.0)
+        self.poll(self.a, stopped)
+        self.app.refresh()
+        self.listing = ([self.a, stopped], None)
+        self.app.cursor = ("session", "b")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
+
+    def test_a_refused_rm_shows_its_message_on_one_line_and_leaves_the_row(self):
+        stopped = session("a", "/p/alpha", state="stopped", pid=None)
+        self.poll(stopped, self.b)
+        self.app.refresh()
+        self.listing = ([stopped, self.b], None)
+        self.done = subprocess.CompletedProcess([], 1, stdout="", stderr="worktree has 2 unpushed commits\nrerun with a flag\n")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "rm", "a"], True)])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("worktree has 2 unpushed commits rerun with a flag", True))
+        self.assertEqual(self.app.tmux.calls, [])
+        self.assertIsNotNone(self.app.session("a"))
+
+    def test_a_stopped_row_resumed_elsewhere_is_never_removed(self):
+        stopped = session("a", "/p/alpha", state="stopped", pid=None)
+        self.poll(stopped, self.b)
+        self.app.refresh()
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.ran, [])
+        self.assertIn("running again", self.app.notice)
+
+    def test_moving_between_presses_acts_on_neither_row(self):
+        self.press(sidebar.CTRL_X, curses.KEY_DOWN, sidebar.CTRL_X)
+        self.assertIsNone(self.app.closer)
+        self.assertEqual(self.app.confirm.id, "b")
+        self.assertEqual(self.ran, [])
+
+    def test_any_other_key_cancels(self):
+        for key in ("x", "?", curses.KEY_MOUSE, "\x1b"):
+            with self.subTest(key=key):
+                self.app.help = False
+                self.press(sidebar.CTRL_X, key)
+                self.assertIsNone(self.app.confirm)
+
+    def test_a_resize_keeps_the_confirm(self):
+        self.press(sidebar.CTRL_X, curses.KEY_RESIZE, sidebar.CTRL_X)
+        self.assertIsNotNone(self.app.closer)
+
+    def test_the_confirm_runs_out_and_the_next_press_only_rearms(self):
+        self.press(sidebar.CTRL_X)
+        armed = self.app.confirm
+        with mock.patch.object(sidebar.time, "monotonic", return_value=armed.at + core.CONFIRM_SECONDS + 1):
+            self.app.refresh()
+            self.assertIsNone(self.app.confirm)
+            self.press(sidebar.CTRL_X)
+        self.assertIsNone(self.app.closer)
+        self.assertIsNotNone(self.app.confirm)
+
+    def test_the_poll_changing_the_rows_running_state_cancels(self):
+        self.press(sidebar.CTRL_X)
+        self.poll(session("a", "/p/alpha", state="stopped", pid=None), self.b)
+        self.app.refresh()
+        self.assertIsNone(self.app.confirm)
+
+    def test_the_cursor_moved_by_a_poll_cancels(self):
+        self.press(sidebar.CTRL_X)
+        self.poll(self.b)
+        self.app.refresh()
+        self.assertNotEqual(self.app.cursor, ("session", "a"))
+        self.assertIsNone(self.app.confirm)
+
+    def test_ctrl_x_on_a_group_header_does_nothing(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.assertEqual((self.app.confirm, self.app.closer, self.app.notice), (None, None, ""))
+
+    def test_no_press_arms_while_listing_fails_or_a_close_runs(self):
+        self.app.list_error = "listing broken"
+        self.press(sidebar.CTRL_X)
+        self.assertIsNone(self.app.confirm)
+        self.assertIn("Can't list sessions", self.app.notice)
+        self.app.list_error = ""
+        self.app.closer = sidebar.Closer("claude", core.press_close(None, ("session", "b"), self.b, 0.0)[0])
+        self.app.closer.is_alive = lambda: True
+        self.press(sidebar.CTRL_X)
+        self.assertIsNone(self.app.confirm)
+        self.assertEqual(self.app.notice, "Still stopping emx-test-b…")
+
+    def test_the_armed_row_says_what_the_second_press_does(self):
+        self.press(sidebar.CTRL_X)
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+        self.app.draw()
+        self.assertIn("ctrl+x again to stop", drawn)
+        self.assertNotIn("emx-test-a", drawn)
+
+    def test_footer_at_his_default_width_and_help_show_ctrl_x(self):
+        self.assertIn("^x", self.app.bottom_lines(39)[-1][0])
+        self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
+
 if __name__ == "__main__":
     unittest.main()
