@@ -24,6 +24,7 @@ When **not** to write one:
 | # | Title | Status |
 |---|---|---|
 | [0001](./0001-tmux-and-python-standard-library.md) | tmux and the Python Standard Library | Accepted |
+| [0002](./0002-haiku-row-summaries-through-claude-p.md) | Haiku writes the row summaries, through `claude -p` | Accepted |
 
 ---
 
