@@ -178,6 +178,18 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format.
 
+### The session list is measured in screen rows, not items
+
+1. **Rule**: we size, scroll and hit-test the session list in screen rows. Each list line's height is the number of laid-out lines it draws (`core.row_lines` for a session, which an armed close label or a rename edit is padded to keep; 1 for a header or a spacer). `core.list_window` picks the scroll from those heights, `core.row_hits` builds `row_map` from them, and drawing walks the lines adding each one's height.
+2. **Why**: a wrapped row takes several screen rows. Code that assumes one item per row scrolls the cursor off screen and sends a click to the wrong session.
+3. **Minimal example**:
+   ```python
+   lines, rows, heights = self.list_layout(width)
+   self.scroll = core.list_window(heights, at, self.scroll, height)
+   self.row_map = core.row_hits(lines, heights, self.scroll, top, height)
+   ```
+4. **Gotcha**: anything that reads `row_map` or `scroll`, or reserves list space (the peek box), must count screen rows the same way, from heights worked out in the same frame they are drawn: a row's height changes with the width, its group's name column and its summary.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

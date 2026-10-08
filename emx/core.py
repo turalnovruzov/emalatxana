@@ -972,13 +972,13 @@ def name_column(rows, width: int) -> int:
     """How wide a group's name column is, so its states line up, from the group's (name, worktree) pairs.
 
     The column is the widest `row_label` within half the row. A worktree
-    label too wide for that counts as half the row when its branch can
-    shorten to fit, since `row_layout` shortens the branch to the column; one
-    too wide even so counts its name and the bare mark, since `row_layout`
-    then drops the branch but keeps the mark. A name too wide for that is
-    left out, so one long name doesn't push every row. A row alone in its
-    group has nothing to line up with, so it gets no column and keeps its
-    whole branch.
+    label too wide for that counts as half the row when its branch could
+    shorten to fit, and as its name and the bare mark when even that is too
+    wide; a name too wide for that is left out, so one long name doesn't push
+    every row. `row_lines` draws the branch whole, so a row whose label is
+    wider than the column puts its state word after the branch, out of line
+    with the rest of its group, wrapping when it must. A row alone in its
+    group has nothing to line up with, so it gets no column.
     """
     rows = list(rows)
     if len(rows) < 2:
@@ -1012,7 +1012,9 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     right-aligned one column in from the edge. The status starts `align`
     columns after the name's start when the row can afford it, so states
     line up within a group; a worktree's branch shortens to stay inside that
-    column, or goes when it can't, as `name_column` assumes. As space runs
+    column, or goes when it can't. `row_lines` draws this line only when it
+    shows every part whole, or on a pane too narrow to wrap, so the
+    shortening below is seen only there; otherwise the row wraps. As space runs
     out, in order: the status detail shortens; the worktree's branch
     shortens, down to BRANCH_MIN, then goes, leaving the bare mark; the state
     word goes whole, never cut, since the glyph's colour still shows the
@@ -1131,14 +1133,19 @@ def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width:
     return flow.lines
 
 
-def confirm_lines(label: str, width: int) -> list:
-    """The armed close label in place of a row's parts, wrapped like a row so it is read whole."""
+def confirm_lines(label: str, width: int, height: int = 1) -> list:
+    """The armed close label in place of a row's parts, wrapped like a row so it is read whole.
+
+    Empty lines pad it to `height`, the row's own, so arming doesn't move the rows below.
+    """
     usable = width - 1
     if usable - ROW_INDENT < 2:
-        return [[(ROW_LEAD, fit(label, usable - ROW_LEAD), "confirm")]]
-    flow = _Flow(ROW_LEAD, usable, usable)
-    flow.words(label, "confirm", 0)
-    return flow.lines
+        lines = [[(ROW_LEAD, fit(label, usable - ROW_LEAD), "confirm")]]
+    else:
+        flow = _Flow(ROW_LEAD, usable, usable)
+        flow.words(label, "confirm", 0)
+        lines = flow.lines
+    return lines + [[] for _ in range(height - len(lines))]
 
 
 def _shows_all(parts: list, name: str, worktree: str, word: str, detail: str, age: str) -> bool:
@@ -2378,11 +2385,17 @@ def peek_room(height: int, width: int, bottom_count: int) -> int:
     return max(0, height - 2 - bottom_count) if width - 5 > 0 else 0
 
 
-def peek_height(available: int, body: int) -> int:
+def peek_height(available: int, body: int, cursor_rows: int = 1) -> int:
     """Rows the peek box takes from the `available` rows under the panel's top lines: two borders, its title and at most PEEK_BODY_LINES of body.
 
-    It never leaves the list fewer than PEEK_MIN_LIST_ROWS, so the cursor's
-    row stays in view; 0 when not even one body line fits.
+    It leaves the list at least PEEK_MIN_LIST_ROWS and at least the
+    `cursor_rows` the cursor's row takes, so that row stays whole in view;
+    when that leaves too little, it keeps only PEEK_MIN_LIST_ROWS and the
+    row's top stays in view. 0 when not even one body line fits.
     """
-    rows = min(3 + max(1, min(body, PEEK_BODY_LINES)), available - PEEK_MIN_LIST_ROWS)
-    return rows if rows >= 4 else 0
+    want = 3 + max(1, min(body, PEEK_BODY_LINES))
+    for keep in dict.fromkeys((max(PEEK_MIN_LIST_ROWS, cursor_rows), PEEK_MIN_LIST_ROWS)):
+        rows = min(want, available - keep)
+        if rows >= 4:
+            return rows
+    return 0

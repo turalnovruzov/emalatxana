@@ -2248,6 +2248,27 @@ class WrappedRows(AppCase):
         self.app.handle_key(curses.KEY_DOWN)
         self.assertEqual(self.app.cursor, ("session", "a"))
 
+    def test_arming_ctrl_x_keeps_the_rows_height(self):
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        before = self.rows_of("a"), self.rows_of("b")
+        self.app.handle_key(sidebar.CTRL_X)
+        self.app.draw()
+        self.assertIsNotNone(self.app.confirm)
+        self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
+        self.assertIn("ctrl+x again", self.screen()[before[0][0]])
+
+    def test_the_peek_leaves_the_cursor_row_whole(self):
+        self.scr.size = (11, 24)
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.app.draw()
+        self.assertTrue(self.app.peeking)
+        tall = len(self.rows_of("a"))
+        self.assertGreater(tall, core.PEEK_MIN_LIST_ROWS)
+        box = next(y for y, line in enumerate(self.screen()) if line.startswith("╭─"))
+        self.assertLess(self.rows_of("a")[-1], box)
+
     def test_a_wide_panel_keeps_the_row_on_one_line(self):
         self.scr.size = (20, 100)
         self.app.draw()

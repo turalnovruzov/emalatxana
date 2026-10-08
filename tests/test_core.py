@@ -690,6 +690,10 @@ class RowLines(unittest.TestCase):
         got = [rendered(p) for p in core.confirm_lines("ctrl+x again to remove", 19)]
         self.assertEqual(got, ["   ctrl+x again to", "     remove"])
 
+    def test_the_armed_label_is_padded_to_the_rows_height(self):
+        self.assertEqual(core.confirm_lines("ctrl+x again to stop", 40, 3), [[(3, "ctrl+x again to stop", "confirm")], [], []])
+        self.assertEqual(len(core.confirm_lines("ctrl+x again to remove", 19, 1)), 2)
+
 
 class ListWindow(unittest.TestCase):
     """Scrolling and clicks count screen rows, so a wrapped row is kept whole on screen and every line of it is his click."""
@@ -2738,6 +2742,11 @@ class PeekHeight(unittest.TestCase):
         self.assertEqual(core.peek_height(10, 50), 10 - core.PEEK_MIN_LIST_ROWS)
         self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 4, 5), 4)
         self.assertEqual(core.peek_height(core.PEEK_MIN_LIST_ROWS + 3, 5), 0)
+
+    def test_it_leaves_the_cursor_row_whole_when_it_can_else_only_its_top(self):
+        self.assertEqual(core.peek_height(12, 50, 5), 12 - 5)
+        self.assertEqual(core.peek_height(12, 50, 2), 12 - core.PEEK_MIN_LIST_ROWS)
+        self.assertEqual(core.peek_height(10, 50, 7), 10 - core.PEEK_MIN_LIST_ROWS)
 
 
 if __name__ == "__main__":
