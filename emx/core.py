@@ -1605,6 +1605,8 @@ PEEK_MIN_LIST_ROWS = 3
 _FILE_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit")
 _TOOL_ARGS = ("command", "pattern", "url", "query", "description", "prompt", "skill")
 _INTERRUPTED = "[Request interrupted"
+_WRAPPER_TAGS = ("<command-", "<local-command-", "<bash-", "<task-notification>", "<system-reminder>")
+_SESSION_ID = re.compile(r"[0-9a-fA-F-]{36}")
 
 
 @dataclass(frozen=True)
@@ -1612,16 +1614,19 @@ class Transcript:
     """What the tail of a session's transcript says it did last.
 
     `tool` is the latest tool call on one line (`Bash: npm test`, or the
-    question for AskUserQuestion), `tool_about` the description the call gave
-    of itself, and `tool_lines` the call in full for the peek. `pending`
-    means that call has no result yet. `answered` means `reply` came after
-    the latest prompt. `latest` says which of "prompt", "reply", "tool" and
-    "interrupted" came last. Times are epoch milliseconds.
+    question for AskUserQuestion), or while calls in the latest batch have no
+    result yet, the earliest of those; `pending` says it is one of them.
+    `tool_about` is the description the call gave of itself, and `tool_lines`
+    the call in full for the peek. `reply_line` is the first line of `reply`.
+    `answered` means `reply` came after the latest prompt. `latest` says
+    which of "prompt", "reply", "tool" and "interrupted" came last. Times are
+    epoch milliseconds.
     """
 
     prompt: str = ""
     prompt_at: float | None = None
     reply: str = ""
+    reply_line: str = ""
     reply_at: float | None = None
     answered: bool = False
     tool: str = ""
@@ -1642,26 +1647,35 @@ def transcript_dir(cwd: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
+def is_session_id(value: str) -> bool:
+    """Whether `value` is shaped like a session id, so it is safe as a transcript file name."""
+    return isinstance(value, str) and _SESSION_ID.fullmatch(value) is not None
+
+
 def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
     """What the session did last, from JSONL text at the end of its transcript, or None when nothing in it says. Never raises.
 
     `partial` says the text starts mid-file, so its first line is cut and is
     dropped. Lines that aren't JSON objects, subagent (sidechain) entries,
-    meta entries and the tag-wrapped text Claude Code adds to the user's turn
-    are skipped; its interrupt marker ends the turn. One reply can span several assistant entries (thinking, then
-    a tool call), so blocks are read in order across entries.
+    meta entries, compaction summaries and the tag-wrapped text Claude Code
+    adds to the user's turn are skipped; its interrupt marker ends the turn.
+    One reply can span several assistant entries (thinking, then a tool
+    call), so blocks are read in order across entries.
+
+    Of a batch of parallel tool calls, Claude Code asks about the earliest
+    one still waiting first, so that one is reported while any is unresolved.
     """
     lines = text.splitlines()
     if partial:
         lines = lines[1:]
     prompt = reply = tool = None
-    results, seq, marks = set(), 0, {}
+    batch, results, seq, marks = [], set(), 0, {}
     for raw in lines:
         try:
             entry = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(entry, dict) or entry.get("isSidechain") is True:
+        if not isinstance(entry, dict) or entry.get("isSidechain") is True or entry.get("isCompactSummary"):
             continue
         kind, message = entry.get("type"), entry.get("message")
         if kind not in ("user", "assistant") or not isinstance(message, dict):
@@ -1680,29 +1694,34 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
                 elif btype == "text" and not entry.get("isMeta"):
                     said = _text(block.get("text")).strip()
                     if said.startswith(_INTERRUPTED):
-                        marks["interrupted"] = seq
-                    elif said and not said.startswith("<"):
-                        prompt, marks["prompt"] = (said, at), seq
+                        marks["interrupted"], batch = seq, []
+                    elif said and not said.startswith(_WRAPPER_TAGS):
+                        prompt, marks["prompt"], batch = (said, at), seq, []
             elif btype == "text":
                 said = _text(block.get("text")).strip()
                 if said:
-                    reply, marks["reply"] = (said, at), seq
+                    reply, marks["reply"], batch = (said, at), seq, []
             elif btype == "tool_use" and isinstance(block.get("name"), str):
                 given = block.get("input") if isinstance(block.get("input"), dict) else {}
                 tool, marks["tool"] = (block["name"], given, at, block.get("id")), seq
+                batch.append(tool)
     if prompt is None and reply is None and tool is None:
         return None
     seen = Transcript(latest=max(marks, key=marks.get))
     if prompt is not None:
         seen = replace(seen, prompt=prompt[0], prompt_at=prompt[1])
     if reply is not None:
-        seen = replace(seen, reply=reply[0], reply_at=reply[1], answered=marks["reply"] > marks.get("prompt", 0))
+        seen = replace(
+            seen, reply=reply[0], reply_line=first_line(reply[0]), reply_at=reply[1],
+            answered=marks["reply"] > marks.get("prompt", 0),
+        )
+    waiting = [call for call in batch if call[3] not in results]
     if tool is not None:
-        name, given, at, use_id = tool
+        name, given, at, _ = waiting[0] if waiting else tool
         line, about, full = describe_tool(name, given)
         seen = replace(
             seen, tool=line, tool_about=about, tool_lines=full, tool_at=at,
-            question=name == "AskUserQuestion", pending=use_id not in results,
+            question=name == "AskUserQuestion", pending=bool(waiting),
         )
     return seen
 
@@ -1800,19 +1819,15 @@ def session_summary(session: Session, transcript: Transcript | None) -> str:
             return first_line(t.tool_about) or t.tool
         if t.latest == "interrupted":
             return "interrupted"
-        return first_line(t.reply) if t.latest == "reply" else ""
+        return t.reply_line if t.latest == "reply" else ""
     if cat == DONE and t.answered:
-        return first_line(t.reply)
+        return t.reply_line
     return ""
 
 
 def row_detail(session: Session, transcript: Transcript | None) -> tuple:
-    """(detail, tail) for `row_layout`: the summary, then `waitingFor` when it adds something; with no summary, `waitingFor` alone, as before."""
-    summary = session_summary(session, transcript)
-    if not summary:
-        return session.waiting_for, ""
-    waiting = session.waiting_for
-    return summary, waiting if waiting and waiting not in summary else ""
+    """(detail, tail) for `row_layout`: the summary, or `waitingFor` when there is none; the tail is always empty."""
+    return session_summary(session, transcript) or session.waiting_for, ""
 
 
 @dataclass(frozen=True)
@@ -1871,9 +1886,16 @@ def peek_lines(peek: Peek, width: int, rows: int) -> list:
         out += [(line, style) for line in wrapped]
     while out and not out[-1][0].strip():
         out.pop()
-    if len(out) <= rows:
-        return out
-    return out[: rows - 1] + [("…", "dim")]
+    return cut_lines(out, rows)
+
+
+def cut_lines(lines: list, rows: int) -> list:
+    """At most `rows` of the (text, style) `lines`; lines cut short end in "…"."""
+    if rows <= 0:
+        return []
+    if len(lines) <= rows:
+        return lines
+    return lines[: rows - 1] + [("…", "dim")]
 
 
 def peek_height(available: int, body: int) -> int:

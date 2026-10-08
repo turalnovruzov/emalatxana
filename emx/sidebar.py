@@ -68,6 +68,7 @@ FIND_HINT = "↑↓ move · ↵ open · Esc clear"
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
+PEEK_NO_ROOM = "No room to peek here; make the pane taller."
 CLOSE_SECONDS = 30
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
@@ -416,8 +417,8 @@ def claude_home() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
-def read_transcript(path: str, size: int) -> core.Transcript | None:
-    """What the end of the transcript at `path` says (`core.parse_transcript`), reading only as much of its tail as `core.tail_bytes` asks for, or None. Never raises, and never writes."""
+def read_transcript(path: str, size: int) -> tuple:
+    """(what the end of the transcript at `path` says, or None; whether the read succeeded), reading only as much of its tail as `core.tail_bytes` asks for. Never raises, and never writes."""
     found, read = None, 0
     try:
         with open(path, "rb") as f:
@@ -426,8 +427,8 @@ def read_transcript(path: str, size: int) -> core.Transcript | None:
                 text = f.read(want).decode("utf-8", errors="replace")
                 found, read = core.parse_transcript(text, partial=want < size), want
     except (OSError, ValueError):
-        return None
-    return found
+        return None, False
+    return found, True
 
 
 class Transcripts(threading.Thread):
@@ -471,12 +472,17 @@ class Transcripts(threading.Thread):
                 self.read_one(sid, cwd, uuid)
             except Exception:
                 continue
+        uuids = {uuid for _, uuid in wanted.values()}
+        for uuid in set(self.paths) - uuids:
+            del self.paths[uuid]
+        for uuid in set(self.misses) - uuids:
+            del self.misses[uuid]
         with self.lock:
-            gone = set(self.found) - set(wanted)
+            gone = (set(self.found) | set(self.stamps)) - set(wanted)
             for sid in gone:
-                self.found.pop(sid, None)
                 self.stamps.pop(sid, None)
-            self.changed = self.changed or bool(gone)
+                if self.found.pop(sid, None) is not None:
+                    self.changed = True
 
     def read_one(self, sid: str, cwd: str, uuid: str) -> None:
         path = self.locate(cwd, uuid)
@@ -486,7 +492,9 @@ class Transcripts(threading.Thread):
         stamp = (path, info.st_mtime_ns, info.st_size)
         if self.stamps.get(sid) == stamp:
             return
-        found = read_transcript(path, info.st_size)
+        found, ok = read_transcript(path, info.st_size)
+        if not ok:
+            return
         with self.lock:
             self.stamps[sid] = stamp
             if self.found.get(sid) != found:
@@ -494,6 +502,8 @@ class Transcripts(threading.Thread):
                 self.changed = True
 
     def locate(self, cwd: str, uuid: str) -> str | None:
+        if not core.is_session_id(uuid):
+            return None
         name = uuid + ".jsonl"
         direct = os.path.join(self.root, "projects", core.transcript_dir(cwd), name)
         if os.path.isfile(direct):
@@ -504,6 +514,8 @@ class Transcripts(threading.Thread):
         tries, after = self.misses.get(uuid, (0, 0.0))
         if after > time.monotonic():
             return None
+        # Recorded before the scan, so a scan that raises (no projects folder yet) backs off too.
+        self.misses[uuid] = (tries + 1, time.monotonic() + core.retry_after(tries + 1))
         with os.scandir(os.path.join(self.root, "projects")) as folders:
             for folder in folders:
                 path = os.path.join(folder.path, name)
@@ -511,7 +523,6 @@ class Transcripts(threading.Thread):
                     self.paths[uuid] = path
                     self.misses.pop(uuid, None)
                     return path
-        self.misses[uuid] = (tries + 1, time.monotonic() + core.retry_after(tries + 1))
         return None
 
     def take(self):
@@ -608,6 +619,7 @@ class App:
         self.pending_keys = []
         self.transcripts = {}
         self.peeking = False
+        self.peek_wrapped = (None, [])
 
     def say(self, text: str, error: bool = False, seconds: float | None = None) -> None:
         """Show a notice; with `seconds` it goes by itself after that long, unless another replaces it first."""
@@ -1185,7 +1197,7 @@ class App:
         elif self.peeking and key in PEEK_KEYS:
             self.peek_key(key)
         elif key == " ":
-            self.peeking = self.peeked() is not None
+            self.open_peek()
         elif key in (curses.KEY_UP, "k"):
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, -1), None
         elif key in (curses.KEY_DOWN, "j"):
@@ -1328,10 +1340,16 @@ class App:
             return 0
         peek = core.peek_content(session, self.transcripts.get(session.id), time.time() * 1000)
         inner = width - 5
-        rows = core.peek_height(bottom - top, len(core.peek_lines(peek, inner, core.PEEK_BODY_LINES)))
-        if rows == 0 or inner <= 0:
+        if inner <= 0:
             return 0
-        body = core.peek_lines(peek, inner, rows - 3)
+        # Wrapping a long reply is the costly part, so it is done again only when the body or the width changes.
+        if self.peek_wrapped[0] != (peek.lines, inner):
+            self.peek_wrapped = ((peek.lines, inner), core.peek_lines(peek, inner, core.PEEK_BODY_LINES + 1))
+        wrapped = self.peek_wrapped[1]
+        rows = core.peek_height(bottom - top, len(wrapped))
+        if rows == 0:
+            return 0
+        body = core.cut_lines(wrapped, rows - 3)
         y, box = bottom - rows, width - 1
         muted = self.palette.attr("muted")
         label = core.fit(session.name, box - 6)
@@ -1483,6 +1501,20 @@ class App:
             return None
         return self.session(self.cursor[1])
 
+    def open_peek(self) -> None:
+        if self.peeked() is None:
+            return
+        if self.peek_fits():
+            self.peeking = True
+        else:
+            self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
+
+    def peek_fits(self) -> bool:
+        """Whether the pane, at its size now, has room for the peek box under the list."""
+        h, w = self.scr.getmaxyx()
+        available = h - len(self.bottom_lines(max(1, w - 1), h)) - 2
+        return w - 5 > 0 and core.peek_height(available, 1) > 0
+
     def peek_key(self, key) -> None:
         if key in (" ", "\x1b"):
             self.peeking = False
@@ -1500,6 +1532,11 @@ class App:
             self.take_transcripts()
             if self.peeking and self.peeked() is None:
                 self.peeking = False
+            elif self.peeking and not self.peek_fits():
+                self.peeking = False
+                if not self.notice:
+                    # A notice that took the room is kept rather than replaced by this one.
+                    self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
             now = time.monotonic()
             if self.confirm is not None and not core.confirm_holds(
                 self.confirm, self.cursor, self.session(self.confirm.id), now,

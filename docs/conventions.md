@@ -49,7 +49,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    text, width = real_screen("agent-view")   # agent-view.w100.txt
    core.main_view_state(text, "emx-test-named", width)
    ```
-4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes.
+4. **Gotcha**: redact only lines the detector does not read. Editing a rule line, the `❯` line, the agent header or the footer changes what the test proves. The captures are pinned to the Claude Code version they came from, so recapture when it changes. Transcript fixtures under `tests/fixtures/transcripts/` follow the same rule: throwaway sessions only, allowlisted fields only, and the Claude Code version asserted.
 
 ### tmux targets for a session name the session exactly: `=name:`
 
@@ -133,6 +133,26 @@ The house style for writing code in this repo: how *this* codebase does things, 
        self.closer.start()
    ```
 4. **Gotcha**: the cursor and the row can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys. And the command follows `running`, not the shown state: a Done row whose process has exited is removed, not stopped.
+
+### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
+
+1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, and reads only files named after a `sessionId` in the current listing that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
+2. **Why**: the contract allows reading `~/.claude` and forbids writing, moving or deleting anything there. Transcripts run to many megabytes and grow while being read, and a read on the curses thread would freeze the panel.
+3. **Minimal example**:
+   ```python
+   # worker thread (Transcripts), for a sessionId from the listing
+   if not core.is_session_id(uuid):
+       return None
+   with open(path, "rb") as f:
+       while (want := core.tail_bytes(found, read, size)) is not None:
+           f.seek(size - want)
+           text = f.read(want).decode("utf-8", errors="replace")
+           found, read = core.parse_transcript(text, partial=want < size), want
+
+   # curses thread, in refresh()
+   found = self.poller.transcripts.take()
+   ```
+4. **Gotcha**: a tail's first line is cut and its last line may be half-written, so neither is read as an entry: the first is dropped (`partial=True`) and a half-written last one fails to parse as JSON and is skipped. The project folder name is Claude Code's own mangling of the cwd and can be shortened, so a miss is looked up by `<sessionId>.jsonl` across the project folders, with backoff. The listing, not the transcript, decides a session's state.
 
 ## The contract for this file
 

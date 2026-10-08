@@ -1961,14 +1961,30 @@ def entry(kind, content, at="2026-10-08T09:00:00Z", **extra):
     return json.dumps({"type": kind, "timestamp": at, "message": {"role": kind, "content": content}, **extra})
 
 
+FIXTURE_KEYS = {"type", "subtype", "uuid", "parentUuid", "isSidechain", "isMeta", "timestamp", "version", "cwd",
+                "sessionId", "durationMs", "attachment", "message"}
+FIXTURE_MESSAGE_KEYS = {"role", "content", "stop_reason"}
+
+
 class ParseRealTranscripts(unittest.TestCase):
     def test_the_fixtures_come_from_one_claude_code_version_and_hold_nothing_private(self):
-        for path in TRANSCRIPTS.glob("*.jsonl"):
+        paths = sorted(TRANSCRIPTS.glob("*.jsonl"))
+        self.assertGreater(len(paths), 0)
+        for path in paths:
             text = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
-                versions = {json.loads(line).get("version") for line in text.splitlines()} - {None}
-                self.assertEqual(versions, {"2.1.294"})
-                for private in ("/Users/", "/private/tmp/", "@", "claude.ai/code", "organization", "signature"):
+                entries = [json.loads(line) for line in text.splitlines()]
+                self.assertEqual({e.get("version") for e in entries} - {None}, {"2.1.294"})
+                for e in entries:
+                    self.assertLessEqual(set(e), FIXTURE_KEYS)
+                    self.assertLessEqual(set(e.get("message", {})), FIXTURE_MESSAGE_KEYS)
+                    self.assertLessEqual(set(e.get("attachment", {})), {"type"})
+                    if "cwd" in e:
+                        self.assertTrue(e["cwd"].startswith("<tmp>"), e["cwd"])
+                    if "sessionId" in e:
+                        self.assertEqual(e["sessionId"], "<uuid>")
+                for private in ("/Users/", "/private/tmp/", "/var/folders/", "/home/", "@", "claude.ai/code",
+                                "organization", "signature"):
                     self.assertNotIn(private, text)
 
     def test_a_done_session_reply(self):
@@ -2004,6 +2020,18 @@ class ParseRealTranscripts(unittest.TestCase):
         t = core.parse_transcript(real_transcript("working-finished"))
         self.assertEqual((t.latest, t.pending, t.reply, t.answered), ("reply", False, "Slept three times.", True))
 
+    def test_parallel_calls_waiting_for_approval_are_not_in_the_transcript_yet(self):
+        # 2.1.294 writes a parallel batch only once all of it is settled, so the row falls back to waitingFor.
+        t = core.parse_transcript(real_transcript("parallel-permission"))
+        self.assertEqual((t.latest, t.pending, t.tool), ("prompt", False, ""))
+        blocked = st("blocked", "permission prompt")
+        self.assertEqual(core.row_detail(blocked, t), ("permission prompt", ""))
+        self.assertEqual(core.peek_content(blocked, t, 0).lines, (("permission prompt", "dim"),))
+
+    def test_a_dismissed_parallel_batch_leaves_nothing_pending(self):
+        t = core.parse_transcript(real_transcript("parallel-permission-dismissed"))
+        self.assertEqual((t.latest, t.pending), ("interrupted", False))
+
 
 class ParseTranscriptNeverRaises(unittest.TestCase):
     def test_garbage_gives_none(self):
@@ -2024,7 +2052,9 @@ class ParseTranscriptNeverRaises(unittest.TestCase):
             entry("assistant", [{"type": "text", "text": None}], at="yesterday"),
         ])
         t = core.parse_transcript(text)
-        self.assertEqual((t.tool, t.tool_lines), ("AskUserQuestion", ("  2. 4",)))
+        self.assertEqual((t.tool, t.pending), ("Bash", True))
+        q = core.parse_transcript(text.splitlines()[1])
+        self.assertEqual((q.tool, q.tool_lines), ("AskUserQuestion", ("  2. 4",)))
 
     def test_a_cut_first_line_is_dropped(self):
         whole = entry("assistant", [{"type": "text", "text": "Earlier."}])
@@ -2042,10 +2072,73 @@ class ParseTranscriptNeverRaises(unittest.TestCase):
         ])
         self.assertEqual(core.parse_transcript(text).prompt, "real prompt")
 
+    def test_only_known_wrapper_tags_are_skipped_not_every_prompt_starting_with_a_tag(self):
+        for wrapped in ("<command-name>/clear</command-name>", "<local-command-stdout>ok</local-command-stdout>",
+                        "<bash-input>ls</bash-input>", "<task-notification>done</task-notification>",
+                        "<system-reminder>note</system-reminder>"):
+            with self.subTest(wrapped=wrapped):
+                self.assertEqual(core.parse_transcript("\n".join([entry("user", "real"), entry("user", wrapped)])).prompt, "real")
+        self.assertEqual(core.parse_transcript(entry("user", "<div> renders blank, why?")).prompt, "<div> renders blank, why?")
+
+    def test_a_compaction_summary_is_skipped(self):
+        text = "\n".join([entry("user", "real prompt"), entry("user", "This session is being continued...", isCompactSummary=True)])
+        self.assertEqual(core.parse_transcript(text).prompt, "real prompt")
+
+    def test_the_first_line_of_the_reply_is_kept(self):
+        t = core.parse_transcript(entry("assistant", [{"type": "text", "text": "\n## Done\nmore"}]))
+        self.assertEqual(t.reply_line, "Done")
+
     def test_a_reply_before_the_latest_prompt_is_not_its_answer(self):
         text = "\n".join([entry("assistant", [{"type": "text", "text": "Old."}]), entry("user", "new question")])
         t = core.parse_transcript(text)
         self.assertEqual((t.reply, t.answered, t.latest), ("Old.", False, "prompt"))
+
+
+def call(use_id, name, given):
+    return {"type": "tool_use", "id": use_id, "name": name, "input": given}
+
+
+def result(use_id):
+    return entry("user", [{"type": "tool_result", "tool_use_id": use_id, "content": "ok"}])
+
+
+class ParallelToolCalls(unittest.TestCase):
+    def test_a_waiting_call_is_kept_when_a_later_call_of_its_batch_has_its_result(self):
+        text = "\n".join([entry("user", "clean up"),
+                          entry("assistant", [call("t1", "Bash", {"command": "rm x"}), call("t2", "Read", {"file_path": "/a"})]),
+                          result("t2")])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.tool, t.pending, t.latest), ("Bash: rm x", True, "tool"))
+        self.assertEqual(core.session_summary(st("blocked", "permission prompt"), t), "approve Bash: rm x")
+
+    def test_of_several_waiting_calls_the_earliest_is_the_one_asked_about(self):
+        # On screen, 2.1.294 asked about `touch first.txt` first (see the parallel-permission fixtures).
+        text = "\n".join([entry("user", "go"),
+                          entry("assistant", [call("t1", "Bash", {"command": "touch first.txt"})]),
+                          entry("assistant", [call("t2", "Bash", {"command": "touch second.txt"})])])
+        self.assertEqual(core.parse_transcript(text).tool, "Bash: touch first.txt")
+        self.assertEqual(core.parse_transcript(text + "\n" + result("t1")).tool, "Bash: touch second.txt")
+
+    def test_with_every_call_answered_the_latest_is_shown_and_nothing_is_pending(self):
+        text = "\n".join([entry("assistant", [call("t1", "Bash", {"command": "a"}), call("t2", "Bash", {"command": "b"})]),
+                          result("t1"), result("t2")])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.tool, t.pending), ("Bash: b", False))
+
+    def test_a_call_left_without_a_result_before_a_new_prompt_is_not_pending(self):
+        text = "\n".join([entry("assistant", [call("t1", "Bash", {"command": "old"})]), entry("user", "next"),
+                          entry("assistant", [call("t2", "Bash", {"command": "new"})]), result("t2")])
+        t = core.parse_transcript(text)
+        self.assertEqual((t.tool, t.pending), ("Bash: new", False))
+
+
+class SessionIds(unittest.TestCase):
+    def test_only_a_uuid_shape_passes(self):
+        self.assertTrue(core.is_session_id("816e8d5e-c8a9-4b40-914c-b0d248df02d1".upper()))
+        for bad in ("", "u1", "../../etc/passwd", "816e8d5e-c8a9-4b40-914c-b0d248df02d", "816e8d5e-c8a9-4b40-914c-b0d248df02d1/",
+                    "816e8d5e-c8a9-4b40-914c-b0d248df02d1\n", None):
+            with self.subTest(bad=bad):
+                self.assertFalse(core.is_session_id(bad))
 
 
 class TailBytes(unittest.TestCase):
@@ -2116,12 +2209,13 @@ class SessionSummary(unittest.TestCase):
 
 
 class RowDetail(unittest.TestCase):
-    def test_waiting_for_follows_the_summary_or_stands_alone(self):
+    def test_the_summary_replaces_waiting_for_which_stands_in_only_when_there_is_none(self):
         perm = core.parse_transcript(real_transcript("permission"))
         self.assertEqual(core.row_detail(st("blocked", "permission prompt"), perm),
-                         ("approve Bash: echo emx-perm-check > out.txt", "permission prompt"))
+                         ("approve Bash: echo emx-perm-check > out.txt", ""))
         self.assertEqual(core.row_detail(st("blocked", "permission prompt"), None), ("permission prompt", ""))
         self.assertEqual(core.row_detail(st("done"), core.parse_transcript(real_transcript("done"))), ("Alpha done.", ""))
+        self.assertEqual(core.row_detail(st("done", "idle"), core.parse_transcript(real_transcript("done"))), ("Alpha done.", ""))
 
     def test_the_tail_shows_only_when_all_of_it_fits(self):
         def row(width):
@@ -2194,6 +2288,14 @@ class PeekLines(unittest.TestCase):
         for width in range(2, 15):
             for text, _ in core.peek_lines(peek, width, 50):
                 self.assertLessEqual(core.display_width(text), width)
+
+
+class CutLines(unittest.TestCase):
+    def test_keeps_what_fits_and_ends_a_cut_in_an_ellipsis(self):
+        lines = [("a", "body"), ("b", "body"), ("c", "body")]
+        self.assertEqual(core.cut_lines(lines, 3), lines)
+        self.assertEqual(core.cut_lines(lines, 2), [("a", "body"), ("…", "dim")])
+        self.assertEqual(core.cut_lines(lines, 0), [])
 
 
 class PeekHeight(unittest.TestCase):

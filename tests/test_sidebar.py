@@ -1556,6 +1556,11 @@ def transcript_line(kind, content, at="2026-10-08T09:00:00Z"):
     return json.dumps({"type": kind, "timestamp": at, "message": {"role": kind, "content": content}})
 
 
+U1 = "11111111-1111-4111-8111-111111111111"
+U2 = "22222222-2222-4222-8222-222222222222"
+U9 = "99999999-9999-4999-8999-999999999999"
+
+
 class ReadTranscript(unittest.TestCase):
     def test_finds_a_reply_behind_a_huge_line_reading_only_the_tail_and_never_writing(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1567,16 +1572,16 @@ class ReadTranscript(unittest.TestCase):
             path.write_text(filler + "\n" + reply + "\n" + padding + "\n")
             before = os.stat(path)
             with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
-                found = sidebar.read_transcript(str(path), before.st_size)
-            self.assertEqual(found.reply, "Done here.")
+                found, ok = sidebar.read_transcript(str(path), before.st_size)
+            self.assertEqual((found.reply, ok), ("Done here.", True))
             self.assertEqual([c.args[1] for c in opened.call_args_list], ["rb"])
             self.assertEqual(os.stat(path).st_mtime_ns, before.st_mtime_ns)
 
-    def test_a_missing_or_garbled_file_gives_none(self):
+    def test_a_missing_file_fails_and_a_garbled_one_reads_as_nothing(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertIsNone(sidebar.read_transcript(os.path.join(d, "missing.jsonl"), 10))
+            self.assertEqual(sidebar.read_transcript(os.path.join(d, "missing.jsonl"), 10), (None, False))
             Path(d, "bad.jsonl").write_bytes(b"\xff\xfe{not json\n")
-            self.assertIsNone(sidebar.read_transcript(os.path.join(d, "bad.jsonl"), 13))
+            self.assertEqual(sidebar.read_transcript(os.path.join(d, "bad.jsonl"), 13), (None, True))
 
 
 class TranscriptReader(unittest.TestCase):
@@ -1597,48 +1602,84 @@ class TranscriptReader(unittest.TestCase):
         return core.Session(sid, sid, cwd, "done", "", "", None, True, uuid)
 
     def test_reads_the_transcript_where_claude_code_keeps_it_for_the_folder(self):
-        self.write("-tmp-a-proj", "u1", transcript_line("assistant", [{"type": "text", "text": "Hi."}]))
-        self.reader.want([self.row("s1", "/tmp/a.proj", "u1"), self.row("s2", "/tmp/b", "")])
+        self.write("-tmp-a-proj", U1, transcript_line("assistant", [{"type": "text", "text": "Hi."}]))
+        self.reader.want([self.row("s1", "/tmp/a.proj", U1), self.row("s2", "/tmp/b", "")])
         self.reader.read_all()
         self.assertEqual({sid: t.reply for sid, t in self.reader.take().items()}, {"s1": "Hi."})
         self.assertIsNone(self.reader.take())
 
     def test_a_transcript_elsewhere_is_found_by_its_file_name_and_a_miss_backs_off(self):
-        self.write("-some-shortened-name-1234", "u1", transcript_line("user", "go"))
-        self.write("-other", "u9", transcript_line("user", "not this one"))
-        self.assertTrue(self.reader.locate("/tmp/x", "u1").endswith("-some-shortened-name-1234/u1.jsonl"))
-        self.assertIsNone(self.reader.locate("/tmp/x", "u2"))
+        self.write("-some-shortened-name-1234", U1, transcript_line("user", "go"))
+        self.write("-other", U9, transcript_line("user", "not this one"))
+        self.assertTrue(self.reader.locate("/tmp/x", U1).endswith(f"-some-shortened-name-1234/{U1}.jsonl"))
+        self.assertIsNone(self.reader.locate("/tmp/x", U2))
         with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched again")):
-            self.assertIsNone(self.reader.locate("/tmp/x", "u2"))
+            self.assertIsNone(self.reader.locate("/tmp/x", U2))
+
+    def test_a_session_id_not_shaped_like_one_is_never_looked_up(self):
+        self.write("-tmp-a", "notes", transcript_line("user", "go"))
+        for bad in ("notes", "../" + U1[3:], U1 + "/x", U1[:-1], ""):
+            with self.subTest(bad=bad), \
+                    mock.patch.object(sidebar.os.path, "isfile", side_effect=AssertionError("looked up")), \
+                    mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched")):
+                self.assertIsNone(self.reader.locate("/tmp/a", bad))
+
+    def test_a_missing_projects_folder_backs_off_too(self):
+        with self.assertRaises(OSError):
+            self.reader.locate("/tmp/x", U1)
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched again")):
+            self.assertIsNone(self.reader.locate("/tmp/x", U1))
 
     def test_an_unchanged_file_is_not_read_again(self):
-        path = self.write("-tmp-a", "u1", transcript_line("user", "go"))
-        self.reader.want([self.row("s1", "/tmp/a", "u1")])
+        path = self.write("-tmp-a", U1, transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", U1)])
         with mock.patch.object(sidebar, "read_transcript", wraps=sidebar.read_transcript) as reads:
             self.reader.read_all()
             self.reader.read_all()
             self.assertEqual(reads.call_count, 1)
-            self.write("-tmp-a", "u1", transcript_line("assistant", [{"type": "text", "text": "Went."}]))
+            self.write("-tmp-a", U1, transcript_line("assistant", [{"type": "text", "text": "Went."}]))
             self.reader.read_all()
             self.assertEqual(reads.call_count, 2)
         self.assertEqual(self.reader.take()["s1"].reply, "Went.")
         self.assertTrue(os.path.exists(path))
 
+    def test_a_failed_read_is_tried_again_while_an_empty_one_is_not(self):
+        self.write("-tmp-a", U1, transcript_line("user", "go"))
+        self.write("-tmp-b", U2, "{not json")
+        self.reader.want([self.row("s1", "/tmp/a", U1), self.row("s2", "/tmp/b", U2)])
+        real = sidebar.read_transcript
+        failed = []
+
+        def flaky(path, size):
+            if U1 in path and not failed:
+                failed.append(path)
+                return None, False
+            return real(path, size)
+
+        with mock.patch.object(sidebar, "read_transcript", side_effect=flaky) as reads:
+            self.reader.read_all()
+            self.reader.read_all()
+            self.reader.read_all()
+        self.assertEqual(sorted(U1 in c.args[0] for c in reads.call_args_list), [False, True, True])
+        self.assertEqual(self.reader.take()["s1"].prompt, "go")
+
     def test_a_session_no_longer_listed_is_forgotten(self):
-        self.write("-tmp-a", "u1", transcript_line("user", "go"))
-        self.reader.want([self.row("s1", "/tmp/a", "u1")])
+        self.write("-elsewhere", U1, transcript_line("user", "go"))
+        self.reader.want([self.row("s1", "/tmp/a", U1), self.row("s2", "/tmp/b", U2)])
         self.reader.read_all()
         self.reader.take()
+        self.assertEqual((set(self.reader.paths), set(self.reader.misses)), ({U1}, {U2}))
         self.reader.want([])
         self.reader.read_all()
         self.assertEqual(self.reader.take(), {})
+        self.assertEqual((self.reader.paths, self.reader.misses, self.reader.stamps), ({}, {}, {}))
 
     def test_the_poller_hands_its_sessions_to_the_reader(self):
         poller = sidebar.Poller("claude")
-        rows = [self.row("s1", "/tmp/a", "u1")]
+        rows = [self.row("s1", "/tmp/a", U1)]
         with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
             poller.poll()
-        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", "u1")})
+        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1)})
 
 
 class RecordingScr(FakeScr):
@@ -1743,6 +1784,37 @@ class Peek(AppCase):
             if boxed:
                 bottom = screen.index(boxed[0])
                 self.assertTrue(screen[bottom + sum(1 for line in screen[bottom:] if line[:1] in "╭│")].startswith("╰"))
+
+    def test_space_in_a_pane_too_short_for_the_box_says_so_instead_of_peeking(self):
+        self.app.cursor = ("session", "a")
+        self.scr.size = (8, 40)
+        self.app.handle_key(" ")
+        self.assertFalse(self.app.peeking)
+        self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
+        self.scr.size = (20, 40)
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+
+    def test_shrinking_the_pane_closes_the_peek_with_the_notice(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.scr.size = (8, 40)
+        self.app.handle_key(curses.KEY_RESIZE)
+        self.app.refresh()
+        self.assertFalse(self.app.peeking)
+        self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
+        self.assertFalse(any(line.startswith("╭") for line in self.screen()))
+
+    def test_a_long_body_is_wrapped_once_per_change_not_per_draw(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        with mock.patch.object(core, "peek_lines", wraps=core.peek_lines) as wraps:
+            for _ in range(3):
+                self.app.draw()
+            self.assertEqual(wraps.call_count, 1)
+            self.scr.size = (20, 50)
+            self.app.draw()
+            self.assertEqual(wraps.call_count, 2)
 
     def test_the_footer_and_help_mention_it(self):
         self.assertIn("␣ peek", sidebar.FOOTERS[0])
