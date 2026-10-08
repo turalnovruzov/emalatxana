@@ -3055,6 +3055,22 @@ class InterruptSession(AppCase):
         self.assertTrue(all(not i.is_alive() for i in both))
         self.assertEqual(ran[0], ["claude", "stop", "working"])
 
+    def test_a_session_that_leaves_the_listing_after_the_escape_ends_the_wait_at_once_without_an_error(self):
+        self.after = session("b", "/p/beta")
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.app.tmux.keys_sent, [("%2", "Escape")])
+        self.assertEqual(len(self.fetched), 2)
+        self.assertEqual((self.app.notice, self.app.notice_error),
+                         ("emx sent Esc to emx-test-working, which isn't listed any more.", False))
+
+    def test_a_failing_listing_while_waiting_is_not_taken_for_the_session_leaving(self):
+        self.listings = [[self.working], None, None]
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(len(self.fetched), 4)
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Interrupted emx-test-working.", False))
+
     def test_an_escape_that_does_not_stop_it_says_so(self):
         self.after = self.working
         self.press(sidebar.CTRL_X)

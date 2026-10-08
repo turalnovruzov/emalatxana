@@ -518,6 +518,8 @@ class Interrupter(threading.Thread):
         except TmuxError as exc:
             return False, f"tmux: {exc}"
         stopped = self.wait_until_stopped()
+        if stopped is None:
+            return True, core.left_listing_text(interrupt)
         return stopped, core.interrupted_text(interrupt, stopped)
 
     def screen(self, pane: str) -> core.RenameScreen:
@@ -537,11 +539,14 @@ class Interrupter(threading.Thread):
             time.sleep(LISTED_CHECK_SECONDS)
         return None
 
-    def wait_until_stopped(self) -> bool:
+    def wait_until_stopped(self) -> bool | None:
+        """True once a listing shows it stopped working, False if it still is at the deadline, None once a listing that worked no longer shows it."""
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         while not self.cancel.is_set():
             sessions, _ = fetch_sessions(self.claude)
-            session, _ = core.checked_row(sessions, self.interrupt.id)
+            session, fresh = core.checked_row(sessions, self.interrupt.id)
+            if fresh and session is None:
+                return None
             if session is not None and not core.interruptible(session):
                 return True
             if time.monotonic() >= deadline:

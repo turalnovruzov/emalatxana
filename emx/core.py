@@ -639,6 +639,10 @@ def interrupted_text(interrupt: Interrupt, stopped: bool) -> str:
     return f"{interrupt.name} is still working; emx sent Esc but it didn't stop."
 
 
+def left_listing_text(interrupt: Interrupt) -> str:
+    return f"emx sent Esc to {interrupt.name}, which isn't listed any more."
+
+
 def type_gate(
     viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str, cursor_x: int | None = None,
 ) -> str | None:

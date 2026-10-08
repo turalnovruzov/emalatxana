@@ -2659,6 +2659,8 @@ class InterruptChecks(unittest.TestCase):
         self.assertEqual(core.interrupted_text(self.interrupt, True), "Interrupted emx-test-working.")
         self.assertEqual(core.interrupted_text(self.interrupt, False),
                          "emx-test-working is still working; emx sent Esc but it didn't stop.")
+        self.assertEqual(core.left_listing_text(self.interrupt),
+                         "emx sent Esc to emx-test-working, which isn't listed any more.")
 
 
 class TypeGate(unittest.TestCase):
