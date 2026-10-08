@@ -9,7 +9,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 ### Every tmux call goes through `emx.tmux.Tmux`
 
 1. **Rule**: we reach tmux only through the `Tmux` wrapper in `emx/tmux.py`, which puts emx's private `-L` socket on every command. New tmux behaviour becomes a method on it, never a bare `tmux` in a subprocess call or a shell string.
-2. **Why**: Tural runs his own tmux server all day. A command without the private socket lands on his server and can rebind keys or kill panes in his real work.
+2. **Why**: the user's default tmux server holds his real work. A command without the private socket lands on that server and can rebind keys or kill panes there.
 3. **Minimal example**:
    ```python
    tmux.some_action(pane)        # a Tmux method; it adds -L <socket>
@@ -30,7 +30,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### CLI wrappers never raise
 
-1. **Rule**: a function that runs an outside command (`claude`, and anything like it) returns `(value, None)` on success or `(None, one-line error)` on failure, and never raises. The caller shows the error line on screen.
+1. **Rule**: a function that wraps the `claude` CLI returns `(value, None)` on success or `(None, one-line error)` on failure, and never raises. The caller shows the error line on screen. The `Tmux` wrapper is the exception: it raises `TmuxError`, and every caller of it catches that and shows the line.
 2. **Why**: the sidebar runs for hours in a pane. One escaped exception kills the poller thread or the curses loop, and he is left with a frozen or dead panel.
 3. **Minimal example**:
    ```python

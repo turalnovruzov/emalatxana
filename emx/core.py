@@ -318,11 +318,12 @@ _FULL_RULE = re.compile(r"^─+$")
 _NAME_RULE = re.compile(r"^─*\s+(\S.*?)\s+─$")
 _PROMPT = re.compile(r"^❯(\s|$)")
 _AGENT_FOOTER = re.compile(r"^\s*enter to return\b|\bctrl\+x to delete\b")
-_AGENT_COUNTS = re.compile(r"\b\d+ (awaiting input|working|completed)( · \d+ [a-z ]+)*$")
+_AGENT_COUNT = r"\d+ (?:awaiting input|working|completed)"
+_AGENT_HEADER = re.compile(rf"^[\s▐▛▜▌▝▘█]*{_AGENT_COUNT}(?: · {_AGENT_COUNT})+$")
 _PROMPT_REACH = 12
 
 
-def main_view_state(captured: str, expected_name: str) -> str:
+def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:
     """What a `claude attach` pane is showing, judged from its captured text.
 
     "agent_view" when ← has turned it into the all-sessions view, "mismatch"
@@ -330,6 +331,7 @@ def main_view_state(captured: str, expected_name: str) -> str:
     "ok" when the rule names it, and "unknown" otherwise. Only positive
     evidence raises an alarm: dialogs, startup, transcript text and an empty
     `expected_name` (an unnamed session) all come back "unknown".
+    `pane_width` is the width tmux reports for the pane the text came from.
     """
     lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
     if not lines:
@@ -337,11 +339,11 @@ def main_view_state(captured: str, expected_name: str) -> str:
     for i in range(max(1, len(lines) - 2), len(lines)):
         if _AGENT_FOOTER.search(lines[i]) and _FULL_RULE.match(lines[i - 1]):
             return "agent_view"
-    above = _line_above_prompt(lines)
+    above = _line_above_prompt(lines, pane_width)
     if above is None:
         return "unknown"
     if _FULL_RULE.match(above):
-        if any(_AGENT_COUNTS.search(line) for line in lines[:4]):
+        if any(_AGENT_HEADER.match(line) for line in lines[:4]):
             return "agent_view"
         return "unknown"
     match = _NAME_RULE.match(above)
@@ -350,13 +352,12 @@ def main_view_state(captured: str, expected_name: str) -> str:
     return "ok" if _names_match(match.group(1), expected_name) else "mismatch"
 
 
-def _line_above_prompt(lines: list) -> str | None:
+def _line_above_prompt(lines: list, pane_width: int) -> str | None:
     """The line over the input box: the last `❯` line near the bottom with a pane-wide rule under it.
 
     Both rules of the real input box span the whole pane, so requiring that
     width keeps a rule-and-prompt look-alike quoted in the transcript from counting.
     """
-    pane_width = max(display_width(line) for line in lines)
     start = max(1, len(lines) - _PROMPT_REACH)
     for i in range(len(lines) - 2, start - 1, -1):
         if not _PROMPT.match(lines[i]):
@@ -373,3 +374,19 @@ def _names_match(shown: str, expected: str) -> bool:
     if shown.endswith("…"):
         return expected.startswith(shown[:-1].rstrip())
     return shown == expected
+
+
+def latch_off_main(flagged: frozenset, pane_id: str, state: str) -> tuple:
+    """Track viewers caught showing something other than their own session.
+
+    A pane id joins the set on "agent_view" or "mismatch" and leaves it only on
+    "ok" (or when the caller respawns it), so the flag survives the viewer
+    leaving the main pane and an "unknown" read such as a dialog. Returns
+    (new_flagged, respawn): respawn says the viewer needs a fresh
+    `claude attach` before it is shown again.
+    """
+    if state in ("agent_view", "mismatch"):
+        flagged = flagged | {pane_id}
+    elif state == "ok":
+        flagged = flagged - {pane_id}
+    return frozenset(flagged), pane_id in flagged

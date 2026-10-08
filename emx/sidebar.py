@@ -17,7 +17,6 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
-OFF_STATES = ("agent_view", "mismatch")
 BACK_KEY = "C-\\"
 FOOTERS = (
     "↵ open  n new  r restart  s side  [ ] main  < > panel  q detach  ^\\ back",
@@ -162,7 +161,7 @@ class App:
         self.scroll = 0
         self.poller = Poller(claude)
         self.starter = None
-        self.off_main = None
+        self.flagged_viewers = frozenset()
 
     def say(self, text: str, error: bool = False) -> None:
         self.notice, self.notice_error = text, error
@@ -205,6 +204,7 @@ class App:
                 self.reconcile_widths(sidebar, main, spacer)
             if fresh_list:
                 self.close_stale(panes, main)
+            self.flagged_viewers &= {p.id for p in panes}
             self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -212,23 +212,18 @@ class App:
     def check_main(self, main: Pane | None) -> None:
         """Flag the main pane once it stops showing the session emx put there: ← opens the agent view, and from there any session."""
         if main is None or main.dead or not main.session:
-            self.off_main = None
             return
-        state = self.view_state(main)
-        if state in OFF_STATES:
-            self.off_main = main.id
-        elif state == "ok" or self.off_main != main.id:
-            self.off_main = None
+        self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, self.view_state(main))
 
     def view_state(self, viewer: Pane) -> str:
         session = self.session(viewer.session)
         if session is None:
             return "unknown"
         expected = "" if session.name == session.id else session.name
-        return core.main_view_state(self.tmux.capture(viewer.id), expected)
+        return core.main_view_state(self.tmux.capture(viewer.id), expected, viewer.width)
 
     def main_is_off(self) -> bool:
-        return self.main_pane is not None and self.off_main == self.main_pane.id
+        return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
 
     def reconcile_widths(self, sidebar: Pane, main: Pane, spacer: Pane) -> None:
         actual = (sidebar.window_width, sidebar.width, main.width)
@@ -282,11 +277,12 @@ class App:
                 self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
             else:
                 pane_id = viewer.id
-                if viewer.dead or pane_id == self.off_main or self.view_state(viewer) in OFF_STATES:
+                self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
+                if viewer.dead or respawn:
                     if not self.reopen_allowed(sid):
                         return
                     self.tmux.respawn(pane_id, command)
-                    self.off_main = None
+                    self.flagged_viewers -= {pane_id}
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
@@ -311,7 +307,7 @@ class App:
             return
         try:
             self.tmux.respawn(main.id, core.viewer_command(self.claude, main.session))
-            self.off_main = None
+            self.flagged_viewers -= {main.id}
             self.tmux.select(main.id)
             self.say("Viewer restarted.")
         except TmuxError as exc:

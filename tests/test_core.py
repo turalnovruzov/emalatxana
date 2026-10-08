@@ -334,44 +334,44 @@ AGENT_VIEW = "\n".join([
 
 class MainViewState(unittest.TestCase):
     def test_matching_name_is_ok(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha")), "alpha"), "ok")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha")), "alpha", 40), "ok")
 
     def test_other_name_is_mismatch(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha"), "mismatch")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha", 40), "mismatch")
 
     def test_agent_view_by_footer(self):
-        self.assertEqual(core.main_view_state(AGENT_VIEW, "alpha"), "agent_view")
+        self.assertEqual(core.main_view_state(AGENT_VIEW, "alpha", 70), "agent_view")
 
     def test_agent_view_by_counts_when_footer_is_cut(self):
         screen = "\n".join(AGENT_VIEW.splitlines()[:-1] + ["  ? for shortcuts"])
-        self.assertEqual(core.main_view_state(screen, "alpha"), "agent_view")
+        self.assertEqual(core.main_view_state(screen, "alpha", 70), "agent_view")
 
     def test_agent_view_for_unnamed_session(self):
-        self.assertEqual(core.main_view_state(AGENT_VIEW, ""), "agent_view")
+        self.assertEqual(core.main_view_state(AGENT_VIEW, "", 70), "agent_view")
 
     def test_ansi_codes_are_ignored(self):
         screen = viewer_screen("\x1b[2m" + named_rule("alpha") + "\x1b[0m")
-        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
+        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
 
     def test_names_with_spaces_and_extra_whitespace(self):
         screen = viewer_screen(named_rule("my  long name", width=60), width=60)
-        self.assertEqual(core.main_view_state(screen, "my long name"), "ok")
+        self.assertEqual(core.main_view_state(screen, "my long name", 60), "ok")
 
     def test_truncated_name_matches_by_prefix(self):
         for rule in (" a very long session na… ─", "───── a very long session na… ─"):
             with self.subTest(rule=rule):
                 screen = viewer_screen(rule, width=len(rule))
-                self.assertEqual(core.main_view_state(screen, "a very long session name indeed"), "ok")
-                self.assertEqual(core.main_view_state(screen, "a very different name"), "mismatch")
+                self.assertEqual(core.main_view_state(screen, "a very long session name indeed", len(rule)), "ok")
+                self.assertEqual(core.main_view_state(screen, "a very different name", len(rule)), "mismatch")
 
     def test_multiline_prompt_input(self):
         screen = viewer_screen(named_rule("alpha"), prompt="❯ first line\n  second line\n  third line")
-        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
-        self.assertEqual(core.main_view_state(screen, "beta"), "mismatch")
+        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
+        self.assertEqual(core.main_view_state(screen, "beta", 40), "mismatch")
 
     def test_unnamed_session_never_mismatches(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("generated-name")), ""), "unknown")
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("x")), "   "), "unknown")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("generated-name")), "", 40), "unknown")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("x")), "   ", 40), "unknown")
 
     def test_unsure_screens_are_unknown(self):
         no_prompt = "\n".join(["Do you want to allow this?", " ❯ 1. Yes", "   2. No", "─" * 40, "Esc to cancel"])
@@ -379,7 +379,7 @@ class MainViewState(unittest.TestCase):
         startup = "Loading…\n"
         for screen in ("", "\n\n   \n", startup, no_prompt, bare_rule_no_counts):
             with self.subTest(screen=screen):
-                self.assertEqual(core.main_view_state(screen, "alpha"), "unknown")
+                self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
 
     def test_transcript_text_raises_no_alarm(self):
         transcript = (
@@ -390,13 +390,62 @@ class MainViewState(unittest.TestCase):
             "enter to return, said the doc",
         )
         screen = viewer_screen(named_rule("alpha"), transcript=transcript)
-        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
+        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
         no_input_box = "\n".join([*transcript, "still thinking…", "", ""])
-        self.assertEqual(core.main_view_state(no_input_box, "alpha"), "unknown")
+        self.assertEqual(core.main_view_state(no_input_box, "alpha", 40), "unknown")
 
     def test_prompt_far_above_bottom_is_ignored(self):
         screen = named_rule("beta") + "\n❯ old\n" + "─" * 40 + "\n" + "\n".join(f"output line {i}" for i in range(30))
-        self.assertEqual(core.main_view_state(screen, "alpha"), "unknown")
+        self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
+
+    def test_count_words_at_line_end_are_not_the_agent_header(self):
+        for top in ("Step 3 completed", "build: 4 working", "noted: 2 awaiting input · 1 working"):
+            with self.subTest(top=top):
+                screen = viewer_screen("─" * 40, transcript=(top, "more text", ""))
+                self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
+
+    def test_agent_header_needs_two_counts(self):
+        screen = "\n".join(AGENT_VIEW.splitlines()[:-1] + ["  ? for shortcuts"])
+        one_count = screen.replace("2 awaiting input · 1 working · 3 completed", "3 completed")
+        self.assertEqual(core.main_view_state(one_count, "alpha", 70), "unknown")
+
+    def test_wide_emoji_line_does_not_hide_the_input_box(self):
+        family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"
+        transcript = (family * 8, "some answer text", "")
+        self.assertGreater(core.display_width(family * 8), 40)
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha"), transcript=transcript), "alpha", 40), "ok")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta"), transcript=transcript), "alpha", 40), "mismatch")
+
+    def test_rule_narrower_than_the_pane_is_not_the_input_box(self):
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha", 41), "unknown")
+
+
+class LatchOffMain(unittest.TestCase):
+    def test_off_states_flag_the_pane(self):
+        for state in ("agent_view", "mismatch"):
+            with self.subTest(state=state):
+                self.assertEqual(core.latch_off_main(frozenset(), "%1", state), (frozenset({"%1"}), True))
+
+    def test_ok_clears_only_that_pane(self):
+        self.assertEqual(core.latch_off_main(frozenset({"%1", "%2"}), "%1", "ok"), (frozenset({"%2"}), False))
+
+    def test_unknown_keeps_the_flag(self):
+        self.assertEqual(core.latch_off_main(frozenset({"%1"}), "%1", "unknown"), (frozenset({"%1"}), True))
+        self.assertEqual(core.latch_off_main(frozenset(), "%1", "unknown"), (frozenset(), False))
+
+    def test_flag_survives_another_session_in_main(self):
+        flagged, _ = core.latch_off_main(frozenset(), "%A", "agent_view")
+        flagged, respawn_c = core.latch_off_main(flagged, "%C", "ok")
+        self.assertFalse(respawn_c)
+        flagged, respawn_a = core.latch_off_main(flagged, "%A", "unknown")
+        self.assertTrue(respawn_a)
+        self.assertEqual(flagged, frozenset({"%A"}))
+
+    def test_input_set_is_not_mutated(self):
+        before = frozenset({"%1"})
+        core.latch_off_main(before, "%2", "mismatch")
+        core.latch_off_main(before, "%1", "ok")
+        self.assertEqual(before, frozenset({"%1"}))
 
 
 class IdListed(unittest.TestCase):

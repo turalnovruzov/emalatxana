@@ -23,10 +23,16 @@ Opens the emx workspace in a private tmux server, or reattaches if it is running
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude")."""
 
 
-def socket_name() -> str | None:
-    """None when EMX_SOCKET is empty or "default": "default" is the socket of his everyday tmux server."""
-    name = os.environ.get("EMX_SOCKET", "emx")
+SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."
+
+
+def private_socket(name: str) -> str | None:
+    """None for an empty or "default" name: "default" is the socket of the user's default tmux server."""
     return None if name in ("", "default") else name
+
+
+def socket_name() -> str | None:
+    return private_socket(os.environ.get("EMX_SOCKET", "emx"))
 
 
 def self_command(*args: str) -> str:
@@ -66,7 +72,7 @@ def launch() -> int:
         return 1
     socket = socket_name()
     if socket is None:
-        print("emx: EMX_SOCKET must name a private socket, not be empty or \"default\".", file=sys.stderr)
+        print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
     tmux = Tmux(socket, CONFIG)
     try:
@@ -117,6 +123,9 @@ def main(argv: list) -> int:
         print(USAGE)
         return 0
     if argv[0] == "sidebar" and len(argv) == 2:
+        if private_socket(argv[1]) is None:
+            print(SOCKET_REFUSAL, file=sys.stderr)
+            return 2
         from emx.sidebar import run
 
         return run(argv[1])
