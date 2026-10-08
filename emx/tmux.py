@@ -176,6 +176,25 @@ class Tmux:
     def capture(self, pane: str) -> str:
         return self.run("capture-pane", "-p", "-t", pane)
 
+    def prompt_probe(self, pane: str) -> tuple:
+        """(cursor x, cursor y, cursor shown, pane width, in a mode) for the pane."""
+        out = self.run(
+            "display-message", "-p", "-t", pane, "#{cursor_x}\t#{cursor_y}\t#{cursor_flag}\t#{pane_width}\t#{pane_in_mode}",
+        )
+        x, y, shown, width, in_mode = out.strip().split("\t")
+        return int(x), int(y), shown == "1", int(width), in_mode not in ("", "0")
+
+    def type_if(self, pane: str, gate: str, text: str, typed: str, report: str) -> str:
+        """Type `text` and Enter into the pane only while the format `gate` is true there, all in one tmux command, so no other key lands between the check and the typing.
+
+        Prints back `typed` when it typed, else `report` expanded on the
+        pane. The text goes as hex bytes (`-H`): tmux reads an argument
+        ending in `;` as a command separator and drops the `;`, even with `-l`.
+        """
+        keys = " ".join(format(b, "02x") for b in text.encode("utf-8"))
+        send = f"send-keys -t {pane} -H {keys} ; send-keys -t {pane} Enter ; display-message -p {typed}"
+        return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()
+
     def detach(self) -> None:
         """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""
         self.run("detach-client")

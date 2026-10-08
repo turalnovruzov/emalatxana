@@ -1931,6 +1931,210 @@ class Pins(unittest.TestCase):
         self.assertEqual(core.pin_notice(core.toggle_pin(prefs, "a"), self.sessions[0]), "Unpinned alpha.")
 
 
+def renamed_rule(name):
+    """The named-viewer capture with its rule naming `name` instead, drawn as Claude Code draws a rule name."""
+    text, width = real_screen("named-viewer")
+    rule = next(line for line in text.split("\n") if line.endswith(" emx-test-named ─"))
+    return text.replace(rule, "─" * (width - core.display_width(name) - 3) + f" {name} ─"), width
+
+
+def rename_screen(viewer, prompt, in_mode=False, flagged=False):
+    captured, _ = real_screen(viewer)
+    line, below, x, shown, width = at_cursor(prompt)
+    return core.RenameScreen(captured, line, below, x, 26, shown, width, in_mode, flagged)
+
+
+class RenameChecks(unittest.TestCase):
+    def setUp(self):
+        self.rename = core.Rename("a", "emx-test-named", "beta")
+        self.session = named("a", "emx-test-named")
+        self.others = [named("b", "bee"), named("c", "c", state="stopped", running=False)]
+
+    def test_the_edit_opens_with_the_name_or_empty_for_an_unnamed_session(self):
+        self.assertEqual(core.rename_start(named("a", "alpha")), "alpha")
+        self.assertEqual(core.rename_start(named("a", "a")), "")
+
+    def test_a_request_is_one_plain_line_and_emoji_joiners_are_plain(self):
+        self.assertEqual(core.rename_request("a", "old", "  my name; with spaces "),
+                         (core.Rename("a", "old", "my name; with spaces"), None))
+        family = "fam \U0001f468‍\U0001f469‍\U0001f467"
+        self.assertEqual(core.rename_request("a", "old", family)[0].new, family)
+        self.assertTrue(core.name_char_allowed("‍"))
+        for bad in ("", "   ", "two\nlines", "tab\there", "esc\x1bseq", "del\x7f", "line sep", "para sep",
+                    "x" * (core.RENAME_MAX + 1)):
+            with self.subTest(bad=bad):
+                rename, error = core.rename_request("a", "old", bad)
+                self.assertIsNone(rename)
+                self.assertTrue(error)
+        self.assertEqual(core.rename_request("a", "old", "x" * core.RENAME_MAX)[0].new, "x" * core.RENAME_MAX)
+
+    def test_an_unchanged_name_is_no_request_and_no_error(self):
+        self.assertEqual(core.rename_request("a", "old", " old "), (None, None))
+
+    def test_the_longest_line_stays_under_what_claude_code_takes_for_a_paste(self):
+        self.assertLess(len(core.rename_line("x" * core.RENAME_MAX)) + 1, 64)
+
+    def test_the_line_typed_is_exactly_the_slash_command(self):
+        self.assertEqual(core.rename_line("my name"), "/rename my name")
+
+    def test_the_live_viewer_is_the_one_emx_opened_on_the_session_and_not_dead(self):
+        @dataclass
+        class P:
+            id: str
+            session: str
+            dead: bool = False
+
+        panes = [P("%1", ""), P("%2", "a", dead=True), P("%3", "b"), P("%4", "a")]
+        self.assertEqual(core.live_viewer(panes, "a").id, "%4")
+        self.assertIsNone(core.live_viewer(panes[:3], "a"))
+
+    def test_ctrl_r_needs_a_running_session_with_an_open_viewer_and_a_healthy_listing(self):
+        running = named("a", "alpha")
+        self.assertIsNone(core.rename_blocked(False, None, running, True))
+        self.assertIn("Open alpha once", core.rename_blocked(False, None, running, False))
+        stopped = named("a", "alpha", state="stopped", running=False)
+        self.assertIn("isn't running", core.rename_blocked(False, None, stopped, True))
+        self.assertIn("Can't list", core.rename_blocked(True, None, running, True))
+        self.assertIn("Still renaming", core.rename_blocked(False, self.rename, running, True))
+
+    def test_the_fresh_listing_must_show_it_running_and_not_working(self):
+        self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="blocked"), True))
+        self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="done"), True))
+        cases = {
+            "Couldn't list": (named("a", "alpha"), False),
+            "isn't listed": (None, True),
+            "isn't running": (named("a", "alpha", state="stopped", running=False), True),
+            "is working": (named("a", "alpha", state="working"), True),
+        }
+        for want, (session, fresh) in cases.items():
+            with self.subTest(want=want):
+                self.assertIn(want, core.rename_listing_refusal(self.rename, session, fresh))
+
+    def identity(self, session, others, screen):
+        text, width = real_screen(screen) if isinstance(screen, str) else screen
+        return core.viewer_identity(session, [session] + others, text, width)
+
+    def test_a_viewer_is_its_sessions_only_when_no_other_listed_session_fits_its_screen(self):
+        unnamed = named("u", "u")
+        stopped_unnamed = named("v", "v", state="stopped", running=False)
+        cases = [
+            (self.session, self.others, "named-viewer", "ok"),
+            (self.session, self.others + [named("d", "emx-test-named")], "named-viewer", "ambiguous"),
+            (named("a", "someone-else"), self.others, "named-viewer", "other"),
+            (self.session, self.others, "agent-view", "other"),
+            (self.session, self.others, "cross-wired", "other"),
+            (self.session, self.others, "unnamed-empty-viewer", "other"),
+            (unnamed, self.others, "unnamed-empty-viewer", "ok"),
+            (unnamed, self.others + [named("v", "v")], "unnamed-empty-viewer", "ambiguous"),
+            (unnamed, self.others + [stopped_unnamed], "unnamed-empty-viewer", "ok"),
+            (unnamed, self.others, "named-viewer", "other"),
+            (unnamed, self.others, "cross-wired", "other"),
+            (unnamed, self.others, "agent-view", "other"),
+        ]
+        for session, others, screen, want in cases:
+            with self.subTest(session=session.name, others=len(others), screen=screen):
+                self.assertEqual(self.identity(session, others, screen), want)
+
+    def test_a_name_cut_to_fit_proves_the_session_only_when_it_fits_no_other(self):
+        long = named("a", "emx-test-a-rather-long-session-name")
+        cut = renamed_rule("emx-test-a-rather…")
+        self.assertEqual(self.identity(long, self.others, cut), "ok")
+        self.assertEqual(self.identity(long, self.others + [named("d", "emx-test-a-rather-short")], cut), "ambiguous")
+
+    def test_the_screen_must_show_this_sessions_empty_prompt_outside_any_mode(self):
+        sessions = [self.session] + self.others
+
+        def refusal(screen, listed=sessions):
+            return core.rename_screen_refusal(self.rename, self.session, listed, screen)
+
+        self.assertIsNone(refusal(rename_screen("named-viewer", "prompt-empty")))
+        self.assertIn("scrolled back", refusal(rename_screen("named-viewer", "prompt-empty", in_mode=True)))
+        self.assertIn("isn't showing its prompt", refusal(rename_screen("named-viewer", "prompt-empty", flagged=True)))
+        self.assertIn("isn't showing its prompt", refusal(rename_screen("agent-view", "prompt-empty")))
+        for prompt in ("prompt-text", "prompt-text-at-start", "prompt-slash-menu", "prompt-permission", "prompt-multiline"):
+            with self.subTest(prompt=prompt):
+                self.assertIn("isn't empty", refusal(rename_screen("named-viewer", prompt)))
+        twin = refusal(rename_screen("named-viewer", "prompt-empty"), sessions + [named("d", "emx-test-named")])
+        self.assertIn("looks the same as another session's", twin)
+
+    def test_the_rule_name_is_read_off_the_input_box(self):
+        cases = {"named-viewer": "emx-test-named", "unnamed-empty-viewer": "", "cross-wired": "emx-test-perm",
+                 "permission-dialog": None}
+        for screen, want in cases.items():
+            with self.subTest(screen=screen):
+                self.assertEqual(core.rule_name(*real_screen(screen)), want)
+
+    def test_the_gate_takes_only_plain_ids(self):
+        self.assertIsNotNone(core.type_gate("%3", "%1", "c43619b4", 26, "@emx_session"))
+        bad = (("%3,", "%1", "a"), ("%3", "1", "a"), ("%3", "%1", "a}"), ("%3", "%1", "a b"), ("%3", "%1", ""))
+        for viewer, panel, sid in bad:
+            with self.subTest(viewer=viewer, panel=panel, sid=sid):
+                self.assertIsNone(core.type_gate(viewer, panel, sid, 26, "@emx_session"))
+
+    def test_the_gate_names_the_viewer_the_session_the_cursor_and_the_panel(self):
+        gate = core.type_gate("%3", "%1", "abc", 26, "@emx_session")
+        for part in ("#{==:#{pane_id},%3}", "#{==:#{pane_in_mode},0}", "#{==:#{pane_dead},0}",
+                     "#{==:#{@emx_session},abc}", "#{==:#{cursor_flag},1}", "#{==:#{cursor_x},2}",
+                     "#{==:#{cursor_y},26}", "#{==:#{pane_id},%1}"):
+            with self.subTest(part=part):
+                self.assertIn(part, gate)
+        self.assertEqual(gate.count("{"), gate.count("}"))
+        self.assertNotIn("%", core.gate_report("@emx_session"))
+
+    def test_what_tmux_printed_says_whether_it_typed_and_why_not(self):
+        r = core.Rename("abc", "alpha", "beta")
+        self.assertIsNone(core.gate_refusal(r, core.TYPED, 26))
+        cases = {
+            "1 0 1 2 26 abc": "scrolled back",
+            "0 1 1 2 26 abc": "viewer changed",
+            "0 0 1 2 26 other": "viewer changed",
+            "0 0 1 2 26": "viewer changed",
+            "0 0 0 2 26 abc": "prompt changed",
+            "0 0 1 7 26 abc": "prompt changed",
+            "0 0 1 2 25 abc": "prompt changed",
+            "0 0 1 2 26 abc": "Focus left the panel",
+            "": "viewer changed",
+        }
+        for report, want in cases.items():
+            with self.subTest(report=report):
+                self.assertIn(want, core.gate_refusal(r, report, 26))
+
+    def test_the_rename_counts_once_the_listing_shows_any_new_name(self):
+        r = core.Rename("a", "alpha", "beta")
+        self.assertIsNone(core.renamed_to(r, named("a", "alpha")))
+        self.assertIsNone(core.renamed_to(r, None))
+        self.assertEqual(core.renamed_to(r, named("a", "beta")), "beta")
+        self.assertEqual(core.renamed_to(r, named("a", "fam 👨 👩 👧")), "fam 👨 👩 👧")
+        self.assertIsNone(core.renamed_to(core.Rename("a", "a", "beta"), named("a", "a")))
+        self.assertEqual(core.renamed_text(r, "beta"), "Renamed alpha to beta.")
+        self.assertIn("doesn't show a new name", core.renamed_text(r, None))
+
+    def test_the_new_name_on_the_viewer_is_his_session_until_the_listing_catches_up(self):
+        text, width = real_screen("named-viewer")
+        self.assertEqual(core.main_view_state(text, "old-name", width), "mismatch")
+        self.assertEqual(core.view_state_for(text, ["old-name", "emx-test-named"], width), "ok")
+        self.assertEqual(core.view_state_for(text, ["old-name"], width), "mismatch")
+        self.assertEqual(core.view_state_for(text, ["", "other"], width), "unknown")
+        renaming = core.rename_started({}, core.Rename("a", "old-name", "emx-test-named"))
+        self.assertEqual(core.viewer_names(named("a", "old-name"), renaming), ["old-name", "emx-test-named"])
+        self.assertEqual(core.viewer_names(named("a", "a"), {}), [""])
+
+    def test_a_rename_that_typed_nothing_is_dropped_at_once(self):
+        r = core.Rename("a", "alpha", "beta")
+        renaming = core.rename_started({"b": ("bee", "bea", 50.0)}, r)
+        self.assertEqual(core.pending_renames(renaming, [named("a", "alpha")], "a", 10.0)["a"], ("alpha", "beta", None))
+        self.assertEqual(core.rename_finished(renaming, r, False, 10.0), {"b": ("bee", "bea", 50.0)})
+
+    def test_a_typed_rename_is_pending_while_the_listing_shows_the_old_name_until_its_time_is_up(self):
+        r = core.Rename("a", "alpha", "beta")
+        renaming = core.rename_finished(core.rename_started({}, r), r, True, 100.0)
+        sessions = [named("a", "alpha")]
+        self.assertIn("a", core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS - 1))
+        self.assertEqual(core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS), {})
+        self.assertEqual(core.pending_renames(renaming, [named("a", "beta")], None, 101.0), {})
+        self.assertEqual(core.pending_renames(renaming, [], None, 101.0), {})
+
+
 class ErrorLine(unittest.TestCase):
     def test_first_line_of_message(self):
         self.assertEqual(core.error_line(RuntimeError("first\nsecond")), "first")

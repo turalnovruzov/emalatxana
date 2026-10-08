@@ -8,6 +8,7 @@ import unittest
 import uuid
 from unittest import mock
 
+from emx import core
 from emx.tmux import BACK_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
@@ -26,9 +27,8 @@ while True:
 LEFT = b"\x1b[D"
 
 
-@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
-class LeftBinding(unittest.TestCase):
-    """The ← binding as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
+class PrivateServer(unittest.TestCase):
+    """A private tmux server with main and the panel side by side, each running the recorder, and a client attached."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -105,6 +105,12 @@ class LeftBinding(unittest.TestCase):
         except FileNotFoundError:
             return b""
 
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class LeftBinding(PrivateServer):
+    """The ← binding as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
+
     def press_left(self, check):
         self.tmux.bind_left(self.sidebar, check, 2)
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
@@ -158,6 +164,77 @@ class LeftBinding(unittest.TestCase):
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
         self.wait_for(lambda: self.typed("main"), "the key in main")
         self.assertEqual(self.typed("main"), LEFT)
+
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class TypeIf(PrivateServer):
+    """Typing into a viewer through `type_gate`, judged and typed by tmux in one command, with focus on the panel."""
+
+    TEXT = "/rename näme; with -l \\; and ;"
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.select(self.sidebar)
+
+    def type(self, pane=None, sid="s1", y=0):
+        pane = pane or self.main
+        gate = core.type_gate(pane, self.sidebar, sid, y, SESSION_OPT)
+        return self.tmux.type_if(pane, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT))
+
+    def refused(self, report, want, y=0):
+        self.assertIn(want, core.gate_refusal(core.Rename("s1", "old", "new"), report, y))
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        self.assertEqual(self.typed("sidebar"), b"")
+
+    def test_it_types_the_text_exactly_then_enter_while_nothing_changed(self):
+        self.assertEqual(self.type(), core.TYPED)
+        want = self.TEXT.encode("utf-8") + b"\r"
+        self.wait_for(lambda: len(self.typed("main")) >= len(want), "the line in main")
+        self.assertEqual(self.typed("main"), want)
+        self.assertEqual(self.typed("sidebar"), b"")
+
+    def test_it_types_into_a_viewer_in_a_hidden_window(self):
+        hidden = self.tmux.new_hidden_window(f"{sys.executable} -I {os.path.join(self.dir, 'recorder.py')} {self.keys('hidden')}")
+        self.tmux.set_pane_option(hidden, SESSION_OPT, "s2")
+        self.wait_for(lambda: self.show(hidden, "#{cursor_x}") == "2", "the recorder's prompt")
+        self.assertEqual(self.type(hidden, "s2"), core.TYPED)
+        self.wait_for(lambda: self.typed("hidden"), "the line in the hidden viewer")
+
+    def test_a_viewer_in_copy_mode_gets_nothing(self):
+        self.tmux.run("copy-mode", "-t", self.main)
+        self.refused(self.type(), "scrolled back")
+
+    def test_focus_off_the_panel_types_nothing(self):
+        self.tmux.select(self.main)
+        self.refused(self.type(), "Focus left the panel")
+
+    def test_a_pane_holding_another_session_gets_nothing(self):
+        self.tmux.set_pane_option(self.main, SESSION_OPT, "s2")
+        self.refused(self.type(), "viewer changed")
+
+    def test_a_cursor_that_moved_types_nothing(self):
+        self.refused(self.type(y=5), "prompt changed", y=5)
+
+    def test_a_viewer_that_is_gone_types_nothing_anywhere(self):
+        gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        self.tmux.kill_pane(self.main)
+        try:
+            report = self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT))
+        except TmuxError:
+            report = None
+        self.assertNotEqual(report, core.TYPED)
+        if report is not None:
+            self.assertIn("viewer changed", core.gate_refusal(core.Rename("s1", "old", "new"), report, 0))
+        time.sleep(0.3)
+        self.assertEqual(self.typed("sidebar"), b"")
+
+    def test_the_probe_reads_where_the_prompt_put_the_cursor_and_the_mode(self):
+        width = int(self.show(self.main, "#{pane_width}"))
+        self.assertEqual(self.tmux.prompt_probe(self.main), (2, 0, True, width, False))
+        self.tmux.run("copy-mode", "-t", self.main)
+        self.assertTrue(self.tmux.prompt_probe(self.main)[4])
 
 
 if __name__ == "__main__":
