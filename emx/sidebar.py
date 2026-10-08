@@ -28,7 +28,6 @@ RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
     "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
     "→ open ← back ␣ peek n new ^f find ^t pin ^x close ^s view ? keys",
-    "→ open  ← back  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
     "→ open ← back n new ^f find ^t pin ^x close ^s view ? keys",
     "→ open ← back ␣ peek n new ^x close ^s view ? keys",
     "→ open  ← back  n new  ^x close  ^s view  ? keys",
