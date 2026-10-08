@@ -1791,6 +1791,7 @@ class Peek(AppCase):
         self.app.handle_key(" ")
         self.assertFalse(self.app.peeking)
         self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
+        self.assertEqual(len(core.wrap_words(sidebar.PEEK_NO_ROOM, 39)), 1)
         self.scr.size = (20, 40)
         self.app.handle_key(" ")
         self.assertTrue(self.app.peeking)
