@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.2.1 — 2026-10-08
+
+- A hiccup in the session list no longer closes the sessions you have open; a view still closes once its session is really gone.
+
 ## 1.2.0 — 2026-10-08
 
 - The line under each session's name is now written by Claude Haiku in plain words, for every session whatever its state, and kept current as the session moves on. The old line shows until Haiku's arrives, and whenever it can't be had.
