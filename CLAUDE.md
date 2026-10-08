@@ -34,7 +34,7 @@ pick (GitHub Issues) → locate → plan → plan review → execute → review 
 - **execute**: `coder` works the plan, writes the tests it names, runs both verify lines.
 - **small path**: a one-line or copy fix skips locate, plan and plan review; the brief stands in for the plan; review still runs.
 - **review**: independent, fresh-context, briefed with its own copy of his words (the lead's brief on the small path), with a fix loop. **Exit:** no unresolved **Critical** or **Important** findings. Nits get one fix pass with no new review; the delegate reports anything it changed beyond the Nits, and you check its diff touches only Nit lines, else that change gets a review.
-- **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in and the PR's last commit bumps the [version](#conventions); his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
+- **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in and the PR bumps the [version](#conventions) from current `main`; his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
 
 ## The squad
 
@@ -79,7 +79,7 @@ The repo is private, but it may be made public later and the tool stays separate
 - **PRs are four sections: Why / What / Evidence / How to try it.** Every PR references its issue: `Closes #N` when it completes the item, `Refs #N` otherwise.
 - **Documentation:** the three homes are indexed in [`docs/README.md`](docs/README.md).
 - **Comments** follow [`.claude/rules/codery-code-comments.md`](.claude/rules/codery-code-comments.md).
-- **Versioning:** semantic versioning from 1.0.0 (Tural, 2026-10-08), held in `emx/__init__.py`. Every PR, as its last commit, bumps the version from its change type (a feature the minor, a breaking change the major, a fix or anything else the patch) and adds its lines to [`CHANGELOG.md`](CHANGELOG.md); after the squash merge you tag `vX.Y.Z` on `main`.
+- **Versioning:** semantic versioning from 1.0.0 (Tural, 2026-10-08), held in `emx/__init__.py`. Right before merge, you add the bump from current `main` as the PR's last commit, so a fix pass after it or a parallel PR that took the number cannot leave it wrong. The bump follows the change type (a feature the minor, a breaking change the major, a fix or anything else the patch) and adds the PR's lines to [`CHANGELOG.md`](CHANGELOG.md) under that version. After the squash merge, tag the merge commit `vX.Y.Z` and push the tag; no GitHub Release.
 
 ## Knowledge currency and technology decisions
 

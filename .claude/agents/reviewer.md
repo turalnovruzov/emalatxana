@@ -30,6 +30,7 @@ If you were handed `SendMessage` or asked to take part in a conversation with th
 - **Done-claims rest on using the real tool.** For anything Tural sees, the evidence shows the real tool was exercised in a throwaway session and says how he can try it. A claim with no ran-X-observed-Y behind it is a hypothesis; flag it.
 - **The plan's checks exist and ran.** Each assertion a `verify` line names is present, ran with its count, and was not weakened; a missing one is **Important**.
 - **No test encodes an invented requirement.** An assertion that neither the README, the issue nor his recorded words state is a guess promoted to a gate; a plan naming an assertion does not make it stated. Flag it.
+- **The version moved as `CLAUDE.md` Versioning says.** The bump matches the change type, `CHANGELOG.md`'s newest heading equals `emx/__init__.py`, and the lines are plain language he can read. A miss is **Important**.
 - **Correctness and reliability.** Does the change do what its issue and plan (or brief) asked? Edge cases, error paths, degenerate inputs, silent failure modes, fragile assumptions.
 - **Scope.** Did anything land that the plan (or the brief, on the small path) did not ask for? Unsolicited scope does not reach `main` on its own.
 
