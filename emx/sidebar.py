@@ -19,6 +19,8 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
+# Longer than a `claude agents` call's own timeout, so an interrupt cancelled mid-listing still ends inside it.
+INTERRUPT_JOIN_SECONDS = 20
 GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
 MAX_LISTINGS = 4
@@ -210,9 +212,9 @@ def wait_until_running(claude: str, sid: str) -> tuple:
         time.sleep(LISTED_CHECK_SECONDS)
 
 
-def close_session(claude: str, confirm: core.Confirm) -> tuple:
-    """Run `claude stop` or `claude rm` on the confirmed session: (its output, None), or (None, its whole message on one line). Never raises."""
-    args = core.close_args(claude, confirm)
+def close_session(args: list) -> tuple:
+    """Run one of `core.close_args`' commands: (its output, None), or (None, its whole message on one line). Never raises."""
+    claude = args[0]
     try:
         done = subprocess.run(
             args, capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
@@ -296,24 +298,56 @@ class Listings:
 
 
 class Closer(threading.Thread):
-    """Stops or removes a confirmed session off the main thread, after checking a fresh listing still shows it as he saw it."""
+    """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
-    def __init__(self, claude: str, confirm: core.Confirm):
+    A running session is stopped, then removed. `wait_for` is an Interrupter
+    of one of them, cancelled when the close began: the close waits for it
+    to end, so its `claude attach` can never land after the stop and resume
+    the session. `current` is the session being closed now. `result` is
+    (all closed, message, {id: closed}).
+    """
+
+    def __init__(self, claude: str, targets: tuple, wait_for: threading.Thread | None = None):
         super().__init__(daemon=True)
-        self.claude, self.confirm = claude, confirm
+        self.claude, self.targets, self.wait_for = claude, tuple(targets), wait_for
+        self.current = self.targets[0]
         self.result = None
 
     def run(self) -> None:
+        finished = {}
         try:
-            sessions, _ = fetch_sessions(self.claude)
-            session, fresh = core.checked_row(sessions, self.confirm.id)
-            if not core.close_still_applies(self.confirm, session, fresh):
-                self.result = (False, core.close_refusal(self.confirm, session, fresh))
-                return
-            output, error = close_session(self.claude, self.confirm)
-            self.result = (error is None, error or core.closed_text(self.confirm, output))
+            self.result = self.attempt(finished)
         except Exception as exc:
-            self.result = (False, f"{self.confirm.action} failed: {core.error_line(exc)}")
+            finished.update((t.id, False) for t in self.targets if t.id not in finished)
+            self.result = (False, f"close failed: {core.error_line(exc)}", finished)
+
+    def attempt(self, finished: dict) -> tuple:
+        if self.wait_for is not None:
+            self.wait_for.join(INTERRUPT_JOIN_SECONDS)
+            if self.wait_for.is_alive():
+                finished.update((t.id, False) for t in self.targets)
+                return False, f"emx is still interrupting {self.current.name}, so it didn't close it.", finished
+        messages = []
+        for confirm in self.targets:
+            self.current = confirm
+            closed, message = self.close_one(confirm)
+            finished[confirm.id] = closed
+            messages.append(message)
+        return all(finished.values()), " ".join(messages), finished
+
+    def close_one(self, confirm: core.Confirm) -> tuple:
+        sessions, _ = fetch_sessions(self.claude)
+        session, fresh = core.checked_row(sessions, confirm.id)
+        if not core.close_still_applies(confirm, session, fresh):
+            return False, core.close_refusal(confirm, session, fresh)
+        output = ""
+        for args in core.close_args(self.claude, confirm):
+            output, error = close_session(args)
+            if error and args[1] == "rm" and confirm.running:
+                return False, core.stopped_not_removed_text(confirm, error)
+            if error:
+                return False, error
+        return True, core.closed_text(confirm, output)
 
 
 class Renamer(threading.Thread):
@@ -791,6 +825,7 @@ class App:
         self.checker = None
         self.closer = None
         self.interrupter = None
+        self.closing = {}
         self.confirm = None
         self.find = None
         self.rename_edit = None
@@ -862,8 +897,9 @@ class App:
         return [line for line in self.lines() if line]
 
     def regroup(self) -> None:
+        before = self.items()
         self.groups = self.grouped()
-        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor)
+        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor, before)
         if self.cursor == self.wanted_cursor:
             self.wanted_cursor = None
 
@@ -887,6 +923,10 @@ class App:
         self.cursor, self.wanted_cursor = item, None
         if item[0] == "group":
             self.toggle_group(item[1])
+        elif item[1] in self.closing:
+            # Opening a session that is being stopped would resume it.
+            shown = self.session(item[1])
+            self.say(core.still_closing(shown.name if shown else item[1]))
         else:
             self.switch_to(item[1], core.OPEN)
 
@@ -1125,21 +1165,59 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
+    def group(self, key: str):
+        return next((g for g in self.groups if g.key == key), None)
+
+    def confirm_row(self, confirm):
+        """What `confirm` was armed on, as the panel lists it now: the session, or the group for a header."""
+        if isinstance(confirm, core.GroupConfirm):
+            return self.group(confirm.key)
+        return self.session(confirm.id)
+
     def press_close(self) -> None:
-        session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
-        if session is None:
+        cursor = self.cursor
+        if not cursor:
             return
-        blocked = core.close_blocked(bool(self.list_error), self.closer.confirm if self.closer else None)
+        if cursor[0] == "group":
+            row = self.group(cursor[1])
+            if row is None:
+                return
+            if not core.group_closable(self.view(), row.key):
+                self.confirm = None
+                self.say(core.GROUP_CLOSE_REFUSAL)
+                return
+        else:
+            row = self.session(cursor[1])
+            if row is None:
+                return
+            if row.id in self.closing:
+                self.confirm = None
+                self.say(core.still_closing(row.name))
+                return
+        blocked = core.close_blocked(bool(self.list_error), self.closer.current if self.closer else None)
         if blocked:
             self.confirm = None
             self.say(blocked)
             return
-        self.confirm, act = core.press_close(self.confirm, self.cursor, session, time.monotonic())
+        self.confirm, act = core.press_close(self.confirm, cursor, row, time.monotonic(), self.view())
         if act is None:
-            if self.confirm is not None and core.interruptible(session):
-                self.start_interrupt(session)
+            if isinstance(self.confirm, core.GroupConfirm) and row.key in self.collapsed():
+                self.toggle_group(row.key)
+            elif isinstance(self.confirm, core.Confirm) and core.interruptible(row):
+                self.start_interrupt(row)
             return
-        self.closer = Closer(self.claude, act)
+        self.start_close(act)
+
+    def start_close(self, act) -> None:
+        targets = core.close_targets(act)
+        ids = {t.id for t in targets}
+        interrupter = self.interrupter
+        wait_for = None
+        if interrupter is not None and interrupter.interrupt.id in ids:
+            interrupter.cancel.set()
+            wait_for = interrupter
+        self.closing.update((sid, None) for sid in ids)
+        self.closer = Closer(self.claude, targets, wait_for)
         self.closer.start()
         self.say(core.closing_text(act))
 
@@ -1170,14 +1248,16 @@ class App:
         if closer is None or closer.is_alive():
             return
         self.closer = None
-        done, message = closer.result or (False, f"{closer.confirm.action} failed")
+        done, message, finished = closer.result or (False, "close failed", {t.id: False for t in closer.targets})
         self.say(message, error=not done)
+        self.closing = core.closing_after(self.closing, finished, None)
         self.poller.wake.set()
-        if done and closer.confirm.action == core.REMOVE:
+        closed = {sid for sid, ok in finished.items() if ok}
+        if closed:
             try:
                 panes = self.tmux.panes()
                 _, main = self.layout_panes(panes)
-                self.close_viewers(panes, main, {closer.confirm.id})
+                self.close_viewers(panes, main, closed)
             except TmuxError as exc:
                 self.say(f"tmux: {exc}", error=True)
 
@@ -1237,6 +1317,9 @@ class App:
     def start_rename(self) -> None:
         session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
         if session is None:
+            return
+        if session.id in self.closing:
+            self.say(core.still_closing(session.name))
             return
         try:
             has_viewer = core.live_viewer(self.tmux.panes(), session.id) is not None
@@ -1703,7 +1786,7 @@ class App:
         for line in lines:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
-                armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
+                armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
                 rows[line] = self.session_lines(session, width, aligns.get(session.id, 0), now_ms, armed,
                                                 group_of.get(session.id, ""))
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
@@ -1734,12 +1817,18 @@ class App:
                 for r in shown:
                     self.put(r, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
-                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width)
+                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width,
+                                 core.header_label(self.confirm, groups[line[1]], self.closing))
             elif line in rows:
                 session = self.session(line[1])
                 self.draw_session(first, shown, rows[line], session, selected, session.id == main_sid, frame)
 
-    def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
+    def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int, label: str | None = None) -> None:
+        if label is not None:
+            arrow = "▸" if group.key in self.collapsed() else "▾"
+            self.put(y, 0, arrow, self.palette.attr("muted", selected))
+            self.put(y, 2, core.fit(label, max(1, width - 3)), self.palette.attr("error", selected) | curses.A_BOLD)
+            return
         view = self.view()
         name_tone = CATEGORY_TONE[group.key] if core.state_group(view, group.key) else "plain"
         tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
@@ -1756,11 +1845,13 @@ class App:
     def session_lines(
         self, s, width: int, align: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
     ) -> list:
-        """The row's lines as `core.row_lines` gives them, or, while it is armed or renamed, the close label's or the rename edit's padded to as many."""
+        """The row's lines as `core.row_lines` gives them, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
         detail = core.row_detail(s, self.transcripts.get(s.id))
         lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
+        if s.id in self.closing:
+            return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
         if armed is not None:
             return core.confirm_lines(core.confirm_label(armed), width, len(lines))
         if self.rename_edit is not None and self.rename_edit["id"] == s.id:
@@ -1808,6 +1899,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
         else:
@@ -1871,14 +1963,16 @@ class App:
             self.finish_close()
             self.finish_interrupt()
             self.finish_rename()
+            peeked = self.peeked()
             fresh_list = self.take_poll()
             self.take_placements()
             self.take_transcripts()
-            if self.peeking and self.peeked() is None:
+            # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
+            if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False
             now = time.monotonic()
             if self.confirm is not None and not core.confirm_holds(
-                self.confirm, self.cursor, self.session(self.confirm.id), now,
+                self.confirm, self.cursor, self.confirm_row(self.confirm), now,
             ):
                 self.confirm = None
             if core.notice_expired(self.notice_until, now):

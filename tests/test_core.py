@@ -2141,6 +2141,17 @@ class CloseConfirm(unittest.TestCase):
         self.assertEqual(core.confirm_label(group), "ctrl+x again to close 2 sessions")
         self.assertEqual(core.CLOSING_LABEL, "closing…")
 
+    def test_a_header_reads_its_armed_label_or_closing_only_for_its_own_group(self):
+        b = mk(id="b", name="emx-test-b")
+        app, other = self.group(self.running, b), self.group(mk(id="z"), key="/r/other")
+        armed, _ = core.press_close(None, ("group", "/r/app"), app, 0.0)
+        self.assertEqual(core.header_label(armed, app, {}), "ctrl+x again to close 2 sessions")
+        self.assertIsNone(core.header_label(armed, other, {}))
+        self.assertEqual(core.header_label(None, app, {"a": None, "b": True}), "closing…")
+        self.assertIsNone(core.header_label(None, app, {"a": None}))
+        row, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertIsNone(core.header_label(row, app, {}))
+
     def test_closing_ids_stay_until_a_listing_lacks_them_after_success_and_go_at_once_on_failure(self):
         closing = {"a": None, "b": None}
         self.assertEqual(core.closing_after(closing, {}, ["a", "b"]), closing)

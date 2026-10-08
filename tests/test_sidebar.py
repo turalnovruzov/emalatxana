@@ -213,6 +213,8 @@ class AppCase(unittest.TestCase):
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "TMUX_PANE": "%1"}),
             mock.patch.object(sidebar, "Palette", FakePalette),
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
+            # A worker a test didn't mean to start must never run his real claude.
+            mock.patch.object(sidebar, "fetch_sessions", lambda claude: (None, "no claude in tests")),
         ]
         for p in patches:
             p.start()
@@ -518,6 +520,8 @@ class Focus(AppCase):
 
     def test_leaving_the_panel_cancels_an_armed_ctrl_x_but_his_terminal_losing_focus_does_not(self):
         self.app.handle_key(sidebar.CTRL_X)
+        # c is working, so the press also starts an interrupt; it is let finish before the test ends.
+        self.app.interrupter.join(5)
         self.read(*FOCUS_OUT)
         self.assertEqual(self.app.confirm.id, "c")
         self.leave_panel()
@@ -774,11 +778,14 @@ class CloseTmux:
 
 
 class CloseSession(AppCase):
-    """Ctrl+X twice on one row stops or removes that session, on a worker thread, after a fresh listing agrees with the row."""
+    """Ctrl+X twice on one row closes that session (stop if running, then remove), on a worker thread, after a fresh listing agrees with the row.
+
+    The rows wait for input, so the first press only arms: interrupting a working row is InterruptSession's.
+    """
 
     def setUp(self):
         super().setUp()
-        self.a, self.b = session("a", "/p/alpha"), session("b", "/p/alpha", started=1.0)
+        self.a, self.b = session("a", "/p/alpha", state="blocked"), session("b", "/p/alpha", state="blocked", started=1.0)
         self.poll(self.a, self.b)
         self.app.refresh()
         self.app.tmux = CloseTmux()
@@ -786,10 +793,11 @@ class CloseSession(AppCase):
         self.listing = ([self.a, self.b], None)
         self.ran = []
         self.done = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        self.failing = {}
 
         def run(args, **kw):
             self.ran.append((args, threading.current_thread() is not threading.main_thread()))
-            return self.done
+            return self.failing.get(args[1], self.done)
 
         def fetch(claude):
             self.assertIsNot(threading.current_thread(), threading.main_thread())
@@ -808,36 +816,42 @@ class CloseSession(AppCase):
             self.app.closer.join(5)
         self.app.refresh()
 
-    def test_double_ctrl_x_stops_a_running_session_off_the_curses_thread(self):
+    def drawn(self):
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+        self.app.draw()
+        del self.app.put
+        return drawn
+
+    def stopped(self, sid, started=0.0):
+        return session(sid, "/p/alpha", state="stopped", pid=None, started=started)
+
+    def test_double_ctrl_x_on_a_running_row_stops_then_removes_it_off_the_curses_thread(self):
         self.press(sidebar.CTRL_X)
         self.assertEqual(self.app.confirm.id, "a")
+        self.assertIsNone(self.app.interrupter)
         self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
         self.assertEqual(self.ran, [])
         self.press(sidebar.CTRL_X)
-        self.assertEqual(self.app.notice, "Stopping emx-test-a…")
+        self.assertEqual(self.app.notice, "Closing emx-test-a…")
         self.assertIsNone(self.app.confirm)
         self.settle()
-        self.assertEqual(self.ran, [(["claude", "stop", "a"], True)])
-        self.assertEqual((self.app.notice, self.app.notice_error), ("Stopped emx-test-a.", False))
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True), (["claude", "rm", "a"], True)])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a.", False))
         self.assertTrue(self.app.poller.wake.is_set())
-        self.assertEqual(self.app.tmux.calls, [])
+        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
 
     def test_double_ctrl_x_on_a_stopped_session_removes_it_and_closes_its_viewer_in_main(self):
-        stopped = session("a", "/p/alpha", state="stopped", pid=None)
-        self.poll(stopped, self.b)
+        self.poll(self.stopped("a"), self.b)
         self.app.refresh()
-        self.listing = ([stopped, self.b], None)
+        self.listing = ([self.stopped("a"), self.b], None)
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
         self.assertEqual(self.ran, [(["claude", "rm", "a"], True)])
-        self.assertEqual(self.app.notice, "Removed emx-test-a.")
+        self.assertEqual(self.app.notice, "Closed emx-test-a.")
         self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
 
-    def test_a_worktree_rm_left_behind_shows_after_removed_on_one_line(self):
-        stopped = session("a", "/p/alpha", state="stopped", pid=None)
-        self.poll(stopped, self.b)
-        self.app.refresh()
-        self.listing = ([stopped, self.b], None)
+    def test_a_worktree_rm_left_behind_shows_after_closed_on_one_line(self):
         self.done = subprocess.CompletedProcess(
             [], 0, stdout="removed a\nworktree directory left at /x/wt (git no longer recognized it)\n", stderr="",
         )
@@ -845,25 +859,20 @@ class CloseSession(AppCase):
         self.settle()
         self.assertEqual(
             (self.app.notice, self.app.notice_error),
-            ("Removed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)", False),
+            ("Closed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)", False),
         )
         self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
 
     def test_removing_a_session_kills_its_hidden_viewer(self):
-        stopped = session("b", "/p/alpha", state="stopped", pid=None, started=1.0)
-        self.poll(self.a, stopped)
-        self.app.refresh()
-        self.listing = ([self.a, stopped], None)
         self.app.cursor = ("session", "b")
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
         self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
 
     def test_a_refused_rm_shows_its_message_on_one_line_and_leaves_the_row(self):
-        stopped = session("a", "/p/alpha", state="stopped", pid=None)
-        self.poll(stopped, self.b)
+        self.poll(self.stopped("a"), self.b)
         self.app.refresh()
-        self.listing = ([stopped, self.b], None)
+        self.listing = ([self.stopped("a"), self.b], None)
         self.done = subprocess.CompletedProcess([], 1, stdout="", stderr="worktree has 2 unpushed commits\nrerun with a flag\n")
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
@@ -871,12 +880,36 @@ class CloseSession(AppCase):
         self.assertEqual((self.app.notice, self.app.notice_error), ("worktree has 2 unpushed commits rerun with a flag", True))
         self.assertEqual(self.app.tmux.calls, [])
         self.assertIsNotNone(self.app.session("a"))
+        self.assertEqual(self.app.closing, {})
+
+    def test_a_failed_rm_drops_closing_and_shows_the_message_on_one_line(self):
+        self.failing["rm"] = subprocess.CompletedProcess([], 1, stdout="", stderr="worktree has 2 unpushed commits\nrerun with a flag\n")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.assertIn("a", self.app.closing)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True), (["claude", "rm", "a"], True)])
+        self.assertEqual(
+            (self.app.notice, self.app.notice_error),
+            ("Stopped emx-test-a, but didn't remove it: worktree has 2 unpushed commits rerun with a flag", True),
+        )
+        self.assertEqual(self.app.closing, {})
+        self.assertEqual(self.app.tmux.calls, [])
+        self.poll(self.stopped("a"), self.b)
+        self.app.refresh()
+        self.assertNotIn("closing…", self.drawn())
+
+    def test_a_failed_stop_never_removes(self):
+        self.failing["stop"] = subprocess.CompletedProcess([], 1, stdout="", stderr="couldn't stop it\n")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True)])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("couldn't stop it", True))
+        self.assertEqual(self.app.closing, {})
 
     def test_a_refusal_on_stdout_alone_shows_on_one_line_and_leaves_the_row(self):
-        stopped = session("a", "/p/alpha", state="stopped", pid=None)
-        self.poll(stopped, self.b)
+        self.poll(self.stopped("a"), self.b)
         self.app.refresh()
-        self.listing = ([stopped, self.b], None)
+        self.listing = ([self.stopped("a"), self.b], None)
         self.done = subprocess.CompletedProcess([], 1, stdout="kept a — its worktree is still at /x/wt", stderr="")
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
@@ -885,13 +918,13 @@ class CloseSession(AppCase):
         self.assertIsNotNone(self.app.session("a"))
 
     def test_a_stopped_row_resumed_elsewhere_is_never_removed(self):
-        stopped = session("a", "/p/alpha", state="stopped", pid=None)
-        self.poll(stopped, self.b)
+        self.poll(self.stopped("a"), self.b)
         self.app.refresh()
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
         self.assertEqual(self.ran, [])
         self.assertIn("running again", self.app.notice)
+        self.assertEqual(self.app.closing, {})
 
     def test_moving_between_presses_acts_on_neither_row(self):
         self.press(sidebar.CTRL_X, curses.KEY_DOWN, sidebar.CTRL_X)
@@ -909,6 +942,7 @@ class CloseSession(AppCase):
     def test_a_resize_keeps_the_confirm(self):
         self.press(sidebar.CTRL_X, curses.KEY_RESIZE, sidebar.CTRL_X)
         self.assertIsNotNone(self.app.closer)
+        self.settle()
 
     def test_the_confirm_runs_out_and_the_next_press_only_rearms(self):
         self.press(sidebar.CTRL_X)
@@ -922,7 +956,7 @@ class CloseSession(AppCase):
 
     def test_the_poll_changing_the_rows_running_state_cancels(self):
         self.press(sidebar.CTRL_X)
-        self.poll(session("a", "/p/alpha", state="stopped", pid=None), self.b)
+        self.poll(self.stopped("a"), self.b)
         self.app.refresh()
         self.assertIsNone(self.app.confirm)
 
@@ -933,34 +967,170 @@ class CloseSession(AppCase):
         self.assertNotEqual(self.app.cursor, ("session", "a"))
         self.assertIsNone(self.app.confirm)
 
-    def test_ctrl_x_on_a_group_header_does_nothing(self):
-        self.app.cursor = ("group", "/p/alpha")
-        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
-        self.assertEqual((self.app.confirm, self.app.closer, self.app.notice), (None, None, ""))
-
     def test_no_press_arms_while_listing_fails_or_a_close_runs(self):
         self.app.list_error = "listing broken"
         self.press(sidebar.CTRL_X)
         self.assertIsNone(self.app.confirm)
         self.assertIn("Can't list sessions", self.app.notice)
         self.app.list_error = ""
-        self.app.closer = sidebar.Closer("claude", core.press_close(None, ("session", "b"), self.b, 0.0)[0])
+        busy, _ = core.press_close(None, ("session", "b"), self.b, 0.0)
+        self.app.closer = sidebar.Closer("claude", (busy,))
         self.app.closer.is_alive = lambda: True
         self.press(sidebar.CTRL_X)
         self.assertIsNone(self.app.confirm)
-        self.assertEqual(self.app.notice, "Still stopping emx-test-b…")
+        self.assertEqual(self.app.notice, "Still closing emx-test-b…")
+        self.app.cursor = ("group", "/p/alpha")
+        self.press(sidebar.CTRL_X)
+        self.assertIsNone(self.app.confirm)
+        self.assertEqual(self.app.notice, "Still closing emx-test-b…")
 
     def test_the_armed_row_says_what_the_second_press_does(self):
         self.press(sidebar.CTRL_X)
-        drawn = []
-        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
-        self.app.draw()
-        self.assertIn("ctrl+x again to stop", drawn)
+        drawn = self.drawn()
+        self.assertIn("ctrl+x again to close", drawn)
         self.assertNotIn("emx-test-a", drawn)
+
+    def test_the_row_reads_closing_from_the_second_press_until_a_listing_lacks_it(self):
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.assertIn("closing…", self.drawn())
+        self.assertNotIn("emx-test-a", self.drawn())
+        self.settle()
+        self.assertEqual(self.app.notice, "Closed emx-test-a.")
+        self.assertIn("closing…", self.drawn())
+        self.poll()
+        self.app.refresh()
+        self.assertEqual(self.app.closing, {"a": True})
+        self.poll(self.a, self.b)
+        self.app.refresh()
+        self.assertIn("closing…", self.drawn())
+        self.poll(self.b)
+        self.app.refresh()
+        self.assertNotIn("closing…", self.drawn())
+        self.assertEqual(self.app.closing, {})
+
+    def test_the_closing_row_is_bold_in_the_confirm_tone(self):
+        self.app.palette.attr = lambda tone, selected=None: {"error": 1 << 20}.get(tone, 0)
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append((text, attr))
+        self.app.draw()
+        self.assertIn(("closing…", (1 << 20) | curses.A_BOLD), drawn)
+        self.settle()
+
+    def test_enter_click_and_ctrl_r_on_a_closing_row_open_nothing(self):
+        self.poll(self.stopped("a"), self.b)
+        self.app.refresh()
+        self.listing = ([self.stopped("a"), self.b], None)
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        for key in ("\r", curses.KEY_RIGHT):
+            with self.subTest(key=key):
+                self.app.say("")
+                self.press(key)
+                self.assertEqual(self.opened, [])
+                self.assertEqual(self.app.notice, "Still closing emx-test-a…")
+        self.app.say("")
+        self.app.draw()
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "a"))
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.press(curses.KEY_MOUSE)
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.notice, "Still closing emx-test-a…")
+        self.app.say("")
+        self.press(sidebar.CTRL_R)
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(self.app.notice, "Still closing emx-test-a…")
+        self.settle()
+
+    def test_after_removal_the_cursor_lands_on_the_row_below(self):
+        c = session("c", "/p/alpha", state="blocked", started=2.0)
+        self.poll(self.a, self.b, c)
+        self.app.refresh()
+        self.listing = ([self.a, self.b, c], None)
+        self.app.cursor = ("session", "b")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.poll(self.a, c)
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "c"))
+
+    def test_after_removal_the_cursor_lands_above_when_it_was_last(self):
+        self.app.cursor = ("session", "b")
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.settle()
+        self.poll(self.a)
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "a"))
+
+    def test_double_ctrl_x_on_a_project_header_closes_every_session_in_it(self):
+        other = session("z", "/p/zeta", state="blocked")
+        self.poll(self.a, self.stopped("b", 1.0), other)
+        self.app.refresh()
+        self.listing = ([self.a, self.stopped("b", 1.0), other], None)
+        self.app.cursor = ("group", "/p/alpha")
+        self.press(sidebar.CTRL_X)
+        self.assertIsInstance(self.app.confirm, core.GroupConfirm)
+        self.assertIn("ctrl+x again to close 2 sessions", self.drawn())
+        self.assertEqual(self.ran, [])
+        self.press(sidebar.CTRL_X)
+        self.assertEqual(self.app.notice, "Closing 2 sessions…")
+        drawn = self.drawn()
+        self.assertEqual(drawn.count("closing…"), 3)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True), (["claude", "rm", "a"], True),
+                                    (["claude", "rm", "b"], True)])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a. Closed emx-test-b.", False))
+        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2"), ("kill", "%3")])
+        self.poll(other)
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("group", "/p/zeta"))
+        self.assertEqual(self.app.closing, {})
+
+    def test_a_group_close_rechecks_each_session_and_closes_the_rest(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.press(sidebar.CTRL_X)
+        self.listing = ([self.a], None)
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual(self.ran, [(["claude", "stop", "a"], True), (["claude", "rm", "a"], True)])
+        self.assertEqual(self.app.notice, "Closed emx-test-a. emx-test-b isn't listed any more, so emx didn't close it.")
+        self.assertTrue(self.app.notice_error)
+        self.assertEqual(self.app.closing, {"a": True})
+
+    def test_ctrl_x_on_a_pinned_or_state_header_closes_nothing_and_says_why(self):
+        self.app.prefs = core.toggle_pin(self.app.prefs, "a")
+        self.app.regroup()
+        self.app.cursor = ("group", core.PINNED)
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.assertEqual((self.app.confirm, self.app.closer), (None, None))
+        self.assertEqual(self.app.notice, "Ctrl+X closes a project's group from the project view.")
+        self.app.say("")
+        self.app.prefs = core.toggle_view(self.app.prefs)
+        self.app.regroup()
+        self.app.cursor = ("group", core.NEEDS_INPUT)
+        self.press(sidebar.CTRL_X, sidebar.CTRL_X)
+        self.assertEqual((self.app.confirm, self.app.closer), (None, None))
+        self.assertEqual(self.app.notice, "Ctrl+X closes a project's group from the project view.")
+        self.assertEqual(self.ran, [])
+
+    def test_first_ctrl_x_on_a_folded_header_unfolds_and_arms_and_the_second_closes_all(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.app.toggle_group("/p/alpha")
+        self.assertIn("/p/alpha", self.app.collapsed())
+        self.press(sidebar.CTRL_X)
+        self.assertNotIn("/p/alpha", self.app.collapsed())
+        self.assertEqual(self.app.cursor, ("group", "/p/alpha"))
+        self.assertEqual(self.app.confirm.key, "/p/alpha")
+        self.assertIn("ctrl+x again to close 2 sessions", self.drawn())
+        self.assertEqual(self.ran, [])
+        self.press(sidebar.CTRL_X)
+        self.settle()
+        self.assertEqual([args for args, _ in self.ran],
+                         [["claude", "stop", "a"], ["claude", "rm", "a"], ["claude", "stop", "b"], ["claude", "rm", "b"]])
 
     def test_a_footer_and_the_help_show_ctrl_x(self):
         self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
+
 
 class FakeListings:
     def __init__(self, cache=None):
@@ -2253,10 +2423,22 @@ class WrappedRows(AppCase):
         self.app.draw()
         before = self.rows_of("b"), self.rows_of("a")
         self.app.handle_key(sidebar.CTRL_X)
+        # b is working, so the press also starts an interrupt; it is let finish before the test ends.
+        self.app.interrupter.join(5)
         self.app.draw()
         self.assertIsNotNone(self.app.confirm)
         self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
         self.assertIn("ctrl+x again", self.screen()[before[0][0]])
+
+    def test_the_closing_label_keeps_the_rows_height(self):
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        before = self.rows_of("a"), self.rows_of("b")
+        self.assertGreater(len(before[0]), 1)
+        self.app.closing = {"a": None}
+        self.app.draw()
+        self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
+        self.assertIn("closing…", self.screen()[before[0][0]])
 
     def test_a_rename_edit_on_a_wrapped_row_keeps_the_rows_height(self):
         self.app.cursor = ("session", "b")
@@ -2617,14 +2799,22 @@ class InterruptSession(AppCase):
                 self.assertTrue(self.app.notice_error)
 
     def test_a_second_press_inside_the_window_starts_the_close_not_a_second_escape(self):
-        self.press(sidebar.CTRL_X)
-        first = self.app.interrupter
-        first.join(5)
-        self.press(sidebar.CTRL_X)
-        self.assertIs(self.app.interrupter, first)
-        self.assertIsNotNone(self.app.closer)
-        self.settle()
+        ran = []
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar.subprocess, "run", run):
+            self.press(sidebar.CTRL_X)
+            first = self.app.interrupter
+            first.join(5)
+            self.press(sidebar.CTRL_X)
+            self.assertIs(self.app.interrupter, first)
+            self.assertIsNotNone(self.app.closer)
+            self.settle()
         self.assertEqual(self.kinds().count("key_if"), 1)
+        self.assertEqual(ran, [["claude", "stop", "working"], ["claude", "rm", "working"]])
 
     def test_the_interrupted_row_reads_idle_with_a_still_glyph(self):
         scr = RecordingScr(20, 60)
@@ -2691,6 +2881,41 @@ class InterruptSession(AppCase):
         self.assertNotIn("key_if", self.kinds())
         self.assertEqual(self.app.notice, "emx-test-working's viewer didn't come up in time, so emx didn't interrupt it.")
         self.assertTrue(self.app.notice_error)
+
+    def test_a_close_started_before_the_escape_cancels_it_and_waits_for_it(self):
+        self.no_viewer()
+        ran = []
+        held, release = threading.Event(), threading.Event()
+        calls = []
+
+        def fetch(claude):
+            calls.append(threading.current_thread().name)
+            if len(calls) == 1:
+                held.set()
+                release.wait(5)
+            return [self.working], None
+
+        def run(args, **kw):
+            ran.append(args)
+            return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+        with mock.patch.object(sidebar, "fetch_sessions", fetch), mock.patch.object(sidebar.subprocess, "run", run):
+            self.press(sidebar.CTRL_X)
+            interrupter = self.app.interrupter
+            self.assertTrue(held.wait(5))
+            self.press(sidebar.CTRL_X)
+            self.assertTrue(interrupter.cancel.is_set())
+            self.assertIs(self.app.closer.wait_for, interrupter)
+            time.sleep(0.1)
+            self.assertEqual(ran, [])
+            release.set()
+            self.app.closer.join(5)
+            interrupter.join(5)
+            self.app.refresh()
+        self.assertNotIn("new_hidden_window", self.kinds())
+        self.assertNotIn("key_if", self.kinds())
+        self.assertEqual(ran, [["claude", "stop", "working"], ["claude", "rm", "working"]])
+        self.assertEqual(self.app.notice, "Closed emx-test-working.")
 
     def test_an_escape_that_does_not_stop_it_says_so(self):
         self.after = self.working

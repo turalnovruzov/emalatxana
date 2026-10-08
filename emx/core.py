@@ -316,10 +316,14 @@ def confirm_after_key(confirm, close_key: bool, passive: bool):
     return confirm if close_key or passive else None
 
 
+def still_closing(name: str) -> str:
+    return f"Still closing {name}…"
+
+
 def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
     """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one close runs at a time."""
     if busy is not None:
-        return f"Still closing {busy.name}…"
+        return still_closing(busy.name)
     if list_failing:
         return "Can't list sessions right now, so emx won't close one."
     return None
@@ -371,6 +375,15 @@ def closed_text(confirm: Confirm, output: str = "") -> str:
 
 def stopped_not_removed_text(confirm: Confirm, error: str) -> str:
     return f"Stopped {confirm.name}, but didn't remove it: {error}"
+
+
+def header_label(confirm, group, closing) -> str | None:
+    """What a group header reads in place of its name while its group close is armed, or while every session in it is closing; None otherwise."""
+    if isinstance(confirm, GroupConfirm) and confirm.key == group.key:
+        return confirm_label(confirm)
+    if group.sessions and all(s.id in closing for s in group.sessions):
+        return CLOSING_LABEL
+    return None
 
 
 def closing_after(closing: Mapping, finished: Mapping, listed_ids) -> dict:
