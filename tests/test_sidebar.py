@@ -1131,6 +1131,19 @@ class CloseSession(AppCase):
         self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
+    def test_help_names_interrupt_and_close(self):
+        self.assertEqual(dict(sidebar.HELP)["^x"], "interrupt a working session; twice closes it (stop, then remove)")
+        at = [key for key, _ in sidebar.HELP].index("^x")
+        self.assertEqual(sidebar.HELP[at + 1], ("", "on a project header, twice closes the group"))
+        self.assertIn("^x close", sidebar.FOOTERS[0])
+        scr = RecordingScr(30, 60)
+        self.app.scr = scr
+        self.press("?")
+        self.app.draw()
+        shown = "\n".join(scr.cells.values())
+        self.assertIn("interrupt a working session; twice closes it", shown)
+        self.assertIn("on a project header, twice closes the group", shown)
+
 
 class FakeListings:
     def __init__(self, cache=None):
