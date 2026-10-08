@@ -116,7 +116,18 @@ def category(session: Session) -> str:
     return _STATE_CATEGORY.get(session.state, WORKING)
 
 
+def idle(session: Session) -> bool:
+    """Interrupted: `claude agents` keeps the state "working" and turns the status "idle", and draws the row Idle. A done row is idle too, so the state counts."""
+    return session.state == "working" and session.status == "idle"
+
+
+def interruptible(session: Session) -> bool:
+    return session.running and session.state == "working" and not idle(session)
+
+
 def state_word(session: Session) -> str:
+    if idle(session):
+        return "Idle"
     cat = category(session)
     if cat != WORKING or session.state == "working":
         return CATEGORY_LABELS[cat]
@@ -127,6 +138,11 @@ def glyph(cat: str, frame: int) -> str:
     if cat == WORKING:
         return WORKING_FRAMES[frame % len(WORKING_FRAMES)]
     return GLYPHS.get(cat, "·")
+
+
+def session_glyph(session: Session, frame: int) -> str:
+    """An interrupted row keeps its Working place but stops spinning, as `claude agents` draws it."""
+    return "✻" if idle(session) else glyph(category(session), frame)
 
 
 def format_age(seconds: float | None) -> str:
@@ -146,7 +162,7 @@ def session_age(session: Session, now_ms: float) -> str:
     return format_age((now_ms - session.started_at) / 1000)
 
 
-OPEN, RESTART, NEW = "open", "restart", "new"
+OPEN, RESTART, NEW, INTERRUPT = "open", "restart", "new", "interrupt"
 
 
 def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
@@ -164,7 +180,7 @@ def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -
         return False
     if trigger == OPEN:
         return True
-    return trigger in (RESTART, NEW) and fresh and session.running
+    return trigger in (RESTART, NEW, INTERRUPT) and fresh and session.running
 
 
 def checked_row(sessions: list | None, sid: str) -> tuple:
@@ -188,6 +204,9 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
     """Why `attach_allowed` said no, for the notice line."""
     if trigger != OPEN and not fresh:
         return f"Couldn't list sessions to check {name} is still running, so emx left it alone."
+    if trigger == INTERRUPT:
+        why = "isn't listed any more" if session is None else "isn't running"
+        return f"{name} {why}, so emx didn't open a viewer to interrupt it."
     if session is None:
         return f"{name} isn't listed any more, so emx won't open it."
     return f"{name} isn't running. Press Enter on it to reopen it."
@@ -492,13 +511,67 @@ def rename_screen_refusal(rename: Rename, session: Session, sessions, screen: Re
     return None
 
 
-def type_gate(viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str) -> str | None:
+@dataclass(frozen=True)
+class Interrupt:
+    """A first Ctrl+X on a working row: the session the Esc is for, taken at the press, never from the cursor later."""
+
+    id: str
+    name: str
+
+
+# What `interrupt_listing_refusal` gives when the session has already stopped working: no refusal, nothing to send.
+NOTHING_TO_INTERRUPT = "nothing to interrupt"
+
+
+def interrupt_listing_refusal(interrupt: Interrupt, session: Session | None, fresh: bool) -> str | None:
+    """Why emx may not send Esc to the session, judged on a listing taken just before, NOTHING_TO_INTERRUPT when it no longer works, or None."""
+    if not fresh:
+        return f"Couldn't list sessions to check {interrupt.name}, so emx didn't interrupt it."
+    if session is None:
+        return f"{interrupt.name} isn't listed any more, so emx didn't interrupt it."
+    if not session.running:
+        return f"{interrupt.name} isn't running, so emx didn't interrupt it."
+    if not interruptible(session):
+        return NOTHING_TO_INTERRUPT
+    return None
+
+
+def nothing_to_interrupt_text(interrupt: Interrupt) -> str:
+    return f"{interrupt.name} isn't working any more, so there was nothing to interrupt."
+
+
+def interrupt_screen_refusal(interrupt: Interrupt, session: Session, sessions, screen: RenameScreen) -> str | None:
+    """Why emx may not send Esc into the session's viewer as it is on screen now, or None.
+
+    The checks `rename_screen_refusal` makes, but a draft in the prompt does
+    not refuse: Esc while Claude Code works interrupts the turn and leaves
+    the draft where it is. The cursor must be shown, as it is at the prompt.
+    """
+    if screen.in_mode:
+        return f"{interrupt.name}'s viewer is scrolled back, so emx didn't interrupt it. Press q in it, then try again."
+    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
+    if identity == "ambiguous":
+        return f"{interrupt.name}'s viewer looks the same as another session's, so emx didn't interrupt it."
+    if identity != "ok" or not screen.cursor_shown:
+        return f"{interrupt.name}'s viewer isn't showing its prompt, so emx didn't interrupt it."
+    return None
+
+
+def interrupted_text(interrupt: Interrupt, stopped: bool) -> str:
+    if stopped:
+        return f"Interrupted {interrupt.name}."
+    return f"{interrupt.name} is still working; emx sent Esc but it didn't stop."
+
+
+def type_gate(
+    viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str, cursor_x: int | None = None,
+) -> str | None:
     """A tmux format, read on the viewer, that is true only while nothing checked before typing has changed; None when an id is not plain enough to put in one.
 
     tmux judges it and types in one command, so no key of his lands between
     the check and the typing. It holds while the viewer is not in a mode,
-    alive, still opened on `sid`, its cursor still at the empty prompt's
-    place (`cursor_y` is where the checks saw it), and his focus is on the
+    alive, still opened on `sid`, its cursor still where the checks saw it
+    (`cursor_x` is the empty prompt's place unless given), and his focus is on the
     panel: the panel is the active pane of the active window. tmux falls
     back to another pane when the target is gone, hence the pane id test.
     """
@@ -511,7 +584,7 @@ def type_gate(viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str
         "#{==:#{pane_dead},0}",
         f"#{{==:#{{{session_opt}}},{sid}}}",
         "#{==:#{cursor_flag},1}",
-        f"#{{==:#{{cursor_x}},{PROMPT_TEXT_X}}}",
+        f"#{{==:#{{cursor_x}},{PROMPT_TEXT_X if cursor_x is None else int(cursor_x)}}}",
         f"#{{==:#{{cursor_y}},{int(cursor_y)}}}",
         f"#{{==:{panel_focused},1}}",
     ]
@@ -526,27 +599,33 @@ def gate_report(session_opt: str) -> str:
     return f"#{{pane_in_mode}} #{{pane_dead}} #{{cursor_flag}} #{{cursor_x}} #{{cursor_y}} #{{{session_opt}}}"
 
 
-def gate_refusal(rename: Rename, report: str, cursor_y: int) -> str | None:
-    """None when tmux typed the line (it printed TYPED), else why not, from the `gate_report` it printed instead.
+def gate_refusal(subject, report: str, cursor_y: int, cursor_x: int | None = None) -> str | None:
+    """None when tmux typed (it printed TYPED), else why not, from the `gate_report` it printed instead. `subject` is the Rename or Interrupt the gate was for.
 
     The report covers the viewer only, so when nothing in it changed, the
     panel lost focus.
     """
     if report == TYPED:
         return None
+    if isinstance(subject, Interrupt):
+        name, act, did, into, again = subject.name, "sent Esc", "interrupt it", f"interrupt {subject.name}", "try again"
+        prompt_did = did
+    else:
+        name, act, did, into, again = subject.old, "typed", "rename it", f"type into {subject.old}", "rename again"
+        prompt_did = "type into it"
     fields = report.split()
     # tmux reports on some other pane, or prints nothing, once the viewer is gone.
     if len(fields) < 5:
-        return f"{rename.old}'s viewer changed just before emx typed, so emx didn't rename it."
+        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
     in_mode, dead, shown, x, y = fields[:5]
     sid = fields[5] if len(fields) > 5 else ""
     if in_mode != "0":
-        return f"{rename.old}'s viewer was scrolled back just before emx typed, so it didn't. Press q in it, then rename again."
-    if dead != "0" or sid != rename.id:
-        return f"{rename.old}'s viewer changed just before emx typed, so emx didn't rename it."
-    if shown != "1" or x != str(PROMPT_TEXT_X) or y != str(cursor_y):
-        return f"{rename.old}'s prompt changed just before emx typed, so emx didn't type into it."
-    return f"Focus left the panel, so emx didn't type into {rename.old}."
+        return f"{name}'s viewer was scrolled back just before emx {act}, so it didn't. Press q in it, then {again}."
+    if dead != "0" or sid != subject.id:
+        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
+    if shown != "1" or x != str(PROMPT_TEXT_X if cursor_x is None else cursor_x) or y != str(cursor_y):
+        return f"{name}'s prompt changed just before emx {act}, so emx didn't {prompt_did}."
+    return f"Focus left the panel, so emx didn't {into}."
 
 
 def renamed_to(rename: Rename, session: Session | None) -> str | None:

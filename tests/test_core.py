@@ -145,6 +145,18 @@ class Ages(unittest.TestCase):
         self.assertEqual(core.session_age(mk(started_at=1_000_000.0), 1_000_000 + 4_000), "4s")
         self.assertEqual(core.session_age(mk(started_at=None), 5_000), "")
 
+    def test_an_interrupted_session_reads_idle(self):
+        interrupted = mk(state="working", status="idle")
+        self.assertEqual(core.state_word(interrupted), "Idle")
+        self.assertEqual(core.category(interrupted), core.WORKING)
+        for f in range(len(core.WORKING_FRAMES) + 1):
+            with self.subTest(frame=f):
+                self.assertEqual(core.session_glyph(interrupted, f), "✻")
+        busy = mk(state="working", status="busy")
+        self.assertEqual(core.state_word(busy), "Working")
+        self.assertGreater(len({core.session_glyph(busy, f) for f in range(len(core.WORKING_FRAMES))}), 1)
+        self.assertEqual(core.state_word(mk(state="done", status="idle")), "Done")
+
 
 class ReopenRule(unittest.TestCase):
     """`claude attach` resumes a session with no live process, so only his explicit open may do it."""
@@ -182,6 +194,28 @@ class ReopenRule(unittest.TestCase):
             for fresh in (True, False):
                 with self.subTest(trigger=trigger, fresh=fresh):
                     self.assertFalse(core.attach_allowed(None, trigger, fresh=fresh))
+
+
+class AttachAllowed(unittest.TestCase):
+    def test_interrupt_attaches_only_a_running_session_on_a_fresh_listing(self):
+        running, stopped = mk(state="working"), mk(state="stopped", running=False)
+        self.assertTrue(core.attach_allowed(running, core.INTERRUPT, True))
+        self.assertFalse(core.attach_allowed(running, core.INTERRUPT, False))
+        self.assertFalse(core.attach_allowed(stopped, core.INTERRUPT, True))
+        self.assertFalse(core.attach_allowed(None, core.INTERRUPT, True))
+        self.assertTrue(core.attach_allowed(stopped, core.OPEN))
+        for trigger in (core.RESTART, core.NEW):
+            with self.subTest(trigger=trigger):
+                self.assertTrue(core.attach_allowed(running, trigger, True))
+                self.assertFalse(core.attach_allowed(running, trigger, False))
+                self.assertFalse(core.attach_allowed(stopped, trigger, True))
+
+    def test_an_interrupt_refusal_says_no_viewer_was_opened(self):
+        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.INTERRUPT, False, None))
+        self.assertIn("isn't listed", core.refusal("emx-test-a", core.INTERRUPT, True, None))
+        stopped = mk(state="stopped", running=False)
+        self.assertEqual(core.refusal("emx-test-a", core.INTERRUPT, True, stopped),
+                         "emx-test-a isn't running, so emx didn't open a viewer to interrupt it.")
 
 
 class PlacementFromGit(unittest.TestCase):
@@ -2422,6 +2456,97 @@ class RenameChecks(unittest.TestCase):
         self.assertEqual(core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS), {})
         self.assertEqual(core.pending_renames(renaming, [named("a", "beta")], None, 101.0), {})
         self.assertEqual(core.pending_renames(renaming, [], None, 101.0), {})
+
+
+def interrupt_screen(viewer, x=2, y=26, shown=True, in_mode=False, flagged=False):
+    captured, width = real_screen(viewer)
+    return core.RenameScreen(core.strip_ansi(captured), "", "", x, y, shown, width, in_mode, flagged)
+
+
+class InterruptChecks(unittest.TestCase):
+    def setUp(self):
+        self.interrupt = core.Interrupt("w", "emx-test-working")
+        self.working = named("w", "emx-test-working", state="working")
+
+    def test_only_a_working_running_not_idle_row_is_interruptible(self):
+        self.assertTrue(core.interruptible(mk(state="working", status="busy")))
+        self.assertTrue(core.interruptible(mk(state="working")))
+        for s in (mk(state="working", status="idle"), mk(state="blocked"), mk(state="done", status="idle"),
+                  mk(state="working", running=False), mk(state="stopped", running=False)):
+            with self.subTest(state=s.state, status=s.status, running=s.running):
+                self.assertFalse(core.interruptible(s))
+
+    def test_listing_refusals(self):
+        self.assertIsNone(core.interrupt_listing_refusal(self.interrupt, self.working, True))
+        cases = {
+            "Couldn't list": (self.working, False),
+            "isn't listed": (None, True),
+            "isn't running": (named("w", "emx-test-working", state="stopped", running=False), True),
+        }
+        for want, (session, fresh) in cases.items():
+            with self.subTest(want=want):
+                refusal = core.interrupt_listing_refusal(self.interrupt, session, fresh)
+                self.assertIn(want, refusal)
+                self.assertIn("emx-test-working", refusal)
+        for done in (core.Session("w", "emx-test-working", "", "working", "idle", "", None, True),
+                     named("w", "emx-test-working", state="blocked")):
+            with self.subTest(state=done.state):
+                self.assertIs(core.interrupt_listing_refusal(self.interrupt, done, True), core.NOTHING_TO_INTERRUPT)
+        self.assertIn("nothing to interrupt", core.nothing_to_interrupt_text(self.interrupt))
+
+    def test_screen_checks_on_real_captures(self):
+        perm = named("p", "emx-test-perm", state="working")
+        others = [named("b", "bee")]
+        ok = {"working-streaming": (self.working, self.interrupt), "working-spinner": (perm, core.Interrupt("p", "emx-test-perm"))}
+        for screen, (session, interrupt) in ok.items():
+            with self.subTest(screen=screen):
+                self.assertIsNone(core.interrupt_screen_refusal(interrupt, session, [session] + others, interrupt_screen(screen)))
+        sessions = [self.working] + others
+
+        def refusal(screen):
+            return core.interrupt_screen_refusal(self.interrupt, self.working, sessions, screen)
+
+        self.assertIn("scrolled back", refusal(interrupt_screen("working-streaming", in_mode=True)))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", flagged=True)))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("agent-view")))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", shown=False)))
+        twin = core.interrupt_screen_refusal(
+            self.interrupt, self.working, sessions + [named("d", "emx-test-working", state="working")],
+            interrupt_screen("working-streaming"),
+        )
+        self.assertIn("looks the same as another session's", twin)
+
+    def test_a_draft_does_not_refuse(self):
+        focus = named("f", "emx-test-focus", state="working")
+        line, below, x, shown, width = at_cursor("prompt-text")
+        screen = interrupt_screen("prompt-text", x=x, y=PROMPT_CURSORS["cursors"]["prompt-text"]["y"], shown=shown)
+        self.assertIsNone(core.interrupt_screen_refusal(core.Interrupt("f", "emx-test-focus"), focus, [focus], screen))
+        self.assertFalse(core.empty_prompt(line, below, x, shown, width))
+
+    def test_what_tmux_printed_names_the_interrupt_and_the_pinned_x(self):
+        i = core.Interrupt("abc", "alpha")
+        self.assertIsNone(core.gate_refusal(i, core.TYPED, 26, cursor_x=17))
+        cases = {
+            "1 0 1 17 26 abc": "alpha's viewer was scrolled back just before emx sent Esc, so it didn't. Press q in it, then try again.",
+            "0 0 1 17 26 other": "alpha's viewer changed just before emx sent Esc, so emx didn't interrupt it.",
+            "0 0 1 2 26 abc": "alpha's prompt changed just before emx sent Esc, so emx didn't interrupt it.",
+            "0 0 1 17 26 abc": "Focus left the panel, so emx didn't interrupt alpha.",
+        }
+        for report, want in cases.items():
+            with self.subTest(report=report):
+                self.assertEqual(core.gate_refusal(i, report, 26, cursor_x=17), want)
+
+    def test_the_result_says_whether_it_stopped(self):
+        self.assertEqual(core.interrupted_text(self.interrupt, True), "Interrupted emx-test-working.")
+        self.assertEqual(core.interrupted_text(self.interrupt, False),
+                         "emx-test-working is still working; emx sent Esc but it didn't stop.")
+
+
+class TypeGate(unittest.TestCase):
+    def test_cursor_x_is_pinned_where_given(self):
+        self.assertIn("#{==:#{cursor_x},17}", core.type_gate("%3", "%1", "abc", 26, "@emx_session", cursor_x=17))
+        self.assertNotIn("#{==:#{cursor_x},2}", core.type_gate("%3", "%1", "abc", 26, "@emx_session", cursor_x=17))
+        self.assertIn("#{==:#{cursor_x},2}", core.type_gate("%3", "%1", "abc", 26, "@emx_session"))
 
 
 class ErrorLine(unittest.TestCase):
