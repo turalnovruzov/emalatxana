@@ -313,140 +313,6 @@ def closed_text(confirm: Confirm, output: str = "") -> str:
     return f"{done} {extra}" if extra else done
 
 
-RENAME_MAX = 200
-
-
-@dataclass(frozen=True)
-class Rename:
-    """A confirmed rename. The session is the one Ctrl+R was pressed on, never the row under the cursor at Enter."""
-
-    id: str
-    old: str
-    new: str
-
-
-def rename_start(session: Session) -> str:
-    """The text the inline edit opens with: the name, or nothing for an unnamed session, whose name is its id."""
-    return "" if session.name == session.id else session.name
-
-
-def rename_text(text: str) -> tuple:
-    """(name, None) for the name he typed, or (None, why not).
-
-    It is typed into his session as one line, so a control character such
-    as a newline, which would submit early or send a key, is refused, and
-    so is a name longer than Claude Code keeps.
-    """
-    name = text.strip()
-    if not name:
-        return None, "Type a name, or Esc to cancel."
-    if any(unicodedata.category(ch).startswith("C") for ch in name):
-        return None, "A name can't hold control characters."
-    if len(name) > RENAME_MAX:
-        return None, f"A name can be at most {RENAME_MAX} characters."
-    return name, None
-
-
-def rename_line(name: str) -> str:
-    return f"/rename {name}"
-
-
-def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None, has_viewer: bool) -> str | None:
-    """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
-
-    emx renames only by typing `/rename` into a viewer already open on a
-    running session: it never attaches just to rename.
-    """
-    if busy is not None:
-        return f"Still renaming {busy.old}…"
-    if list_failing:
-        return "Can't list sessions right now, so emx won't rename one."
-    if session is None:
-        return None
-    if not session.running:
-        return f"{session.name} isn't running, so emx can't rename it. Open it first."
-    if not has_viewer:
-        return f"Open {session.name} once, then press ctrl+r to rename it."
-    return None
-
-
-def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool) -> str | None:
-    """Why a confirmed rename may not type into the session, judged on a listing taken just before, or None.
-
-    A working session would queue `/rename` behind its turn, or treat it as
-    a reply; a session with no live process has nothing to type into.
-    """
-    if not fresh:
-        return f"Couldn't list sessions to check {rename.old}, so emx didn't rename it."
-    if session is None:
-        return f"{rename.old} isn't listed any more, so emx didn't rename it."
-    if not session.running:
-        return f"{rename.old} isn't running, so emx didn't rename it."
-    if category(session) == WORKING:
-        return f"{rename.old} is working. Rename it once it stops."
-    return None
-
-
-@dataclass(frozen=True)
-class RenameScreen:
-    """What is on screen at the moment emx would type `/rename`.
-
-    `view_state` is `main_view_state` of the viewer against the session's
-    name ("" when unnamed); `bare_rule` says the line over its prompt is a
-    pane-wide rule naming no session (`bare_rule_above_prompt`); `flagged`
-    says emx has caught this viewer showing something else
-    (`latch_off_main`); `panel_active` says his focus is still on the panel.
-    """
-
-    view_state: str
-    bare_rule: bool
-    prompt_empty: bool
-    flagged: bool
-    panel_active: bool
-
-
-def rename_screen_refusal(rename: Rename, named: bool, screen: RenameScreen) -> str | None:
-    """Why emx may not type `/rename` into the session's viewer as things are on screen now, or None.
-
-    His focus must still be on the panel, so no key of his can land between
-    this check and the typing. The viewer must show this session: its rule
-    names it, or, for an unnamed session, its rule names no session and it
-    is not Claude Code's agent view, where the line would start a new
-    session; and emx must not have caught it showing another session. Its
-    prompt must be empty (`empty_prompt`), so a draft of his is never
-    touched and no dialog or menu takes the keys.
-    """
-    if not screen.panel_active:
-        return f"Focus left the panel, so emx didn't type into {rename.old}."
-    if named:
-        shows = screen.view_state == "ok"
-    else:
-        shows = screen.view_state == "unknown" and screen.bare_rule
-    if screen.flagged or not shows:
-        return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
-    if not screen.prompt_empty:
-        return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
-    return None
-
-
-def renamed_to(rename: Rename, session: Session | None) -> str | None:
-    """The name the listing shows after `/rename`, or None while it shows no rename.
-
-    Claude Code may change the name it was given (a variant when another
-    live session has it, or a cut to its length cap), so any new name
-    counts, and is what emx reports.
-    """
-    if session is None or session.name in (rename.old, session.id):
-        return None
-    return session.name
-
-
-def renamed_text(rename: Rename, name: str | None) -> str:
-    if name is None:
-        return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
-    return f"Renamed {rename.old} to {name}."
-
-
 @dataclass(frozen=True)
 class Placement:
     repo: str
@@ -580,6 +446,28 @@ def top_match(items: list):
     return next((item for item in items if item[0] == "session"), None)
 
 
+def find_move(items: list, cursor, delta: int):
+    """↑↓ while finding move among the matching sessions only, skipping headers."""
+    return move_cursor([item for item in items if item[0] == "session"], cursor, delta)
+
+
+def find_target(items: list, cursor):
+    """What Enter opens while finding: the session under the cursor, else the top match, else None."""
+    if cursor and cursor[0] == "session":
+        return cursor
+    return top_match(items)
+
+
+def finding_collapsed(prefs: dict, view: str, finding: bool) -> frozenset:
+    """The folded groups; none while a find filters the panel, so every group shows its matches, as in `claude agents`."""
+    return frozenset() if finding else collapsed_keys(prefs, view)
+
+
+def state_group(view: str, key: str) -> bool:
+    """Whether the group's header names a state, so its rows leave the state word out: every by-state group but Pinned."""
+    return view == BY_STATE and key != PINNED
+
+
 def pinned_ids(prefs: dict) -> frozenset:
     return frozenset(prefs.get("pinned", ()))
 
@@ -591,18 +479,16 @@ def toggle_pin(prefs: dict, sid: str) -> dict:
     return {**prefs, "pinned": pinned}
 
 
+def pin_notice(prefs: dict, session: Session) -> str:
+    return f"{'Pinned' if session.id in pinned_ids(prefs) else 'Unpinned'} {session.name}."
+
+
 def prune_pins(prefs: dict, live_ids, misses: dict) -> tuple:
     """(prefs, misses, changed) after a successful listing of every session (`--all`): a pin whose session is missing from STALE_AFTER_MISSES listings in a row is dropped, as `stale_viewers` drops a viewer."""
     misses, gone = stale_viewers(pinned_ids(prefs), live_ids, misses)
     if not gone:
         return prefs, misses, False
     return {**prefs, "pinned": [p for p in prefs.get("pinned", ()) if p not in gone]}, misses, True
-
-
-def pending_renames(renaming: Mapping, sessions, in_flight: str | None) -> dict:
-    """The renames (id → (old, new)) whose new name the viewer may show before the listing does: kept while the listing still shows the old name, or while the rename is still being typed and checked."""
-    names = {s.id: s.name for s in sessions}
-    return {sid: pair for sid, pair in renaming.items() if names.get(sid) == pair[0] or sid == in_flight}
 
 
 def panel_lines(groups, collapsed) -> list:
@@ -1458,12 +1344,6 @@ _AGENT_HEADER = re.compile(rf"^[\s▐▛▜▌▝▘█]*{_AGENT_COUNT}(?: · {_
 _PROMPT_REACH = 12
 
 
-def view_state_for(captured: str, names, pane_width: int) -> str:
-    """`main_view_state` against any of `names`: "ok" when the rule names one of them. While a rename lands, the viewer's rule already shows the new name and the listing still the old one, so either is his session."""
-    states = [main_view_state(captured, name, pane_width) for name in names]
-    return "ok" if "ok" in states else states[0]
-
-
 def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:
     """What a `claude attach` pane is showing, judged from its captured text.
 
@@ -1491,13 +1371,6 @@ def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:
     if not match or not expected_name.strip():
         return "unknown"
     return "ok" if _names_match(match.group(1), expected_name) else "mismatch"
-
-
-def bare_rule_above_prompt(captured: str, pane_width: int) -> bool:
-    """Whether the line over the input box is a pane-wide rule with no session name on it, as an unnamed session's viewer draws it."""
-    lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
-    above = _line_above_prompt(lines, pane_width)
-    return above is not None and bool(_FULL_RULE.match(above))
 
 
 def _line_above_prompt(lines: list, pane_width: int) -> str | None:

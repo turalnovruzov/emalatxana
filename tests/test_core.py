@@ -1825,6 +1825,25 @@ class Find(unittest.TestCase):
         self.assertIsNone(core.top_match([("group", "/x")]))
         self.assertIsNone(core.top_match([]))
 
+    def test_arrows_while_finding_skip_headers(self):
+        items = [("group", "/x"), ("session", "a"), ("group", "/y"), ("session", "b")]
+        self.assertEqual(core.find_move(items, ("session", "a"), 1), ("session", "b"))
+        self.assertEqual(core.find_move(items, ("session", "b"), -1), ("session", "a"))
+        self.assertEqual(core.find_move(items, ("group", "/y"), 1), ("session", "a"))
+        self.assertIsNone(core.find_move([("group", "/x")], None, 1))
+
+    def test_enter_opens_the_session_under_the_cursor_else_the_top_match(self):
+        items = [("group", "/x"), ("session", "a"), ("session", "b")]
+        self.assertEqual(core.find_target(items, ("session", "b")), ("session", "b"))
+        self.assertEqual(core.find_target(items, ("group", "/x")), ("session", "a"))
+        self.assertEqual(core.find_target(items, None), ("session", "a"))
+        self.assertIsNone(core.find_target([("group", "/x")], ("group", "/x")))
+
+    def test_nothing_is_folded_while_finding(self):
+        prefs = core.toggle_collapsed(dict(core.DEFAULT_PREFS), core.PROJECT, "/r/app")
+        self.assertEqual(core.finding_collapsed(prefs, core.PROJECT, False), {"/r/app"})
+        self.assertEqual(core.finding_collapsed(prefs, core.PROJECT, True), frozenset())
+
 
 class Pins(unittest.TestCase):
     def setUp(self):
@@ -1893,125 +1912,16 @@ class Pins(unittest.TestCase):
         self.assertEqual(core.default_folder(("group", core.PINNED), groups, self.sessions, core.PROJECT, "/r/last"), "/r/last")
         self.assertNotIn(core.PINNED, core.session_folders(self.sessions, groups, core.PROJECT))
 
+    def test_only_by_state_headers_other_than_pinned_name_a_state(self):
+        self.assertTrue(core.state_group(core.BY_STATE, core.WORKING))
+        self.assertFalse(core.state_group(core.BY_STATE, core.PINNED))
+        self.assertFalse(core.state_group(core.PROJECT, "/r/app"))
+        self.assertFalse(core.state_group(core.PROJECT, core.PINNED))
 
-class RenameChecks(unittest.TestCase):
-    def setUp(self):
-        self.rename = core.Rename("a", "alpha", "beta")
-
-    def test_the_edit_opens_with_the_name_or_empty_for_an_unnamed_session(self):
-        self.assertEqual(core.rename_start(named("a", "alpha")), "alpha")
-        self.assertEqual(core.rename_start(named("a", "a")), "")
-
-    def test_the_typed_name_is_one_plain_line(self):
-        self.assertEqual(core.rename_text("  my name; with spaces "), ("my name; with spaces", None))
-        for bad in ("", "   ", "two\nlines", "tab\there", "esc\x1bseq", "x" * (core.RENAME_MAX + 1)):
-            with self.subTest(bad=bad):
-                name, error = core.rename_text(bad)
-                self.assertIsNone(name)
-                self.assertTrue(error)
-        self.assertEqual(core.rename_text("x" * core.RENAME_MAX)[0], "x" * core.RENAME_MAX)
-
-    def test_the_line_typed_is_exactly_the_slash_command(self):
-        self.assertEqual(core.rename_line("my name"), "/rename my name")
-
-    def test_ctrl_r_needs_a_running_session_with_an_open_viewer_and_a_healthy_listing(self):
-        running = named("a", "alpha")
-        self.assertIsNone(core.rename_blocked(False, None, running, True))
-        self.assertIn("Open alpha once", core.rename_blocked(False, None, running, False))
-        self.assertIn("isn't running", core.rename_blocked(False, None, named("a", "alpha", state="stopped", running=False), True))
-        self.assertIn("Can't list", core.rename_blocked(True, None, running, True))
-        self.assertIn("Still renaming", core.rename_blocked(False, self.rename, running, True))
-
-    def test_the_fresh_listing_must_show_it_running_and_not_working(self):
-        self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="blocked"), True))
-        self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="done"), True))
-        cases = {
-            "Couldn't list": (named("a", "alpha"), False),
-            "isn't listed": (None, True),
-            "isn't running": (named("a", "alpha", state="stopped", running=False), True),
-            "is working": (named("a", "alpha", state="working"), True),
-        }
-        for want, (session, fresh) in cases.items():
-            with self.subTest(want=want):
-                self.assertIn(want, core.rename_listing_refusal(self.rename, session, fresh))
-
-    def screen(self, state="ok", bare=False, empty=True, flagged=False, active=True):
-        return core.RenameScreen(state, bare, empty, flagged, active)
-
-    def test_the_screen_must_show_this_sessions_empty_prompt(self):
-        self.assertIsNone(core.rename_screen_refusal(self.rename, True, self.screen()))
-        self.assertIsNone(core.rename_screen_refusal(self.rename, False, self.screen("unknown", bare=True)))
-        self.assertIn("isn't empty", core.rename_screen_refusal(self.rename, True, self.screen(empty=False)))
-        refused = [
-            (True, self.screen("unknown")), (True, self.screen("mismatch")), (True, self.screen("agent_view")),
-            (False, self.screen("agent_view", bare=True)), (False, self.screen("unknown", bare=False)),
-            (True, self.screen(flagged=True)), (False, self.screen("unknown", bare=True, flagged=True)),
-        ]
-        for named_, screen in refused:
-            with self.subTest(named=named_, screen=screen):
-                self.assertIn("isn't showing its prompt", core.rename_screen_refusal(self.rename, named_, screen))
-
-    def test_focus_off_the_panel_refuses_before_anything_else(self):
-        self.assertEqual(
-            core.rename_screen_refusal(self.rename, True, self.screen(active=False)),
-            "Focus left the panel, so emx didn't type into alpha.",
-        )
-
-    def test_on_real_screens_only_this_sessions_empty_prompt_passes(self):
-        cases = {
-            ("named-viewer", "emx-test-named", "prompt-empty"): None,
-            ("named-viewer", "emx-test-named", "prompt-text"): "isn't empty",
-            ("named-viewer", "emx-test-named", "prompt-text-at-start"): "isn't empty",
-            ("named-viewer", "emx-test-named", "prompt-slash-menu"): "isn't empty",
-            ("named-viewer", "emx-test-named", "prompt-permission"): "isn't empty",
-            ("named-viewer", "someone-else", "prompt-empty"): "isn't showing",
-            ("agent-view", "emx-test-named", "prompt-empty"): "isn't showing",
-            ("agent-view", "", "prompt-empty"): "isn't showing",
-            ("unnamed-empty-viewer", "", "prompt-empty"): None,
-            ("cross-wired", "", "prompt-empty"): "isn't showing",
-            ("named-viewer", "", "prompt-empty"): "isn't showing",
-        }
-        for (screen, name, prompt), want in cases.items():
-            with self.subTest(screen=screen, name=name, prompt=prompt):
-                text, width = real_screen(screen)
-                shown = core.RenameScreen(
-                    core.main_view_state(text, name, width), core.bare_rule_above_prompt(text, width),
-                    core.empty_prompt(*at_cursor(prompt)), False, True,
-                )
-                refusal = core.rename_screen_refusal(self.rename, bool(name), shown)
-                if want is None:
-                    self.assertIsNone(refusal)
-                else:
-                    self.assertIn(want, refusal)
-
-    def test_a_bare_rule_is_only_an_unnamed_sessions(self):
-        cases = {"unnamed-empty-viewer": True, "named-viewer": False, "cross-wired": False, "permission-dialog": False}
-        for name, want in cases.items():
-            with self.subTest(screen=name):
-                self.assertEqual(core.bare_rule_above_prompt(*real_screen(name)), want)
-
-    def test_the_rename_counts_once_the_listing_shows_any_new_name(self):
-        self.assertIsNone(core.renamed_to(self.rename, named("a", "alpha")))
-        self.assertIsNone(core.renamed_to(self.rename, None))
-        self.assertEqual(core.renamed_to(self.rename, named("a", "beta")), "beta")
-        self.assertEqual(core.renamed_to(self.rename, named("a", "beta (2)")), "beta (2)")
-        self.assertIsNone(core.renamed_to(core.Rename("a", "a", "beta"), named("a", "a")))
-        self.assertEqual(core.renamed_text(self.rename, "beta (2)"), "Renamed alpha to beta (2).")
-        self.assertIn("doesn't show a new name", core.renamed_text(self.rename, None))
-
-    def test_the_new_name_on_the_viewer_is_his_session_until_the_listing_catches_up(self):
-        text, width = real_screen("named-viewer")
-        self.assertEqual(core.main_view_state(text, "old-name", width), "mismatch")
-        self.assertEqual(core.view_state_for(text, ["old-name", "emx-test-named"], width), "ok")
-        self.assertEqual(core.view_state_for(text, ["old-name"], width), "mismatch")
-        self.assertEqual(core.view_state_for(text, ["", "other"], width), "unknown")
-
-    def test_a_pending_rename_is_kept_while_the_listing_shows_the_old_name_or_it_is_in_flight(self):
-        renaming = {"a": ("alpha", "beta"), "b": ("bee", "bea"), "c": ("cee", "sea")}
-        sessions = [named("a", "alpha"), named("b", "bea"), named("c", "cee (renamed)")]
-        self.assertEqual(core.pending_renames(renaming, sessions, None), {"a": ("alpha", "beta")})
-        self.assertEqual(set(core.pending_renames(renaming, sessions, "c")), {"a", "c"})
-        self.assertEqual(core.pending_renames(renaming, [], None), {})
+    def test_the_notice_says_whether_the_session_is_now_pinned(self):
+        prefs = core.toggle_pin(dict(core.DEFAULT_PREFS), "a")
+        self.assertEqual(core.pin_notice(prefs, self.sessions[0]), "Pinned alpha.")
+        self.assertEqual(core.pin_notice(core.toggle_pin(prefs, "a"), self.sessions[0]), "Unpinned alpha.")
 
 
 class ErrorLine(unittest.TestCase):

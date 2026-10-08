@@ -152,17 +152,6 @@ class LeftBinding(unittest.TestCase):
         self.press_toggle()
         self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "")
 
-    def test_type_line_types_the_text_exactly_then_enter(self):
-        text = "/rename näme; with -l \\; and ;"
-        self.tmux.type_line(self.main, text)
-        want = text.encode("utf-8") + b"\r"
-        self.wait_for(lambda: len(self.typed("main")) >= len(want), "the line in main")
-        self.assertEqual(self.typed("main"), want)
-        self.assertEqual(self.typed("sidebar"), b"")
-
-    def test_cursor_reads_where_the_prompt_put_it(self):
-        self.assertEqual(self.tmux.cursor(self.main), (2, 0, True, int(self.show(self.main, "#{pane_width}"))))
-
     def test_with_the_panel_gone_the_key_reaches_the_pane(self):
         self.tmux.bind_left(self.sidebar, "true", 2)
         self.tmux.kill_pane(self.sidebar)

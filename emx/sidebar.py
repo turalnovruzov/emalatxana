@@ -25,8 +25,8 @@ MAX_LISTINGS = 4
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 FOOTERS = (
-    "→ open  ← back  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
-    "→ open ← back n new ^f find ^t pin ^r rename ^x close ^s view ? keys",
+    "→ open  ← back  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
+    "→ open ← back n new ^f find ^t pin ^x close ^s view ? keys",
     "→ open  ← back  n new  ^x close  ^s view  ? keys",
     "→ open ← back n new ^x close ^s view ? keys",
     "→ open ← back n new ^x close ? keys",
@@ -43,7 +43,6 @@ HELP = (
     ("^x ^x", "stop the session; on a stopped one, remove it"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
-    ("^r", "rename, via /rename in its open viewer"),
     ("^s", "by project / by state"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
@@ -59,10 +58,8 @@ BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
 CTRL_S = "\x13"
 CTRL_X = "\x18"
 CTRL_F = "\x06"
-CTRL_R = "\x12"
 CTRL_T = "\x14"
 CONFIRM_FOOTER = "ctrl+x to confirm"
-RENAME_FOOTER = "enter to save · esc to cancel"
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
 CLOSE_SECONDS = 30
 FRAME_SECONDS = 0.15
@@ -303,71 +300,6 @@ class Closer(threading.Thread):
             self.result = (False, f"{self.confirm.action} failed: {core.error_line(exc)}")
 
 
-class Renamer(threading.Thread):
-    """Renames a session off the curses thread by typing `/rename` into its open viewer.
-
-    It types only once a fresh listing shows the session running and not
-    working, and the viewer's screen shows this session's empty prompt; then
-    it waits for the listing to show the new name. `result` is (renamed,
-    message, typed).
-    """
-
-    def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
-        super().__init__(daemon=True)
-        self.claude, self.tmux, self.rename = claude, tmux, rename
-        self.panel, self.flagged = panel, flagged
-        self.result = None
-
-    def run(self) -> None:
-        try:
-            self.result = self.attempt()
-        except Exception as exc:
-            self.result = (False, f"rename failed: {core.error_line(exc)}", False)
-
-    def attempt(self) -> tuple:
-        sessions, _ = fetch_sessions(self.claude)
-        session, fresh = core.checked_row(sessions, self.rename.id)
-        refusal = core.rename_listing_refusal(self.rename, session, fresh)
-        if refusal:
-            return False, refusal, False
-        try:
-            panes = self.tmux.panes()
-            viewer = next((p for p in panes if p.session == self.rename.id and not p.dead), None)
-            if viewer is None:
-                return False, f"{self.rename.old}'s viewer has closed, so emx didn't rename it.", False
-            # pane_active is per window, so it is read off the panel: the viewer may be alone in a hidden window.
-            panel_active = any(p.id == self.panel and p.active for p in panes)
-            named = session.name != session.id
-            captured = self.tmux.capture(viewer.id)
-            x, y, shown, width = self.tmux.cursor(viewer.id)
-            line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-            screen = core.RenameScreen(
-                view_state=core.main_view_state(captured, session.name if named else "", viewer.width),
-                bare_rule=core.bare_rule_above_prompt(captured, viewer.width),
-                prompt_empty=core.empty_prompt(line, below, x, shown, width),
-                flagged=viewer.id in self.flagged,
-                panel_active=panel_active,
-            )
-            refusal = core.rename_screen_refusal(self.rename, named, screen)
-            if refusal:
-                return False, refusal, False
-            self.tmux.type_line(viewer.id, core.rename_line(self.rename.new))
-        except TmuxError as exc:
-            return False, f"tmux: {exc}", False
-        name = self.wait_for_name()
-        return name is not None, core.renamed_text(self.rename, name), True
-
-    def wait_for_name(self) -> str | None:
-        deadline = time.monotonic() + LISTED_WAIT_SECONDS
-        while True:
-            sessions, _ = fetch_sessions(self.claude)
-            session, _ = core.checked_row(sessions, self.rename.id)
-            name = core.renamed_to(self.rename, session)
-            if name is not None or time.monotonic() >= deadline:
-                return name
-            time.sleep(LISTED_CHECK_SECONDS)
-
-
 class Starter(threading.Thread):
     """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
 
@@ -547,9 +479,6 @@ class App:
         self.closer = None
         self.confirm = None
         self.find = None
-        self.rename_edit = None
-        self.renamer = None
-        self.renaming = {}
         self.pin_misses = {}
         self.flagged_viewers = frozenset()
         self.auto_tried = frozenset()
@@ -584,13 +513,10 @@ class App:
         return core.current_view(self.prefs)
 
     def collapsed(self) -> frozenset:
-        # While a find filters the panel every group shows its matches, as in `claude agents`.
-        if self.find:
-            return frozenset()
-        return core.collapsed_keys(self.prefs, self.view())
+        return core.finding_collapsed(self.prefs, self.view(), bool(self.find))
 
     def grouped(self) -> list:
-        shown = core.find_matches(self.sessions, self.find, self.home) if self.find else self.sessions
+        shown = core.find_matches(self.sessions, self.find or "", self.home)
         return core.group_sessions(shown, self.placements, self.view(), core.pinned_ids(self.prefs))
 
     def lines(self) -> list:
@@ -711,8 +637,7 @@ class App:
         if session is None:
             return "unknown"
         expected = "" if session.name == session.id else session.name
-        names = [expected] + ([self.renaming[session.id][1]] if session.id in self.renaming else [])
-        return core.view_state_for(self.tmux.capture(viewer.id), names, viewer.width)
+        return core.main_view_state(self.tmux.capture(viewer.id), expected, viewer.width)
 
     def main_is_off(self) -> bool:
         return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
@@ -903,8 +828,7 @@ class App:
         self.prefs = core.toggle_pin(self.prefs, session.id)
         self.save_prefs()
         self.regroup()
-        pinned = session.id in core.pinned_ids(self.prefs)
-        self.say(f"{'Pinned' if pinned else 'Unpinned'} {session.name}.", seconds=RESTORED_NOTICE_SECONDS)
+        self.say(core.pin_notice(self.prefs, session), seconds=RESTORED_NOTICE_SECONDS)
 
     def open_find(self) -> None:
         self.find = ""
@@ -922,8 +846,7 @@ class App:
             self.find_submit()
             return
         if key in (curses.KEY_UP, curses.KEY_DOWN):
-            matches = [item for item in self.items() if item[0] == "session"]
-            self.cursor = core.move_cursor(matches, self.cursor, -1 if key == curses.KEY_UP else 1)
+            self.cursor = core.find_move(self.items(), self.cursor, -1 if key == curses.KEY_UP else 1)
             self.wanted_cursor = None
             return
         if key in BACKSPACE_KEYS:
@@ -940,8 +863,7 @@ class App:
 
     def find_submit(self) -> None:
         """Enter opens the session under the cursor, which typing keeps on the top match."""
-        on_session = self.cursor if self.cursor and self.cursor[0] == "session" else None
-        target = on_session or core.top_match(self.items())
+        target = core.find_target(self.items(), self.cursor)
         if target is None:
             self.say("No session matches.")
             return
@@ -951,63 +873,6 @@ class App:
             return
         self.close_find()
         self.activate(target)
-
-    def start_rename(self) -> None:
-        session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
-        if session is None:
-            return
-        try:
-            has_viewer = any(p.session == session.id and not p.dead for p in self.tmux.panes())
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
-            return
-        blocked = core.rename_blocked(
-            bool(self.list_error), self.renamer.rename if self.renamer else None, session, has_viewer,
-        )
-        if blocked:
-            self.say(blocked, error=True)
-            return
-        self.rename_edit = {"id": session.id, "old": session.name, "text": core.rename_start(session), "hint": ""}
-        self.say("")
-
-    def rename_key(self, key) -> None:
-        edit = self.rename_edit
-        if key == "\x1b":
-            self.rename_edit = None
-        elif key in ENTER_KEYS:
-            self.submit_rename()
-        elif key in BACKSPACE_KEYS:
-            edit.update(text=edit["text"][:-1], hint="")
-        elif key == "\x15":
-            edit.update(text="", hint="")
-        elif isinstance(key, str) and key.isprintable():
-            edit.update(text=edit["text"] + key, hint="")
-
-    def submit_rename(self) -> None:
-        edit = self.rename_edit
-        name, error = core.rename_text(edit["text"])
-        if error:
-            edit["hint"] = error
-            return
-        self.rename_edit = None
-        if name == edit["old"]:
-            return
-        rename = core.Rename(edit["id"], edit["old"], name)
-        self.renaming[rename.id] = (rename.old, rename.new)
-        self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
-        self.renamer.start()
-        self.say(f"Renaming {rename.old}…")
-
-    def finish_rename(self) -> None:
-        renamer = self.renamer
-        if renamer is None or renamer.is_alive():
-            return
-        self.renamer = None
-        done, message, typed = renamer.result or (False, "rename failed", False)
-        if not typed:
-            self.renaming.pop(renamer.rename.id, None)
-        self.say(message, error=not done)
-        self.poller.wake.set()
 
     def flip_side(self) -> None:
         try:
@@ -1181,8 +1046,6 @@ class App:
             self.housekeep(fresh_list=False)
         elif self.prompt is not None:
             self.prompt_key(key)
-        elif self.rename_edit is not None:
-            self.rename_key(key)
         elif self.find is not None:
             self.find_key(key)
         elif self.help or key == "?":
@@ -1206,8 +1069,6 @@ class App:
             self.open_find()
         elif key == CTRL_T:
             self.toggle_pin()
-        elif key == CTRL_R:
-            self.start_rename()
         elif key == "n":
             self.open_prompt()
         elif key == "r":
@@ -1248,10 +1109,6 @@ class App:
             # The prompt's own hint line stands in for the footer, whose keys don't apply while typing.
             room = None if height is None else height - 2 - len(lines)
             return lines + self.prompt_lines(width, room)
-        if self.rename_edit is not None:
-            hint = self.rename_edit["hint"]
-            lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
-            return lines + [(t, curses.A_DIM) for t in core.wrap_words(RENAME_FOOTER, width)[:2]]
         if self.find is not None:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
@@ -1359,7 +1216,7 @@ class App:
         main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
         cursor_group = core.cursor_group(self.cursor, self.groups)
         groups = {g.key: g for g in self.groups}
-        pinned = {s.id for g in self.groups if g.key == core.PINNED for s in g.sessions}
+        group_of = {s.id: g.key for g in self.groups for s in g.sessions}
         aligns = {}
         for g in self.groups:
             column = core.name_column(((s.name, self.worktree(s)) for s in g.sessions), width)
@@ -1383,12 +1240,12 @@ class App:
                     armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
                     self.draw_session(
                         y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame, armed,
-                        session.id in pinned,
+                        group_of.get(session.id, ""),
                     )
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
         view = self.view()
-        name_tone = CATEGORY_TONE[group.key] if view == core.BY_STATE and group.key != core.PINNED else "plain"
+        name_tone = CATEGORY_TONE[group.key] if core.state_group(view, group.key) else "plain"
         tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
         collapsed = group.key in self.collapsed()
         for x, text, part in core.header_layout(view, group.key, len(group.sessions), collapsed, width):
@@ -1402,7 +1259,7 @@ class App:
 
     def draw_session(
         self, y: int, s, selected: str | None, in_main: bool, width: int, align: int, now_ms: float, frame: int,
-        armed: core.Confirm | None = None, pinned: bool = False,
+        armed: core.Confirm | None = None, group_key: str = "",
     ) -> None:
         cat = core.category(s)
         stopped = cat == core.STOPPED
@@ -1421,12 +1278,7 @@ class App:
             self.put(y, core.ROW_LEAD, core.fit(core.confirm_label(armed), width - 1 - core.ROW_LEAD),
                      pal.attr("error", selected) | curses.A_BOLD)
             return
-        if self.rename_edit is not None and self.rename_edit["id"] == s.id:
-            self.put(y, core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD),
-                     pal.attr("accent", selected) | curses.A_BOLD)
-            return
-        # The by-state view's headers name the state, except the Pinned one.
-        word = "" if self.view() == core.BY_STATE and not pinned else core.state_word(s)
+        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
         parts = core.row_layout(s.name, self.worktree(s), word, s.waiting_for, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
@@ -1448,7 +1300,6 @@ class App:
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
             self.save_prefs()
-        self.renaming = core.pending_renames(self.renaming, sessions, self.renamer.rename.id if self.renamer else None)
         self.regroup()
         return True
 
@@ -1463,7 +1314,6 @@ class App:
             self.finish_start()
             self.finish_check()
             self.finish_close()
-            self.finish_rename()
             fresh_list = self.take_poll()
             self.take_placements()
             now = time.monotonic()

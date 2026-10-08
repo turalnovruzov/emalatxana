@@ -26,7 +26,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    text = tmux.some_capture(pane)          # the wrapper gathers
    verdict = core.judge(text, expected)    # core decides, from plain values
    ```
-4. **Gotcha**: logic creeps into the wrappers. A condition written inline in `sidebar.py` "because it needs the pane" is untested; pass the pane's text or fields into a core function instead.
+4. **Gotcha**: logic creeps into the wrappers. A condition written inline in `sidebar.py` "because it needs the pane" is untested; pass the pane's text or fields into a core function instead. Group keys in the project view are not always folders: `core.PINNED` is a pseudo-key, so code that reads a group key or a `("group", key)` cursor as a folder must exclude it.
 
 ### CLI wrappers never raise
 
