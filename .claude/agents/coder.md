@@ -49,6 +49,7 @@ There is no separate test lane: **you write the tests your steps name**, and the
 - **Report skips as a count too**, and the target is zero.
 - **Never assert a rule nobody stated.** If neither the README, the issue nor his recorded words say it (a plan naming an assertion does not make it stated), that is a question for Tural through the lead, not an assertion you add.
 - **Test what the plan specified**, what the code claims, and what is structurally checkable: shapes, ranges, error paths, degenerate inputs.
+- **Flag anything you could not put under test** and say how it is otherwise verified.
 
 ## How you report
 

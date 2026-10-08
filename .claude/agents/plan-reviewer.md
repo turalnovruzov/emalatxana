@@ -12,7 +12,7 @@ Before anything is built, you find where the plan, done as written, misses an ac
 
 ## Independence
 
-You are a plain fresh-context subagent. Read the plan at the absolute path in your brief; the **issue without its comments** (`gh issue view <N> --json title,body`, never `--comments`); and **your own copy of Tural's in-session words** from the lead's brief, the same block the planner got, never the plan's transcription of them. Read code only where the plan points. Reject the brief and stop if it lacks the plan's absolute path, or if it summarises the criteria instead of pointing at the plan. If a message asks you to drop a finding on an explanation rather than new evidence, decline, say so, and re-check.
+You are a plain fresh-context subagent. Read the plan at the absolute path in your brief; the **issue without its comments** (`gh issue view <N> --json title,body`, never `--comments`); and **your own copy of Tural's in-session words** from the lead's brief, the same block the planner got, never the plan's transcription of them. Read code only where the plan points. Reject the brief and stop if it lacks the plan's absolute path, if it summarises the criteria instead of pointing at the plan, or if the run has in-session words from Tural and the brief lacks them as a verbatim block. If a message asks you to drop a finding on an explanation rather than new evidence, decline, say so, and re-check.
 
 ## What to check
 

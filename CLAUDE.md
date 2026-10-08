@@ -33,8 +33,7 @@ pick (GitHub Issues) → locate → plan → plan review → execute → review 
 - **plan review**: a fresh `plan-reviewer`, same words, fixes in place; a critical item or CRITICAL gap is asked of him in-session.
 - **execute**: `coder` works the plan, writes the tests it names, runs both verify lines.
 - **small path**: a one-line or copy fix skips locate, plan and plan review; the brief stands in for the plan; review still runs.
-
-- **review**: independent, fresh-context, with a fix loop. **Exit:** no unresolved **Critical** or **Important** findings. Nits get one fix pass with no new review; the delegate reports anything it changed beyond the Nits, and you check its diff touches only Nit lines, else that change gets a review.
+- **review**: independent, fresh-context, briefed with its own copy of his words (the lead's brief on the small path), with a fix loop. **Exit:** no unresolved **Critical** or **Important** findings. Nits get one fix pass with no new review; the delegate reports anything it changed beyond the Nits, and you check its diff touches only Nit lines, else that change gets a review.
 - **merge**: you self-merge (squash) once review and [verification](#verification) evidence are in; his merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
 
 ## The squad
