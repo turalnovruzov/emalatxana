@@ -437,12 +437,18 @@ class FocusTmux:
 
     def __init__(self):
         self.panel_active = True
+        self.back = False
+        self.cleared = []
 
     def panes(self):
         return [
-            Pane("%1", "@1", False, "sidebar", "", 40, 121, self.panel_active),
+            Pane("%1", "@1", False, "sidebar", "", 40, 121, self.panel_active, self.back),
             Pane("%2", "@1", False, "", "b", 80, 121, not self.panel_active),
         ]
+
+    def clear_back(self, pane):
+        self.cleared.append(pane)
+        self.back = False
 
 
 class Focus(AppCase):
@@ -464,18 +470,48 @@ class Focus(AppCase):
         self.app.tmux.panel_active = False
         self.read(*FOCUS_OUT)
 
-    def come_back(self, *then):
+    def come_back(self, *then, by_left=False):
         self.app.tmux.panel_active = True
+        self.app.tmux.back = by_left
         self.read(*FOCUS_IN, *then)
 
-    def test_coming_back_from_main_moves_the_cursor_to_the_session_there(self):
+    def test_coming_back_with_left_moves_the_cursor_to_the_session_in_main(self):
         self.leave_panel()
         self.assertIs(self.app.focused, False)
         self.assertEqual(self.app.cursor, ("session", "c"))
-        self.come_back()
+        self.come_back(by_left=True)
         self.assertIs(self.app.focused, True)
         self.assertEqual(self.app.cursor, ("session", "b"))
+        self.assertEqual(self.app.tmux.cleared, ["%1"])
         self.assertEqual(self.opened, [])
+
+    def test_coming_back_with_ctrl_backslash_or_a_click_leaves_the_cursor_where_he_left_it(self):
+        self.leave_panel()
+        self.come_back()
+        self.assertIs(self.app.focused, True)
+        self.assertEqual(self.app.cursor, ("session", "c"))
+        self.assertEqual(self.app.tmux.cleared, [])
+
+    def test_the_left_mark_seen_before_the_panel_is_active_waits_for_it(self):
+        self.leave_panel()
+        self.app.tmux.back = True
+        self.app.read_focus()
+        self.assertEqual((self.app.focused, self.app.tmux.cleared), (False, []))
+        self.app.tmux.panel_active = True
+        self.app.read_focus()
+        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.assertEqual(self.app.tmux.cleared, ["%1"])
+
+    def test_a_mark_tmux_fails_to_clear_still_records_focus(self):
+        def refuse(pane):
+            raise sidebar.TmuxError("no such pane")
+
+        self.leave_panel()
+        self.app.tmux.clear_back = refuse
+        self.come_back(by_left=True)
+        self.assertIs(self.app.focused, True)
+        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.assertIn("tmux: no such pane", self.app.notice)
 
     def test_his_terminal_losing_and_regaining_focus_changes_nothing(self):
         self.read(*FOCUS_IN)
@@ -537,9 +573,12 @@ class ArrowKeys(AppCase):
         self.assertEqual(self.opened, [])
         self.assertNotIn("/p/alpha", self.app.collapsed())
 
-    def test_footer_and_help_lead_with_the_arrows(self):
-        self.assertTrue(sidebar.FOOTERS[0].startswith("→ open  ← back"))
-        self.assertEqual([key for key, _ in sidebar.HELP[:2]], ["→ ↵", "←"])
+    def test_footer_and_help_show_the_arrows(self):
+        help_keys = " ".join(key for key, _ in sidebar.HELP)
+        for arrow in ("←", "→"):
+            with self.subTest(arrow=arrow):
+                self.assertIn(arrow, sidebar.FOOTERS[0])
+                self.assertIn(arrow, help_keys)
 
 
 class AutoRestoreFakeTmux(FakeTmux):
@@ -589,6 +628,14 @@ class AutoRestore(AppCase):
         self.assertEqual(self.app.tmux.selected, ["%1"])
         self.assertIn("brought the session back", self.app.notice)
 
+    def test_the_restore_is_a_way_back_so_the_cursor_goes_to_mains_session(self):
+        self.app.focused, self.app.cursor = False, ("group", "/p/alpha")
+        self.show("agent-view")
+        self.app.check_main(self.app.main_pane)
+        self.settle()
+        self.assertIs(self.app.focused, True)
+        self.assertEqual(self.app.cursor, ("session", "s1"))
+
     def test_a_refusal_is_said_once_and_the_warning_stays(self):
         self.answer = ([session("s1", "/p/alpha", state="stopped", pid=None)], None)
         self.show("agent-view")
@@ -613,6 +660,52 @@ class AutoRestore(AppCase):
         self.app.handle_key("r")
         self.settle()
         self.assertEqual(self.app.tmux.selected, ["%2"])
+
+    def test_a_restore_is_dropped_when_main_has_left_the_agent_view_by_the_answer(self):
+        # He picked another session in Claude Code's agent view, or kept working, while the listing ran.
+        for since in ("named-viewer", "working-streaming", "permission-dialog"):
+            with self.subTest(main_now_shows=since):
+                self.app.tmux.respawned, self.app.tmux.selected = [], []
+                self.app.flagged_viewers = self.app.auto_tried = frozenset()
+                self.app.last_restore = None
+                self.show("agent-view")
+                self.app.check_main(self.app.main_pane)
+                self.assertIsNotNone(self.app.checker)
+                self.show(since)
+                self.settle()
+                self.assertEqual(self.app.tmux.respawned, [])
+                self.assertEqual(self.app.tmux.selected, [])
+                self.assertNotIn("bringing back", self.app.notice)
+
+    def restore_cycles(self, screens):
+        """Each screen is a fixture name, or "" for a viewer still starting, which reads "unknown"."""
+        for screen in screens:
+            if screen:
+                self.show(screen)
+            else:
+                self.app.tmux.screen = ""
+            self.app.check_main(self.app.main_pane)
+            if self.app.checker is not None:
+                self.settle()
+
+    def test_the_agent_view_back_right_after_a_restore_stops_restoring_and_warns(self):
+        self.restore_cycles(["agent-view", ""] * 4)
+        self.assertEqual(self.app.tmux.respawned, ["%2"])
+        self.assertEqual(self.app.tmux.selected, ["%1"])
+        shown = " ".join(t for t, _ in self.app.bottom_lines(60))
+        self.assertIn("press r", shown)
+        self.assertNotIn("brought the session back", shown)
+
+    def test_an_ok_read_after_a_restore_lets_the_next_agent_view_restore_again(self):
+        self.app.sessions = [core.Session("s1", "emx-test-named", "/p/alpha", "working", "", "", 0.0, True)]
+        self.restore_cycles(["agent-view", "named-viewer", "agent-view"])
+        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
+
+    def test_after_the_backoff_window_the_agent_view_is_restored_again(self):
+        self.restore_cycles(["agent-view"])
+        self.app.last_restore = ("%2", time.monotonic() - core.RESTORE_BACKOFF_SECONDS - 1)
+        self.restore_cycles(["", "agent-view"])
+        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
 
 
 if __name__ == "__main__":

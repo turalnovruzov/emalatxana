@@ -353,6 +353,7 @@ class App:
         self.checker = None
         self.flagged_viewers = frozenset()
         self.auto_tried = frozenset()
+        self.last_restore = None
         self.focused = None
         self.pending_keys = []
 
@@ -428,7 +429,7 @@ class App:
                 self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
-                self.set_focus(sidebar.active)
+                self.take_focus(sidebar)
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -438,9 +439,14 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
-    def set_focus(self, focused: bool, follow_main: bool = True) -> None:
-        """Note whether the panel has focus; arriving from the main pane puts the cursor on the session there, unless `follow_main` is off."""
-        if focused and self.focused is False and follow_main:
+    def set_focus(self, focused: bool, back: bool = False) -> None:
+        """Note whether the panel has focus.
+
+        Coming back from main with ← (`back`) puts the cursor on the session
+        there, as `claude agents` does; Ctrl+\\ or a click leaves it where he
+        left it.
+        """
+        if focused and self.focused is False and back:
             main = self.main_pane
             main_sid = main.session if main is not None and not self.main_is_off() else ""
             self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
@@ -459,7 +465,17 @@ class App:
             self.say(f"tmux: {exc}", error=True)
             return
         if sidebar:
-            self.set_focus(sidebar.active)
+            self.take_focus(sidebar)
+
+    def take_focus(self, sidebar: Pane) -> None:
+        """Focus as tmux reports it. The ← binding marks the panel before selecting it; the mark is cleared once seen here with focus."""
+        back = core.came_back(sidebar.active, sidebar.back)
+        if back:
+            try:
+                self.tmux.clear_back(sidebar.id)
+            except TmuxError as exc:
+                self.say(f"tmux: {exc}", error=True)
+        self.set_focus(sidebar.active, back=back)
 
     def check_main(self, main: Pane | None) -> None:
         """Flag the main pane once it stops showing the session emx put there, and bring the session back if it shows Claude Code's agent view."""
@@ -467,10 +483,17 @@ class App:
             return
         state = self.view_state(main)
         self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
-        self.auto_tried &= self.flagged_viewers
-        if core.auto_restore(state, main.id in self.auto_tried, self.checker is not None):
+        self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
+        self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
+        action = core.auto_restore(
+            state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
+        )
+        if action is not None:
             self.auto_tried |= {main.id}
+        if action == core.RESTORE:
             self.start_check(main, auto=True)
+        elif action == core.GIVE_UP:
+            self.say("")
 
     def view_state(self, viewer: Pane) -> str:
         session = self.session(viewer.session)
@@ -484,7 +507,10 @@ class App:
 
     def restoring_main(self) -> bool:
         checker = self.checker
-        return checker is not None and checker.auto and self.main_pane is not None and checker.asked[1] == self.main_pane.id
+        return checker is not None and core.restoring_main(checker.asked, checker.auto, self.main_id())
+
+    def main_id(self) -> str | None:
+        return self.main_pane.id if self.main_pane is not None else None
 
     def reconcile_widths(self, sidebar: Pane) -> None:
         action = core.width_action(self.applied, (sidebar.window_width, sidebar.width))
@@ -603,12 +629,18 @@ class App:
             if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
                 self.say("The main pane changed while emx was checking, so it wasn't restarted.")
                 return
+            if checker.auto and self.view_state(main) != "agent_view":
+                # He has moved on inside Claude Code meanwhile (picked a session, or went back to work).
+                self.say("")
+                return
             if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
                 return
             self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
             self.flagged_viewers -= {pane_id}
             if checker.auto:
+                self.last_restore = (pane_id, time.monotonic())
                 self.tmux.select(self.me)
+                self.set_focus(True, back=True)
                 self.say("Main showed Claude Code's agent view, so emx brought the session back.")
             else:
                 self.tmux.select(pane_id)
@@ -758,7 +790,7 @@ class App:
     def bottom_lines(self, width: int) -> list:
         """(text, attr) lines for the area under the list: notice, prompt, footer."""
         lines = []
-        if self.main_is_off() and not self.restoring_main():
+        if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
             session = self.session(self.main_pane.session)
             name = session.name if session else self.main_pane.session
             # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
@@ -955,7 +987,7 @@ class App:
                         continue
                     if key not in (curses.KEY_RESIZE, curses.KEY_MOUSE):
                         # A key typed here proves focus; he is already moving, so the cursor stays his.
-                        self.set_focus(True, follow_main=False)
+                        self.set_focus(True)
                     self.handle_key(key)
                 except Exception as exc:
                     self.say(f"emx error: {core.error_line(exc)}", error=True)

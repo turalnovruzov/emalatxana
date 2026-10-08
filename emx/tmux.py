@@ -10,6 +10,7 @@ ROLE = "@emx_role"
 SESSION_OPT = "@emx_session"
 VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
+BACK_OPT = "@emx_back"
 
 
 class TmuxError(RuntimeError):
@@ -26,6 +27,7 @@ class Pane:
     width: int
     window_width: int
     active: bool = False
+    back: bool = False
 
 
 _PANE_FORMAT = "\t".join(
@@ -38,6 +40,7 @@ _PANE_FORMAT = "\t".join(
         "#{pane_width}",
         "#{window_width}",
         "#{pane_active}",
+        "#{" + BACK_OPT + "}",
     ]
 )
 
@@ -77,11 +80,14 @@ class Tmux:
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")
-            if len(parts) != 8:
+            if len(parts) != 9:
                 continue
-            pid, window, dead, role, session, width, window_width, active = parts
+            pid, window, dead, role, session, width, window_width, active, back = parts
             panes.append(
-                Pane(pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0), active == "1")
+                Pane(
+                    pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0), active == "1",
+                    back == "1",
+                )
             )
         return panes
 
@@ -134,18 +140,29 @@ class Tmux:
         `check` is a shell command that exits 0 for that case; tmux appends
         the pane, cursor and width, so the check needs no tmux call to find
         them. It runs only when the cursor is shown at `prompt_x`, where an
-        empty prompt puts it: anywhere else ← goes straight to the pane, so
-        moving through typed text never waits on a process. Whenever the check
-        fails or can't run, ← reaches the pane as usual. The command is kept in
-        an option, not in the binding, so its paths need no tmux quoting.
+        empty prompt puts it, and the sidebar is still in the window: anywhere
+        else ← goes straight to the pane, so moving through typed text never
+        waits on a process, and a sidebar that is gone never swallows the key.
+        Whenever the check fails or can't run, ← reaches the pane as usual.
+        The command is kept in an option, not in the binding, so its paths
+        need no tmux quoting. Before selecting the sidebar the binding marks it
+        with BACK_OPT, which tells the panel focus came back by ←.
         """
         self.run("set-option", "-g", LEFT_OPT, check)
         decide = (
             f'if-shell "#{{{LEFT_OPT}}} #{{pane_id}} #{{cursor_x}} #{{cursor_y}} #{{cursor_flag}} #{{pane_width}}" '
-            f'"select-pane -t {sidebar}" "send-keys Left"'
+            f'"set-option -p -t {sidebar} {BACK_OPT} 1 ; select-pane -t {sidebar}" "send-keys Left"'
         )
-        at_prompt = f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{cursor_flag}},#{{==:#{{cursor_x}},{prompt_x}}}}}}}"
+        # A loop over the window's panes: tmux formats have no test for whether one pane exists.
+        sidebar_here = f"#{{P:#{{?#{{==:#{{pane_id}},{sidebar}}},1,}}}}"
+        at_prompt = (
+            f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{cursor_flag}},"
+            f"#{{&&:#{{==:#{{cursor_x}},{prompt_x}}},{sidebar_here}}}}}}}"
+        )
         self.run("bind-key", "-n", "Left", "if-shell", "-F", at_prompt, decide, "send-keys Left")
+
+    def clear_back(self, pane: str) -> None:
+        self.run("set-option", "-p", "-u", "-t", pane, BACK_OPT)
 
     def cursor_lines(self, pane: str, y: int) -> list:
         """The styled text of line `y` of the pane's screen and the line under it."""

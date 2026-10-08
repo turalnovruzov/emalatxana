@@ -1046,6 +1046,11 @@ def cursor_on_focus(items: list, cursor, groups, main_sid: str):
     return settle_cursor(items, target, groups)
 
 
+def came_back(active: bool, marked: bool) -> bool:
+    """Whether the panel has just been reached by ←: the binding marks it before selecting it, so the mark counts only once the panel is active."""
+    return active and marked
+
+
 def selection_bar(selected: bool, focused: bool) -> str | None:
     """Which bar a panel row is drawn on: none, the bright one while the panel has focus, or the dim one."""
     if not selected:
@@ -1058,15 +1063,50 @@ def title_style(focused: bool) -> str:
     return "bold" if focused else "dim"
 
 
-def auto_restore(state: str, tried: bool, checking: bool) -> bool:
-    """Whether emx brings the main pane's session back by itself.
+RESTORE, GIVE_UP = "restore", "give_up"
+RESTORE_BACKOFF_SECONDS = 5.0
+
+
+def auto_restore(state: str, pane_id: str, tried: bool, checking: bool, last_restore: tuple | None, now: float) -> str | None:
+    """What emx does by itself about the main pane: RESTORE its session, GIVE_UP restoring it, or nothing (None).
 
     Only the agent view qualifies: Claude Code opened it in place of the
     session, and the session itself is untouched. A different session showing
-    ("mismatch") is left to him, and so is a viewer emx already tried once,
-    so a refusal is said once rather than every half second.
+    ("mismatch") is left to him, and so is a viewer emx already tried, so a
+    refusal is said once rather than every half second. `last_restore` is
+    (pane id, time) of emx's latest automatic restore, kept until an "ok" read
+    of that pane (`last_restore_after`). The agent view back on that pane
+    within RESTORE_BACKOFF_SECONDS means the detection is probably wrong, and
+    restoring again would respawn main and take his focus on every cycle, so
+    emx gives up and leaves the "press r" warning to him.
     """
-    return state == "agent_view" and not tried and not checking
+    if state != "agent_view" or tried or checking:
+        return None
+    if last_restore is not None and last_restore[0] == pane_id and now - last_restore[1] < RESTORE_BACKOFF_SECONDS:
+        return GIVE_UP
+    return RESTORE
+
+
+def last_restore_after(last_restore: tuple | None, pane_id: str, state: str) -> tuple | None:
+    """An "ok" read of the restored pane shows the restore worked, so a later agent view there is restored again."""
+    if last_restore is not None and last_restore[0] == pane_id and state == "ok":
+        return None
+    return last_restore
+
+
+def still_tried(tried: frozenset, flagged: frozenset) -> frozenset:
+    """The panes emx already tried to restore, kept only while they stay flagged; once a flag clears (an "ok" read or a respawn) the next agent view there is a new episode."""
+    return frozenset(tried) & frozenset(flagged)
+
+
+def restoring_main(asked: tuple, auto: bool, main_id: str | None) -> bool:
+    """Whether a running check is emx's own restore of the pane now in main; `asked` is the check's (session id, pane id)."""
+    return auto and main_id is not None and asked[1] == main_id
+
+
+def off_main_warning(flagged: frozenset, main_id: str | None, restoring: bool) -> bool:
+    """Whether the panel says main isn't showing its session: it is flagged, and emx is not already bringing it back."""
+    return main_id is not None and main_id in flagged and not restoring
 
 
 def latch_off_main(flagged: frozenset, pane_id: str, state: str) -> tuple:

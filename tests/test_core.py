@@ -1069,7 +1069,9 @@ def real_screen(name):
 
     The prompt-* screens keep their styling (`capture-pane -e`) and come from
     the version in prompt-cursors.json, with the cursor tmux reported; the
-    rest are plain text from 2.1.293.
+    rest are plain text, agent-view and cross-wired from 2.1.294 (agent-view
+    from `claude agents --cwd`, so only throwaway sessions show) and the
+    others from 2.1.293.
     """
     (path,) = FIXTURES.glob(f"{name}.w*.txt")
     return path.read_text(encoding="utf-8"), int(path.stem.rsplit(".w", 1)[1])
@@ -1159,6 +1161,13 @@ class FocusReports(unittest.TestCase):
                 self.assertFalse(core.may_be_focus_report(keys))
 
 
+class CameBack(unittest.TestCase):
+    def test_the_left_mark_counts_only_once_the_panel_is_active(self):
+        self.assertTrue(core.came_back(active=True, marked=True))
+        self.assertFalse(core.came_back(active=False, marked=True))
+        self.assertFalse(core.came_back(active=True, marked=False))
+
+
 class FocusStyle(unittest.TestCase):
     def test_selection_bar_and_title_follow_focus(self):
         self.assertIsNone(core.selection_bar(False, True))
@@ -1169,13 +1178,54 @@ class FocusStyle(unittest.TestCase):
 
 
 class AutoRestore(unittest.TestCase):
+    NOW = 1000.0
+
+    def decide(self, state="agent_view", tried=False, checking=False, last_restore=None):
+        return core.auto_restore(state, "%2", tried, checking, last_restore, self.NOW)
+
     def test_only_the_agent_view_is_brought_back_once_and_never_over_a_running_check(self):
-        self.assertTrue(core.auto_restore("agent_view", tried=False, checking=False))
-        self.assertFalse(core.auto_restore("agent_view", tried=True, checking=False))
-        self.assertFalse(core.auto_restore("agent_view", tried=False, checking=True))
+        self.assertEqual(self.decide(), core.RESTORE)
+        self.assertIsNone(self.decide(tried=True))
+        self.assertIsNone(self.decide(checking=True))
         for state in ("mismatch", "ok", "unknown"):
             with self.subTest(state=state):
-                self.assertFalse(core.auto_restore(state, tried=False, checking=False))
+                self.assertIsNone(self.decide(state))
+
+    def test_the_agent_view_back_soon_after_emxs_own_restore_gives_up(self):
+        soon = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS + 1)
+        self.assertEqual(self.decide(last_restore=soon), core.GIVE_UP)
+        self.assertIsNone(self.decide(last_restore=soon, tried=True))
+        self.assertIsNone(self.decide("unknown", last_restore=soon))
+
+    def test_a_restore_long_ago_or_of_another_pane_does_not_hold_it_back(self):
+        long_ago = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS - 1)
+        self.assertEqual(self.decide(last_restore=long_ago), core.RESTORE)
+        self.assertEqual(self.decide(last_restore=("%7", self.NOW)), core.RESTORE)
+
+    def test_an_ok_read_of_the_restored_pane_ends_the_backoff(self):
+        last = ("%2", self.NOW)
+        self.assertIsNone(core.last_restore_after(last, "%2", "ok"))
+        for pane, state in (("%2", "agent_view"), ("%2", "unknown"), ("%2", "mismatch"), ("%7", "ok")):
+            with self.subTest(pane=pane, state=state):
+                self.assertEqual(core.last_restore_after(last, pane, state), last)
+        self.assertIsNone(core.last_restore_after(None, "%2", "ok"))
+
+    def test_a_pane_stays_tried_only_while_it_is_flagged(self):
+        self.assertEqual(core.still_tried(frozenset({"%2", "%3"}), frozenset({"%3", "%4"})), frozenset({"%3"}))
+        self.assertEqual(core.still_tried(frozenset({"%2"}), frozenset()), frozenset())
+
+    def test_restoring_main_means_emxs_own_check_on_the_pane_in_main(self):
+        self.assertTrue(core.restoring_main(("s1", "%2"), True, "%2"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), False, "%2"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), True, "%5"))
+        self.assertFalse(core.restoring_main(("s1", "%2"), True, None))
+
+    def test_the_off_main_warning_waits_while_emx_brings_it_back(self):
+        flagged = frozenset({"%2"})
+        self.assertTrue(core.off_main_warning(flagged, "%2", restoring=False))
+        self.assertFalse(core.off_main_warning(flagged, "%2", restoring=True))
+        self.assertFalse(core.off_main_warning(flagged, "%5", restoring=False))
+        self.assertFalse(core.off_main_warning(flagged, None, restoring=False))
 
 
 class MainViewStateOnRealScreens(unittest.TestCase):
