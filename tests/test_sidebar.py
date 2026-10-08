@@ -3,11 +3,13 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
 
 from emx import core, sidebar
+from emx.tmux import Pane
 
 
 def git(*args):
@@ -33,6 +35,9 @@ class GitPlacement(unittest.TestCase):
         cls.empty = os.path.join(cls.base, "fresh")
         cls.plain = os.path.join(cls.base, "notes")
         cls.home = os.path.join(cls.base, "homey")
+        cls.solo = os.path.join(cls.real, "solo", "alpha-feat-x")
+        os.makedirs(os.path.join(cls.real, "solo"))
+        os.symlink(os.path.join(cls.real, "in", "alpha-feat-x"), cls.solo)
         os.makedirs(os.path.join(cls.repo, "sub"))
         os.makedirs(cls.plain)
         os.makedirs(os.path.join(cls.home, "scratch"))
@@ -56,6 +61,11 @@ class GitPlacement(unittest.TestCase):
 
     def test_worktree_groups_under_the_main_repo(self):
         self.assertEqual(sidebar.git_placement(self.worktree), (core.Placement(self.repo, "feat-x"), None))
+
+    def test_a_symlinked_worktree_never_groups_under_a_folder_that_does_not_exist(self):
+        placement, _ = sidebar.git_placement(self.solo)
+        self.assertEqual(placement, core.Placement(os.path.join(self.real, "in", "proj-alpha"), "feat-x"))
+        self.assertTrue(os.path.isdir(placement.repo))
 
     def test_repo_with_no_commits_yet(self):
         self.assertEqual(sidebar.git_placement(self.empty), (core.Placement(self.empty), None))
@@ -144,6 +154,13 @@ class Resolving(unittest.TestCase):
         self.assertEqual(resolver.take(), {"/a": core.Placement("/r")})
         self.assertNotIn("/a", resolver.failures)
 
+    def test_folders_of_sessions_no_longer_listed_are_not_asked_about(self):
+        resolver = sidebar.Resolver("/h")
+        resolver.want(["/a", "/b"])
+        resolver.want(["/a"])
+        self.assertEqual(resolver.due(time.monotonic()), ["/a"])
+        self.assertEqual(resolver.wanted, {"/a"})
+
     def test_a_crash_in_git_counts_as_a_failure(self):
         resolver = sidebar.Resolver("/h")
         with mock.patch.object(sidebar, "git_placement", side_effect=RuntimeError("boom")):
@@ -202,7 +219,9 @@ class AppCase(unittest.TestCase):
         self.app = sidebar.App(self.scr, tmux=None, claude="claude")
         self.app.housekeep = lambda fresh_list: None
         self.opened = []
-        self.app.switch_to = lambda sid, trigger: self.opened.append((sid, trigger))
+        self.app.switch_to = lambda sid, trigger, checked=None: self.opened.append(
+            (sid, trigger) if checked is None else (sid, trigger, checked)
+        )
 
     def poll(self, *sessions):
         self.app.poller.result = (list(sessions), None)
@@ -231,38 +250,167 @@ class QueuedClicks(AppCase):
 
 
 class AttachChecks(AppCase):
+    """This thread never lists: OPEN judges the row he sees, every other trigger the (session, fresh) a worker handed over."""
+
     def setUp(self):
         super().setUp()
         self.poll(session("s1", "/p/alpha"))
         self.app.refresh()
+        no_listing = mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("listed on the main thread"))
+        no_listing.start()
+        self.addCleanup(no_listing.stop)
 
-    def test_restart_asks_a_fresh_listing_and_refuses_a_session_stopped_since_the_poll(self):
-        stopped = [{"id": "s1", "kind": "background", "name": "emx-test-s1", "state": "stopped"}]
-        with mock.patch.object(sidebar.subprocess, "run", return_value=listed(stopped)) as run:
-            self.assertFalse(self.app.confirm_attach("s1", core.RESTART))
-        self.assertEqual(run.call_count, 1)
-        self.assertIn("isn't running", self.app.notice)
+    def test_open_uses_the_row_he_sees(self):
+        self.assertTrue(self.app.confirm_attach("s1", core.OPEN))
 
-    def test_restart_attaches_when_the_fresh_listing_has_it_running(self):
-        running = [{"id": "s1", "kind": "background", "state": "working", "pid": 7}]
-        with mock.patch.object(sidebar.subprocess, "run", return_value=listed(running)):
-            self.assertTrue(self.app.confirm_attach("s1", core.RESTART))
-            self.assertTrue(self.app.confirm_attach("s1", core.NEW))
+    def test_other_triggers_attach_only_on_a_checked_running_row(self):
+        running, stopped = session("s1", "/p/alpha"), session("s1", "/p/alpha", state="stopped", pid=None)
+        for trigger in (core.RESTART, core.NEW):
+            with self.subTest(trigger=trigger):
+                self.assertTrue(self.app.confirm_attach("s1", trigger, (running, True)))
+                self.assertFalse(self.app.confirm_attach("s1", trigger, (stopped, True)))
+                self.assertIn("isn't running", self.app.notice)
+                self.assertFalse(self.app.confirm_attach("s1", trigger, (None, False)))
+                self.assertIn("Couldn't list sessions", self.app.notice)
+                self.assertFalse(self.app.confirm_attach("s1", trigger))
 
-    def test_refused_when_listing_fails_or_polling_is_failing(self):
-        broken = subprocess.CompletedProcess([], 1, stdout="", stderr="listing broken")
-        with mock.patch.object(sidebar.subprocess, "run", return_value=broken):
-            self.assertFalse(self.app.confirm_attach("s1", core.RESTART))
+    def test_refused_while_the_panels_own_polling_is_failing(self):
         self.app.list_error = "listing broken"
-        running = [{"id": "s1", "kind": "background", "state": "working", "pid": 7}]
-        with mock.patch.object(sidebar.subprocess, "run", return_value=listed(running)) as run:
-            self.assertFalse(self.app.confirm_attach("s1", core.NEW))
-        self.assertEqual(run.call_count, 0)
+        self.assertFalse(self.app.confirm_attach("s1", core.NEW, (session("s1", "/p/alpha"), True)))
         self.assertIn("Couldn't list sessions", self.app.notice)
 
-    def test_open_uses_the_row_he_sees_without_listing(self):
-        with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("listed")):
-            self.assertTrue(self.app.confirm_attach("s1", core.OPEN))
+    def test_the_refusal_names_the_checked_row_when_the_panel_has_none(self):
+        exited = core.Session("new1", "emx-test-new1", "/p", "done", "", "", None, False)
+        self.assertFalse(self.app.confirm_attach("new1", core.NEW, (exited, True)))
+        self.assertTrue(self.app.notice.startswith("emx-test-new1 isn't running"), self.app.notice)
+
+
+class FakeTmux:
+    def __init__(self):
+        self.side = Pane("%1", "@1", False, "sidebar", "", 40, 121)
+        self.main = Pane("%2", "@1", False, "", "s1", 80, 121)
+        self.respawned = []
+
+    def panes(self):
+        return [self.side, self.main]
+
+    def respawn(self, pane, command):
+        self.respawned.append(pane)
+
+    def select(self, pane):
+        pass
+
+
+class RestartOffThread(AppCase):
+    """`r` lists on a worker thread; the panel keeps drawing, and the answer acts only if it is still about what's in main."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = FakeTmux()
+        self.app.main_pane = self.app.tmux.main
+        self.poll(session("s1", "/p/alpha"), session("s2", "/p/alpha"))
+        self.app.refresh()
+        self.gate = threading.Event()
+        self.calls = []
+        self.answer = ([session("s1", "/p/alpha")], None)
+
+        def fetch(claude):
+            self.calls.append(threading.current_thread() is not threading.main_thread())
+            self.gate.wait(5)
+            return self.answer
+
+        p = mock.patch.object(sidebar, "fetch_sessions", fetch)
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(self.gate.set)
+
+    def press_r(self):
+        self.app.handle_key("r")
+
+    def answer_arrives(self):
+        checker = self.app.checker
+        self.gate.set()
+        checker.join(5)
+        self.app.refresh()
+
+    def test_repeated_r_runs_one_check_and_the_panel_keeps_drawing(self):
+        for _ in range(3):
+            self.press_r()
+        deadline = time.monotonic() + 5
+        while not self.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.app.notice.startswith("Checking emx-test-s1"), self.app.notice)
+        started = time.monotonic()
+        self.app.refresh()
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(self.app.tmux.respawned, [])
+        self.answer_arrives()
+        self.assertEqual(self.calls, [True])
+        self.assertEqual(self.app.tmux.respawned, ["%2"])
+        self.assertEqual(self.app.notice, "Viewer restarted.")
+        self.assertIsNone(self.app.checker)
+
+    def test_a_session_stopped_since_the_poll_is_left_alone(self):
+        self.answer = ([session("s1", "/p/alpha", state="stopped", pid=None)], None)
+        self.press_r()
+        self.answer_arrives()
+        self.assertEqual(self.app.tmux.respawned, [])
+        self.assertIn("isn't running", self.app.notice)
+
+    def test_a_failed_or_timed_out_listing_refuses(self):
+        self.answer = (None, "claude agents --json timed out")
+        self.press_r()
+        self.answer_arrives()
+        self.assertEqual(self.app.tmux.respawned, [])
+        self.assertIn("Couldn't list sessions", self.app.notice)
+
+    def test_an_answer_about_what_main_no_longer_shows_is_dropped(self):
+        for changed in (Pane("%2", "@1", False, "", "s2", 80, 121), Pane("%3", "@1", False, "", "s1", 80, 121)):
+            with self.subTest(main=changed):
+                self.app.tmux.main = self.app.main_pane = FakeTmux().main
+                self.gate.clear()
+                self.press_r()
+                self.app.tmux.main = changed
+                self.answer_arrives()
+                self.assertEqual(self.app.tmux.respawned, [])
+                self.assertIn("main pane changed", self.app.notice)
+
+    def test_no_check_while_the_panels_own_polling_is_failing(self):
+        self.app.list_error = "listing broken"
+        self.press_r()
+        self.assertIsNone(self.app.checker)
+        self.assertEqual(self.calls, [])
+        self.assertIn("Couldn't list sessions", self.app.notice)
+
+
+class StartWaitsUntilRunning(AppCase):
+    def rows(self, *pids):
+        return [([{"id": "new1", "kind": "background", "state": "working", **({"pid": p} if p else {})}], None)
+                for p in pids]
+
+    def test_the_first_listing_without_a_pid_is_waited_out(self):
+        with mock.patch.object(sidebar, "list_rows", side_effect=self.rows(None, None, 4343)), \
+                mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0):
+            found, error = sidebar.wait_until_running("claude", "new1")
+        self.assertEqual((found.id, found.running, error), ("new1", True, None))
+
+    def test_listed_but_never_running_gives_up_saying_so(self):
+        with mock.patch.object(sidebar, "list_rows", side_effect=self.rows(None) * 3), \
+                mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
+            found, error = sidebar.wait_until_running("claude", "new1")
+        self.assertIsNone(found)
+        self.assertIn("isn't running", error)
+        with mock.patch.object(sidebar, "list_rows", return_value=([], None)), \
+                mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
+            self.assertIn("doesn't list it", sidebar.wait_until_running("claude", "new1")[1])
+
+    def test_the_starters_listing_is_the_fresh_one_the_viewer_opens_on(self):
+        new = session("new1", "/p/alpha")
+        done = sidebar.Starter("claude", "/p/alpha", "")
+        done.result = (new, None)
+        self.app.starter = done
+        self.app.finish_start()
+        self.assertEqual(self.opened, [("new1", core.NEW, (new, True))])
 
 
 class CursorAfterStart(AppCase):

@@ -164,13 +164,39 @@ def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -
     return trigger in (RESTART, NEW) and fresh and session.running
 
 
+def checked_row(sessions: list | None, sid: str) -> tuple:
+    """(session, fresh) for `attach_allowed` from a listing just taken: `sessions` is None when that listing failed."""
+    if sessions is None:
+        return None, False
+    return next((s for s in sessions if s.id == sid), None), True
+
+
+def check_still_applies(asked: tuple, main_id: str | None, main_session: str | None) -> bool:
+    """Whether a restart check's answer may act: `asked` is (session id, main pane id) from when `r` was pressed.
+
+    The listing runs on another thread, so by the time it answers he may have
+    opened another session in the main pane; the answer is then about a
+    session that is no longer the one to restart.
+    """
+    return bool(asked[0]) and (main_session, main_id) == tuple(asked)
+
+
+def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> str:
+    """Why `attach_allowed` said no, for the notice line."""
+    if trigger != OPEN and not fresh:
+        return f"Couldn't list sessions to check {name} is still running, so emx left it alone."
+    if session is None:
+        return f"{name} isn't listed any more, so emx won't open it."
+    return f"{name} isn't running. Press Enter on it to reopen it."
+
+
 @dataclass(frozen=True)
 class Placement:
     repo: str
     worktree: str = ""
 
 
-def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home: str = "") -> Placement:
+def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home: str = "", real=None) -> Placement:
     """Which repository a session's folder belongs to, from git's own answers.
 
     `rev_parse` is the output of `git rev-parse --path-format=absolute
@@ -184,7 +210,10 @@ def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home
 
     git answers in real paths (`/private/tmp/...` for `/tmp/...`). The answer
     is put back into the form `cwd` uses, so a group found by git and a group
-    keyed by a bare cwd never spell the same parent folder two ways.
+    keyed by a bare cwd never spell the same parent folder two ways. That
+    rewrite is a guess from where `cwd` sits, and guesses wrong when `cwd` is
+    itself a symlink to somewhere else; `real`, the caller's realpath, keeps
+    the rewritten spelling only when it leads back to git's folder.
     """
     lines = (rev_parse or "").splitlines()
     if len(lines) < 2 or not all(os.path.isabs(line) for line in lines[:2]):
@@ -193,10 +222,12 @@ def placement_from_git(cwd: str, rev_parse: str | None, branch: str | None, home
     root = os.path.dirname(common) if os.path.basename(common) == ".git" else top
     if home and root == os.path.normpath(home):
         return Placement(cwd)
-    in_cwd_form = _cwd_form(cwd, top, lines[2] if len(lines) > 2 else None)
+    repo = _cwd_form(cwd, top, lines[2] if len(lines) > 2 else None)(root)
+    if real is not None and repo != root and real(repo) != root:
+        repo = root
     if top == root:
-        return Placement(in_cwd_form(root))
-    return Placement(in_cwd_form(root), (branch or "").strip() or os.path.basename(top))
+        return Placement(repo)
+    return Placement(repo, (branch or "").strip() or os.path.basename(top))
 
 
 def _cwd_form(cwd: str, top: str, prefix: str | None):
@@ -440,10 +471,32 @@ def row_label(name: str, worktree: str) -> str:
     return f"{name} {WORKTREE_MARK}{worktree}" if worktree else name
 
 
-def name_column(labels, width: int) -> int:
-    """How wide a group's name column is, so its states line up: the widest `row_label` within half the row. A longer one is left out, so one long name doesn't push every row."""
+def name_column(rows, width: int) -> int:
+    """How wide a group's name column is, so its states line up, from the group's (name, worktree) pairs.
+
+    The column is the widest `row_label` within half the row. A worktree
+    label too wide for that counts as half the row when its branch can
+    shorten to fit, since `row_layout` shortens the branch to the column; a
+    label too wide even so is left out, so one long name doesn't push every
+    row. A row alone in its group has nothing to line up with, so it gets no
+    column and keeps its whole branch.
+    """
+    rows = list(rows)
+    if len(rows) < 2:
+        return 0
     cap = max(0, width - ROW_LEAD) // 2
-    return max((w for w in map(display_width, labels) if w <= cap), default=0)
+    widths = []
+    for name, worktree in rows:
+        label = display_width(row_label(name, worktree))
+        shortest = display_width(name) + 1 + display_width(WORKTREE_MARK) + _branch_floor(worktree)
+        if label > cap and worktree and shortest <= cap:
+            label = cap
+        widths.append(label)
+    return max((w for w in widths if w <= cap), default=0)
+
+
+def _branch_floor(worktree: str) -> int:
+    return min(BRANCH_MIN, display_width(worktree))
 
 
 def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
@@ -452,7 +505,8 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
     right-aligned one column in from the edge. The status starts `align`
     columns after the name's start when the row can afford it, so states
-    line up within a group. As space runs out, in order: the status detail
+    line up within a group; a worktree's branch shortens to stay inside that
+    column, as `name_column` assumes. As space runs out, in order: the status detail
     shortens; the worktree's branch shortens, down to BRANCH_MIN, then goes;
     the state word goes whole, never cut, since the glyph's colour still
     shows the state; a name too long to leave even STATUS_MIN columns is cut,
@@ -472,7 +526,10 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     extra = ""
     if worktree:
         spare = room - name_w - 1 - gap - word_w - display_width(WORKTREE_MARK)
-        if spare >= min(BRANCH_MIN, display_width(worktree)):
+        in_column = align - name_w - 1 - display_width(WORKTREE_MARK)
+        if align and in_column >= _branch_floor(worktree):
+            spare = min(spare, in_column)
+        if spare >= _branch_floor(worktree):
             extra = WORKTREE_MARK + fit(worktree, spare)
     if extra or name_w + gap + word_w <= room:
         shown, keep_word = name, True
@@ -809,9 +866,11 @@ def stale_viewers(viewer_ids, live_ids, misses: dict) -> tuple:
     return updated, close
 
 
-def id_listed(rows: list, session_id: str) -> bool:
-    """Whether `session_id` is exactly the `id` of some row from `claude agents --json`."""
-    return bool(session_id) and any(row.get("id") == session_id for row in rows)
+def listed_session(rows: list, session_id: str) -> Session | None:
+    """The background session whose `id` is exactly `session_id` in rows from `claude agents --json`, or None."""
+    if not session_id:
+        return None
+    return next((s for s in background_sessions(rows) if s.id == session_id), None)
 
 
 def error_line(exc: BaseException) -> str:

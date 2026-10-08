@@ -124,7 +124,7 @@ def git_placement(cwd: str, home: str = "") -> tuple:
     if error:
         return None, error
     branch, _ = run_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
-    return core.placement_from_git(cwd, rev_parse, branch, home), None
+    return core.placement_from_git(cwd, rev_parse, branch, home, os.path.realpath), None
 
 
 def start_session(claude: str, folder: str, message: str) -> tuple:
@@ -153,14 +153,23 @@ def start_session(claude: str, folder: str, message: str) -> tuple:
     return sid, None
 
 
-def wait_until_listed(claude: str, sid: str) -> tuple:
-    """(sid, None) once `claude agents --json` lists `sid` exactly, else (None, error) after a few seconds."""
+def wait_until_running(claude: str, sid: str) -> tuple:
+    """(session, None) once `claude agents --json` lists `sid` with a live process, else (None, error) after a few seconds.
+
+    A session can be listed a moment before its pid is. The listing that
+    finds it running is the fresh one the new viewer attaches on.
+    """
     deadline = time.monotonic() + LISTED_WAIT_SECONDS
+    seen = False
     while True:
         rows, _ = list_rows(claude)
-        if rows is not None and core.id_listed(rows, sid):
-            return sid, None
+        session = core.listed_session(rows, sid) if rows is not None else None
+        if session is not None and session.running:
+            return session, None
+        seen = seen or session is not None
         if time.monotonic() >= deadline:
+            if seen:
+                return None, f"claude agents lists session {sid}, but it isn't running, so no viewer was opened"
             return None, f"claude --bg reported session {sid}, but claude agents doesn't list it, so no viewer was opened"
         time.sleep(LISTED_CHECK_SECONDS)
 
@@ -176,11 +185,30 @@ class Starter(threading.Thread):
     def run(self) -> None:
         try:
             sid, error = start_session(self.claude, self.folder, self.message)
+            session = None
             if sid:
-                sid, error = wait_until_listed(self.claude, sid)
+                session, error = wait_until_running(self.claude, sid)
         except Exception as exc:
-            sid, error = None, f"starting a session failed: {core.error_line(exc)}"
-        self.result = (sid, error)
+            session, error = None, f"starting a session failed: {core.error_line(exc)}"
+        self.result = (session, error)
+
+
+class Checker(threading.Thread):
+    """Lists sessions off the main thread before a restart, so a slow `claude agents` never freezes the panel.
+
+    `asked` is (session id, main pane id) from when he pressed `r`.
+    """
+
+    def __init__(self, claude: str, asked: tuple):
+        super().__init__(daemon=True)
+        self.claude, self.asked = claude, asked
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = fetch_sessions(self.claude)
+        except Exception as exc:
+            self.result = (None, f"listing sessions failed: {core.error_line(exc)}")
 
 
 class Resolver(threading.Thread):
@@ -202,9 +230,11 @@ class Resolver(threading.Thread):
         self.changed = False
 
     def want(self, cwds) -> None:
+        """Ask about these folders, the listed sessions' own, and stop asking about any other."""
+        cwds = set(cwds)
         with self.lock:
-            new = set(cwds) - self.wanted
-            self.wanted |= new
+            new = cwds - self.wanted
+            self.wanted = cwds
         if new:
             self.wake.set()
 
@@ -314,6 +344,7 @@ class App:
         self.last_housekeep = 0.0
         self.poller = Poller(claude)
         self.starter = None
+        self.checker = None
         self.flagged_viewers = frozenset()
 
     def say(self, text: str, error: bool = False) -> None:
@@ -442,7 +473,7 @@ class App:
                 self.tmux.swap(placeholder.id, pane.id)
             self.tmux.kill_pane(pane.id)
 
-    def switch_to(self, sid: str, trigger: str) -> None:
+    def switch_to(self, sid: str, trigger: str, checked: tuple | None = None) -> None:
         try:
             panes = self.tmux.panes()
             _, main = self.layout_panes(panes)
@@ -452,7 +483,7 @@ class App:
             viewer = next((p for p in panes if p.session == sid), None)
             command = core.viewer_command(self.claude, sid)
             if viewer is None:
-                if not self.confirm_attach(sid, trigger):
+                if not self.confirm_attach(sid, trigger, checked):
                     return
                 pane_id = self.tmux.new_hidden_window(command)
                 self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
@@ -460,7 +491,7 @@ class App:
                 pane_id = viewer.id
                 self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
                 if viewer.dead or respawn:
-                    if not self.confirm_attach(sid, trigger):
+                    if not self.confirm_attach(sid, trigger, checked):
                         return
                     self.tmux.respawn(pane_id, command)
                     self.flagged_viewers -= {pane_id}
@@ -472,31 +503,23 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
-    def fresh_row(self, sid: str) -> tuple:
-        """(session, fresh): `sid`'s row in a listing taken now. fresh is False, with no row, when that listing fails or the panel's own polling is failing."""
-        if self.list_error:
-            return None, False
-        sessions, error = fetch_sessions(self.claude)
-        if error:
-            return None, False
-        return next((s for s in sessions if s.id == sid), None), True
+    def confirm_attach(self, sid: str, trigger: str, checked: tuple | None = None) -> bool:
+        """Ask core whether `claude attach` may run, and say why not when it may not.
 
-    def confirm_attach(self, sid: str, trigger: str) -> bool:
-        """Ask core whether `claude attach` may run, and say why not when it may not."""
+        `checked` is (session, fresh) from a listing a worker thread took just
+        now (`core.checked_row`); this thread never lists, so a slow `claude
+        agents` can't freeze the panel. A trigger other than OPEN without one
+        is refused.
+        """
         if trigger == core.OPEN:
             session, fresh = self.session(sid), False
         else:
-            session, fresh = self.fresh_row(sid)
+            session, fresh = checked or (None, False)
+            fresh = fresh and not self.list_error
         if core.attach_allowed(session, trigger, fresh):
             return True
-        shown = self.session(sid)
-        name = shown.name if shown else sid
-        if trigger != core.OPEN and not fresh:
-            self.say(f"Couldn't list sessions to check {name} is still running, so emx left it alone.", error=True)
-        elif session is None:
-            self.say(f"{name} isn't listed any more, so emx won't open it.", error=True)
-        else:
-            self.say(f"{name} isn't running. Press Enter on it to reopen it.", error=True)
+        shown = session or self.session(sid)
+        self.say(core.refusal(shown.name if shown else sid, trigger, fresh, session), error=True)
         return False
 
     def restart_viewer(self) -> None:
@@ -504,12 +527,33 @@ class App:
         if main is None or not main.session:
             self.say("No session is open in the main pane.")
             return
-        if not self.confirm_attach(main.session, core.RESTART):
+        if self.checker is None:
+            if self.list_error:
+                self.confirm_attach(main.session, core.RESTART)
+                return
+            self.checker = Checker(self.claude, (main.session, main.id))
+            self.checker.start()
+        sid = self.checker.asked[0]
+        shown = self.session(sid)
+        self.say(f"Checking {shown.name if shown else sid} is still running…")
+
+    def finish_check(self) -> None:
+        checker = self.checker
+        if checker is None or checker.is_alive():
             return
+        self.checker = None
+        sid, pane_id = checker.asked
+        sessions, _ = checker.result or (None, "listing sessions failed")
         try:
-            self.tmux.respawn(main.id, core.viewer_command(self.claude, main.session))
-            self.flagged_viewers -= {main.id}
-            self.tmux.select(main.id)
+            _, main = self.layout_panes(self.tmux.panes())
+            if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
+                self.say("The main pane changed while emx was checking, so it wasn't restarted.")
+                return
+            if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
+                return
+            self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
+            self.flagged_viewers -= {pane_id}
+            self.tmux.select(pane_id)
             self.say("Viewer restarted.")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -588,16 +632,17 @@ class App:
         if starter is None or starter.is_alive():
             return
         self.starter = None
-        sid, error = starter.result or (None, "starting a session failed")
+        session, error = starter.result or (None, "starting a session failed")
         if error:
             self.say(error, error=True)
             return
+        sid = session.id
         self.prefs["last_folder"] = starter.folder
         self.save_prefs()
         self.fresh[sid] = time.monotonic()
         self.wanted_cursor = ("session", sid)
         self.poller.wake.set()
-        self.switch_to(sid, core.NEW)
+        self.switch_to(sid, core.NEW, (session, True))
         if not self.notice_error:
             self.say("Session started.")
 
@@ -736,7 +781,7 @@ class App:
         groups = {g.key: g for g in self.groups}
         aligns = {}
         for g in self.groups:
-            column = core.name_column((core.row_label(s.name, self.worktree(s)) for s in g.sessions), width)
+            column = core.name_column(((s.name, self.worktree(s)) for s in g.sessions), width)
             aligns.update((s.id, column) for s in g.sessions)
         now_ms = time.time() * 1000
         frame = int(time.monotonic() / FRAME_SECONDS)
@@ -817,6 +862,7 @@ class App:
     def refresh(self) -> None:
         try:
             self.finish_start()
+            self.finish_check()
             fresh_list = self.take_poll()
             self.take_placements()
             now = time.monotonic()

@@ -240,6 +240,22 @@ class PlacementFromGit(unittest.TestCase):
         wt_elsewhere = "/data/repos/app/.git\n/scratch/feat\n\n"
         self.assertEqual(core.placement_from_git("/h/me/feat", wt_elsewhere, "feat"), core.Placement("/data/repos/app", "feat"))
 
+    def test_a_rewrite_that_does_not_lead_back_to_git_keeps_gits_path(self):
+        links = {"/h/me/solo/feat": "/data/wt/feat", "/h/me/solo/app": "/h/me/solo/app", "/tmp/x/app": "/private/tmp/x/app"}
+        real = links.get
+        # /h/me/solo/feat is a symlink to the worktree; the guessed /h/me/solo/app doesn't exist.
+        wt = core.placement_from_git("/h/me/solo/feat", "/data/repos/app/.git\n/data/wt/feat\n\n", "feat", real=real)
+        self.assertEqual(wt, core.Placement("/data/repos/app", "feat"))
+        tmp = core.placement_from_git("/tmp/x/app", "/private/tmp/x/app/.git\n/private/tmp/x/app\n\n", "main", real=real)
+        self.assertEqual(tmp, core.Placement("/tmp/x/app"))
+
+    def test_realpath_is_not_asked_when_nothing_was_rewritten(self):
+        def real(path):
+            raise AssertionError(f"realpath({path})")
+
+        got = core.placement_from_git("/r/app/src", "/r/app/.git\n/r/app\nsrc/\n", "main", real=real)
+        self.assertEqual(got, core.Placement("/r/app"))
+
     def test_a_prefix_the_cwd_does_not_end_in_leaves_git_paths_alone(self):
         got = core.placement_from_git("/tmp/x/other", "/private/tmp/x/app/.git\n/private/tmp/x/app\nsrc/\n", "main")
         self.assertEqual(got, core.Placement("/private/tmp/x/app"))
@@ -474,13 +490,36 @@ class RowLayout(unittest.TestCase):
         self.assertEqual(got, "   emx-test-perm  approv… 12m")
 
     def test_name_column(self):
-        self.assertEqual(core.name_column(["emx-test-a", "emx-test-long"], 40), 13)
-        self.assertEqual(core.name_column(["x", "emx-test-a-very-long-session-name"], 40), 1)
-        self.assertEqual(core.name_column(["emx-test-quick", "emx-test-stopped", "emx-test-a-very-long-session-name"], 40), 16)
-        self.assertEqual(core.name_column(["emx-test-a-very-long-session-name"], 40), 0)
-        self.assertEqual(core.name_column([], 40), 0)
+        def column(names, width=40):
+            return core.name_column([(n, "") for n in names], width)
+
+        self.assertEqual(column(["emx-test-a", "emx-test-long"]), 13)
+        self.assertEqual(column(["x", "emx-test-a-very-long-session-name"]), 1)
+        self.assertEqual(column(["emx-test-quick", "emx-test-stopped", "emx-test-a-very-long-session-name"]), 16)
+        self.assertEqual(column(["emx-test-a-very-long-session-name"]), 0)
+        self.assertEqual(column([]), 0)
         self.assertEqual(core.row_label("emx-test-wt", "feat-x"), "emx-test-wt ⎇ feat-x")
         self.assertEqual(core.row_label("emx-test-wt", ""), "emx-test-wt")
+
+    def test_states_line_up_in_a_group_with_a_worktree_row(self):
+        for branch in ("feat-x", "feature/3-grouped-panel"):
+            group = [("emx-test-a", ""), ("emx-test-wt", branch)]
+            for width in (40, 50, 60):
+                column = core.name_column(group, width)
+                with self.subTest(branch=branch, width=width, column=column):
+                    rows = [self.row(width, name=n, worktree=w, word="Working", align=column) for n, w in group]
+                    status_x = {next(x for x, _, p in parts if p == "status") for parts in rows}
+                    self.assertEqual(status_x, {3 + column + 2})
+                    self.assertIn("⎇", rendered(rows[1]))
+        long = [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")]
+        self.assertIn("⎇ feature/3-gro…  Working", rendered(self.row(60, "emx-test-wt", "feature/3-grouped-panel", "Working",
+                                                                      align=core.name_column(long, 60))))
+
+    def test_a_row_alone_in_its_group_keeps_its_whole_branch(self):
+        alone = [("emx-test-wt", "feature/3-grouped-panel")]
+        self.assertEqual(core.name_column(alone, 40), 0)
+        got = rendered(self.row(40, "emx-test-wt", "feature/3-grouped-panel", "Working", align=core.name_column(alone, 40)))
+        self.assertEqual(got, "   emx-test-wt ⎇ feature/…  Working 12m")
 
     def test_long_name_is_cut_to_keep_the_state_word(self):
         got = rendered(self.row(40, name="emx-test-a-very-long-session-name", age="3h"))
@@ -1069,21 +1108,48 @@ class LatchOffMain(unittest.TestCase):
         self.assertEqual(before, frozenset({"%1"}))
 
 
-class IdListed(unittest.TestCase):
-    ROWS = [{"id": "abc123", "kind": "background"}, {"kind": "interactive"}, {"id": 5}]
+class ListedSession(unittest.TestCase):
+    ROWS = [{"id": "abc123", "kind": "background", "state": "working"}, {"kind": "interactive"}, {"id": 5}]
 
-    def test_exact_id_is_listed(self):
-        self.assertTrue(core.id_listed(self.ROWS, "abc123"))
+    def test_exact_id_is_listed_with_its_running_state(self):
+        found = core.listed_session(self.ROWS, "abc123")
+        self.assertEqual((found.id, found.running), ("abc123", False))
+        with_pid = core.listed_session([{**self.ROWS[0], "pid": 9}], "abc123")
+        self.assertTrue(with_pid.running)
 
     def test_prefix_suffix_or_case_variants_are_not(self):
         for sid in ("abc", "abc1234", "ABC123", " abc123", "bc123"):
             with self.subTest(sid=sid):
-                self.assertFalse(core.id_listed(self.ROWS, sid))
+                self.assertIsNone(core.listed_session(self.ROWS, sid))
 
     def test_empty_inputs(self):
-        self.assertFalse(core.id_listed([], "abc123"))
-        self.assertFalse(core.id_listed(self.ROWS, ""))
-        self.assertFalse(core.id_listed([{"id": ""}], ""))
+        self.assertIsNone(core.listed_session([], "abc123"))
+        self.assertIsNone(core.listed_session(self.ROWS, ""))
+        self.assertIsNone(core.listed_session([{"id": "", "kind": "background"}], ""))
+
+
+class RestartCheck(unittest.TestCase):
+    """The listing a restart waits on arrives later, on another thread."""
+
+    def test_checked_row_from_a_listing(self):
+        a, b = mk(id="a"), mk(id="b")
+        self.assertEqual(core.checked_row([a, b], "b"), (b, True))
+        self.assertEqual(core.checked_row([a], "b"), (None, True))
+        self.assertEqual(core.checked_row(None, "b"), (None, False))
+
+    def test_the_answer_acts_only_on_the_session_and_pane_it_was_asked_about(self):
+        asked = ("s1", "%2")
+        self.assertTrue(core.check_still_applies(asked, "%2", "s1"))
+        for main_id, main_session in (("%2", "s2"), ("%5", "s1"), (None, None), ("%2", "")):
+            with self.subTest(main_id=main_id, main_session=main_session):
+                self.assertFalse(core.check_still_applies(asked, main_id, main_session))
+        self.assertFalse(core.check_still_applies(("", "%2"), "%2", ""))
+
+    def test_refusal_says_why(self):
+        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.RESTART, False, mk()))
+        self.assertIn("isn't listed", core.refusal("emx-test-a", core.RESTART, True, None))
+        self.assertIn("isn't running", core.refusal("emx-test-a", core.NEW, True, mk(running=False)))
+        self.assertTrue(core.refusal("emx-test-a", core.OPEN, False, None).startswith("emx-test-a isn't listed"))
 
 
 class ErrorLine(unittest.TestCase):
