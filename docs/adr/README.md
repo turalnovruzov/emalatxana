@@ -25,6 +25,7 @@ When **not** to write one:
 |---|---|---|
 | [0001](./0001-tmux-and-python-standard-library.md) | tmux and the Python Standard Library | Accepted |
 | [0002](./0002-haiku-row-summaries-through-claude-p.md) | Haiku writes the row summaries, through `claude -p` | Accepted |
+| [0003](./0003-haiku-suggests-a-name-on-tab.md) | Haiku suggests a session name on Tab in the rename box | Accepted |
 
 ---
 
