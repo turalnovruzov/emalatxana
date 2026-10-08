@@ -954,11 +954,11 @@ class App:
             self.say("Session started.")
 
     def awaiting_started_row(self) -> bool:
-        """Whether the session just started has yet to land in the list; given up after FRESH_GRACE_SECONDS, as its viewer is."""
+        """Whether the cursor still waits to land on the session just started: until it does, he moves it, or FRESH_GRACE_SECONDS pass, as its viewer's wait does."""
         if self.started is None:
             return False
         sid, at = self.started
-        if any(s.id == sid for s in self.sessions) or time.monotonic() - at >= FRESH_GRACE_SECONDS:
+        if self.wanted_cursor != ("session", sid) or time.monotonic() - at >= FRESH_GRACE_SECONDS:
             self.started = None
             return False
         return True

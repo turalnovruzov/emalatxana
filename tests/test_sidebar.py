@@ -1152,6 +1152,40 @@ class NewSession(AppCase):
         self.keys("\n")
         self.assertIn("new1", [o[0] for o in self.opened if o[1] == core.OPEN])
 
+    def start_from_the_stopped_row(self, folder):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.app.starter = mock.Mock(folder=folder, result=(session("new1", folder), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+
+    def test_a_late_enter_stays_blocked_while_the_new_row_is_folded_out_of_reach(self):
+        self.app.toggle_group("/p/beta")
+        self.start_from_the_stopped_row("/p/beta")
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"), session("new1", "/p/beta"))
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "s"))
+        self.keys("\n")
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+
+    def test_j_or_k_lifts_the_block_while_the_listing_is_out(self):
+        self.start_from_the_stopped_row("/p/stopped")
+        self.keys("\n")
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.keys("k", "j")
+        self.assertEqual(self.app.cursor, ("session", "s"))
+        self.keys("\n")
+        self.assertIn("s", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_a_late_enter_is_freed_once_the_wait_gives_up(self):
+        self.start_from_the_stopped_row("/p/stopped")
+        later = sidebar.time.monotonic() + sidebar.FRESH_GRACE_SECONDS + 1
+        with mock.patch.object(sidebar.time, "monotonic", return_value=later):
+            self.keys("\n")
+        self.assertIn("s", [o[0] for o in self.opened if o[1] == core.OPEN])
+
     def test_a_failed_start_frees_enter_once_its_notice_shows(self):
         self.app.cursor = ("session", "b")
         self.app.starter = mock.Mock(folder="/p/beta", result=(None, "claude said no"))

@@ -903,10 +903,15 @@ class FuzzyMatch(unittest.TestCase):
 
     def test_letters_that_grow_when_lowercased_never_shift_the_match(self):
         listed = {"/h/me": ["İşlər", "Proje-İçerik", "Docs"]}
-        for query in ("r", "k", "~/r", "~/k", "ər", "~/ik"):
+        expected = {
+            "r": ["~/İşlər", "~/Proje-İçerik"], "~/r": ["~/İşlər", "~/Proje-İçerik"], "ər": ["~/İşlər"],
+            "k": ["~/Proje-İçerik"], "~/k": ["~/Proje-İçerik"], "~/ik": ["~/Proje-İçerik"], "işl": ["~/İşlər"],
+        }
+        for query, shown in expected.items():
             with self.subTest(query=query):
-                core.folder_suggestions(query, [], [], listed, "/h/me")
-        self.assertEqual(core.fuzzy_match("x", "~/İx")[0], 0)
+                self.assertEqual([r.shown for r in core.folder_suggestions(query, [], [], listed, "/h/me")], shown)
+        self.assertEqual(core.fuzzy_match("x", "~/İx"), (0, True, 4))
+        self.assertEqual(core.fuzzy_match("ix", "~/İx"), (-1, False, 4))
         self.assertIsNotNone(core.fuzzy_match("işlər", "~/İşlər"))
         self.assertIsNotNone(core.fuzzy_match("ŞLƏR", "~/İşlər"))
         self.assertEqual(core.fuzzy_match("ik", "~/Proje-İçerik")[0], -1)
