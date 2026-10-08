@@ -156,11 +156,11 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### A session counts as gone only after `STALE_AFTER_MISSES` listings in a row without it
 
-1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count and the decision live in core (`stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`).
+1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count and the decision live in core (`stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`). Viewer closing (`App.close_stale`) counts misses but does not yet skip empty listings.
 2. **Why**: `claude agents` can return one glitchy or empty result. Acting on it closes or discards something he is using.
 3. **Minimal example**:
    ```python
-   misses, gone = core.stale_viewers(ids, live_ids, misses)
+   misses, gone = core.edit_session_gone(sid, live_ids, misses)
    ```
 4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. And check for the empty listing before counting: `stale_viewers` alone counts an empty listing as a miss for everything.
 
