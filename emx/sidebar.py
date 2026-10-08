@@ -15,6 +15,9 @@ from emx.tmux import ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
+LISTED_WAIT_SECONDS = 5
+LISTED_CHECK_SECONDS = 0.5
+OFF_STATES = ("agent_view", "mismatch")
 BACK_KEY = "C-\\"
 FOOTERS = (
     "↵ open  n new  r restart  s side  [ ] main  < > panel  q detach  ^\\ back",
@@ -26,11 +29,12 @@ ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
 
 
-def fetch_sessions(claude: str) -> tuple:
-    """(sessions, None) on success, (None, one-line error) on any failure. Never raises."""
+def list_rows(claude: str) -> tuple:
+    """(rows of `claude agents --json`, None) on success, (None, one-line error) on any failure. Never raises."""
     try:
         done = subprocess.run(
-            [claude, "agents", "--json"], capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15
+            [claude, "agents", "--json"], capture_output=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=15,
         )
     except FileNotFoundError:
         return None, f"can't find the claude command ({claude})"
@@ -41,17 +45,27 @@ def fetch_sessions(claude: str) -> tuple:
     if done.returncode != 0:
         return None, core.first_message(done.stderr) or f"claude agents exited with {done.returncode}"
     try:
-        return core.background_sessions(core.parse_agents(done.stdout)), None
+        return core.parse_agents(done.stdout), None
     except core.AgentsError as exc:
         return None, str(exc)
 
 
+def fetch_sessions(claude: str) -> tuple:
+    rows, error = list_rows(claude)
+    if error:
+        return None, error
+    return core.background_sessions(rows), None
+
+
 def start_session(claude: str, folder: str, message: str) -> tuple:
     """Run `claude --bg` in `folder`. Returns (session_id, None) or (None, error)."""
+    if not os.path.isdir(folder):
+        return None, f"folder not found: {folder}"
     try:
         done = subprocess.run(
             core.new_session_args(claude, message),
-            cwd=folder, capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60,
+            cwd=folder, capture_output=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=60,
         )
     except FileNotFoundError:
         return None, f"can't find the claude command ({claude})"
@@ -69,6 +83,36 @@ def start_session(claude: str, folder: str, message: str) -> tuple:
     return sid, None
 
 
+def wait_until_listed(claude: str, sid: str) -> tuple:
+    """(sid, None) once `claude agents --json` lists `sid` exactly, else (None, error) after a few seconds."""
+    deadline = time.monotonic() + LISTED_WAIT_SECONDS
+    while True:
+        rows, _ = list_rows(claude)
+        if rows is not None and core.id_listed(rows, sid):
+            return sid, None
+        if time.monotonic() >= deadline:
+            return None, f"claude --bg reported session {sid}, but claude agents doesn't list it, so no viewer was opened"
+        time.sleep(LISTED_CHECK_SECONDS)
+
+
+class Starter(threading.Thread):
+    """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
+
+    def __init__(self, claude: str, folder: str, message: str):
+        super().__init__(daemon=True)
+        self.claude, self.folder, self.message = claude, folder, message
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            sid, error = start_session(self.claude, self.folder, self.message)
+            if sid:
+                sid, error = wait_until_listed(self.claude, sid)
+        except Exception as exc:
+            sid, error = None, f"starting a session failed: {core.error_line(exc)}"
+        self.result = (sid, error)
+
+
 class Poller(threading.Thread):
     def __init__(self, claude: str):
         super().__init__(daemon=True)
@@ -79,7 +123,10 @@ class Poller(threading.Thread):
 
     def run(self) -> None:
         while True:
-            result = fetch_sessions(self.claude)
+            try:
+                result = fetch_sessions(self.claude)
+            except Exception as exc:
+                result = None, f"listing sessions failed: {core.error_line(exc)}"
             with self.lock:
                 self.result = result
             self.wake.wait(POLL_SECONDS)
@@ -114,8 +161,8 @@ class App:
         self.row_map = {}
         self.scroll = 0
         self.poller = Poller(claude)
-
-    # --- state helpers -------------------------------------------------------
+        self.starter = None
+        self.off_main = None
 
     def say(self, text: str, error: bool = False) -> None:
         self.notice, self.notice_error = text, error
@@ -136,13 +183,15 @@ class App:
         main = next((p for p in home if p is not mine and p is not spacer), None)
         return mine, main, spacer
 
+    def session(self, sid: str):
+        """The session with this id in the latest successful poll, or None."""
+        return next((s for s in self.sessions if s.id == sid), None)
+
     def cursor_index(self) -> int:
         for i, s in enumerate(self.sessions):
             if s.id == self.cursor_id:
                 return i
         return 0
-
-    # --- tmux housekeeping ---------------------------------------------------
 
     def housekeep(self, fresh_list: bool) -> None:
         try:
@@ -156,8 +205,30 @@ class App:
                 self.reconcile_widths(sidebar, main, spacer)
             if fresh_list:
                 self.close_stale(panes, main)
+            self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
+
+    def check_main(self, main: Pane | None) -> None:
+        """Flag the main pane once it stops showing the session emx put there: ← opens the agent view, and from there any session."""
+        if main is None or main.dead or not main.session:
+            self.off_main = None
+            return
+        state = self.view_state(main)
+        if state in OFF_STATES:
+            self.off_main = main.id
+        elif state == "ok" or self.off_main != main.id:
+            self.off_main = None
+
+    def view_state(self, viewer: Pane) -> str:
+        session = self.session(viewer.session)
+        if session is None:
+            return "unknown"
+        expected = "" if session.name == session.id else session.name
+        return core.main_view_state(self.tmux.capture(viewer.id), expected)
+
+    def main_is_off(self) -> bool:
+        return self.main_pane is not None and self.off_main == self.main_pane.id
 
     def reconcile_widths(self, sidebar: Pane, main: Pane, spacer: Pane) -> None:
         actual = (sidebar.window_width, sidebar.width, main.width)
@@ -197,8 +268,6 @@ class App:
                 self.tmux.swap(placeholder.id, pane.id)
             self.tmux.kill_pane(pane.id)
 
-    # --- actions -------------------------------------------------------------
-
     def switch_to(self, sid: str) -> None:
         try:
             panes = self.tmux.panes()
@@ -213,8 +282,11 @@ class App:
                 self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
             else:
                 pane_id = viewer.id
-                if viewer.dead:
+                if viewer.dead or pane_id == self.off_main or self.view_state(viewer) in OFF_STATES:
+                    if not self.reopen_allowed(sid):
+                        return
                     self.tmux.respawn(pane_id, command)
+                    self.off_main = None
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
@@ -223,13 +295,23 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
+    def reopen_allowed(self, sid: str) -> bool:
+        """`claude attach` on a stopped session resumes it, so emx reattaches only sessions the latest poll listed."""
+        if self.session(sid) is not None:
+            return True
+        self.say(f"Session {sid} isn't in the latest list, so emx won't reopen it.", error=True)
+        return False
+
     def restart_viewer(self) -> None:
         main = self.main_pane
         if main is None or not main.session:
             self.say("No session is open in the main pane.")
             return
+        if not self.reopen_allowed(main.session):
+            return
         try:
             self.tmux.respawn(main.id, core.viewer_command(self.claude, main.session))
+            self.off_main = None
             self.tmux.select(main.id)
             self.say("Viewer restarted.")
         except TmuxError as exc:
@@ -261,9 +343,10 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
-    # --- new-session prompt --------------------------------------------------
-
     def open_prompt(self) -> None:
+        if self.starter is not None:
+            self.say("Still starting the last session…")
+            return
         folder = self.prefs.get("last_folder", "~")
         home = os.path.expanduser("~")
         if folder.startswith(home + "/") or folder == home:
@@ -298,23 +381,28 @@ class App:
                 return
             self.prompt = {"stage": "message", "text": "", "folder": folder, "hint": ""}
             return
-        folder, message = p["folder"], p["text"]
         self.prompt = None
+        self.starter = Starter(self.claude, p["folder"], p["text"])
+        self.starter.start()
         self.say("Starting a session…")
-        self.draw()
-        sid, error = start_session(self.claude, folder, message)
+
+    def finish_start(self) -> None:
+        starter = self.starter
+        if starter is None or starter.is_alive():
+            return
+        self.starter = None
+        sid, error = starter.result or (None, "starting a session failed")
         if error:
             self.say(error, error=True)
             return
-        self.prefs["last_folder"] = folder
+        self.prefs["last_folder"] = starter.folder
         self.save_prefs()
         self.fresh[sid] = time.monotonic()
         self.cursor_id = sid
         self.poller.wake.set()
         self.switch_to(sid)
-        self.say("Session started.")
-
-    # --- input ---------------------------------------------------------------
+        if not self.notice_error:
+            self.say("Session started.")
 
     def handle_mouse(self) -> None:
         try:
@@ -358,8 +446,6 @@ class App:
         elif key == "q":
             self.detach()
 
-    # --- drawing -------------------------------------------------------------
-
     def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
         if 0 <= y < h and x < w:
@@ -371,6 +457,11 @@ class App:
     def bottom_lines(self, width: int) -> list:
         """(text, attr) lines for the area under the list: notice, prompt, footer."""
         lines = []
+        if self.main_is_off():
+            session = self.session(self.main_pane.session)
+            name = session.name if session else self.main_pane.session
+            warning = f"Main isn't showing {name} — press r to go back"
+            lines += [(t, self.color("error")) for t in core.wrap(warning, width)[:3]]
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap(f"! {self.list_error}", width)[:3]]
         if self.notice:
@@ -425,7 +516,7 @@ class App:
         visible = max(1, (bottom - top) // per_row)
         cursor = self.cursor_index()
         self.scroll = min(max(self.scroll, cursor - visible + 1), cursor)
-        main_sid = self.main_pane.session if self.main_pane else ""
+        main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
         for slot, session in enumerate(self.sessions[self.scroll:self.scroll + visible]):
             y = top + slot * per_row
             selected = self.scroll + slot == cursor
@@ -443,8 +534,6 @@ class App:
                 detail += f" · {folder}"
             self.put(y + 1, 0, "   " + detail, base | self.color(session.state))
             self.row_map[y] = self.row_map[y + 1] = session.id
-
-    # --- loop ----------------------------------------------------------------
 
     def take_poll(self) -> bool:
         result = self.poller.take()
@@ -465,17 +554,24 @@ class App:
         self.poller.start()
         last_housekeep = 0.0
         while True:
-            fresh_list = self.take_poll()
-            now = time.monotonic()
-            if fresh_list or now - last_housekeep >= HOUSEKEEP_SECONDS:
-                self.housekeep(fresh_list)
-                last_housekeep = now
-            self.draw()
+            try:
+                self.finish_start()
+                fresh_list = self.take_poll()
+                now = time.monotonic()
+                if fresh_list or now - last_housekeep >= HOUSEKEEP_SECONDS:
+                    last_housekeep = now
+                    self.housekeep(fresh_list)
+                self.draw()
+            except Exception as exc:
+                self.say(f"emx error: {core.error_line(exc)}", error=True)
             try:
                 key = self.scr.get_wch()
             except curses.error:
                 continue
-            self.handle_key(key)
+            try:
+                self.handle_key(key)
+            except Exception as exc:
+                self.say(f"emx error: {core.error_line(exc)}", error=True)
 
 
 def setup_curses(scr) -> None:
@@ -505,5 +601,9 @@ def run(socket: str) -> int:
         setup_curses(scr)
         App(scr, Tmux(socket), claude).run()
 
+    # Stale LINES/COLUMNS inherited from the launching shell would override the pane's real size.
+    # curses.use_env(False) is not the fix: it falls back to terminfo's fixed 80x24, not the pane.
+    os.environ.pop("LINES", None)
+    os.environ.pop("COLUMNS", None)
     curses.wrapper(body)
     return 0

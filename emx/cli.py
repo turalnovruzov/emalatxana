@@ -23,8 +23,10 @@ Opens the emx workspace in a private tmux server, or reattaches if it is running
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude")."""
 
 
-def socket_name() -> str:
-    return os.environ.get("EMX_SOCKET") or "emx"
+def socket_name() -> str | None:
+    """None when EMX_SOCKET is empty or "default": "default" is the socket of his everyday tmux server."""
+    name = os.environ.get("EMX_SOCKET", "emx")
+    return None if name in ("", "default") else name
 
 
 def self_command(*args: str) -> str:
@@ -62,7 +64,11 @@ def launch() -> int:
     if shutil.which("tmux") is None:
         print("emx needs tmux, and it is not on PATH.", file=sys.stderr)
         return 1
-    tmux = Tmux(socket_name(), CONFIG)
+    socket = socket_name()
+    if socket is None:
+        print("emx: EMX_SOCKET must name a private socket, not be empty or \"default\".", file=sys.stderr)
+        return 2
+    tmux = Tmux(socket, CONFIG)
     try:
         if tmux.has_session():
             revive_sidebar(tmux)

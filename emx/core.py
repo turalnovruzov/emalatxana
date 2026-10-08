@@ -149,9 +149,6 @@ def first_message(text: str) -> str:
     return ""
 
 
-# --- layout -----------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Layout:
     panel: int
@@ -184,9 +181,6 @@ def width_action(applied: tuple | None, actual: tuple) -> str | None:
     if actual[2] != applied[2]:
         return "adopt-main"
     return None
-
-
-# --- prefs ------------------------------------------------------------------
 
 
 def prefs_path(env: Mapping | None = None) -> Path:
@@ -240,9 +234,6 @@ def flip_side(prefs: dict) -> dict:
     return {**prefs, "side": "left" if prefs["side"] == "right" else "right"}
 
 
-# --- folders ----------------------------------------------------------------
-
-
 def resolve_folder(text: str, base: str) -> str:
     """Expand `~` and $VARS; a relative path is taken relative to `base`; empty means `base`."""
     expanded = os.path.expanduser(os.path.expandvars(text.strip()))
@@ -276,9 +267,6 @@ def complete_dir(text: str, base: str) -> tuple:
     return head + sep + os.path.commonprefix(names), names
 
 
-# --- claude command lines ---------------------------------------------------
-
-
 def new_session_args(claude: str, message: str) -> list:
     """`--` stops a first message that starts with `-` being read as a flag."""
     args = [claude, "--bg"]
@@ -300,8 +288,8 @@ def viewer_command(claude: str, session_id: str) -> str:
 def stale_viewers(viewer_ids, live_ids, misses: dict) -> tuple:
     """Viewers whose session is missing from STALE_AFTER_MISSES polls in a row.
 
-    One missing poll is not enough: closing a viewer he is typing into on a
-    single glitchy listing would throw away an unsent draft.
+    One missing poll is not enough: a single glitchy listing would otherwise
+    close the viewer he is reading.
     Returns (updated_misses, ids_to_close).
     """
     live = set(live_ids)
@@ -315,3 +303,73 @@ def stale_viewers(viewer_ids, live_ids, misses: dict) -> tuple:
         else:
             updated[sid] = count
     return updated, close
+
+
+def id_listed(rows: list, session_id: str) -> bool:
+    """Whether `session_id` is exactly the `id` of some row from `claude agents --json`."""
+    return bool(session_id) and any(row.get("id") == session_id for row in rows)
+
+
+def error_line(exc: BaseException) -> str:
+    return first_message(str(exc)) or type(exc).__name__
+
+
+_FULL_RULE = re.compile(r"^─+$")
+_NAME_RULE = re.compile(r"^─*\s+(\S.*?)\s+─$")
+_PROMPT = re.compile(r"^❯(\s|$)")
+_AGENT_FOOTER = re.compile(r"^\s*enter to return\b|\bctrl\+x to delete\b")
+_AGENT_COUNTS = re.compile(r"\b\d+ (awaiting input|working|completed)( · \d+ [a-z ]+)*$")
+_PROMPT_REACH = 12
+
+
+def main_view_state(captured: str, expected_name: str) -> str:
+    """What a `claude attach` pane is showing, judged from its captured text.
+
+    "agent_view" when ← has turned it into the all-sessions view, "mismatch"
+    when its prompt's top rule names a session other than `expected_name`,
+    "ok" when the rule names it, and "unknown" otherwise. Only positive
+    evidence raises an alarm: dialogs, startup, transcript text and an empty
+    `expected_name` (an unnamed session) all come back "unknown".
+    """
+    lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
+    if not lines:
+        return "unknown"
+    for i in range(max(1, len(lines) - 2), len(lines)):
+        if _AGENT_FOOTER.search(lines[i]) and _FULL_RULE.match(lines[i - 1]):
+            return "agent_view"
+    above = _line_above_prompt(lines)
+    if above is None:
+        return "unknown"
+    if _FULL_RULE.match(above):
+        if any(_AGENT_COUNTS.search(line) for line in lines[:4]):
+            return "agent_view"
+        return "unknown"
+    match = _NAME_RULE.match(above)
+    if not match or not expected_name.strip():
+        return "unknown"
+    return "ok" if _names_match(match.group(1), expected_name) else "mismatch"
+
+
+def _line_above_prompt(lines: list) -> str | None:
+    """The line over the input box: the last `❯` line near the bottom with a pane-wide rule under it.
+
+    Both rules of the real input box span the whole pane, so requiring that
+    width keeps a rule-and-prompt look-alike quoted in the transcript from counting.
+    """
+    pane_width = max(display_width(line) for line in lines)
+    start = max(1, len(lines) - _PROMPT_REACH)
+    for i in range(len(lines) - 2, start - 1, -1):
+        if not _PROMPT.match(lines[i]):
+            continue
+        if any(_FULL_RULE.match(line) and display_width(line) == pane_width for line in lines[i + 1:]):
+            above = lines[i - 1]
+            return above if display_width(above) == pane_width else None
+    return None
+
+
+def _names_match(shown: str, expected: str) -> bool:
+    """Claude Code cuts a long name to fit and ends it with an ellipsis, so a cut name matches by prefix."""
+    shown, expected = " ".join(shown.split()), " ".join(expected.split())
+    if shown.endswith("…"):
+        return expected.startswith(shown[:-1].rstrip())
+    return shown == expected

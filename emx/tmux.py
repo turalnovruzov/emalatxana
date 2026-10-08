@@ -52,7 +52,8 @@ class Tmux:
     def run(self, *args: str) -> str:
         try:
             done = subprocess.run(
-                self.argv(*args), capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=10
+                self.argv(*args), capture_output=True, encoding="utf-8", errors="replace",
+                stdin=subprocess.DEVNULL, timeout=10,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise TmuxError(f"tmux failed: {exc}") from None
@@ -114,5 +115,9 @@ class Tmux:
             f"select-pane -t {main}", f"select-pane -t {sidebar}",
         )
 
+    def capture(self, pane: str) -> str:
+        return self.run("capture-pane", "-p", "-t", pane)
+
     def detach(self) -> None:
-        self.run("detach-client", "-s", f"={SESSION}")
+        """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""
+        self.run("detach-client")

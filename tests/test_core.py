@@ -311,5 +311,118 @@ class StaleViewers(unittest.TestCase):
         self.assertEqual(close, ["b"])
 
 
+def viewer_screen(rule_line, prompt="❯ ", width=40, transcript=("some answer text", "❯ an earlier message", "")):
+    return "\n".join([*transcript, rule_line, prompt, "─" * width, "  ➜ folder  │  model", "  ⏵⏵ mode line", "", ""])
+
+
+def named_rule(name, width=40):
+    return "─" * max(0, width - len(name) - 3) + f" {name} ─"
+
+
+AGENT_VIEW = "\n".join([
+    " ▐▛███▛█   Claude Code",
+    " ▝▝   ▝▝   2 awaiting input · 1 working · 3 completed",
+    "✻ alpha            working · doing a thing      1m",
+    "✻ beta             done · finished               2h",
+    "─" * 70,
+    "❯ describe a task for a new session",
+    "─" * 70,
+    "  enter to return · space to reply · ctrl+x to delete · ? for short…",
+    "",
+])
+
+
+class MainViewState(unittest.TestCase):
+    def test_matching_name_is_ok(self):
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha")), "alpha"), "ok")
+
+    def test_other_name_is_mismatch(self):
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha"), "mismatch")
+
+    def test_agent_view_by_footer(self):
+        self.assertEqual(core.main_view_state(AGENT_VIEW, "alpha"), "agent_view")
+
+    def test_agent_view_by_counts_when_footer_is_cut(self):
+        screen = "\n".join(AGENT_VIEW.splitlines()[:-1] + ["  ? for shortcuts"])
+        self.assertEqual(core.main_view_state(screen, "alpha"), "agent_view")
+
+    def test_agent_view_for_unnamed_session(self):
+        self.assertEqual(core.main_view_state(AGENT_VIEW, ""), "agent_view")
+
+    def test_ansi_codes_are_ignored(self):
+        screen = viewer_screen("\x1b[2m" + named_rule("alpha") + "\x1b[0m")
+        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
+
+    def test_names_with_spaces_and_extra_whitespace(self):
+        screen = viewer_screen(named_rule("my  long name", width=60), width=60)
+        self.assertEqual(core.main_view_state(screen, "my long name"), "ok")
+
+    def test_truncated_name_matches_by_prefix(self):
+        for rule in (" a very long session na… ─", "───── a very long session na… ─"):
+            with self.subTest(rule=rule):
+                screen = viewer_screen(rule, width=len(rule))
+                self.assertEqual(core.main_view_state(screen, "a very long session name indeed"), "ok")
+                self.assertEqual(core.main_view_state(screen, "a very different name"), "mismatch")
+
+    def test_multiline_prompt_input(self):
+        screen = viewer_screen(named_rule("alpha"), prompt="❯ first line\n  second line\n  third line")
+        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
+        self.assertEqual(core.main_view_state(screen, "beta"), "mismatch")
+
+    def test_unnamed_session_never_mismatches(self):
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("generated-name")), ""), "unknown")
+        self.assertEqual(core.main_view_state(viewer_screen(named_rule("x")), "   "), "unknown")
+
+    def test_unsure_screens_are_unknown(self):
+        no_prompt = "\n".join(["Do you want to allow this?", " ❯ 1. Yes", "   2. No", "─" * 40, "Esc to cancel"])
+        bare_rule_no_counts = viewer_screen("─" * 40)
+        startup = "Loading…\n"
+        for screen in ("", "\n\n   \n", startup, no_prompt, bare_rule_no_counts):
+            with self.subTest(screen=screen):
+                self.assertEqual(core.main_view_state(screen, "alpha"), "unknown")
+
+    def test_transcript_text_raises_no_alarm(self):
+        transcript = (
+            "──── beta ─",
+            "❯ an earlier message about beta",
+            "──────────",
+            "noted: 2 awaiting input · 1 working",
+            "enter to return, said the doc",
+        )
+        screen = viewer_screen(named_rule("alpha"), transcript=transcript)
+        self.assertEqual(core.main_view_state(screen, "alpha"), "ok")
+        no_input_box = "\n".join([*transcript, "still thinking…", "", ""])
+        self.assertEqual(core.main_view_state(no_input_box, "alpha"), "unknown")
+
+    def test_prompt_far_above_bottom_is_ignored(self):
+        screen = named_rule("beta") + "\n❯ old\n" + "─" * 40 + "\n" + "\n".join(f"output line {i}" for i in range(30))
+        self.assertEqual(core.main_view_state(screen, "alpha"), "unknown")
+
+
+class IdListed(unittest.TestCase):
+    ROWS = [{"id": "abc123", "kind": "background"}, {"kind": "interactive"}, {"id": 5}]
+
+    def test_exact_id_is_listed(self):
+        self.assertTrue(core.id_listed(self.ROWS, "abc123"))
+
+    def test_prefix_suffix_or_case_variants_are_not(self):
+        for sid in ("abc", "abc1234", "ABC123", " abc123", "bc123"):
+            with self.subTest(sid=sid):
+                self.assertFalse(core.id_listed(self.ROWS, sid))
+
+    def test_empty_inputs(self):
+        self.assertFalse(core.id_listed([], "abc123"))
+        self.assertFalse(core.id_listed(self.ROWS, ""))
+        self.assertFalse(core.id_listed([{"id": ""}], ""))
+
+
+class ErrorLine(unittest.TestCase):
+    def test_first_line_of_message(self):
+        self.assertEqual(core.error_line(RuntimeError("first\nsecond")), "first")
+
+    def test_empty_message_falls_back_to_type(self):
+        self.assertEqual(core.error_line(KeyError()), "KeyError")
+
+
 if __name__ == "__main__":
     unittest.main()
