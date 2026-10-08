@@ -6,6 +6,7 @@ import curses
 import locale
 import os
 import subprocess
+import textwrap
 import threading
 import time
 
@@ -17,22 +18,55 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
+GIT_SECONDS = 5
 BACK_KEY = "C-\\"
 FOOTERS = (
-    "↵ open  n new  r restart  s side  < > panel  q detach  ^\\ back",
-    "n new  r restart  s side  <> panel  q detach  ^\\ back",
-    "n new r restart s side <> q ^\\back",
+    "↵ open  n new  ^s view  ? keys",
+    "↵ open n new ^s view ? keys",
+    "n new  ? keys",
+    "? keys",
 )
-GLYPHS = {"working": "●", "blocked": "◆", "done": "✓"}
+HELP = (
+    ("↑↓ j k", "move"),
+    ("↵ click", "open a session, fold a group"),
+    ("n", "new session"),
+    ("^s", "by project / by state"),
+    ("r", "restart the main viewer"),
+    ("s", "panel to the other side"),
+    ("< >", "narrower / wider panel"),
+    ("^\\", "jump to main and back"),
+    ("q", "detach; sessions keep running"),
+    ("?", "close this help"),
+)
+HELP_KEY_WIDTH = 9
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
+CTRL_S = "\x13"
+FRAME_SECONDS = 0.15
+
+# (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
+TONES = {
+    "muted": (245, curses.COLOR_WHITE),
+    "needs": (221, curses.COLOR_YELLOW),
+    "done": (114, curses.COLOR_GREEN),
+    "stopped": (241, curses.COLOR_WHITE),
+    "accent": (75, curses.COLOR_CYAN),
+    "path": (244, curses.COLOR_WHITE),
+    "error": (203, curses.COLOR_RED),
+    "plain": (-1, -1),
+}
+SELECTED_BG = 237
+CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
 def list_rows(claude: str) -> tuple:
-    """(rows of `claude agents --json`, None) on success, (None, one-line error) on any failure. Never raises."""
+    """(rows of `claude agents --json --all`, None) on success, (None, one-line error) on any failure. Never raises.
+
+    `--all` keeps stopped and completed sessions listed, as `claude agents` shows them, until he removes them.
+    """
     try:
         done = subprocess.run(
-            [claude, "agents", "--json"], capture_output=True, encoding="utf-8", errors="replace",
+            [claude, "agents", "--json", "--all"], capture_output=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, timeout=15,
         )
     except FileNotFoundError:
@@ -54,6 +88,30 @@ def fetch_sessions(claude: str) -> tuple:
     if error:
         return None, error
     return core.background_sessions(rows), None
+
+
+def run_git(cwd: str, *args: str) -> tuple:
+    """(stdout, None) from `git -C cwd ...`, or (None, one-line error). Never raises."""
+    if not cwd or not os.path.isdir(cwd):
+        return None, f"folder not found: {cwd}"
+    try:
+        done = subprocess.run(
+            ["git", "-C", cwd, *args], capture_output=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=GIT_SECONDS, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"can't run git: {exc}"
+    if done.returncode != 0:
+        return None, core.first_message(done.stderr) or f"git exited with {done.returncode}"
+    return done.stdout, None
+
+
+def git_placement(cwd: str) -> core.Placement:
+    rev_parse, _ = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel")
+    branch = None
+    if rev_parse is not None:
+        branch, _ = run_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
+    return core.placement_from_git(cwd, rev_parse, branch)
 
 
 def start_session(claude: str, folder: str, message: str) -> tuple:
@@ -113,19 +171,31 @@ class Starter(threading.Thread):
 
 
 class Poller(threading.Thread):
+    """Lists sessions, and works out each new folder's repository here so git never holds up drawing."""
+
     def __init__(self, claude: str):
         super().__init__(daemon=True)
         self.claude = claude
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.result = None
+        self.placements = {}
+
+    def poll(self) -> tuple:
+        sessions, error = fetch_sessions(self.claude)
+        if error:
+            return None, None, error
+        for s in sessions:
+            if s.cwd not in self.placements:
+                self.placements[s.cwd] = git_placement(s.cwd)
+        return sessions, dict(self.placements), None
 
     def run(self) -> None:
         while True:
             try:
-                result = fetch_sessions(self.claude)
+                result = self.poll()
             except Exception as exc:
-                result = None, f"listing sessions failed: {core.error_line(exc)}"
+                result = None, None, f"listing sessions failed: {core.error_line(exc)}"
             with self.lock:
                 self.result = result
             self.wake.wait(POLL_SECONDS)
@@ -146,11 +216,15 @@ class App:
         self.prefs_file = core.prefs_path()
         self.prefs = core.load_prefs(self.prefs_file)
         self.sessions = []
+        self.placements = {}
+        self.groups = []
         self.loaded = False
         self.list_error = ""
         self.notice = ""
         self.notice_error = False
-        self.cursor_id = None
+        self.cursor = None
+        self.help = False
+        self.palette = Palette()
         self.main_pane = None
         self.applied = None
         self.misses = {}
@@ -184,11 +258,44 @@ class App:
         """The session with this id in the latest successful poll, or None."""
         return next((s for s in self.sessions if s.id == sid), None)
 
-    def cursor_index(self) -> int:
-        for i, s in enumerate(self.sessions):
-            if s.id == self.cursor_id:
-                return i
-        return 0
+    def view(self) -> str:
+        return core.current_view(self.prefs)
+
+    def collapsed(self) -> frozenset:
+        return core.collapsed_keys(self.prefs, self.view())
+
+    def lines(self) -> list:
+        return core.panel_lines(self.groups, self.collapsed())
+
+    def items(self) -> list:
+        return [line for line in self.lines() if line]
+
+    def regroup(self) -> None:
+        self.groups = core.group_sessions(self.sessions, self.placements, self.view())
+        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups)
+
+    def toggle_group(self, key: str) -> None:
+        self.prefs = core.toggle_collapsed(self.prefs, self.view(), key)
+        self.save_prefs()
+        self.regroup()
+
+    def toggle_view(self) -> None:
+        group = core.cursor_group(self.cursor, self.groups)
+        on_session = self.cursor if self.cursor and self.cursor[0] == "session" else None
+        self.prefs = core.toggle_view(self.prefs)
+        self.save_prefs()
+        self.groups = core.group_sessions(self.sessions, self.placements, self.view())
+        # The session under the cursor stays under it; a header has no counterpart in the other view.
+        self.cursor = core.settle_cursor(self.items(), on_session or ("group", group), self.groups)
+
+    def activate(self, item) -> None:
+        if not item:
+            return
+        self.cursor = item
+        if item[0] == "group":
+            self.toggle_group(item[1])
+        else:
+            self.switch_to(item[1], core.OPEN)
 
     def housekeep(self, fresh_list: bool) -> None:
         try:
@@ -254,7 +361,7 @@ class App:
                 self.tmux.swap(placeholder.id, pane.id)
             self.tmux.kill_pane(pane.id)
 
-    def switch_to(self, sid: str) -> None:
+    def switch_to(self, sid: str, trigger: str) -> None:
         try:
             panes = self.tmux.panes()
             _, main = self.layout_panes(panes)
@@ -264,13 +371,15 @@ class App:
             viewer = next((p for p in panes if p.session == sid), None)
             command = core.viewer_command(self.claude, sid)
             if viewer is None:
+                if not self.attach_allowed(sid, trigger):
+                    return
                 pane_id = self.tmux.new_hidden_window(command)
                 self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
             else:
                 pane_id = viewer.id
                 self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
                 if viewer.dead or respawn:
-                    if not self.reopen_allowed(sid):
+                    if not self.attach_allowed(sid, trigger):
                         return
                     self.tmux.respawn(pane_id, command)
                     self.flagged_viewers -= {pane_id}
@@ -282,11 +391,14 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
-    def reopen_allowed(self, sid: str) -> bool:
-        """`claude attach` on a stopped session resumes it, so emx reattaches only sessions the latest poll listed."""
-        if self.session(sid) is not None:
+    def attach_allowed(self, sid: str, trigger: str) -> bool:
+        session = self.session(sid)
+        if core.attach_allowed(session, trigger):
             return True
-        self.say(f"Session {sid} isn't in the latest list, so emx won't reopen it.", error=True)
+        if session is None:
+            self.say(f"Session {sid} isn't in the latest list, so emx won't reopen it.", error=True)
+        else:
+            self.say(f"{session.name} is stopped. Press Enter on it to reopen it.", error=True)
         return False
 
     def restart_viewer(self) -> None:
@@ -294,7 +406,7 @@ class App:
         if main is None or not main.session:
             self.say("No session is open in the main pane.")
             return
-        if not self.reopen_allowed(main.session):
+        if not self.attach_allowed(main.session, core.RESTART):
             return
         try:
             self.tmux.respawn(main.id, core.viewer_command(self.claude, main.session))
@@ -385,9 +497,9 @@ class App:
         self.prefs["last_folder"] = starter.folder
         self.save_prefs()
         self.fresh[sid] = time.monotonic()
-        self.cursor_id = sid
+        self.cursor = ("session", sid)
         self.poller.wake.set()
-        self.switch_to(sid)
+        self.switch_to(sid, core.NEW)
         if not self.notice_error:
             self.say("Session started.")
 
@@ -398,10 +510,7 @@ class App:
             return
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
-        sid = self.row_map.get(y)
-        if sid:
-            self.cursor_id = sid
-            self.switch_to(sid)
+        self.activate(self.row_map.get(y))
 
     def handle_key(self, key) -> None:
         if key == curses.KEY_MOUSE:
@@ -410,12 +519,17 @@ class App:
             self.housekeep(fresh_list=False)
         elif self.prompt is not None:
             self.prompt_key(key)
-        elif key in (curses.KEY_UP, "k") and self.sessions:
-            self.cursor_id = self.sessions[max(0, self.cursor_index() - 1)].id
-        elif key in (curses.KEY_DOWN, "j") and self.sessions:
-            self.cursor_id = self.sessions[min(len(self.sessions) - 1, self.cursor_index() + 1)].id
-        elif key in ENTER_KEYS and self.sessions:
-            self.switch_to(self.sessions[self.cursor_index()].id)
+        elif self.help or key == "?":
+            # Any key closes the help, so Enter can't open a session hidden behind it.
+            self.help = not self.help
+        elif key in (curses.KEY_UP, "k"):
+            self.cursor = core.move_cursor(self.items(), self.cursor, -1)
+        elif key in (curses.KEY_DOWN, "j"):
+            self.cursor = core.move_cursor(self.items(), self.cursor, 1)
+        elif key in ENTER_KEYS:
+            self.activate(self.cursor)
+        elif key == CTRL_S:
+            self.toggle_view()
         elif key == "n":
             self.open_prompt()
         elif key == "r":
@@ -466,73 +580,124 @@ class App:
         return lines
 
     def color(self, name: str) -> int:
-        if name == "done":
-            return curses.A_DIM
-        index = {"working": 1, "blocked": 2, "error": 3}.get(name)
-        if index is None or not curses.has_colors():
-            return curses.A_BOLD if name == "error" else 0
-        return curses.color_pair(index)
+        return self.palette.attr(name)
 
     def draw(self) -> None:
         scr = self.scr
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
-        count = f"{len(self.sessions)}" if self.loaded else "…"
-        self.put(0, 0, f" emx · sessions ({count})", curses.A_BOLD)
-        self.put(1, 0, "─" * w, curses.A_DIM)
+        self.draw_summary(w)
+        self.put(1, 0, "─" * w, self.palette.attr("muted"))
         bottom = self.bottom_lines(max(1, w - 1))
         list_top, list_bottom = 2, h - len(bottom)
-        if not self.loaded:
+        if self.help:
+            self.draw_help(list_top, list_bottom, w)
+        elif not self.loaded:
             if not self.list_error:
                 self.put(list_top, 1, "Loading sessions…", curses.A_DIM)
         elif not self.sessions:
             self.put(list_top, 1, "No background sessions.", curses.A_DIM)
             self.put(list_top + 1, 1, "Press n to start one.", curses.A_DIM)
         else:
-            self.draw_rows(list_top, list_bottom, w)
+            self.draw_list(list_top, list_bottom, w)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
 
-    def draw_rows(self, top: int, bottom: int, width: int) -> None:
-        per_row = 3
-        visible = max(1, (bottom - top) // per_row)
-        cursor = self.cursor_index()
-        self.scroll = min(max(self.scroll, cursor - visible + 1), cursor)
+    def draw_summary(self, width: int) -> None:
+        if not self.loaded:
+            placed = core.fit_parts([("…", None)], width - 2)
+        else:
+            placed = core.summary_line(self.sessions, width - 2)
+        for x, text, cat in placed:
+            tone = "muted" if cat in (None, core.STOPPED) else CATEGORY_TONE[cat]
+            self.put(0, 1 + x, text, self.palette.attr(tone))
+
+    def draw_help(self, top: int, bottom: int, width: int) -> None:
+        self.put(top, 1, "Keys", curses.A_BOLD)
+        y, x = top + 2, 1 + HELP_KEY_WIDTH
+        for key, what in HELP:
+            lines = textwrap.wrap(what, max(1, width - 1 - x))
+            if y + len(lines) > bottom:
+                break
+            self.put(y, 1, key, self.palette.attr("accent"))
+            for line in lines:
+                self.put(y, x, line)
+                y += 1
+
+    def draw_list(self, top: int, bottom: int, width: int) -> None:
+        lines = self.lines()
+        height = max(1, bottom - top)
+        at = lines.index(self.cursor) if self.cursor in lines else 0
+        self.scroll = max(0, min(self.scroll, len(lines) - height))
+        self.scroll = min(max(self.scroll, at - height + 1), at)
         main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
-        for slot, session in enumerate(self.sessions[self.scroll:self.scroll + visible]):
-            y = top + slot * per_row
-            selected = self.scroll + slot == cursor
-            base = curses.A_REVERSE if selected else 0
-            in_main = session.id == main_sid
+        cursor_group = core.cursor_group(self.cursor, self.groups)
+        groups = {g.key: g for g in self.groups}
+        now_ms = time.time() * 1000
+        frame = int(time.monotonic() / FRAME_SECONDS)
+        for slot, line in enumerate(lines[self.scroll:self.scroll + height]):
+            if line is None:
+                continue
+            y = top + slot
+            selected = line == self.cursor
+            self.row_map[y] = line
             if selected:
-                self.put(y, 0, " " * width, base)
-                self.put(y + 1, 0, " " * width, base)
-            marker = "▶ " if in_main else "  "
-            self.put(y, 0, " " + marker + session.name, base | (curses.A_BOLD if in_main else 0))
-            glyph = GLYPHS.get(session.state, "·")
-            detail = f"{glyph} {core.state_label(session)}"
-            folder = core.folder_tail(session.cwd)
-            if folder:
-                detail += f" · {folder}"
-            self.put(y + 1, 0, "   " + detail, base | self.color(session.state))
-            self.row_map[y] = self.row_map[y + 1] = session.id
+                self.put(y, 0, " " * width, self.palette.attr("plain", True))
+            if line[0] == "group":
+                self.draw_header(y, groups[line[1]], selected, line[1] == cursor_group, width)
+            else:
+                session = self.session(line[1])
+                if session is not None:
+                    self.draw_session(y, session, selected, session.id == main_sid, width, now_ms, frame)
+
+    def draw_header(self, y: int, group, selected: bool, bold: bool, width: int) -> None:
+        view = self.view()
+        name_tone = CATEGORY_TONE[group.key] if view == core.BY_STATE else "plain"
+        tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
+        collapsed = group.key in self.collapsed()
+        for x, text, part in core.header_layout(view, group.key, len(group.sessions), collapsed, width):
+            attr = self.palette.attr(tones[part], selected)
+            if part == "name" and bold:
+                attr |= curses.A_BOLD
+            self.put(y, x, text, attr)
+
+    def draw_session(self, y: int, s, selected: bool, in_main: bool, width: int, now_ms: float, frame: int) -> None:
+        cat = core.category(s)
+        stopped = cat == core.STOPPED
+        pal = self.palette
+
+        def attr(tone: str, extra: int = 0) -> int:
+            if stopped:
+                return pal.attr("stopped", selected) | curses.A_DIM | extra
+            return pal.attr(tone, selected) | extra
+
+        if in_main:
+            self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
+        glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
+        self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+        worktree = self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
+        parts = core.row_layout(s.name, worktree, core.state_word(s), s.waiting_for, core.session_age(s, now_ms), width)
+        tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
+        for x, text, part in parts:
+            emphasis = curses.A_BOLD if part == "name" and (selected or in_main) else 0
+            self.put(y, x, text, attr(tones[part], emphasis))
 
     def take_poll(self) -> bool:
         result = self.poller.take()
         if result is None:
             return False
-        sessions, error = result
+        sessions, placements, error = result
         if error:
             self.list_error = error
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.placements = placements
         self.loaded = True
-        if self.cursor_id not in {s.id for s in sessions}:
-            self.cursor_id = sessions[0].id if sessions else None
+        self.regroup()
         return True
 
     def run(self) -> None:
@@ -569,12 +734,37 @@ def setup_curses(scr) -> None:
     scr.timeout(200)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
     curses.mouseinterval(0)
-    if curses.has_colors():
+
+
+class Palette:
+    """curses attributes for each tone in TONES, plain or on the selection bar.
+
+    With 256 colours the bar is a dark grey background; with fewer it is
+    reverse video, and the greys become dim white.
+    """
+
+    def __init__(self):
+        self.colored = curses.has_colors()
+        self.rich = False
+        self.pairs = {}
+        if not self.colored:
+            return
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_GREEN, -1)
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)
-        curses.init_pair(3, curses.COLOR_RED, -1)
+        self.rich = curses.COLORS >= 256 and curses.COLOR_PAIRS > 2 * len(TONES)
+        bar = SELECTED_BG if self.rich else -1
+        for i, (tone, (rich, basic)) in enumerate(TONES.items()):
+            fg = rich if self.rich else basic
+            curses.init_pair(2 * i + 1, fg, -1)
+            curses.init_pair(2 * i + 2, fg, bar)
+            self.pairs[tone] = (2 * i + 1, 2 * i + 2)
+
+    def attr(self, tone: str, selected: bool = False) -> int:
+        dim = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped") else 0
+        bar = curses.A_REVERSE if selected and not self.rich else 0
+        if not self.colored:
+            return dim | bar | (curses.A_BOLD if tone == "error" else 0)
+        return curses.color_pair(self.pairs[tone][1 if selected else 0]) | dim | bar
 
 
 def run(socket: str) -> int:
