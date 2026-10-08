@@ -1479,14 +1479,16 @@ class App:
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
         else:
-            peek_rows = self.draw_peek(list_bottom, w, core.peek_room(h, w, len(bottom))) if self.peeking else 0
-            self.draw_list(list_top, list_bottom - peek_rows, w)
+            layout = self.list_layout(w)
+            room = core.peek_room(h, w, len(bottom))
+            peek_rows = self.draw_peek(list_bottom, w, room, self.cursor_rows(layout)) if self.peeking else 0
+            self.draw_list(list_top, list_bottom - peek_rows, w, layout)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
 
-    def draw_peek(self, bottom: int, width: int, room: int) -> int:
+    def draw_peek(self, bottom: int, width: int, room: int, cursor_rows: int = 1) -> int:
         """Draw the peek box ending above row `bottom`, in the `room` rows `core.peek_room` gives, and return how many rows it took (0 when it doesn't fit)."""
         session = self.peeked()
         if session is None or room <= 0:
@@ -1497,7 +1499,7 @@ class App:
         if self.peek_wrapped[0] != (peek.lines, inner):
             self.peek_wrapped = ((peek.lines, inner), core.peek_lines(peek, inner, core.PEEK_BODY_LINES + 1))
         wrapped = self.peek_wrapped[1]
-        rows = core.peek_height(room, len(wrapped))
+        rows = core.peek_height(room, len(wrapped), cursor_rows)
         if rows == 0:
             return 0
         body = core.cut_lines(wrapped, rows - 3)
@@ -1538,41 +1540,54 @@ class App:
                 self.put(y, x, line)
                 y += 1
 
-    def draw_list(self, top: int, bottom: int, width: int) -> None:
+    def list_layout(self, width: int) -> tuple:
+        """(lines, each session line's laid-out rows, every line's height in screen rows) for the list at `width`."""
         lines = self.lines()
-        height = max(1, bottom - top)
-        at = lines.index(self.cursor) if self.cursor in lines else 0
-        self.scroll = max(0, min(self.scroll, len(lines) - height))
-        self.scroll = min(max(self.scroll, at - height + 1), at)
-        main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
-        cursor_group = core.cursor_group(self.cursor, self.groups)
-        groups = {g.key: g for g in self.groups}
         group_of = {s.id: g.key for g in self.groups for s in g.sessions}
         aligns = {}
         for g in self.groups:
             column = core.name_column(((s.name, self.worktree(s)) for s in g.sessions), width)
             aligns.update((s.id, column) for s in g.sessions)
         now_ms = time.time() * 1000
+        rows = {}
+        for line in lines:
+            session = self.session(line[1]) if line and line[0] == "session" else None
+            if session is not None:
+                armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
+                rows[line] = self.session_lines(session, width, aligns.get(session.id, 0), now_ms, armed,
+                                                group_of.get(session.id, ""))
+        return lines, rows, [len(rows.get(line, [None])) for line in lines]
+
+    def cursor_rows(self, layout: tuple) -> int:
+        """How many screen rows the cursor's line takes in `layout`, 1 when the cursor is not on a listed line."""
+        lines, _, heights = layout
+        return heights[lines.index(self.cursor)] if self.cursor in lines else 1
+
+    def draw_list(self, top: int, bottom: int, width: int, layout: tuple) -> None:
+        lines, rows, heights = layout
+        height = max(1, bottom - top)
+        main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
+        cursor_group = core.cursor_group(self.cursor, self.groups)
+        groups = {g.key: g for g in self.groups}
         frame = int(time.monotonic() / FRAME_SECONDS)
-        for slot, line in enumerate(lines[self.scroll:self.scroll + height]):
-            if line is None:
+        at = lines.index(self.cursor) if self.cursor in lines else 0
+        self.scroll = core.list_window(heights, at, self.scroll, height)
+        self.row_map = core.row_hits(lines, heights, self.scroll, top, height)
+        y = top - self.scroll
+        for line, rows_taken in zip(lines, heights):
+            first, y = y, y + rows_taken
+            if line is None or y <= top or first >= top + height:
                 continue
-            y = top + slot
             selected = core.selection_bar(line == self.cursor, self.focused is not False)
-            self.row_map[y] = line
+            shown = [r for r in range(first, y) if top <= r < top + height]
             if selected:
-                self.put(y, 0, " " * width, self.palette.attr("plain", selected))
+                for r in shown:
+                    self.put(r, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
-                self.draw_header(y, groups[line[1]], selected, line[1] == cursor_group, width)
-            else:
+                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width)
+            elif line in rows:
                 session = self.session(line[1])
-                if session is not None:
-                    in_main = session.id == main_sid
-                    armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
-                    self.draw_session(
-                        y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame, armed,
-                        group_of.get(session.id, ""),
-                    )
+                self.draw_session(first, shown, rows[line], session, selected, session.id == main_sid, frame)
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
         view = self.view()
@@ -1588,10 +1603,25 @@ class App:
     def worktree(self, s) -> str:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
+    def session_lines(
+        self, s, width: int, align: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
+    ) -> list:
+        """The row's lines as `core.row_lines` gives them, or, while it is armed or renamed, the close label's or the rename edit's padded to as many."""
+        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
+        age = core.session_age(s, now_ms)
+        detail = core.row_detail(s, self.transcripts.get(s.id))
+        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
+        if armed is not None:
+            return core.confirm_lines(core.confirm_label(armed), width, len(lines))
+        if self.rename_edit is not None and self.rename_edit["id"] == s.id:
+            edit = (core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD), "rename")
+            return [[edit]] + [[] for _ in lines[1:]]
+        return lines
+
     def draw_session(
-        self, y: int, s, selected: str | None, in_main: bool, width: int, align: int, now_ms: float, frame: int,
-        armed: core.Confirm | None = None, group_key: str = "",
+        self, y: int, shown: list, rows: list, s, selected: str | None, in_main: bool, frame: int,
     ) -> None:
+        """Draw the row's `rows` from screen row `y`, only on the screen rows in `shown`."""
         cat = core.category(s)
         stopped = cat == core.STOPPED
         pal = self.palette
@@ -1601,26 +1631,22 @@ class App:
                 return pal.attr("stopped", selected) | curses.A_DIM | extra
             return pal.attr(tone, selected) | extra
 
-        if in_main:
-            self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
         glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
-        self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
-        if armed is not None:
-            self.put(y, core.ROW_LEAD, core.fit(core.confirm_label(armed), width - 1 - core.ROW_LEAD),
-                     pal.attr("error", selected) | curses.A_BOLD)
-            return
-        if self.rename_edit is not None and self.rename_edit["id"] == s.id:
-            self.put(y, core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD),
-                     pal.attr("accent", selected) | curses.A_BOLD)
-            return
-        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
-        age = core.session_age(s, now_ms)
-        detail = core.row_detail(s, self.transcripts.get(s.id))
-        parts = core.row_layout(s.name, self.worktree(s), word, detail, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
-        for x, text, part in parts:
-            emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
-            self.put(y, x, text, attr(tones[part], emphasis))
+        for i, parts in enumerate(rows):
+            if y + i not in shown:
+                continue
+            if in_main:
+                self.put(y + i, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
+            if i == 0:
+                self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+            for x, text, part in parts:
+                if part in ("confirm", "rename"):
+                    tone = "error" if part == "confirm" else "accent"
+                    self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
+                    continue
+                emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
+                self.put(y + i, x, text, attr(tones[part], emphasis))
 
     def take_poll(self) -> bool:
         result = self.poller.take()

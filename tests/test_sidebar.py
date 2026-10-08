@@ -2174,5 +2174,118 @@ class Peek(AppCase):
         self.assertIn("space", dict(sidebar.HELP))
 
 
+LONG_WAIT = "approve Bash: python3 -m unittest discover -s tests -v"
+
+
+class WrappedRows(AppCase):
+    """On a narrow panel a long row takes several lines; clicks, the cursor and scrolling count every one of them."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(20, 40)
+        self.app.scr = self.scr
+        self.poll(blocked("a", "/p/alpha", waiting=LONG_WAIT), session("b", "/p/alpha"))
+        self.app.refresh()
+
+    def screen(self):
+        return [self.scr.cells.get(y, "") for y in range(self.scr.size[0])]
+
+    def rows_of(self, sid):
+        return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
+
+    def test_the_whole_request_is_on_screen_under_the_row(self):
+        self.assertEqual(self.app.notice, "")
+        ys = self.rows_of("a")
+        self.assertGreater(len(ys), 1)
+        self.assertEqual(ys, list(range(ys[0], ys[0] + len(ys))))
+        shown = " ".join(self.screen()[y] for y in ys)
+        self.assertEqual(" ".join(shown.split()).split("Needs input · ")[1], LONG_WAIT)
+        self.assertNotIn("…", shown)
+        self.assertTrue(self.screen()[ys[0]].startswith(" ✻ emx-test-a"))
+        for y in ys[1:]:
+            self.assertTrue(self.screen()[y].startswith(" " * core.ROW_INDENT), self.screen()[y])
+
+    def test_a_click_on_any_line_of_a_wrapped_row_opens_it(self):
+        for y in self.rows_of("a"):
+            self.opened.clear()
+            with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, y, 0, curses.BUTTON1_CLICKED)):
+                self.app.handle_mouse()
+            self.assertEqual(self.opened, [("a", core.OPEN)], y)
+        above = self.rows_of("a")[0] - 1
+        self.assertEqual(self.app.row_map[above], ("session", "b"))
+        self.assertNotIn(self.rows_of("a")[-1] + 1, self.app.row_map)
+
+    def test_the_selection_bar_covers_every_line_of_the_row(self):
+        bars = []
+        self.app.palette.attr = lambda tone, selected=None: 1 if selected else 0
+        self.scr.addstr = lambda y, x, text, attr=0: bars.append(y) if attr and text.strip() == "" else None
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        self.assertEqual(sorted(set(bars)), self.rows_of("a"))
+
+    def test_scrolling_keeps_the_cursor_row_whole_and_clicks_follow_the_scroll(self):
+        self.scr.size = (9, 40)
+        self.poll(*[blocked(c, "/p/alpha", waiting=LONG_WAIT) for c in "abcd"])
+        self.app.refresh()
+        for sid in "dcba":
+            self.app.cursor = ("session", sid)
+            self.app.draw()
+            ys = self.rows_of(sid)
+            self.assertEqual(len(ys), len(core.row_lines(
+                f"emx-test-{sid}", "", "Needs input", LONG_WAIT, core.session_age(self.app.session(sid), time.time() * 1000), 40,
+            )), sid)
+            self.assertTrue(self.screen()[ys[0]].startswith(" ✻ emx-test-" + sid), self.screen())
+            with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, ys[-1], 0, curses.BUTTON1_CLICKED)):
+                self.opened.clear()
+                self.app.handle_mouse()
+            self.assertEqual(self.opened, [(sid, core.OPEN)])
+
+    def test_the_arrows_move_one_session_however_many_lines_it_takes(self):
+        self.assertEqual(self.app.items()[1:], [("session", "b"), ("session", "a")])
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(curses.KEY_UP)
+        self.assertEqual(self.app.cursor, ("session", "b"))
+        self.app.handle_key(curses.KEY_DOWN)
+        self.assertEqual(self.app.cursor, ("session", "a"))
+
+    def test_arming_ctrl_x_keeps_the_rows_height(self):
+        self.app.cursor = ("session", "b")
+        self.app.draw()
+        before = self.rows_of("b"), self.rows_of("a")
+        self.app.handle_key(sidebar.CTRL_X)
+        self.app.draw()
+        self.assertIsNotNone(self.app.confirm)
+        self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
+        self.assertIn("ctrl+x again", self.screen()[before[0][0]])
+
+    def test_a_rename_edit_on_a_wrapped_row_keeps_the_rows_height(self):
+        self.app.cursor = ("session", "b")
+        self.app.draw()
+        before = self.rows_of("b"), self.rows_of("a")
+        self.app.rename_edit = {"id": "b", "old": "emx-test-b", "text": "emx-test-b", "hint": ""}
+        self.app.draw()
+        self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
+        self.assertIn("emx-test-b▏", self.screen()[before[0][0]])
+        for y in before[0][1:]:
+            self.assertEqual(self.screen()[y].strip(), "", y)
+
+    def test_the_peek_leaves_the_cursor_row_whole(self):
+        self.scr.size = (11, 24)
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.app.draw()
+        self.assertTrue(self.app.peeking)
+        tall = len(self.rows_of("a"))
+        self.assertGreater(tall, core.PEEK_MIN_LIST_ROWS)
+        box = next(y for y, line in enumerate(self.screen()) if line.startswith("╭─"))
+        self.assertLess(self.rows_of("a")[-1], box)
+
+    def test_a_wide_panel_keeps_the_row_on_one_line(self):
+        self.scr.size = (20, 100)
+        self.app.draw()
+        self.assertEqual(len(self.rows_of("a")), 1)
+        self.assertIn("Needs input · " + LONG_WAIT, self.screen()[self.rows_of("a")[0]])
+
+
 if __name__ == "__main__":
     unittest.main()
