@@ -82,7 +82,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    if core.attach_allowed(session, trigger, fresh):
        self.tmux.respawn(pane, core.viewer_command(self.claude, sid))
    ```
-4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile. A worker that may attach must stand down when a close of that session starts (the `Interrupter`'s `cancel`), and the close waits for it to end, or its attach could land after the stop and resume the session.
+4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile. A worker that may attach must stand down when a close of that session starts (the `Interrupter`'s `cancel`) and kill any hidden viewer it opened before it ends, because `new_hidden_window` returns before `claude attach` has connected. The close waits for it to end and closes nothing if that viewer may still be there; otherwise a starting attach could land after the stop and resume the session.
 
 ### `claude` calls, git calls and filesystem scans never run on the curses thread
 
@@ -177,6 +177,18 @@ The house style for writing code in this repo: how *this* codebase does things, 
        refusal = core.gate_refusal(interrupt, report, cursor_y, cursor_x=x)
    ```
 4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format. One Esc worker at a time: two Escs in quick succession open Claude Code's rewind.
+
+### A cancelled worker ends what it started before it returns
+
+1. **Rule**: a worker thread that is cancelled ends any long-lived process or pane it started (the `Interrupter`'s hidden viewer) before it returns, and records whether it could (`ended`).
+2. **Why**: a waiter's join must mean nothing the worker launched can still act. A `claude attach` that is still starting reopens a session the close has just stopped.
+3. **Minimal example**:
+   ```python
+   if self.cancel.is_set():
+       self.tmux.kill_pane(opened)
+       return
+   ```
+4. **Gotcha**: `new_hidden_window` returns before the command inside it has done anything, so the pane must be killed even when the worker never saw the viewer come up. A kill that fails on a pane already gone is not a failure; check `panes()` before calling it one.
 
 ### The session list is measured in screen rows, not items
 

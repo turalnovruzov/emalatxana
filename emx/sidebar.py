@@ -302,10 +302,12 @@ class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
     A running session is stopped, then removed. `wait_for` is an Interrupter
-    of one of them, cancelled when the close began: the close waits for it
-    to end, so its `claude attach` can never land after the stop and resume
-    the session. `current` is the session being closed now. `result` is
-    (all closed, message, {id: closed}).
+    of one of them, cancelled when the close began. The close waits for it
+    to end, and an Interrupter that ends cancelled has killed any hidden
+    viewer it opened, so no `claude attach` it started can land after the
+    stop and resume the session; if that kill failed and the pane is still
+    there, nothing is closed. `current` is the session being closed now.
+    `result` is (all closed, message, {id: closed}).
     """
 
     def __init__(self, claude: str, targets: tuple, wait_for: threading.Thread | None = None):
@@ -328,6 +330,9 @@ class Closer(threading.Thread):
             if self.wait_for.is_alive():
                 finished.update((t.id, False) for t in self.targets)
                 return False, f"emx is still interrupting {self.current.name}, so it didn't close it.", finished
+            if not self.wait_for.ended:
+                finished.update((t.id, False) for t in self.targets)
+                return False, f"emx couldn't close the viewer it opened for {self.current.name}, so it didn't close it.", finished
         messages = []
         for confirm in self.targets:
             self.current = confirm
@@ -435,7 +440,9 @@ class Interrupter(threading.Thread):
     first, with no swap and no select, so his focus stays where it is. Then
     it waits for the listing to show the session stopped working. `cancel`
     is set when a close of the session starts: from then on it opens and
-    sends nothing. `result` is (stopped, message).
+    sends nothing, and before it ends it kills the hidden viewer it opened
+    (`ended` is False only if that pane may still be there). `result` is
+    (stopped, message).
     """
 
     def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
@@ -444,6 +451,8 @@ class Interrupter(threading.Thread):
         self.claude, self.tmux, self.interrupt = claude, tmux, interrupt
         self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
         self.cancel = threading.Event()
+        self.opened = None
+        self.ended = True
         self.result = None
 
     def run(self) -> None:
@@ -451,6 +460,19 @@ class Interrupter(threading.Thread):
             self.result = self.attempt()
         except Exception as exc:
             self.result = (False, f"interrupt failed: {core.error_line(exc)}")
+        finally:
+            if self.opened is not None and self.cancel.is_set():
+                self.end_opened()
+
+    def end_opened(self) -> None:
+        """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it."""
+        try:
+            self.tmux.kill_pane(self.opened)
+        except TmuxError:
+            try:
+                self.ended = all(p.id != self.opened for p in self.tmux.panes())
+            except TmuxError:
+                self.ended = False
 
     def attempt(self) -> tuple:
         interrupt = self.interrupt
@@ -475,9 +497,11 @@ class Interrupter(threading.Thread):
                     return False, ""
                 if not core.attach_allowed(session, core.INTERRUPT, fresh):
                     return False, core.refusal(interrupt.name, core.INTERRUPT, fresh, session)
-                pane = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
+                pane = self.opened = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
                 self.tmux.set_pane_option(pane, SESSION_OPT, interrupt.id)
                 screen = self.wait_for_prompt(pane, session, sessions)
+                if self.cancel.is_set():
+                    return False, ""
                 if screen is None:
                     return False, f"{interrupt.name}'s viewer didn't come up in time, so emx didn't interrupt it."
             if self.cancel.is_set():
