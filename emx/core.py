@@ -523,7 +523,8 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     state; a name too long to leave even STATUS_MIN columns is cut, down to
     NAME_MIN, to keep the state word; and last the status goes and the name
     is cut to whatever is left. A worktree row keeps at least its bare mark
-    while its name is whole; only a cut name loses it.
+    while its name is whole, and keeps it on a cut name when the whole name
+    alone would have fitted.
     An empty `word` (the by-state view, whose header already says it) leaves
     the detail alone as the status.
     """

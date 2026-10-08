@@ -64,7 +64,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every `claude attach` asks `core.attach_allowed` first
 
-1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`core.checked_row`), never on one taken on the curses thread.
+1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`Checker`'s, through `core.checked_row`, for `RESTART`; `Starter`'s, from `wait_until_running`, for `NEW`), never on one taken on the curses thread.
 2. **Why**: attaching to a stopped session resumes it, and he must be the only one who reopens a session he stopped.
 3. **Minimal example**:
    ```python
@@ -86,7 +86,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### `claude` and git calls never run on the curses thread
 
-1. **Rule**: any call to the `claude` CLI or git runs on a worker thread (`Poller`, `Resolver`, `Starter`, `Checker`). The curses thread starts it, checks `is_alive()` from `refresh()`, and takes `.result`. It never calls `list_rows`, `fetch_sessions` or `run_git` itself.
+1. **Rule**: any call to the `claude` CLI or git runs on a worker thread. One-shot workers (`Starter`, `Checker`) are started by the curses thread, which checks `is_alive()` from `refresh()` and then reads `.result`. Long-running ones (`Poller`, and the `Resolver` it starts) loop on their own, and `refresh()` collects their latest answer with `.take()`, which hands it over under a lock and returns None when nothing is new. The curses thread never calls `list_rows`, `fetch_sessions` or `run_git` itself.
 2. **Why**: `claude agents` can take up to its 15 s timeout. On the curses thread that freezes the panel, and every key he presses meanwhile is lost or queued.
 3. **Minimal example**:
    ```python
