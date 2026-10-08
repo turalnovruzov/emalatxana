@@ -58,7 +58,7 @@ HELP = (
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
-    ("^r", "rename, via /rename in its open viewer"),
+    ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
@@ -78,7 +78,9 @@ CTRL_T = "\x14"
 CTRL_R = "\x12"
 CTRL_U = "\x15"
 CONFIRM_FOOTER = "ctrl+x to confirm"
-RENAME_FOOTER = "enter to save · esc to cancel"
+RENAME_FOOTER = "tab suggest · enter save · esc cancel"
+NAME_ASKING = "Asking Haiku for a name…"
+NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
@@ -1117,7 +1119,10 @@ class App:
         self.confirm = None
         self.find = None
         self.rename_edit = None
+        self.rename_gen = 0
         self.renamer = None
+        self.namer = None
+        self.namer_gen = None
         self.renaming = {}
         self.pin_misses = {}
         self.rename_misses = {}
@@ -1631,7 +1636,11 @@ class App:
         if blocked:
             self.say(blocked, error=True)
             return
-        self.rename_edit = {"id": session.id, "old": session.name, "text": core.rename_start(session), "hint": ""}
+        self.rename_gen += 1
+        self.rename_edit = {
+            "id": session.id, "old": session.name, "text": core.rename_start(session), "hint": "",
+            "offered": [], "gen": self.rename_gen,
+        }
         self.rename_misses = {}
         self.say("")
 
@@ -1641,6 +1650,8 @@ class App:
             self.rename_edit = None
         elif key in ENTER_KEYS:
             self.submit_rename()
+        elif key == "\t":
+            self.ask_name()
         elif key in BACKSPACE_KEYS:
             edit.update(text=edit["text"][:-1], hint="")
         elif key == CTRL_U:
@@ -1661,6 +1672,46 @@ class App:
         self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
+
+    def ask_name(self) -> None:
+        """Tab in the rename box: one Haiku call for a name, which lands in the box and renames nothing."""
+        edit = self.rename_edit
+        if self.namer is not None and not self.namer.is_alive():
+            # An answer for this box that arrived since the last frame is shown, not replaced unseen by another call.
+            answered_here = self.namer_gen == edit["gen"]
+            self.finish_name()
+            if answered_here:
+                return
+        if self.namer is not None:
+            if self.namer_gen != edit["gen"]:
+                edit["hint"] = NAME_STILL_FINISHING
+            return
+        sid = edit["id"]
+        self.namer = Namer(
+            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["old"] == sid, edit["offered"],
+        )
+        self.namer_gen = edit["gen"]
+        edit["asking"] = (edit["gen"], edit["text"])
+        self.namer.start()
+
+    def finish_name(self) -> None:
+        """Puts a finished call's name into the box, only while it is the box that asked and he hasn't typed since."""
+        namer = self.namer
+        if namer is None or namer.is_alive():
+            return
+        self.namer = None
+        edit = self.rename_edit
+        if edit is None or edit["gen"] != self.namer_gen:
+            return
+        asking = edit.pop("asking", None)
+        if asking is None or asking[1] != edit["text"]:
+            return
+        name, error, _ = namer.result or (None, "asking for a name failed", None)
+        if name:
+            edit.update(text=name, hint="")
+            edit["offered"].append(name)
+        else:
+            edit["hint"] = error
 
     def finish_rename(self) -> None:
         renamer = self.renamer
@@ -1938,8 +1989,8 @@ class App:
             room = None if height is None else height - 2 - len(lines)
             return lines + self.prompt_lines(width, room)
         if self.rename_edit is not None:
-            hint = self.rename_edit["hint"]
-            lines += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
+            hint = self.rename_edit["hint"] or (NAME_ASKING if self.rename_edit.get("asking") else "")
+            lines +=[(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:3]] if hint else []
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(RENAME_FOOTER, width)[:2]]
         if self.find is not None:
             lines += [("Find a session:", curses.A_BOLD)]
@@ -2267,6 +2318,7 @@ class App:
             self.finish_close()
             self.finish_interrupt()
             self.finish_rename()
+            self.finish_name()
             peeked = self.peeked()
             fresh_list = self.take_poll()
             self.take_placements()

@@ -2040,6 +2040,148 @@ class RenameSession(AppCase):
         self.assertIn("/rename", dict(sidebar.HELP)["^r"])
 
 
+def named_call(text):
+    return core.SummaryCall(text, "claude-haiku-5-5", 1.0, 1.0, 0.0, 0, 0, 0, 0)
+
+
+class RenameSuggest(AppCase):
+    """Tab in the rename box asks Haiku for a name off the curses thread; the name only fills the box, and only Enter renames."""
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.named = session("named", "/p/alpha", state="blocked")
+        self.poll(self.named, session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.tmux = RenameTmux()
+        self.app.cursor = ("session", "named")
+        path = requests_file(tmp.name, "write a poem about tea", "now a csv parser")
+        self.app.poller.transcripts.path = lambda sid: path if sid == "named" else None
+        self.answers = [(named_call("fix-login-flow"), None), (named_call("tea poem and csv parser"), None)]
+        self.asked = []
+        self.release = threading.Event()
+        self.release.set()
+        self.addCleanup(self.release.set)
+        test = self
+
+        def suggest(claude, excerpt, cwd):
+            test.asked.append((excerpt, threading.current_thread() is threading.main_thread()))
+            test.release.wait(5)
+            return test.answers.pop(0) if test.answers else (None, "no more answers")
+
+        def fetch(claude):
+            return [test.named], None
+
+        for p in (
+            mock.patch.object(sidebar, "suggest_name", suggest),
+            mock.patch.object(sidebar, "summary_scratch", return_value=tmp.name),
+            mock.patch.object(sidebar, "fetch_sessions", fetch),
+            mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0.01),
+            mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0.2),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def keys(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def answered(self):
+        self.release.set()
+        if self.app.namer is not None:
+            self.app.namer.join(5)
+        self.app.refresh()
+
+    def settle(self):
+        if self.app.renamer is not None:
+            self.app.renamer.join(5)
+        self.app.refresh()
+
+    def test_tab_puts_a_name_in_the_box_and_types_nothing(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "fix-login-flow")
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertIsNone(self.app.renamer)
+        self.assertEqual([on_main for _, on_main in self.asked], [False])
+        self.assertIn("write a poem about tea", self.asked[0][0])
+
+    def test_the_box_says_it_is_asking_while_the_call_runs(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t")
+        self.assertIn(sidebar.NAME_ASKING, [t for t, _ in self.app.bottom_lines(39)])
+        self.answered()
+        self.assertNotIn(sidebar.NAME_ASKING, [t for t, _ in self.app.bottom_lines(39)])
+
+    def test_tab_again_sends_the_first_name_and_gets_another(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.keys("\t")
+        self.answered()
+        self.assertIn("fix-login-flow", self.asked[1][0])
+        self.assertEqual(self.app.rename_edit["text"], "tea poem and csv parser")
+
+    def test_tab_while_asking_starts_no_second_call(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\t", "\t")
+        self.answered()
+        self.assertEqual(len(self.asked), 1)
+
+    def test_enter_takes_it_through_the_rename_path(self):
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.keys("\r")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fix-login-flow")])
+
+    def test_enter_while_asking_submits_the_box_and_drops_the_answer(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "-", "2", "\t")
+        self.assertEqual(self.app.rename_edit["asking"][1], "emx-test-named-2")
+        self.keys("\r")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename emx-test-named-2")])
+        self.answered()
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(len(self.app.tmux.typed), 1)
+
+    def test_esc_cancels_and_a_late_answer_is_dropped(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b")
+        self.answered()
+        self.assertIsNone(self.app.rename_edit)
+        self.assertEqual(self.app.tmux.typed, [])
+
+    def test_his_typing_is_never_overwritten(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "x")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-namedx")
+        self.assertNotIn("asking", self.app.rename_edit)
+
+    def test_a_reopened_box_ignores_the_old_answer(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b", sidebar.CTRL_R)
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
+        self.assertEqual(self.app.rename_edit["offered"], [])
+
+    def test_a_failure_keeps_the_text_and_shows_the_error(self):
+        self.answers = [(None, "claude -p timed out")]
+        self.keys(sidebar.CTRL_R, "\t")
+        self.answered()
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
+        self.assertEqual(self.app.rename_edit["hint"], "claude -p timed out")
+
+    def test_tab_in_a_new_box_while_an_old_call_finishes_says_so(self):
+        self.release.clear()
+        self.keys(sidebar.CTRL_R, "\t", "\x1b", sidebar.CTRL_R, "\t")
+        self.assertEqual(self.app.rename_edit["hint"], sidebar.NAME_STILL_FINISHING)
+        self.answered()
+        self.assertEqual(len(self.asked), 1)
+
+
 class FolderListingsOffThread(unittest.TestCase):
     def test_a_hung_folder_never_blocks_and_never_piles_up_threads(self):
         release = threading.Event()
