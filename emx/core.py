@@ -861,8 +861,9 @@ def top_line(sessions, version: str, width: int, loaded: bool = True) -> list:
     """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
 
     Room runs out in this order: the counts switch to short words, the name
-    goes, then the counts are cut; the logo and the version stay until there
-    is no room for even one cut count beside them, then the version goes too.
+    goes, then the counts are cut; when not even one cut count fits beside
+    the logo and the version, the counts go and the version stays. Only when
+    the version itself does not fit does it go, and a cut count takes its place.
     """
     if width <= 0:
         return []
