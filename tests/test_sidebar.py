@@ -2112,6 +2112,13 @@ class SummariesWorker(unittest.TestCase):
         self.assertIn("--help", self.excerpts[0])
         self.assertFalse(self.excerpts[0].startswith("-"))
 
+    def test_an_answer_that_cleans_to_nothing_is_not_asked_for_again(self):
+        empty = core.SummaryCall("", "m", 1, 1, 0.0, 1, 1, 0, 0)
+        with mock.patch.object(sidebar, "summarise", lambda c, e, w: (empty, None)):
+            for _ in range(3):
+                self.worker.step()
+        self.assertEqual(len(self.worker.calls), 1)
+
     def test_the_session_with_nothing_to_say_is_never_called(self):
         self.transcripts.found = {}
         self.worker.step()

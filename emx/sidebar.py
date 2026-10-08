@@ -719,7 +719,8 @@ class Summaries(threading.Thread):
                 return
             self.failures.pop(sid, None)
             self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
-            if sid in self.wanted and call.text:
+            if sid in self.wanted:
+                # Kept even when empty, so the unchanged excerpt isn't asked about again every tick.
                 self.found[sid] = core.Summary(call.text, core.category(session), excerpt, time.monotonic())
                 self.changed = True
 
