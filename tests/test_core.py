@@ -385,6 +385,39 @@ class Navigation(unittest.TestCase):
             with self.subTest(main_sid=main_sid):
                 self.assertEqual(core.cursor_on_focus(open_items, here, self.GROUPS, main_sid), here)
 
+    BEFORE = [("group", "/g1"), ("session", "a"), ("session", "b"), ("session", "c"), ("group", "/g2"), ("session", "d")]
+
+    def after(self, *gone):
+        items = [i for i in self.BEFORE if i not in gone]
+        groups = [core.Group("/g1", tuple(mk(id=s) for s in "abc" if ("session", s) not in gone)),
+                  core.Group("/g2", tuple(mk(id=s) for s in "d" if ("session", s) not in gone))]
+        return items, [g for g in groups if ("group", g.key) in items]
+
+    def test_removing_a_middle_row_lands_on_the_row_below(self):
+        items, groups = self.after(("session", "b"))
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("session", "c"))
+
+    def test_removing_the_last_line_lands_above(self):
+        items, groups = self.after(("group", "/g2"), ("session", "d"))
+        self.assertEqual(core.settle_cursor(items, ("session", "d"), groups, before=self.BEFORE), ("session", "c"))
+
+    def test_removing_a_whole_group_lands_on_the_next_line(self):
+        gone = (("group", "/g1"), ("session", "a"), ("session", "b"), ("session", "c"))
+        items, groups = self.after(*gone)
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("group", "/g2"))
+        self.assertEqual(core.settle_cursor(items, ("group", "/g1"), groups, before=self.BEFORE), ("group", "/g2"))
+
+    def test_a_folded_session_still_lands_on_its_header(self):
+        groups = [core.Group("/g1", (mk(id="a"), mk(id="b"), mk(id="c"))), core.Group("/g2", (mk(id="d"),))]
+        items = [i for i in core.panel_lines(groups, {"/g1"}) if i]
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("group", "/g1"))
+
+    def test_without_before_the_old_fallback_holds(self):
+        items, groups = self.after(("session", "b"))
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups), ("group", "/g1"))
+        self.assertEqual(core.settle_cursor(items, ("session", "zz"), groups, before=self.BEFORE), ("group", "/g1"))
+        self.assertIsNone(core.settle_cursor([], ("session", "b"), [], before=self.BEFORE))
+
     def test_cursor_group(self):
         self.assertEqual(core.cursor_group(("session", "3"), self.GROUPS), "/b")
         self.assertEqual(core.cursor_group(("group", "/a"), self.GROUPS), "/a")

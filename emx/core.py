@@ -955,11 +955,13 @@ def move_cursor(items: list, cursor, delta: int):
     return items[max(0, min(len(items) - 1, items.index(cursor) + delta))]
 
 
-def settle_cursor(items: list, cursor, groups, wanted=None):
+def settle_cursor(items: list, cursor, groups, wanted=None, before=None):
     """Keep the cursor on its item; a session folded out of sight leaves it on its group's header.
 
     `wanted` is an item the cursor should move to once it is listed, such as
-    a session emx has just started; until then the cursor stays put.
+    a session emx has just started; until then the cursor stays put. When
+    the cursor's line has gone, it moves to the nearest line of `before`
+    (the items as they were) still listed: below it first, then above.
     """
     if wanted is not None and wanted in items:
         return wanted
@@ -969,6 +971,12 @@ def settle_cursor(items: list, cursor, groups, wanted=None):
         key = cursor_group(cursor, groups)
         if ("group", key) in items:
             return ("group", key)
+    if before and cursor in before:
+        at = before.index(cursor)
+        listed = set(items)
+        for item in before[at + 1:] + before[:at][::-1]:
+            if item in listed:
+                return item
     return items[0] if items else None
 
 
