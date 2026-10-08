@@ -1,6 +1,6 @@
 # Part of emalatxana's system. Set up by Codery 2026-10-07; maintained in place — CLAUDE.md is the contract.
 
-# gate telemetry (local, per-session decisions with session ids; the repo is public)
+# gate telemetry (local, per-session decisions with session ids; the repo is private now, may be published later)
 .codery/telemetry/
 
 # run directories of the system's own runs

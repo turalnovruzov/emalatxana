@@ -4,7 +4,9 @@
 
 ## What this project is
 
-*Emalatxana* (Azerbaijani for a workshop; `emx`) is Tural's main workspace for working with Claude Code. **The idea is in [`README.md`](README.md), the only statement of it.** Sole user: Tural. The repo is public. No scheduled runs. **This file is the system. Change it here.**
+*Emalatxana* (Azerbaijani for a workshop; `emx`) is Tural's main workspace for working with Claude Code. **The idea is in [`README.md`](README.md), the only statement of it.** Sole user: Tural. The repo is private. No scheduled runs. **This file is the system. Change it here.**
+
+**It is a separate tool.** Tural: *"it's a separate tool, it shouldn't be dependent on my other projects"* (2026-10-07). Nothing committed hard-codes or depends on his other repos, project names, folders, accounts or session names; anything specific to him is runtime input or local config that is never committed.
 
 ## There is no PRD
 
@@ -52,20 +54,20 @@ Of an earlier prototype Tural said: *"I don't want to lose sessions in the middl
 - **Never stop, rm, attach to, resume, rename, send input to, or otherwise act on an id you did not start.** Never `pkill` or `killall` by name. Reading `claude agents --json` is fine.
 - **What Claude Code itself writes** for a session you started (transcript and state under `~/.claude/`) is expected and stays. Agents never edit, move or delete anything under `~/.claude/` themselves, and never change his settings or hooks; reading is fine.
 
-## This repo is public
+## Keep his data out of the repo
 
-Everything committed, every PR body and issue comment is public: no secrets, no private data about other people, no real session names, paths, transcripts or screenshots of his. Fixtures and evidence come from throwaway sessions only.
+The repo is private, but it may be made public later and the tool stays separate. So no commit, PR body, issue comment, fixture, log or evidence holds secrets, private data about other people, or real session names, paths, transcripts or screenshots of his. Fixtures and evidence come from throwaway sessions only.
 
 ## Gates
 
-**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, repo visibility or settings). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate even though the repo is public. Everything else proceeds without him.
+**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, **making this repo public**, repo settings). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate. Everything else proceeds without him.
 
 **Machine and process gates:**
 
 - The tracking gate enforces the PR-issue rule (see Conventions): it blocks the first violating `gh pr create` in a session; a conscious retry proceeds.
 - **"Green `main`":** checks pass **and the number collected is not zero**, zero skipped, review resolved, evidence with counts, every dependency recorded.
 
-**What runs:** the tracking gate, the dependency check and `permissions.deny` (`pkill` and `killall` by prefix, not `sudo` or `xargs`). The tracking gate fires when a session was started in the directory it works in; it does nothing when a session started in the main checkout works inside a worktree; there the reviewer is the barrier. Everything else, including the sessions and public-repo rules, is prose, enforced by you and the reviewer. `main` has no branch protection and nothing makes checks merge-blocking yet; no CI is promised.
+**What runs:** the tracking gate, the dependency check and `permissions.deny` (`pkill` and `killall` by prefix, not `sudo` or `xargs`). The tracking gate fires when a session was started in the directory it works in; it does nothing when a session started in the main checkout works inside a worktree; there the reviewer is the barrier. Everything else, including the sessions and keep-his-data-out rules, is prose, enforced by you and the reviewer. `main` has no branch protection and nothing makes checks merge-blocking yet; no CI is promised.
 
 ## Conventions
 

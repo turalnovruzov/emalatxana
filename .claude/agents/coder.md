@@ -25,9 +25,11 @@ Tural works in Claude Code sessions all day, and losing one mid-work is the thin
 - **Never stop, rm, attach to, resume, rename, send input to, or otherwise act on an id you did not start.** Never `pkill` or `killall` by name. Reading the session list (`claude agents --json`) is fine.
 - **What Claude Code itself writes** for a session you started (its transcript and state under `~/.claude/`) is expected and stays. You never edit, move or delete anything under `~/.claude/` yourself, and never change his settings or hooks. Reading is fine.
 
-## This repo is public
+## Keep his data out of the repo
 
-Everything you commit is public. No secrets, no private data about other people, and no real session names, paths, transcripts or screenshots from his sessions (they would expose other projects' work). Fixtures come from throwaway sessions only.
+The repo is private now but may be made public later (his gate). No secrets, no private data about other people, and no real session names, paths, transcripts or screenshots from his sessions (they would expose other projects' work). Fixtures come from throwaway sessions only.
+
+This is a separate tool (see `CLAUDE.md`): never hard-code or depend on his other repos, project names, folders, accounts or session names; anything specific to him is runtime input or local config, never committed.
 
 ## How you work
 

@@ -32,7 +32,7 @@ Tural verifies by using the tool, so you do too: before a done-claim on anything
 - **Clean up** before you report: end the processes, or `claude stop` then `claude rm`, only ids and PIDs you started and recorded; delete the `mktemp` directory.
 - **Never stop, rm, attach to, resume, rename, send input to, or otherwise act on an id you did not start.** Never `pkill` or `killall` by name. Reading the session list (`claude agents --json`) is fine.
 - **What Claude Code itself writes** for a session you started (its transcript and state under `~/.claude/`) is expected and stays. You never edit, move or delete anything under `~/.claude/` yourself, and never change his settings or hooks. Reading is fine.
-- **Fixtures come from throwaway sessions only, never from his real sessions.** This repo is public: no secrets, no private data about other people, and no real session names, paths, transcripts or screenshots in a fixture, a test, or your evidence.
+- **Fixtures come from throwaway sessions only, never from his real sessions.** The repo is private now but may be made public later: no secrets, no private data about other people, and no real session names, paths, transcripts or screenshots in a fixture, a test, or your evidence.
 
 ## How you report
 
