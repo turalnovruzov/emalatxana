@@ -120,38 +120,30 @@ class TextHelpers(unittest.TestCase):
 
 
 class Layout(unittest.TestCase):
-    def test_main_capped_at_reading_width(self):
-        lay = core.compute_layout(300, 40, 100)
-        self.assertEqual((lay.panel, lay.main), (40, 100))
-        self.assertEqual(lay.panel + lay.main + lay.spacer + 2, 300)
+    def test_main_takes_the_rest(self):
+        lay = core.compute_layout(300, 40)
+        self.assertEqual((lay.panel, lay.main), (40, 259))
 
-    def test_spacer_takes_remainder(self):
-        lay = core.compute_layout(200, 40, 90)
-        self.assertEqual(lay.spacer, 200 - 2 - 40 - 90)
-
-    def test_widths_always_positive_and_fit(self):
+    def test_widths_always_positive_and_fill(self):
         for ww in range(0, 400):
             for pw in (1, 16, 40, 500):
-                for mw in (1, 20, 100, 500):
-                    lay = core.compute_layout(ww, pw, mw)
-                    with self.subTest(ww=ww, pw=pw, mw=mw):
-                        self.assertGreaterEqual(lay.panel, 1)
-                        self.assertGreaterEqual(lay.main, 1)
-                        self.assertGreaterEqual(lay.spacer, 1)
-                        if ww >= 5:
-                            self.assertLessEqual(lay.panel + lay.main + lay.spacer + 2, ww)
+                lay = core.compute_layout(ww, pw)
+                with self.subTest(ww=ww, pw=pw):
+                    self.assertGreaterEqual(lay.panel, 1)
+                    self.assertGreaterEqual(lay.main, 1)
+                    if ww >= 3:
+                        self.assertEqual(lay.panel + lay.main + 1, ww)
 
     def test_narrow_terminal_keeps_min_main(self):
-        lay = core.compute_layout(60, 40, 100)
-        self.assertGreaterEqual(lay.main, core.MIN_MAIN)
-        self.assertLessEqual(lay.panel + lay.main + lay.spacer + 2, 60)
+        lay = core.compute_layout(60, 40)
+        self.assertEqual((lay.panel, lay.main), (39, core.MIN_MAIN))
+        self.assertEqual(lay.panel + lay.main + 1, 60)
 
     def test_width_action(self):
-        self.assertEqual(core.width_action(None, (200, 40, 100)), "apply")
-        self.assertEqual(core.width_action((200, 40, 100), (180, 40, 100)), "apply")
-        self.assertEqual(core.width_action((200, 40, 100), (200, 45, 100)), "adopt-panel")
-        self.assertEqual(core.width_action((200, 40, 100), (200, 40, 90)), "adopt-main")
-        self.assertIsNone(core.width_action((200, 40, 100), (200, 40, 100)))
+        self.assertEqual(core.width_action(None, (200, 40)), "apply")
+        self.assertEqual(core.width_action((200, 40), (180, 40)), "apply")
+        self.assertEqual(core.width_action((200, 40), (200, 45)), "adopt-panel")
+        self.assertIsNone(core.width_action((200, 40), (200, 40)))
 
 
 class Prefs(unittest.TestCase):
@@ -176,19 +168,28 @@ class Prefs(unittest.TestCase):
         self.assertEqual(core.load_prefs(self.path), core.DEFAULT_PREFS)
 
     def test_roundtrip_creates_parent_dirs(self):
-        prefs = {"side": "left", "main_width": 80, "panel_width": 30, "last_folder": "/x"}
+        prefs = {"side": "left", "panel_width": 30, "last_folder": "/x"}
         core.save_prefs(self.path, prefs)
         self.assertEqual(core.load_prefs(self.path), prefs)
         self.assertFalse(self.path.with_name("prefs.json.tmp").exists())
 
+    def test_old_file_with_main_width_loads_and_drops_it(self):
+        self.path.parent.mkdir(parents=True)
+        old = {"side": "left", "main_width": 80, "panel_width": 30, "last_folder": "/x"}
+        self.path.write_text(json.dumps(old), encoding="utf-8")
+        got = core.load_prefs(self.path)
+        self.assertEqual(got, {"side": "left", "panel_width": 30, "last_folder": "/x"})
+        core.save_prefs(self.path, got)
+        self.assertNotIn("main_width", json.loads(self.path.read_text(encoding="utf-8")))
+
     def test_normalize_rejects_bad_values(self):
-        got = core.normalize_prefs({"side": "up", "main_width": "9", "panel_width": True, "last_folder": ""})
+        got = core.normalize_prefs({"side": "up", "panel_width": True, "last_folder": ""})
         self.assertEqual(got, core.DEFAULT_PREFS)
+        self.assertEqual(core.normalize_prefs({"panel_width": "9"}), core.DEFAULT_PREFS)
 
     def test_normalize_clamps(self):
-        got = core.normalize_prefs({"main_width": -5, "panel_width": 10**9})
-        self.assertEqual(got["main_width"], core.MIN_MAIN)
-        self.assertEqual(got["panel_width"], core.MAX_WIDTH)
+        self.assertEqual(core.normalize_prefs({"panel_width": 5})["panel_width"], core.MIN_PANEL)
+        self.assertEqual(core.normalize_prefs({"panel_width": 10**9})["panel_width"], core.MAX_WIDTH)
 
     def test_normalize_non_dict(self):
         for raw in (None, [], "s", 3):
@@ -196,7 +197,7 @@ class Prefs(unittest.TestCase):
 
     def test_normalize_does_not_mutate_defaults(self):
         core.normalize_prefs({"side": "left", "last_folder": "/q"})
-        self.assertEqual(core.DEFAULT_PREFS, {"side": "right", "main_width": 100, "panel_width": 40})
+        self.assertEqual(core.DEFAULT_PREFS, {"side": "right", "panel_width": 40})
 
     def test_prefs_path_xdg(self):
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "/cfg"}), Path("/cfg/emx/prefs.json"))
@@ -208,12 +209,12 @@ class Prefs(unittest.TestCase):
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": ""}), want)
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "rel/dir"}), want)
 
-    def test_adjust_width_clamped(self):
+    def test_adjust_panel_width_clamped(self):
         p = dict(core.DEFAULT_PREFS)
-        self.assertEqual(core.adjust_width(p, "main_width", -1000)["main_width"], core.MIN_MAIN)
-        self.assertEqual(core.adjust_width(p, "panel_width", -1000)["panel_width"], core.MIN_PANEL)
-        self.assertEqual(core.adjust_width(p, "panel_width", 10**6)["panel_width"], core.MAX_WIDTH)
-        self.assertEqual(core.adjust_width(p, "main_width", 5)["main_width"], 105)
+        self.assertEqual(core.adjust_panel_width(p, -1000)["panel_width"], core.MIN_PANEL)
+        self.assertEqual(core.adjust_panel_width(p, 10**6)["panel_width"], core.MAX_WIDTH)
+        self.assertEqual(core.adjust_panel_width(p, 5)["panel_width"], 45)
+        self.assertEqual(core.adjust_panel_width(p, -5)["panel_width"], 35)
         self.assertEqual(p, core.DEFAULT_PREFS)
 
     def test_flip_side(self):

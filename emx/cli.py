@@ -48,11 +48,6 @@ def create_workspace(tmux: Tmux) -> None:
     ).strip()
     tmux.set_pane_option(main, ROLE, "placeholder")
     toward_sidebar = [] if side == "right" else ["-b"]
-    toward_spacer = ["-b"] if side == "right" else []
-    spacer = tmux.run(
-        "split-window", "-h", *toward_spacer, "-d", "-t", main, "-P", "-F", "#{pane_id}", self_command("blank")
-    ).strip()
-    tmux.set_pane_option(spacer, ROLE, "spacer")
     sidebar = tmux.run(
         "split-window", "-h", *toward_sidebar, "-t", main, "-P", "-F", "#{pane_id}",
         self_command("sidebar", tmux.socket),

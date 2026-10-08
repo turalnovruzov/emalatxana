@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-DEFAULT_PREFS = {"side": "right", "main_width": 100, "panel_width": 40}
+DEFAULT_PREFS = {"side": "right", "panel_width": 40}
 SIDES = ("left", "right")
 MIN_PANEL = 16
 MIN_MAIN = 20
@@ -153,33 +153,28 @@ def first_message(text: str) -> str:
 class Layout:
     panel: int
     main: int
-    spacer: int
 
 
-def compute_layout(window_width: int, panel_width: int, main_width: int) -> Layout:
-    """Widths for panel, main and spacer. Two one-column borders sit between three panes; tmux needs each pane at least one column wide."""
-    avail = max(window_width - 2, 3)
-    panel = max(1, min(panel_width, avail - 1 - MIN_MAIN))
-    main = max(1, min(main_width, avail - panel - 1))
-    spacer = max(1, avail - panel - main)
-    return Layout(panel=panel, main=main, spacer=spacer)
+def compute_layout(window_width: int, panel_width: int) -> Layout:
+    """Widths for panel and main; main takes everything the panel leaves. One one-column border sits between the two panes; tmux needs each pane at least one column wide."""
+    avail = max(window_width - 1, 2)
+    panel = max(1, min(panel_width, avail - MIN_MAIN))
+    main = max(1, avail - panel)
+    return Layout(panel=panel, main=main)
 
 
 def width_action(applied: tuple | None, actual: tuple) -> str | None:
     """Decide what a sidebar tick does about pane widths.
 
-    Both tuples are (window_width, panel_width, main_width). A new window width
-    means the terminal resized, so the layout is reapplied from prefs. The same
-    window width with different pane widths means he dragged a border, so those
-    widths become the new prefs: "adopt-panel" when the panel border moved,
-    "adopt-main" when only the main column's did.
+    Both tuples are (window_width, panel_width). A new window width means the
+    terminal resized, so the layout is reapplied from prefs. The same window
+    width with a different panel width means he dragged the panel border, so
+    "adopt-panel" makes that width the new pref.
     """
     if applied is None or actual[0] != applied[0]:
         return "apply"
     if actual[1] != applied[1]:
         return "adopt-panel"
-    if actual[2] != applied[2]:
-        return "adopt-main"
     return None
 
 
@@ -201,10 +196,9 @@ def normalize_prefs(raw) -> dict:
         return prefs
     if raw.get("side") in SIDES:
         prefs["side"] = raw["side"]
-    for key, low in (("main_width", MIN_MAIN), ("panel_width", MIN_PANEL)):
-        value = raw.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            prefs[key] = _clamp(value, low, MAX_WIDTH)
+    value = raw.get("panel_width")
+    if isinstance(value, int) and not isinstance(value, bool):
+        prefs["panel_width"] = _clamp(value, MIN_PANEL, MAX_WIDTH)
     if isinstance(raw.get("last_folder"), str) and raw["last_folder"]:
         prefs["last_folder"] = raw["last_folder"]
     return prefs
@@ -225,9 +219,8 @@ def save_prefs(path: Path, prefs: dict) -> None:
     os.replace(tmp, path)
 
 
-def adjust_width(prefs: dict, key: str, delta: int) -> dict:
-    low = MIN_MAIN if key == "main_width" else MIN_PANEL
-    return {**prefs, key: _clamp(prefs[key] + delta, low, MAX_WIDTH)}
+def adjust_panel_width(prefs: dict, delta: int) -> dict:
+    return {**prefs, "panel_width": _clamp(prefs["panel_width"] + delta, MIN_PANEL, MAX_WIDTH)}
 
 
 def flip_side(prefs: dict) -> dict:
