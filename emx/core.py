@@ -269,14 +269,17 @@ def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
     return None
 
 
-def open_blocked(starting: bool) -> str | None:
+def open_blocked(starting: bool, cursor=None) -> str | None:
     """Why Enter or → on the panel opens nothing now, or None.
 
-    While a new session starts, an Enter he meant for its prompt (the old
-    `n`, Enter, Enter habit) lands on the panel, where it would reopen the
-    stopped session under the cursor.
+    While a new session starts, and until its row lands in the list, an
+    Enter he meant for its prompt (the old `n`, Enter, Enter habit) lands on
+    the panel, where it would reopen the stopped session under the cursor. A
+    group header only folds, so it stays free.
     """
-    return "Still starting the last session…" if starting else None
+    if not starting or (cursor and cursor[0] == "group"):
+        return None
+    return "Still starting the last session…"
 
 
 def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) -> bool:
@@ -1003,7 +1006,7 @@ def fuzzy_match(query: str, text: str) -> tuple | None:
     letters next to each other, then a match that starts the last folder
     name (the prefix). The key ranks those two first, then the shorter text.
     """
-    q, t = query.lower(), text.lower()
+    q, t = _fold(query), _fold(text)
     if not q:
         return (0, False, len(text))
     at = -1
@@ -1028,6 +1031,11 @@ def fuzzy_match(query: str, text: str) -> tuple | None:
         best = step
     together, prefix = max(b for b in best if b is not None)
     return (-together, not prefix, len(text))
+
+
+def _fold(text: str) -> str:
+    # Folded a letter at a time, so it stays the length of `text` and its indexes line up: 'İ'.lower() is two code points.
+    return "".join(c.lower()[0] for c in text)
 
 
 def _word_start(text: str, i: int) -> bool:
@@ -1149,8 +1157,8 @@ def picker_enter(picked: str | None, typed: str, exists: bool | None, rows: list
     The highlighted folder first, then the top suggestion when nothing is
     typed, then the typed path once it is confirmed a folder. While that is
     still being checked he waits, so a path he typed in full is not swapped
-    for a suggestion. A typed path that is not a
-    folder gives way to the top suggestion.
+    for a suggestion. A typed path that is not a folder gives way to the top
+    suggestion.
     """
     if picked:
         return picked, None

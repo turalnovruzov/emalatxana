@@ -236,9 +236,10 @@ class Listings:
     `get` and `readable` never wait: they hand back whatever is cached (None
     before the first read arrives) and start a read when the cache is
     missing or old. `readable` says whether the folder itself could be read,
-    which confirms a folder its parent's listing can't. A folder still being read is never read twice, and at most
-    MAX_LISTINGS reads run at once, so a hung mount holds one slot instead
-    of piling up threads or freezing the panel.
+    which confirms a folder its parent's listing can't. A folder still being
+    read is never read twice, and at most MAX_LISTINGS reads run at once, so
+    a hung mount holds one slot instead of piling up threads or freezing the
+    panel.
     """
 
     def __init__(self):
@@ -466,6 +467,7 @@ class App:
         self.listings = Listings()
         self.home = os.path.expanduser("~")
         self.starter = None
+        self.started = None
         self.checker = None
         self.closer = None
         self.confirm = None
@@ -941,6 +943,7 @@ class App:
             self.say(error, error=True)
             return
         sid = session.id
+        self.started = (sid, time.monotonic())
         self.prefs = core.remember_folder(self.prefs, starter.folder)
         self.save_prefs()
         self.fresh[sid] = time.monotonic()
@@ -949,6 +952,16 @@ class App:
         self.switch_to(sid, core.NEW, (session, True))
         if not self.notice_error:
             self.say("Session started.")
+
+    def awaiting_started_row(self) -> bool:
+        """Whether the session just started has yet to land in the list; given up after FRESH_GRACE_SECONDS, as its viewer is."""
+        if self.started is None:
+            return False
+        sid, at = self.started
+        if any(s.id == sid for s in self.sessions) or time.monotonic() - at >= FRESH_GRACE_SECONDS:
+            self.started = None
+            return False
+        return True
 
     def handle_mouse(self) -> None:
         try:
@@ -975,7 +988,7 @@ class App:
         elif key in (curses.KEY_DOWN, "j"):
             self.cursor, self.wanted_cursor = core.move_cursor(self.items(), self.cursor, 1), None
         elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
-            blocked = core.open_blocked(self.starter is not None)
+            blocked = core.open_blocked(self.starter is not None or self.awaiting_started_row(), self.cursor)
             if blocked:
                 self.say(blocked)
             elif key in ENTER_KEYS or (self.cursor and self.cursor[0] == "session"):
@@ -1049,7 +1062,10 @@ class App:
 
     def suggestion_lines(self, width: int, fits: int) -> list:
         """At most `fits` lines. Rows that don't fit become one "more" line, highlighted when the highlighted folder is among them."""
-        rows = self.suggestions()
+        try:
+            rows = self.suggestions()
+        except Exception as exc:
+            return [(t, self.color("error")) for t in core.wrap_words(f"! {core.error_line(exc)}", width)][:fits]
         if not rows:
             return [("no match", curses.A_DIM)][:fits]
         picked = self.prompt.get("picked")

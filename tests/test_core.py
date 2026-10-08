@@ -901,6 +901,24 @@ class FuzzyMatch(unittest.TestCase):
     def test_empty_query_matches_everything(self):
         self.assertIsNotNone(core.fuzzy_match("", "~/anything"))
 
+    def test_letters_that_grow_when_lowercased_never_shift_the_match(self):
+        listed = {"/h/me": ["İşlər", "Proje-İçerik", "Docs"]}
+        for query in ("r", "k", "~/r", "~/k", "ər", "~/ik"):
+            with self.subTest(query=query):
+                core.folder_suggestions(query, [], [], listed, "/h/me")
+        self.assertEqual(core.fuzzy_match("x", "~/İx")[0], 0)
+        self.assertIsNotNone(core.fuzzy_match("işlər", "~/İşlər"))
+        self.assertIsNotNone(core.fuzzy_match("ŞLƏR", "~/İşlər"))
+        self.assertEqual(core.fuzzy_match("ik", "~/Proje-İçerik")[0], -1)
+
+    def test_odd_unicode_names_never_raise(self):
+        names = ["İİİx", "Straße", "ﬁle-ﬂow", "e\u0301te\u0301", "ΣΑΣ", "Ǆemal", "\u0130\u0307i", "ǰx", "ẞig"]
+        for name in names:
+            for query in ("x", "e", "i", "s", "w", "l", "ss", name, name.lower(), name.upper()):
+                with self.subTest(name=name, query=query):
+                    core.fuzzy_match(query, "~/" + name)
+                    core.fuzzy_match(query, name)
+
 
 class FolderSuggestions(unittest.TestCase):
     def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS, roots=None):
@@ -1079,6 +1097,10 @@ class OpenWhileStarting(unittest.TestCase):
     def test_enter_and_right_open_nothing_while_a_session_starts(self):
         self.assertIsNone(core.open_blocked(False))
         self.assertEqual(core.open_blocked(True), "Still starting the last session…")
+
+    def test_a_group_header_still_folds_while_a_session_starts(self):
+        self.assertIsNone(core.open_blocked(True, ("group", "/p/beta")))
+        self.assertEqual(core.open_blocked(True, ("session", "s")), "Still starting the last session…")
 
 
 class ClaudeCommands(unittest.TestCase):

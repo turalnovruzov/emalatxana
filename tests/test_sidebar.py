@@ -966,7 +966,6 @@ class FakeListings:
     def __init__(self, cache=None):
         self.cache = dict(cache or {})
         self.asked = []
-
         self.readable_cache = {}
 
     def get(self, folder):
@@ -1134,6 +1133,47 @@ class NewSession(AppCase):
         self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
         self.assertEqual(self.app.notice, "Still starting the last session…")
         self.assertEqual(self.app.cursor, ("session", "s"))
+
+    def test_a_late_enter_after_the_start_waits_for_the_new_row(self):
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
+        self.app.refresh()
+        self.app.cursor = ("session", "s")
+        self.keys("n", "\n")
+        self.app.starter = mock.Mock(folder="/p/stopped", result=(session("new1", "/p/stopped"), None))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertIsNone(self.app.starter)
+        self.keys("\n", curses.KEY_RIGHT)
+        self.assertFalse([o for o in self.opened if o[1] == core.OPEN], self.opened)
+        self.assertEqual(self.app.notice, "Still starting the last session…")
+        self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"), session("new1", "/p/stopped"))
+        self.app.refresh()
+        self.assertEqual(self.app.cursor, ("session", "new1"))
+        self.keys("\n")
+        self.assertIn("new1", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_a_failed_start_frees_enter_once_its_notice_shows(self):
+        self.app.cursor = ("session", "b")
+        self.app.starter = mock.Mock(folder="/p/beta", result=(None, "claude said no"))
+        self.app.starter.is_alive.return_value = False
+        self.app.finish_start()
+        self.assertEqual(self.app.notice, "claude said no")
+        self.keys("\n")
+        self.assertIn("b", [o[0] for o in self.opened if o[1] == core.OPEN])
+
+    def test_enter_on_a_group_header_still_folds_while_a_session_starts(self):
+        self.app.cursor = ("group", "/p/beta")
+        self.keys("n", "\n")
+        self.assertIsNotNone(self.app.starter)
+        self.keys("\n")
+        self.assertIn("/p/beta", self.app.collapsed())
+
+    def test_a_suggestion_that_raises_shows_an_error_line_not_a_frozen_draw(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+        with mock.patch.object(core, "folder_suggestions", side_effect=IndexError("boom")):
+            drawn = [text for text, _ in self.app.bottom_lines(39, 20)]
+        self.assertIn("! boom", drawn)
 
     def test_enter_with_nothing_highlighted_takes_a_confirmed_typed_folder_else_the_top_suggestion(self):
         self.app.listings.cache["/q"] = ["xy"]
