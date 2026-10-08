@@ -132,6 +132,18 @@ class StateWords(unittest.TestCase):
         self.assertGreater(len(frames), 1)
         self.assertEqual(core.glyph(core.WORKING, 0), core.glyph(core.WORKING, len(core.WORKING_FRAMES)))
 
+    def test_an_interrupted_session_reads_idle(self):
+        interrupted = mk(state="working", status="idle")
+        self.assertEqual(core.state_word(interrupted), "Idle")
+        self.assertEqual(core.category(interrupted), core.WORKING)
+        for f in range(len(core.WORKING_FRAMES) + 1):
+            with self.subTest(frame=f):
+                self.assertEqual(core.session_glyph(interrupted, f), "✻")
+        busy = mk(state="working", status="busy")
+        self.assertEqual(core.state_word(busy), "Working")
+        self.assertGreater(len({core.session_glyph(busy, f) for f in range(len(core.WORKING_FRAMES))}), 1)
+        self.assertEqual(core.state_word(mk(state="done", status="idle")), "Done")
+
 
 class Ages(unittest.TestCase):
     def test_format_age(self):
@@ -144,18 +156,6 @@ class Ages(unittest.TestCase):
     def test_session_age_reads_milliseconds(self):
         self.assertEqual(core.session_age(mk(started_at=1_000_000.0), 1_000_000 + 4_000), "4s")
         self.assertEqual(core.session_age(mk(started_at=None), 5_000), "")
-
-    def test_an_interrupted_session_reads_idle(self):
-        interrupted = mk(state="working", status="idle")
-        self.assertEqual(core.state_word(interrupted), "Idle")
-        self.assertEqual(core.category(interrupted), core.WORKING)
-        for f in range(len(core.WORKING_FRAMES) + 1):
-            with self.subTest(frame=f):
-                self.assertEqual(core.session_glyph(interrupted, f), "✻")
-        busy = mk(state="working", status="busy")
-        self.assertEqual(core.state_word(busy), "Working")
-        self.assertGreater(len({core.session_glyph(busy, f) for f in range(len(core.WORKING_FRAMES))}), 1)
-        self.assertEqual(core.state_word(mk(state="done", status="idle")), "Done")
 
 
 class ReopenRule(unittest.TestCase):
