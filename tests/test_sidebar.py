@@ -2258,6 +2258,17 @@ class WrappedRows(AppCase):
         self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
         self.assertIn("ctrl+x again", self.screen()[before[0][0]])
 
+    def test_a_rename_edit_on_a_wrapped_row_keeps_the_rows_height(self):
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        before = self.rows_of("a"), self.rows_of("b")
+        self.app.rename_edit = {"id": "a", "old": "emx-test-a", "text": "emx-test-a", "hint": ""}
+        self.app.draw()
+        self.assertEqual((self.rows_of("a"), self.rows_of("b")), before)
+        self.assertIn("emx-test-a▏", self.screen()[before[0][0]])
+        for y in before[0][1:]:
+            self.assertEqual(self.screen()[y].strip(), "", y)
+
     def test_the_peek_leaves_the_cursor_row_whole(self):
         self.scr.size = (11, 24)
         self.app.cursor = ("session", "a")

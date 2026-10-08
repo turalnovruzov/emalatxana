@@ -1559,6 +1559,7 @@ class App:
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
 
     def cursor_rows(self, layout: tuple) -> int:
+        """How many screen rows the cursor's line takes in `layout`, 1 when the cursor is not on a listed line."""
         lines, _, heights = layout
         return heights[lines.index(self.cursor)] if self.cursor in lines else 1
 
