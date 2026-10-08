@@ -15,6 +15,7 @@ BACK_OPT = "@emx_back"
 
 
 _PANE_ID = re.compile(r"%\d+")
+KEYS_SENT = ("Escape",)
 
 
 class TmuxError(RuntimeError):
@@ -199,6 +200,19 @@ class Tmux:
             raise TmuxError(f"not a pane id: {pane!r}")
         keys = " ".join(format(b, "02x") for b in text.encode("utf-8"))
         send = f"send-keys -t {pane} -H {keys} ; send-keys -t {pane} Enter ; display-message -p {typed}"
+        return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()
+
+    def key_if(self, pane: str, gate: str, key: str, typed: str, report: str) -> str:
+        """Send the one named `key`, with no Enter, into the pane only while the format `gate` is true there, in one tmux command as `type_if` does.
+
+        Only keys in KEYS_SENT may go: a key name is read by tmux, so any other
+        could name a binding or a sequence nobody checked.
+        """
+        if key not in KEYS_SENT:
+            raise TmuxError(f"not a key emx sends: {key!r}")
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        send = f"send-keys -t {pane} {key} ; display-message -p {typed}"
         return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()
 
     def detach(self) -> None:

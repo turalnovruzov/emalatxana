@@ -21,6 +21,8 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
+# Longer than a `claude agents` call's own timeout, so an interrupt cancelled mid-listing still ends inside it.
+INTERRUPT_JOIN_SECONDS = 20
 GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
 MAX_LISTINGS = 4
@@ -52,7 +54,8 @@ HELP = (
     ("↵ click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
-    ("^x ^x", "stop the session; on a stopped one, remove it"),
+    ("^x", "interrupt a working session; twice closes it (stop, then remove)"),
+    ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in its open viewer"),
@@ -215,9 +218,9 @@ def wait_until_running(claude: str, sid: str) -> tuple:
         time.sleep(LISTED_CHECK_SECONDS)
 
 
-def close_session(claude: str, confirm: core.Confirm) -> tuple:
-    """Run `claude stop` or `claude rm` on the confirmed session: (its output, None), or (None, its whole message on one line). Never raises."""
-    args = core.close_args(claude, confirm)
+def close_session(args: list) -> tuple:
+    """Run one of `core.close_args`' commands: (its output, None), or (None, its whole message on one line). Never raises."""
+    claude = args[0]
     try:
         done = subprocess.run(
             args, capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
@@ -301,24 +304,72 @@ class Listings:
 
 
 class Closer(threading.Thread):
-    """Stops or removes a confirmed session off the main thread, after checking a fresh listing still shows it as he saw it."""
+    """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
-    def __init__(self, claude: str, confirm: core.Confirm):
+    A running session is stopped, then removed. `wait_for` holds the
+    Interrupters of any of them still running, cancelled when the close
+    began, and those that ended earlier possibly leaving the hidden viewer
+    they meant to kill. The close waits for them to end and tries each
+    kill again; while such a pane is still listed, nothing is closed. Any
+    of these he swapped into main is swapped out for the placeholder
+    before its kill. Any other hidden viewer an interrupt opened is gone,
+    or, with no close started, took the Esc or was swapped into main by
+    him, which makes it his like a viewer he opens; so an interrupt's
+    `claude attach` still starting can't land after the stop and resume
+    the session. Not covered: a window tmux made for a `new_hidden_window`
+    that then failed, since no pane id came back. `current` is the session
+    being closed now. `result` is (all closed, message, {id: closed}).
+    """
+
+    def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
         super().__init__(daemon=True)
-        self.claude, self.confirm = claude, confirm
+        self.claude, self.targets, self.wait_for = claude, tuple(targets), tuple(wait_for)
+        self.current = self.targets[0]
         self.result = None
 
     def run(self) -> None:
+        finished = {}
         try:
-            sessions, _ = fetch_sessions(self.claude)
-            session, fresh = core.checked_row(sessions, self.confirm.id)
-            if not core.close_still_applies(self.confirm, session, fresh):
-                self.result = (False, core.close_refusal(self.confirm, session, fresh))
-                return
-            output, error = close_session(self.claude, self.confirm)
-            self.result = (error is None, error or core.closed_text(self.confirm, output))
+            self.result = self.attempt(finished)
         except Exception as exc:
-            self.result = (False, f"{self.confirm.action} failed: {core.error_line(exc)}")
+            finished.update((t.id, False) for t in self.targets if t.id not in finished)
+            self.result = (False, f"close failed: {core.error_line(exc)}", finished)
+
+    def attempt(self, finished: dict) -> tuple:
+        deadline = time.monotonic() + INTERRUPT_JOIN_SECONDS
+        what = "it" if len(self.targets) == 1 else "any of them"
+        for interrupter in self.wait_for:
+            interrupter.join(max(0.0, deadline - time.monotonic()))
+            name = interrupter.interrupt.name
+            if interrupter.is_alive():
+                finished.update((t.id, False) for t in self.targets)
+                return False, f"emx is still interrupting {name}, so it didn't close {what}.", finished
+            if not interrupter.ended:
+                interrupter.end_opened(closing=True)
+            if not interrupter.ended:
+                finished.update((t.id, False) for t in self.targets)
+                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close {what}.", finished
+        messages = []
+        for confirm in self.targets:
+            self.current = confirm
+            closed, message = self.close_one(confirm)
+            finished[confirm.id] = closed
+            messages.append(message)
+        return all(finished.values()), " ".join(messages), finished
+
+    def close_one(self, confirm: core.Confirm) -> tuple:
+        sessions, _ = fetch_sessions(self.claude)
+        session, fresh = core.checked_row(sessions, confirm.id)
+        if not core.close_still_applies(confirm, session, fresh):
+            return False, core.close_refusal(confirm, session, fresh)
+        output = ""
+        for args in core.close_args(self.claude, confirm):
+            output, error = close_session(args)
+            if error and args[1] == "rm" and confirm.running:
+                return False, core.stopped_not_removed_text(confirm, error)
+            if error:
+                return False, error
+        return True, core.closed_text(confirm, output)
 
 
 class Renamer(threading.Thread):
@@ -393,6 +444,164 @@ class Renamer(threading.Thread):
             if name is not None or time.monotonic() >= deadline:
                 return name
             time.sleep(LISTED_CHECK_SECONDS)
+
+
+class Interrupter(threading.Thread):
+    """Interrupts a working session off the curses thread by sending Esc into its viewer, as `claude agents` does.
+
+    It sends only once a fresh listing shows the session running and
+    working, its viewer shows this session with the cursor at its prompt,
+    and tmux, in the same command that sends, finds none of that changed and
+    his focus still on the panel. With no viewer open it opens a hidden one
+    first, with no swap and no select, so his focus stays where it is. Then
+    it waits for the listing to show the session stopped working. `cancel`
+    is set when a close of the session starts: from then on it opens and
+    sends nothing. Before it ends it kills the hidden viewer it opened,
+    unless the Esc went into it after its prompt came up and no close
+    started, or, with no close started, he has meanwhile opened it in main;
+    on a close, one in main is first swapped out for the placeholder.
+    `ended` is False only if a pane it meant to kill may still be there.
+    `result` is (stopped, message).
+    """
+
+    def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
+                 list_failing: bool):
+        super().__init__(daemon=True)
+        self.claude, self.tmux, self.interrupt = claude, tmux, interrupt
+        self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
+        self.cancel = threading.Event()
+        self.opened = None
+        self.sent = False
+        self.ended = True
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = self.attempt()
+        except Exception as exc:
+            self.result = (False, f"interrupt failed: {core.error_line(exc)}")
+        finally:
+            closing = self.cancel.is_set()
+            if self.opened is not None and (closing or not self.sent):
+                self.end_opened(closing)
+
+    def end_opened(self, closing: bool) -> None:
+        """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it.
+
+        He may have swapped it into main (Enter on its row while it came
+        up). With no close that makes it his and it stays; on a close the
+        placeholder is swapped into main first, as `close_viewers` does, so
+        main keeps a pane. When tmux can't say where it is, there is no
+        placeholder, or the swap fails, nothing is killed and `ended` is
+        False, which holds the close back.
+        """
+        try:
+            panes = self.tmux.panes()
+        except TmuxError:
+            self.ended = False
+            return
+        windows = {p.id: p.window for p in panes}
+        in_main = windows.get(self.opened) is not None and windows.get(self.opened) == windows.get(self.panel)
+        if in_main and not closing:
+            self.ended = True
+            return
+        if in_main:
+            placeholder = next((p for p in panes if p.role == "placeholder"), None)
+            if placeholder is None:
+                self.ended = False
+                return
+            try:
+                self.tmux.swap(placeholder.id, self.opened)
+            except TmuxError:
+                self.ended = False
+                return
+        try:
+            self.tmux.kill_pane(self.opened)
+            self.ended = True
+        except TmuxError:
+            try:
+                self.ended = all(p.id != self.opened for p in self.tmux.panes())
+            except TmuxError:
+                self.ended = False
+
+    def attempt(self) -> tuple:
+        interrupt = self.interrupt
+        sessions, _ = fetch_sessions(self.claude)
+        session, fresh = core.checked_row(sessions, interrupt.id)
+        refusal = core.interrupt_listing_refusal(interrupt, session, fresh)
+        if refusal == core.NOTHING_TO_INTERRUPT:
+            return True, core.nothing_to_interrupt_text(interrupt)
+        if refusal:
+            return False, refusal
+        try:
+            viewer = core.live_viewer(self.tmux.panes(), interrupt.id)
+            if viewer is not None:
+                pane = viewer.id
+                screen = self.screen(pane)
+                refusal = core.interrupt_screen_refusal(interrupt, session, sessions, screen)
+                if refusal:
+                    return False, refusal
+            else:
+                fresh = fresh and not self.list_failing
+                if self.cancel.is_set():
+                    return False, ""
+                if not core.attach_allowed(session, core.INTERRUPT, fresh):
+                    return False, core.refusal(interrupt.name, core.INTERRUPT, fresh, session)
+                pane = self.opened = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
+                self.tmux.set_pane_option(pane, SESSION_OPT, interrupt.id)
+                screen = self.wait_for_prompt(pane, session, sessions)
+                if self.cancel.is_set():
+                    return False, ""
+                if screen is None:
+                    return False, f"{interrupt.name}'s viewer didn't come up in time, so emx didn't interrupt it."
+            if self.cancel.is_set():
+                return False, ""
+            gate = core.type_gate(pane, self.panel, interrupt.id, screen.cursor_y, SESSION_OPT, cursor_x=screen.cursor_x)
+            if gate is None:
+                return False, f"emx can't check {interrupt.name}'s viewer safely, so it didn't interrupt it."
+            report = self.tmux.key_if(pane, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
+            refusal = core.gate_refusal(interrupt, report, screen.cursor_y, cursor_x=screen.cursor_x)
+            if refusal:
+                return False, refusal
+            self.sent = True
+        except TmuxError as exc:
+            return False, f"tmux: {exc}"
+        stopped = self.wait_until_stopped()
+        if stopped is None:
+            return True, core.left_listing_text(interrupt)
+        return stopped, core.interrupted_text(interrupt, stopped)
+
+    def screen(self, pane: str) -> core.RenameScreen:
+        captured = self.tmux.capture(pane)
+        x, y, shown, width, in_mode = self.tmux.prompt_probe(pane)
+        return core.RenameScreen(captured, "", "", x, y, shown, width, in_mode, pane in self.flagged)
+
+    def wait_for_prompt(self, pane: str, session: core.Session, sessions) -> core.RenameScreen | None:
+        """The viewer just opened, once its screen passes the checks; None if it doesn't within LISTED_WAIT_SECONDS or a close starts."""
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while not self.cancel.is_set():
+            screen = self.screen(pane)
+            if core.interrupt_screen_refusal(self.interrupt, session, sessions, screen) is None:
+                return screen
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(LISTED_CHECK_SECONDS)
+        return None
+
+    def wait_until_stopped(self) -> bool | None:
+        """True once a listing shows it stopped working, False if it still is at the deadline, None once a listing that worked no longer shows it."""
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while not self.cancel.is_set():
+            sessions, _ = fetch_sessions(self.claude)
+            session, fresh = core.checked_row(sessions, self.interrupt.id)
+            if fresh and session is None:
+                return None
+            if session is not None and not core.interruptible(session):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LISTED_CHECK_SECONDS)
+        return False
 
 
 class Starter(threading.Thread):
@@ -822,6 +1031,9 @@ class App:
         self.started = None
         self.checker = None
         self.closer = None
+        self.interrupters = {}
+        self.unended = {}
+        self.closing = {}
         self.confirm = None
         self.find = None
         self.rename_edit = None
@@ -894,8 +1106,9 @@ class App:
         return [line for line in self.lines() if line]
 
     def regroup(self) -> None:
+        before = self.items()
         self.groups = self.grouped()
-        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor)
+        self.cursor = core.settle_cursor(self.items(), self.cursor, self.groups, self.wanted_cursor, before)
         if self.cursor == self.wanted_cursor:
             self.wanted_cursor = None
 
@@ -919,6 +1132,10 @@ class App:
         self.cursor, self.wanted_cursor = item, None
         if item[0] == "group":
             self.toggle_group(item[1])
+        elif item[1] in self.closing:
+            # Opening a session that is being stopped would resume it.
+            shown = self.session(item[1])
+            self.say(core.still_closing(shown.name if shown else item[1]))
         else:
             self.switch_to(item[1], core.OPEN)
 
@@ -990,6 +1207,8 @@ class App:
         self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
         self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
         self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
+        if main.session in self.closing:
+            return
         action = core.auto_restore(
             state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
         )
@@ -1088,8 +1307,13 @@ class App:
         `checked` is (session, fresh) from a listing a worker thread took just
         now (`core.checked_row`); this thread never lists, so a slow `claude
         agents` can't freeze the panel. A trigger other than OPEN without one
-        is refused.
+        is refused, and so is a RESTART of a session being closed: its
+        attach could land after the stop and resume it.
         """
+        if trigger == core.RESTART and sid in self.closing:
+            shown = self.session(sid)
+            self.say(core.still_closing(shown.name if shown else sid))
+            return False
         if trigger == core.OPEN:
             session, fresh = self.session(sid), False
         else:
@@ -1157,35 +1381,102 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
 
+    def group(self, key: str):
+        return next((g for g in self.groups if g.key == key), None)
+
+    def confirm_row(self, confirm):
+        """What `confirm` was armed on, as the panel lists it now: the session, or the group for a header."""
+        if isinstance(confirm, core.GroupConfirm):
+            return self.group(confirm.key)
+        return self.session(confirm.id)
+
     def press_close(self) -> None:
-        session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
-        if session is None:
+        cursor = self.cursor
+        if not cursor:
             return
-        blocked = core.close_blocked(bool(self.list_error), self.closer.confirm if self.closer else None)
+        if cursor[0] == "group":
+            row = self.group(cursor[1])
+            if row is None:
+                return
+            if not core.group_closable(self.view(), row.key):
+                self.confirm = None
+                self.say(core.group_close_refusal(row.key))
+                return
+        else:
+            row = self.session(cursor[1])
+            if row is None:
+                return
+            if row.id in self.closing:
+                self.confirm = None
+                self.say(core.still_closing(row.name))
+                return
+        blocked = core.close_blocked(bool(self.list_error), self.closer.current if self.closer else None)
         if blocked:
             self.confirm = None
             self.say(blocked)
             return
-        self.confirm, act = core.press_close(self.confirm, self.cursor, session, time.monotonic())
+        self.confirm, act = core.press_close(self.confirm, cursor, row, time.monotonic(), self.view())
         if act is None:
+            if isinstance(self.confirm, core.GroupConfirm) and row.key in self.collapsed():
+                self.toggle_group(row.key)
+            elif isinstance(self.confirm, core.Confirm) and core.interruptible(row):
+                self.start_interrupt(row)
             return
-        self.closer = Closer(self.claude, act)
+        self.start_close(act)
+
+    def start_close(self, act) -> None:
+        targets = core.close_targets(act)
+        ids = {t.id for t in targets}
+        wait_for = tuple(self.interrupters[sid] for sid in sorted(ids) if sid in self.interrupters)
+        for interrupter in wait_for:
+            interrupter.cancel.set()
+        wait_for += tuple(i for sid in sorted(ids) for i in self.unended.get(sid, ()))
+        self.closing.update((sid, None) for sid in ids)
+        self.closer = Closer(self.claude, targets, wait_for)
         self.closer.start()
         self.say(core.closing_text(act))
+
+    def start_interrupt(self, session: core.Session) -> None:
+        """One interrupt per session at a time: two Escs in quick succession open Claude Code's rewind."""
+        if session.id in self.interrupters:
+            return
+        interrupter = self.interrupters[session.id] = Interrupter(
+            self.claude, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
+            bool(self.list_error),
+        )
+        interrupter.start()
+        self.say(f"Interrupting {session.name}…")
+
+    def finish_interrupt(self) -> None:
+        for sid, interrupter in list(self.interrupters.items()):
+            if interrupter.is_alive():
+                continue
+            del self.interrupters[sid]
+            if not interrupter.ended:
+                self.unended.setdefault(sid, []).append(interrupter)
+            if interrupter.cancel.is_set():
+                continue
+            done, message = interrupter.result or (False, "interrupt failed")
+            self.say(message, error=not done)
+            self.poller.wake.set()
 
     def finish_close(self) -> None:
         closer = self.closer
         if closer is None or closer.is_alive():
             return
         self.closer = None
-        done, message = closer.result or (False, f"{closer.confirm.action} failed")
+        self.unended = {sid: left for sid, workers in self.unended.items()
+                        if (left := [i for i in workers if not i.ended])}
+        done, message, finished = closer.result or (False, "close failed", {t.id: False for t in closer.targets})
         self.say(message, error=not done)
+        self.closing = core.closing_after(self.closing, finished, None)
         self.poller.wake.set()
-        if done and closer.confirm.action == core.REMOVE:
+        closed = {sid for sid, ok in finished.items() if ok}
+        if closed:
             try:
                 panes = self.tmux.panes()
                 _, main = self.layout_panes(panes)
-                self.close_viewers(panes, main, {closer.confirm.id})
+                self.close_viewers(panes, main, closed)
             except TmuxError as exc:
                 self.say(f"tmux: {exc}", error=True)
 
@@ -1245,6 +1536,9 @@ class App:
     def start_rename(self) -> None:
         session = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
         if session is None:
+            return
+        if session.id in self.closing:
+            self.say(core.still_closing(session.name))
             return
         try:
             has_viewer = core.live_viewer(self.tmux.panes(), session.id) is not None
@@ -1711,7 +2005,7 @@ class App:
         for line in lines:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
-                armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
+                armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
                 rows[line] = self.session_lines(session, width, aligns.get(session.id, 0), now_ms, armed,
                                                 group_of.get(session.id, ""))
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
@@ -1742,12 +2036,18 @@ class App:
                 for r in shown:
                     self.put(r, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
-                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width)
+                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width,
+                                 core.header_label(self.confirm, groups[line[1]], self.closing))
             elif line in rows:
                 session = self.session(line[1])
                 self.draw_session(first, shown, rows[line], session, selected, session.id == main_sid, frame)
 
-    def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
+    def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int, label: str | None = None) -> None:
+        if label is not None:
+            arrow = "▸" if group.key in self.collapsed() else "▾"
+            self.put(y, 0, arrow, self.palette.attr("muted", selected))
+            self.put(y, 2, core.fit(label, max(1, width - 3)), self.palette.attr("error", selected) | curses.A_BOLD)
+            return
         view = self.view()
         name_tone = CATEGORY_TONE[group.key] if core.state_group(view, group.key) else "plain"
         tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
@@ -1764,11 +2064,13 @@ class App:
     def session_lines(
         self, s, width: int, align: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
     ) -> list:
-        """The row's lines as `core.row_lines` gives them, or, while it is armed or renamed, the close label's or the rename edit's padded to as many."""
+        """The row's lines as `core.row_lines` gives them, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
         age = core.session_age(s, now_ms)
         detail = core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
         lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
+        if s.id in self.closing:
+            return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
         if armed is not None:
             return core.confirm_lines(core.confirm_label(armed), width, len(lines))
         if self.rename_edit is not None and self.rename_edit["id"] == s.id:
@@ -1797,7 +2099,7 @@ class App:
             if in_main:
                 self.put(y + i, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
             if i == 0:
-                self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+                self.put(y, 1, core.session_glyph(s, frame), attr(glyph_tone))
             for x, text, part in parts:
                 if part in ("confirm", "rename"):
                     tone = "error" if part == "confirm" else "accent"
@@ -1816,6 +2118,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
         else:
@@ -1882,16 +2185,19 @@ class App:
             self.finish_start()
             self.finish_check()
             self.finish_close()
+            self.finish_interrupt()
             self.finish_rename()
+            peeked = self.peeked()
             fresh_list = self.take_poll()
             self.take_placements()
             self.take_transcripts()
             self.take_summaries()
-            if self.peeking and self.peeked() is None:
+            # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
+            if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False
             now = time.monotonic()
             if self.confirm is not None and not core.confirm_holds(
-                self.confirm, self.cursor, self.session(self.confirm.id), now,
+                self.confirm, self.cursor, self.confirm_row(self.confirm), now,
             ):
                 self.confirm = None
             if core.notice_expired(self.notice_until, now):

@@ -64,7 +64,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every `claude attach` asks `core.attach_allowed` first
 
-1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`Checker`'s, through `core.checked_row`, for `RESTART`; `Starter`'s, from `wait_until_running`, for `NEW`), never on one taken on the curses thread.
+1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`, `INTERRUPT`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`Checker`'s, through `core.checked_row`, for `RESTART`; `Starter`'s, from `wait_until_running`, for `NEW`; the `Interrupter`'s own, for `INTERRUPT`), never on one taken on the curses thread. `INTERRUPT` attaches a running session only, and opens its viewer in a hidden window with no swap and no select, so his focus stays on the panel.
 2. **Why**: attaching to a stopped session resumes it, and he must be the only one who reopens a session he stopped.
 3. **Minimal example**:
    ```python
@@ -82,7 +82,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    if core.attach_allowed(session, trigger, fresh):
        self.tmux.respawn(pane, core.viewer_command(self.claude, sid))
    ```
-4. **Gotcha**: the panel's rows come from the last poll, which can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile.
+4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile. A worker that may attach must stand down when a close of that session starts (the `Interrupter`'s `cancel`), because `new_hidden_window` returns before `claude attach` has connected; otherwise a starting attach could land after the stop and resume the session. The `Interrupter` kills the hidden viewer it opened before it ends, on a close and on any other way it ends (timeout, error, refusal). With no close started it keeps it once its prompt came up and the Esc went in, or when he has swapped it into main, which makes it his. On a close it always kills it, and one in main is first swapped out for the placeholder, as `close_viewers` does, so main keeps a pane; when tmux can't say where the pane is, there is no placeholder or the swap fails, it kills nothing and leaves `ended` False. The close waits for a running worker to end, and also takes in any earlier one that may have left its pane (its kill failed, or tmux could not say where the pane was): it tries again the same way and closes nothing while the pane may still be there. Not covered: a window tmux made for a `new_hidden_window` that then failed, since no pane id came back. For the same reason a `RESTART`, by `r` or the automatic restore, of a session in `App.closing` is refused, and the automatic restore does not start for one.
 
 ### `claude` calls, git calls and filesystem scans never run on the curses thread
 
@@ -97,7 +97,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    if checker is not None and not checker.is_alive():
        sessions, _ = checker.result or (None, "listing sessions failed")
    ```
-4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; folder listings are the exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
+4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; interrupts are one per session, so a second working row is interrupted while the first still is; folder listings are the other exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
 ### A tmux key binding that intercepts a key fails open
 
@@ -121,18 +121,18 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: removing SGR codes changes what the test proves, so redact only inside the same styled span. SGR colour parameters such as `38;5;2` are not dim.
 
-### emx stops or removes a session only on a confirmed double Ctrl+X on that row
+### emx closes a session only on a confirmed double Ctrl+X on its row or its project's header
 
-1. **Rule**: `claude stop` and `claude rm` run only when `core.press_close` hands back a `Confirm`: a second Ctrl+X on the same session row within `CONFIRM_SECONDS` of the first, with that row still in the running state it had at the first press. The id, name and command come from the `Confirm` taken at the first press, never from the cursor at the second. A worker (`Closer`) then takes a fresh listing and runs the command only if `core.close_still_applies`. No other key, trigger or automatic path stops or removes a session, and no call passes `--discard-unpushed` or `--force-remove-worktree`.
-2. **Why**: stopping ends his work in progress, and `claude rm` deletes the session and its worktree. A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session.
+1. **Rule**: `claude stop` and `claude rm` run only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids, names and commands come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` runs `core.close_args`, which stops a running session and then removes it, and only removes any other. No other key, trigger or automatic path stops or removes a session, and no call passes `--discard-unpushed` or `--force-remove-worktree`.
+2. **Why**: closing ends his work in progress, and `claude rm` deletes the session and its worktree. A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session.
 3. **Minimal example**:
    ```python
-   self.confirm, act = core.press_close(self.confirm, self.cursor, row, time.monotonic())
+   self.confirm, act = core.press_close(self.confirm, self.cursor, row, time.monotonic(), self.view())
    if act is not None:
-       self.closer = Closer(self.claude, act)   # lists, re-checks, then stop or rm
+       self.closer = Closer(self.claude, core.close_targets(act))   # lists, re-checks, then stop and rm
        self.closer.start()
    ```
-4. **Gotcha**: the cursor and the row can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys. And the command follows `running`, not the shown state: a Done row whose process has exited is removed, not stopped.
+4. **Gotcha**: the cursor and the rows can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys; a group's confirm drops when a session joins or leaves it. The command follows `running`, not the shown state: a Done row whose process has exited is only removed. And while a close runs its row must not open: an Enter on a session being stopped would resume it.
 
 ### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
 
@@ -164,23 +164,35 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. And check for the empty listing before counting: `stale_viewers` alone counts an empty listing as a miss for everything.
 
-### emx types into a session only through `Tmux.type_if`, after the listing and screen checks
+### emx types into a session only through `Tmux.type_if` or `Tmux.key_if`, after the listing and screen checks
 
-1. **Rule**: before emx types anything into a session's viewer, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check (running, not working). The core screen checks pass on the viewer as it is now: not in a mode, showing this session and no other, an empty prompt. Then the keys go only through `Tmux.type_if`, with a gate format built by `core.type_gate`, so tmux re-checks the viewer and his focus and types in the same command.
-2. **Why**: a check in Python and a separate `send-keys` leave a gap of 15–50 ms. A key of his that lands in it is submitted along with the line, and a viewer he scrolled back in the meantime (copy mode) takes the keys as tmux commands instead of text.
+1. **Rule**: before emx types anything into a session's viewer, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check for what is typed: running and not working for a line (`rename_listing_refusal`), running and working and not yet idle for Esc (`interrupt_listing_refusal`). The core screen checks pass on the viewer as it is now: not in a mode, showing this session and no other, and for a line an empty prompt; for Esc the cursor is shown and a draft does not refuse. Then the keys go only through `Tmux.type_if` (a line and Enter) or `Tmux.key_if` (one allowlisted key, no Enter), with a gate format built by `core.type_gate` pinned at the cursor the checks saw, so tmux re-checks the viewer and his focus and types in the same command.
+2. **Why**: a check in Python and a separate `send-keys` leave a gap of 15–50 ms. A key of his that lands in it is submitted along with the line, and a viewer he scrolled back in the meantime (copy mode) takes the keys as tmux commands instead of text. Esc needs no empty prompt because, tried on throwaway sessions, Esc during a turn interrupted it and left a draft in the prompt untouched.
 3. **Minimal example**:
    ```python
    # worker thread: listing refusal, then screen refusal, then
-   gate = core.type_gate(viewer.id, panel, sid, cursor_y, SESSION_OPT)
+   gate = core.type_gate(viewer.id, panel, sid, cursor_y, SESSION_OPT, cursor_x=x)
    if gate is not None:
-       report = tmux.type_if(viewer.id, gate, line, core.TYPED, core.gate_report(SESSION_OPT))
-       refusal = core.gate_refusal(rename, report, cursor_y)
+       report = tmux.key_if(viewer.id, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
+       refusal = core.gate_refusal(interrupt, report, cursor_y, cursor_x=x)
    ```
-4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format.
+4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format. One Esc worker per session at a time (`App.interrupters`, keyed by id): two Escs in quick succession into one session open Claude Code's rewind, while Escs into different sessions are independent.
+
+### A cancelled worker ends what it started before it returns
+
+1. **Rule**: a worker thread that is cancelled ends any long-lived process or pane it started (the `Interrupter`'s hidden viewer) before it returns, and records whether it could (`ended`).
+2. **Why**: a waiter's join must mean nothing the worker launched can still act. A `claude attach` that is still starting reopens a session the close has just stopped.
+3. **Minimal example**:
+   ```python
+   if self.cancel.is_set():
+       self.tmux.kill_pane(opened)
+       return
+   ```
+4. **Gotcha**: `new_hidden_window` returns before the command inside it has done anything, so the pane must be killed even when the worker never saw the viewer come up. A kill that fails on a pane already gone is not a failure; check `panes()` before calling it one.
 
 ### The session list is measured in screen rows, not items
 
-1. **Rule**: we size, scroll and hit-test the session list in screen rows. Each list line's height is the number of laid-out lines it draws (`core.row_lines` for a session, which an armed close label or a rename edit is padded to keep; 1 for a header or a spacer). `core.list_window` picks the scroll from those heights, `core.row_hits` builds `row_map` from them, and drawing walks the lines adding each one's height.
+1. **Rule**: we size, scroll and hit-test the session list in screen rows. Each list line's height is the number of laid-out lines it draws (`core.row_lines` for a session, which an armed close label, a `closing…` label or a rename edit is padded to keep; 1 for a header or a spacer). `core.list_window` picks the scroll from those heights, `core.row_hits` builds `row_map` from them, and drawing walks the lines adding each one's height.
 2. **Why**: a wrapped row takes several screen rows. Code that assumes one item per row scrolls the cursor off screen and sends a click to the wrong session.
 3. **Minimal example**:
    ```python

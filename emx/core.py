@@ -116,7 +116,18 @@ def category(session: Session) -> str:
     return _STATE_CATEGORY.get(session.state, WORKING)
 
 
+def idle(session: Session) -> bool:
+    """Interrupted: `claude agents` keeps the state "working" and turns the status "idle", and draws the row Idle. A done row is idle too, so the state counts."""
+    return session.state == "working" and session.status == "idle"
+
+
+def interruptible(session: Session) -> bool:
+    return session.running and session.state == "working" and not idle(session)
+
+
 def state_word(session: Session) -> str:
+    if idle(session):
+        return "Idle"
     cat = category(session)
     if cat != WORKING or session.state == "working":
         return CATEGORY_LABELS[cat]
@@ -127,6 +138,11 @@ def glyph(cat: str, frame: int) -> str:
     if cat == WORKING:
         return WORKING_FRAMES[frame % len(WORKING_FRAMES)]
     return GLYPHS.get(cat, "·")
+
+
+def session_glyph(session: Session, frame: int) -> str:
+    """An interrupted row keeps its Working place but stops spinning, as `claude agents` draws it."""
+    return "✻" if idle(session) else glyph(category(session), frame)
 
 
 def format_age(seconds: float | None) -> str:
@@ -146,7 +162,7 @@ def session_age(session: Session, now_ms: float) -> str:
     return format_age((now_ms - session.started_at) / 1000)
 
 
-OPEN, RESTART, NEW = "open", "restart", "new"
+OPEN, RESTART, NEW, INTERRUPT = "open", "restart", "new", "interrupt"
 
 
 def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
@@ -164,7 +180,7 @@ def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -
         return False
     if trigger == OPEN:
         return True
-    return trigger in (RESTART, NEW) and fresh and session.running
+    return trigger in (RESTART, NEW, INTERRUPT) and fresh and session.running
 
 
 def checked_row(sessions: list | None, sid: str) -> tuple:
@@ -188,15 +204,18 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
     """Why `attach_allowed` said no, for the notice line."""
     if trigger != OPEN and not fresh:
         return f"Couldn't list sessions to check {name} is still running, so emx left it alone."
+    if trigger == INTERRUPT:
+        why = "isn't listed any more" if session is None else "isn't running"
+        return f"{name} {why}, so emx didn't open a viewer to interrupt it."
     if session is None:
         return f"{name} isn't listed any more, so emx won't open it."
     return f"{name} isn't running. Press Enter on it to reopen it."
 
 
-STOP, REMOVE = "stop", "remove"
 CONFIRM_SECONDS = 2.0
-_CLOSE_SUBCOMMAND = {STOP: "stop", REMOVE: "rm"}
-_CLOSE_WORDS = {STOP: ("Stopping", "Stopped"), REMOVE: ("Removing", "Removed")}
+CLOSING_LABEL = "closing…"
+GROUP_CLOSE_REFUSAL = "Ctrl+X closes a project's group from the project view."
+PINNED_CLOSE_REFUSAL = "Ctrl+X can't close the Pinned group; close its sessions one at a time."
 
 
 @dataclass(frozen=True)
@@ -208,67 +227,111 @@ class Confirm:
     running: bool
     at: float
 
-    @property
-    def action(self) -> str:
-        return close_action(self.running)
 
+@dataclass(frozen=True)
+class GroupConfirm:
+    """A first Ctrl+X on a project header: a Confirm for every session in the group, folded ones too, taken at that press."""
 
-def close_action(running: bool) -> str:
-    """A session with a live process is stopped, keeping its conversation; any other (stopped, or done with its process gone) is removed."""
-    return STOP if running else REMOVE
+    key: str
+    sessions: tuple
+    at: float
 
 
 def close_args(claude: str, confirm: Confirm) -> list:
-    """Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides."""
-    return [claude, _CLOSE_SUBCOMMAND[confirm.action], confirm.id]
+    """The commands that close the session, in order: a running one is stopped first, then removed.
 
-
-def confirm_label(confirm: Confirm) -> str:
-    return f"ctrl+x again to {confirm.action}"
-
-
-def confirm_holds(confirm: Confirm | None, cursor, session: Session | None, now: float) -> bool:
-    """Whether an armed confirm still stands: the cursor is on its row, the panel still lists the session in the same running state, and CONFIRM_SECONDS have not passed.
-
-    The cursor can move without a key (a poll regrouping, ← from main), so
-    this is checked on every refresh, not only on keys.
+    Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides.
     """
+    remove = [claude, "rm", confirm.id]
+    return [[claude, "stop", confirm.id], remove] if confirm.running else [remove]
+
+
+def close_targets(confirm) -> tuple:
+    return confirm.sessions if isinstance(confirm, GroupConfirm) else (confirm,)
+
+
+def confirm_label(confirm) -> str:
+    if isinstance(confirm, GroupConfirm):
+        return group_confirm_label(len(confirm.sessions))
+    return "ctrl+x again to close"
+
+
+def group_confirm_label(count: int) -> str:
+    return f"ctrl+x again to close {count} session{'' if count == 1 else 's'}"
+
+
+def group_closable(view: str, key: str) -> bool:
+    """Only a project's header closes its group: Pinned and the state groups gather sessions from many places."""
+    return view == PROJECT and key != PINNED
+
+
+def group_close_refusal(key: str) -> str:
+    """What Ctrl+X says on a header that can't close its group: Pinned sits in the project view too, so it gets its own line."""
+    return PINNED_CLOSE_REFUSAL if key == PINNED else GROUP_CLOSE_REFUSAL
+
+
+def confirm_holds(confirm, cursor, row, now: float) -> bool:
+    """Whether an armed confirm still stands: the cursor is on its row or header, the panel still lists what it took in the same running state, and CONFIRM_SECONDS have not passed.
+
+    `row` is the session for a Confirm and the group for a GroupConfirm. The
+    cursor can move without a key (a poll regrouping, ← from main), so this
+    is checked on every refresh, not only on keys.
+    """
+    if confirm is None or row is None or not 0 <= now - confirm.at < CONFIRM_SECONDS:
+        return False
+    if isinstance(confirm, GroupConfirm):
+        return (
+            cursor == ("group", confirm.key)
+            and getattr(row, "key", None) == confirm.key
+            and {(s.id, s.running) for s in row.sessions} == {(c.id, c.running) for c in confirm.sessions}
+        )
     return (
-        confirm is not None
-        and cursor == ("session", confirm.id)
-        and session is not None
-        and session.id == confirm.id
-        and session.running == confirm.running
-        and 0 <= now - confirm.at < CONFIRM_SECONDS
+        cursor == ("session", confirm.id)
+        and getattr(row, "id", None) == confirm.id
+        and row.running == confirm.running
     )
 
 
-def press_close(confirm: Confirm | None, cursor, session: Session | None, now: float) -> tuple:
+def press_close(confirm, cursor, row, now: float, view: str | None = None) -> tuple:
     """What a Ctrl+X does: (confirm to keep armed, confirm to act on).
 
-    `session` is the panel's row under the cursor. A second press on the
-    same row while the first still holds acts on the first press's confirm;
-    any other press on a session row arms a new one, so a late second press
-    only re-arms. On a group header, or with no row, it does nothing.
+    `row` is the panel's session under the cursor, or the group whose header
+    it is on. A second press on the same row or header while the first still
+    holds acts on the first press's confirm; any other press arms a new one,
+    so a late second press only re-arms. A header arms only when it is a
+    project's (`group_closable`); with no row it does nothing.
     """
-    if not cursor or cursor[0] != "session" or session is None or session.id != cursor[1]:
+    if not cursor or row is None:
         return None, None
-    if confirm_holds(confirm, cursor, session, now):
+    if cursor[0] == "group":
+        view = PROJECT if view is None else view
+        if getattr(row, "key", None) != cursor[1] or not group_closable(view, row.key) or not row.sessions:
+            return None, None
+        if isinstance(confirm, GroupConfirm) and confirm_holds(confirm, cursor, row, now):
+            return None, confirm
+        return GroupConfirm(row.key, tuple(Confirm(s.id, s.name, s.running, now) for s in row.sessions), now), None
+    if cursor[0] != "session" or getattr(row, "id", None) != cursor[1]:
+        return None, None
+    if isinstance(confirm, Confirm) and confirm_holds(confirm, cursor, row, now):
         return None, confirm
-    return Confirm(session.id, session.name, session.running, now), None
+    return Confirm(row.id, row.name, row.running, now), None
 
 
-def confirm_after_key(confirm: Confirm | None, close_key: bool, passive: bool) -> Confirm | None:
+def confirm_after_key(confirm, close_key: bool, passive: bool):
     """Any key other than Ctrl+X cancels a confirm; `passive` events (a terminal resize) are not his keypress and leave it."""
     return confirm if close_key or passive else None
 
 
+def still_closing(name: str) -> str:
+    return f"Still closing {name}…"
+
+
 def close_blocked(list_failing: bool, busy: Confirm | None) -> str | None:
-    """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one stop or remove runs at a time."""
+    """Why a Ctrl+X may not arm or act now, or None. While listing fails the rows may be stale, and one close runs at a time."""
     if busy is not None:
-        return f"Still {_CLOSE_WORDS[busy.action][0].lower()} {busy.name}…"
+        return still_closing(busy.name)
     if list_failing:
-        return "Can't list sessions right now, so emx won't stop or remove one."
+        return "Can't list sessions right now, so emx won't close one."
     return None
 
 
@@ -286,7 +349,7 @@ def open_blocked(starting: bool, cursor=None) -> str | None:
 
 
 def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) -> bool:
-    """Whether a confirmed stop or remove may run, judged on a listing a worker took just before running it (`checked_row`).
+    """Whether a confirmed close may run, judged on a listing a worker took just before running it (`checked_row`).
 
     The panel's row can be a poll old: a session shown stopped may have been
     resumed elsewhere since, and removing it would delete a live session.
@@ -295,25 +358,57 @@ def close_still_applies(confirm: Confirm, session: Session | None, fresh: bool) 
 
 
 def close_refusal(confirm: Confirm, session: Session | None, fresh: bool) -> str:
-    verb = confirm.action
     if not fresh:
-        return f"Couldn't list sessions to check {confirm.name}, so emx didn't {verb} it."
+        return f"Couldn't list sessions to check {confirm.name}, so emx didn't close it."
     if session is None:
-        return f"{confirm.name} isn't listed any more, so emx didn't {verb} it."
+        return f"{confirm.name} isn't listed any more, so emx didn't close it."
     now = "running again" if session.running else "no longer running"
-    return f"{confirm.name} is {now}, so emx didn't {verb} it."
+    return f"{confirm.name} is {now}, so emx didn't close it."
 
 
-def closing_text(confirm: Confirm) -> str:
-    return f"{_CLOSE_WORDS[confirm.action][0]} {confirm.name}…"
+def closing_text(confirm) -> str:
+    targets = close_targets(confirm)
+    return f"Closing {targets[0].name}…" if len(targets) == 1 else f"Closing {len(targets)} sessions…"
 
 
 def closed_text(confirm: Confirm, output: str = "") -> str:
-    """After a remove, whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
-    done = f"{_CLOSE_WORDS[confirm.action][1]} {confirm.name}."
+    """Whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
     lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
-    extra = one_line("\n".join(lines[1:])) if confirm.action == REMOVE else ""
+    extra = one_line("\n".join(lines[1:]))
+    done = f"Closed {confirm.name}."
     return f"{done} {extra}" if extra else done
+
+
+def stopped_not_removed_text(confirm: Confirm, error: str) -> str:
+    return f"Stopped {confirm.name}, but didn't remove it: {error}"
+
+
+def header_label(confirm, group, closing) -> str | None:
+    """What a group header reads in place of its name while its group close is armed, or while every session in it is closing; None otherwise."""
+    if isinstance(confirm, GroupConfirm) and confirm.key == group.key:
+        return confirm_label(confirm)
+    if group.sessions and all(s.id in closing for s in group.sessions):
+        return CLOSING_LABEL
+    return None
+
+
+def closing_after(closing: Mapping, finished: Mapping, listed_ids) -> dict:
+    """The ids whose rows read `closing…`, after a close finished (`finished` maps an id to whether it closed) or a listing landed (`listed_ids`, None when none did).
+
+    `closing` maps an id to None while its close runs and True once it
+    closed. A failed close leaves at once, and its row shows what it is now;
+    a closed one leaves once a listing lacks it. A listing with no sessions
+    at all counts as no listing, so one glitchy poll never brings a closed
+    row back as it was.
+    """
+    listed = set(listed_ids or ())
+    kept = {}
+    for sid, done in closing.items():
+        done = finished.get(sid, done)
+        if done is False or (done and listed and sid not in listed):
+            continue
+        kept[sid] = done
+    return kept
 
 
 # Claude Code 2.1.294 takes a line typed at once with its Enter as a paste once the line is 63 or more UTF-16 units
@@ -492,13 +587,71 @@ def rename_screen_refusal(rename: Rename, session: Session, sessions, screen: Re
     return None
 
 
-def type_gate(viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str) -> str | None:
+@dataclass(frozen=True)
+class Interrupt:
+    """A first Ctrl+X on a working row: the session the Esc is for, taken at the press, never from the cursor later."""
+
+    id: str
+    name: str
+
+
+# What `interrupt_listing_refusal` gives when the session has already stopped working: no refusal, nothing to send.
+NOTHING_TO_INTERRUPT = "nothing to interrupt"
+
+
+def interrupt_listing_refusal(interrupt: Interrupt, session: Session | None, fresh: bool) -> str | None:
+    """Why emx may not send Esc to the session, judged on a listing taken just before, NOTHING_TO_INTERRUPT when it no longer works, or None."""
+    if not fresh:
+        return f"Couldn't list sessions to check {interrupt.name}, so emx didn't interrupt it."
+    if session is None:
+        return f"{interrupt.name} isn't listed any more, so emx didn't interrupt it."
+    if not session.running:
+        return f"{interrupt.name} isn't running, so emx didn't interrupt it."
+    if not interruptible(session):
+        return NOTHING_TO_INTERRUPT
+    return None
+
+
+def nothing_to_interrupt_text(interrupt: Interrupt) -> str:
+    return f"{interrupt.name} isn't working any more, so there was nothing to interrupt."
+
+
+def interrupt_screen_refusal(interrupt: Interrupt, session: Session, sessions, screen: RenameScreen) -> str | None:
+    """Why emx may not send Esc into the session's viewer as it is on screen now, or None.
+
+    The checks `rename_screen_refusal` makes, but a draft in the prompt does
+    not refuse: Esc while Claude Code works interrupts the turn and leaves
+    the draft where it is. The cursor must be shown, as it is at the prompt.
+    """
+    if screen.in_mode:
+        return f"{interrupt.name}'s viewer is scrolled back, so emx didn't interrupt it. Press q in it, then try again."
+    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
+    if identity == "ambiguous":
+        return f"{interrupt.name}'s viewer looks the same as another session's, so emx didn't interrupt it."
+    if identity != "ok" or not screen.cursor_shown:
+        return f"{interrupt.name}'s viewer isn't showing its prompt, so emx didn't interrupt it."
+    return None
+
+
+def interrupted_text(interrupt: Interrupt, stopped: bool) -> str:
+    if stopped:
+        return f"Interrupted {interrupt.name}."
+    return f"{interrupt.name} is still working; emx sent Esc but it didn't stop."
+
+
+def left_listing_text(interrupt: Interrupt) -> str:
+    return f"emx sent Esc to {interrupt.name}, which isn't listed any more."
+
+
+def type_gate(
+    viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str, cursor_x: int | None = None,
+) -> str | None:
     """A tmux format, read on the viewer, that is true only while nothing checked before typing has changed; None when an id is not plain enough to put in one.
 
     tmux judges it and types in one command, so no key of his lands between
     the check and the typing. It holds while the viewer is not in a mode,
-    alive, still opened on `sid`, its cursor still at the empty prompt's
-    place (`cursor_y` is where the checks saw it), and his focus is on the
+    alive, still opened on `sid`, its cursor still where the checks saw it
+    (`cursor_x` is the empty prompt's place unless given), and his focus is on the
     panel: the panel is the active pane of the active window. tmux falls
     back to another pane when the target is gone, hence the pane id test.
     """
@@ -511,7 +664,7 @@ def type_gate(viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str
         "#{==:#{pane_dead},0}",
         f"#{{==:#{{{session_opt}}},{sid}}}",
         "#{==:#{cursor_flag},1}",
-        f"#{{==:#{{cursor_x}},{PROMPT_TEXT_X}}}",
+        f"#{{==:#{{cursor_x}},{PROMPT_TEXT_X if cursor_x is None else int(cursor_x)}}}",
         f"#{{==:#{{cursor_y}},{int(cursor_y)}}}",
         f"#{{==:{panel_focused},1}}",
     ]
@@ -526,27 +679,33 @@ def gate_report(session_opt: str) -> str:
     return f"#{{pane_in_mode}} #{{pane_dead}} #{{cursor_flag}} #{{cursor_x}} #{{cursor_y}} #{{{session_opt}}}"
 
 
-def gate_refusal(rename: Rename, report: str, cursor_y: int) -> str | None:
-    """None when tmux typed the line (it printed TYPED), else why not, from the `gate_report` it printed instead.
+def gate_refusal(subject, report: str, cursor_y: int, cursor_x: int | None = None) -> str | None:
+    """None when tmux typed (it printed TYPED), else why not, from the `gate_report` it printed instead. `subject` is the Rename or Interrupt the gate was for.
 
     The report covers the viewer only, so when nothing in it changed, the
     panel lost focus.
     """
     if report == TYPED:
         return None
+    if isinstance(subject, Interrupt):
+        name, act, did, into, again = subject.name, "sent Esc", "interrupt it", f"interrupt {subject.name}", "try again"
+        prompt_did = did
+    else:
+        name, act, did, into, again = subject.old, "typed", "rename it", f"type into {subject.old}", "rename again"
+        prompt_did = "type into it"
     fields = report.split()
     # tmux reports on some other pane, or prints nothing, once the viewer is gone.
     if len(fields) < 5:
-        return f"{rename.old}'s viewer changed just before emx typed, so emx didn't rename it."
+        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
     in_mode, dead, shown, x, y = fields[:5]
     sid = fields[5] if len(fields) > 5 else ""
     if in_mode != "0":
-        return f"{rename.old}'s viewer was scrolled back just before emx typed, so it didn't. Press q in it, then rename again."
-    if dead != "0" or sid != rename.id:
-        return f"{rename.old}'s viewer changed just before emx typed, so emx didn't rename it."
-    if shown != "1" or x != str(PROMPT_TEXT_X) or y != str(cursor_y):
-        return f"{rename.old}'s prompt changed just before emx typed, so emx didn't type into it."
-    return f"Focus left the panel, so emx didn't type into {rename.old}."
+        return f"{name}'s viewer was scrolled back just before emx {act}, so it didn't. Press q in it, then {again}."
+    if dead != "0" or sid != subject.id:
+        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
+    if shown != "1" or x != str(PROMPT_TEXT_X if cursor_x is None else cursor_x) or y != str(cursor_y):
+        return f"{name}'s prompt changed just before emx {act}, so emx didn't {prompt_did}."
+    return f"Focus left the panel, so emx didn't {into}."
 
 
 def renamed_to(rename: Rename, session: Session | None) -> str | None:
@@ -819,11 +978,13 @@ def move_cursor(items: list, cursor, delta: int):
     return items[max(0, min(len(items) - 1, items.index(cursor) + delta))]
 
 
-def settle_cursor(items: list, cursor, groups, wanted=None):
+def settle_cursor(items: list, cursor, groups, wanted=None, before=None):
     """Keep the cursor on its item; a session folded out of sight leaves it on its group's header.
 
     `wanted` is an item the cursor should move to once it is listed, such as
-    a session emx has just started; until then the cursor stays put.
+    a session emx has just started; until then the cursor stays put. When
+    the cursor's line has gone, it moves to the nearest line of `before`
+    (the items as they were) still listed: below it first, then above.
     """
     if wanted is not None and wanted in items:
         return wanted
@@ -833,6 +994,12 @@ def settle_cursor(items: list, cursor, groups, wanted=None):
         key = cursor_group(cursor, groups)
         if ("group", key) in items:
             return ("group", key)
+    if before and cursor in before:
+        at = before.index(cursor)
+        listed = set(items)
+        for item in before[at + 1:] + before[:at][::-1]:
+            if item in listed:
+                return item
     return items[0] if items else None
 
 

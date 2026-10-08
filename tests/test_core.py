@@ -132,6 +132,18 @@ class StateWords(unittest.TestCase):
         self.assertGreater(len(frames), 1)
         self.assertEqual(core.glyph(core.WORKING, 0), core.glyph(core.WORKING, len(core.WORKING_FRAMES)))
 
+    def test_an_interrupted_session_reads_idle(self):
+        interrupted = mk(state="working", status="idle")
+        self.assertEqual(core.state_word(interrupted), "Idle")
+        self.assertEqual(core.category(interrupted), core.WORKING)
+        for f in range(len(core.WORKING_FRAMES) + 1):
+            with self.subTest(frame=f):
+                self.assertEqual(core.session_glyph(interrupted, f), "✻")
+        busy = mk(state="working", status="busy")
+        self.assertEqual(core.state_word(busy), "Working")
+        self.assertGreater(len({core.session_glyph(busy, f) for f in range(len(core.WORKING_FRAMES))}), 1)
+        self.assertEqual(core.state_word(mk(state="done", status="idle")), "Done")
+
 
 class Ages(unittest.TestCase):
     def test_format_age(self):
@@ -182,6 +194,28 @@ class ReopenRule(unittest.TestCase):
             for fresh in (True, False):
                 with self.subTest(trigger=trigger, fresh=fresh):
                     self.assertFalse(core.attach_allowed(None, trigger, fresh=fresh))
+
+
+class AttachAllowed(unittest.TestCase):
+    def test_interrupt_attaches_only_a_running_session_on_a_fresh_listing(self):
+        running, stopped = mk(state="working"), mk(state="stopped", running=False)
+        self.assertTrue(core.attach_allowed(running, core.INTERRUPT, True))
+        self.assertFalse(core.attach_allowed(running, core.INTERRUPT, False))
+        self.assertFalse(core.attach_allowed(stopped, core.INTERRUPT, True))
+        self.assertFalse(core.attach_allowed(None, core.INTERRUPT, True))
+        self.assertTrue(core.attach_allowed(stopped, core.OPEN))
+        for trigger in (core.RESTART, core.NEW):
+            with self.subTest(trigger=trigger):
+                self.assertTrue(core.attach_allowed(running, trigger, True))
+                self.assertFalse(core.attach_allowed(running, trigger, False))
+                self.assertFalse(core.attach_allowed(stopped, trigger, True))
+
+    def test_an_interrupt_refusal_says_no_viewer_was_opened(self):
+        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.INTERRUPT, False, None))
+        self.assertIn("isn't listed", core.refusal("emx-test-a", core.INTERRUPT, True, None))
+        stopped = mk(state="stopped", running=False)
+        self.assertEqual(core.refusal("emx-test-a", core.INTERRUPT, True, stopped),
+                         "emx-test-a isn't running, so emx didn't open a viewer to interrupt it.")
 
 
 class PlacementFromGit(unittest.TestCase):
@@ -350,6 +384,39 @@ class Navigation(unittest.TestCase):
         for main_sid in ("", "gone"):
             with self.subTest(main_sid=main_sid):
                 self.assertEqual(core.cursor_on_focus(open_items, here, self.GROUPS, main_sid), here)
+
+    BEFORE = [("group", "/g1"), ("session", "a"), ("session", "b"), ("session", "c"), ("group", "/g2"), ("session", "d")]
+
+    def after(self, *gone):
+        items = [i for i in self.BEFORE if i not in gone]
+        groups = [core.Group("/g1", tuple(mk(id=s) for s in "abc" if ("session", s) not in gone)),
+                  core.Group("/g2", tuple(mk(id=s) for s in "d" if ("session", s) not in gone))]
+        return items, [g for g in groups if ("group", g.key) in items]
+
+    def test_removing_a_middle_row_lands_on_the_row_below(self):
+        items, groups = self.after(("session", "b"))
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("session", "c"))
+
+    def test_removing_the_last_line_lands_above(self):
+        items, groups = self.after(("group", "/g2"), ("session", "d"))
+        self.assertEqual(core.settle_cursor(items, ("session", "d"), groups, before=self.BEFORE), ("session", "c"))
+
+    def test_removing_a_whole_group_lands_on_the_next_line(self):
+        gone = (("group", "/g1"), ("session", "a"), ("session", "b"), ("session", "c"))
+        items, groups = self.after(*gone)
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("group", "/g2"))
+        self.assertEqual(core.settle_cursor(items, ("group", "/g1"), groups, before=self.BEFORE), ("group", "/g2"))
+
+    def test_a_folded_session_still_lands_on_its_header(self):
+        groups = [core.Group("/g1", (mk(id="a"), mk(id="b"), mk(id="c"))), core.Group("/g2", (mk(id="d"),))]
+        items = [i for i in core.panel_lines(groups, {"/g1"}) if i]
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups, before=self.BEFORE), ("group", "/g1"))
+
+    def test_without_before_the_old_fallback_holds(self):
+        items, groups = self.after(("session", "b"))
+        self.assertEqual(core.settle_cursor(items, ("session", "b"), groups), ("group", "/g1"))
+        self.assertEqual(core.settle_cursor(items, ("session", "zz"), groups, before=self.BEFORE), ("group", "/g1"))
+        self.assertIsNone(core.settle_cursor([], ("session", "b"), [], before=self.BEFORE))
 
     def test_cursor_group(self):
         self.assertEqual(core.cursor_group(("session", "3"), self.GROUPS), "/b")
@@ -1893,28 +1960,28 @@ class RestartCheck(unittest.TestCase):
 
 
 class CloseConfirm(unittest.TestCase):
-    """Ctrl+X twice on one row stops a running session or removes a stopped one; anything else in between cancels."""
+    """Ctrl+X twice on one row closes that session: a running one is stopped, then removed; anything else in between cancels."""
 
     def setUp(self):
         self.running = mk(id="a", name="emx-test-a")
         self.stopped = mk(id="a", name="emx-test-a", state="stopped", running=False)
         self.on_a = ("session", "a")
 
-    def test_which_command_for_which_state(self):
+    def test_close_args_stop_then_remove_a_running_session(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        self.assertEqual((armed.action, core.close_args("claude", armed)), (core.STOP, ["claude", "stop", "a"]))
-        self.assertEqual(core.confirm_label(armed), "ctrl+x again to stop")
-        armed, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
-        self.assertEqual((armed.action, core.close_args("claude", armed)), (core.REMOVE, ["claude", "rm", "a"]))
-        self.assertEqual(core.confirm_label(armed), "ctrl+x again to remove")
+        self.assertEqual(core.close_args("claude", armed), [["claude", "stop", "a"], ["claude", "rm", "a"]])
+        for args in core.close_args("claude", armed):
+            with self.subTest(args=args):
+                self.assertFalse(any(a.startswith("--") for a in args))
+                self.assertNotIn("--discard-unpushed", args)
+                self.assertNotIn("--force-remove-worktree", args)
 
-    def test_a_done_session_whose_process_has_gone_is_removed(self):
-        armed, _ = core.press_close(None, self.on_a, mk(id="a", state="done", running=False), 0.0)
-        self.assertEqual(armed.action, core.REMOVE)
-
-    def test_the_remove_never_discards_or_forces(self):
-        armed, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
-        self.assertFalse(any(a.startswith("--") for a in core.close_args("claude", armed)))
+    def test_close_args_only_remove_a_stopped_or_exited_one(self):
+        exited = mk(id="a", state="done", running=False)
+        for row in (self.stopped, exited):
+            with self.subTest(state=row.state):
+                armed, _ = core.press_close(None, self.on_a, row, 0.0)
+                self.assertEqual(core.close_args("claude", armed), [["claude", "rm", "a"]])
 
     def test_the_second_press_within_the_window_acts_on_the_first_press(self):
         armed, act = core.press_close(None, self.on_a, self.running, 10.0)
@@ -1935,9 +2002,10 @@ class CloseConfirm(unittest.TestCase):
         self.assertIsNone(act)
         self.assertEqual(rearmed.id, "b")
 
-    def test_a_group_header_or_no_row_does_nothing(self):
+    def test_no_row_or_a_row_that_is_not_the_cursors_does_nothing(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        for cursor, row in ((("group", "/p"), None), (None, None), (self.on_a, None), (("session", "b"), self.running)):
+        for cursor, row in ((("group", "/p"), None), (None, None), (self.on_a, None), (("session", "b"), self.running),
+                            (("group", "/p"), core.Group("/q", (self.running,)))):
             with self.subTest(cursor=cursor, row=row):
                 self.assertEqual(core.press_close(armed, cursor, row, 0.5), (None, None))
 
@@ -1961,7 +2029,7 @@ class CloseConfirm(unittest.TestCase):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
         rearmed, act = core.press_close(armed, self.on_a, self.stopped, 0.5)
         self.assertIsNone(act)
-        self.assertEqual(rearmed.action, core.REMOVE)
+        self.assertFalse(rearmed.running)
 
     def test_the_acted_id_and_name_are_the_armed_ones(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
@@ -1979,7 +2047,7 @@ class CloseConfirm(unittest.TestCase):
         busy, _ = core.press_close(None, self.on_a, self.running, 0.0)
         self.assertIsNone(core.close_blocked(False, None))
         self.assertIn("Can't list sessions", core.close_blocked(True, None))
-        self.assertEqual(core.close_blocked(False, busy), "Still stopping emx-test-a…")
+        self.assertEqual(core.close_blocked(False, busy), "Still closing emx-test-a…")
 
     def test_a_close_runs_only_if_a_fresh_listing_still_shows_the_row_as_he_saw_it(self):
         stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
@@ -1987,7 +2055,7 @@ class CloseConfirm(unittest.TestCase):
         self.assertTrue(core.close_still_applies(stop, self.running, True))
         self.assertTrue(core.close_still_applies(remove, self.stopped, True))
         self.assertFalse(core.close_still_applies(remove, self.running, True))
-        self.assertIn("running again", core.close_refusal(remove, self.running, True))
+        self.assertEqual(core.close_refusal(remove, self.running, True), "emx-test-a is running again, so emx didn't close it.")
         self.assertFalse(core.close_still_applies(stop, self.stopped, True))
         self.assertIn("no longer running", core.close_refusal(stop, self.stopped, True))
         self.assertFalse(core.close_still_applies(stop, None, True))
@@ -1997,23 +2065,108 @@ class CloseConfirm(unittest.TestCase):
 
     def test_notices(self):
         stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
-        self.assertEqual((core.closing_text(stop), core.closed_text(stop)), ("Stopping emx-test-a…", "Stopped emx-test-a."))
-        self.assertEqual((core.closing_text(remove), core.closed_text(remove)), ("Removing emx-test-a…", "Removed emx-test-a."))
+        self.assertEqual((core.closing_text(stop), core.closed_text(stop)), ("Closing emx-test-a…", "Closed emx-test-a."))
+        self.assertEqual(core.stopped_not_removed_text(stop, "worktree has 2 unpushed commits"),
+                         "Stopped emx-test-a, but didn't remove it: worktree has 2 unpushed commits")
 
-    def test_a_removed_notice_carries_what_rm_printed_past_its_first_line(self):
-        stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
+    def test_a_closed_notice_carries_what_rm_printed_past_its_first_line(self):
         remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
         output = "\n\x1b[1mremoved a\x1b[0m\n\n  worktree directory left at /x/wt\n  (git no longer recognized it)\n"
         self.assertEqual(
-            core.closed_text(remove, output), "Removed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)",
+            core.closed_text(remove, output), "Closed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)",
         )
-        self.assertEqual(core.closed_text(remove, "removed a\n"), "Removed emx-test-a.")
-        self.assertEqual(core.closed_text(stop, "stopped a\nsomething else\n"), "Stopped emx-test-a.")
+        self.assertEqual(core.closed_text(remove, "removed a\n"), "Closed emx-test-a.")
 
     def test_one_line_keeps_every_line_of_a_refusal(self):
         self.assertEqual(core.one_line("\x1b[31mrefused:\x1b[0m\n\n  2 unpushed commits\n"), "refused: 2 unpushed commits")
         self.assertEqual(core.one_line(""), "")
+
+    def group(self, *sessions, key="/r/app"):
+        return core.Group(key, tuple(sessions))
+
+    def test_header_press_arms_a_snapshot_of_its_sessions_and_the_second_acts_on_it(self):
+        b = mk(id="b", name="emx-test-b", state="stopped", running=False)
+        header = ("group", "/r/app")
+        armed, act = core.press_close(None, header, self.group(self.running, b), 5.0)
+        self.assertIsNone(act)
+        self.assertIsInstance(armed, core.GroupConfirm)
+        self.assertEqual([(c.id, c.name, c.running) for c in armed.sessions],
+                         [("a", "emx-test-a", True), ("b", "emx-test-b", False)])
+        renamed = mk(id="a", name="emx-test-renamed")
+        kept, act = core.press_close(armed, header, self.group(renamed, b), 6.0)
+        self.assertEqual((kept, act), (None, armed))
+        self.assertEqual(core.close_targets(act), armed.sessions)
+        self.assertEqual(core.closing_text(act), "Closing 2 sessions…")
+        self.assertEqual(core.close_targets(core.press_close(None, self.on_a, self.running, 0.0)[0])[0].id, "a")
+
+    def test_a_group_confirm_drops_when_a_session_joins_leaves_or_changes_running(self):
+        b = mk(id="b", name="emx-test-b")
+        header = ("group", "/r/app")
+        armed, _ = core.press_close(None, header, self.group(self.running, b), 0.0)
+        self.assertTrue(core.confirm_holds(armed, header, self.group(b, self.running), 1.0))
+        cases = {
+            "joined": (header, self.group(self.running, b, mk(id="c")), 1.0),
+            "left": (header, self.group(self.running), 1.0),
+            "stopped": (header, self.group(self.stopped, b), 1.0),
+            "cursor moved": (self.on_a, self.group(self.running, b), 1.0),
+            "other header": (("group", "/r/other"), self.group(self.running, b, key="/r/other"), 1.0),
+            "timed out": (header, self.group(self.running, b), core.CONFIRM_SECONDS),
+            "group gone": (header, None, 1.0),
+        }
+        for why, (cursor, row, now) in cases.items():
+            with self.subTest(why):
+                self.assertFalse(core.confirm_holds(armed, cursor, row, now))
+        rearmed, act = core.press_close(armed, header, self.group(self.running), 1.0)
+        self.assertIsNone(act)
+        self.assertEqual([c.id for c in rearmed.sessions], ["a"])
+
+    def test_only_a_project_header_arms(self):
+        pinned = core.Group(core.PINNED, (self.running,))
+        self.assertEqual(core.press_close(None, ("group", core.PINNED), pinned, 0.0, core.PROJECT), (None, None))
+        working = core.Group(core.WORKING, (self.running,))
+        self.assertEqual(core.press_close(None, ("group", core.WORKING), working, 0.0, core.BY_STATE), (None, None))
+        armed, _ = core.press_close(None, ("group", "/r/app"), self.group(self.running), 0.0, core.PROJECT)
+        self.assertIsInstance(armed, core.GroupConfirm)
+        self.assertFalse(core.group_closable(core.PROJECT, core.PINNED))
+        self.assertFalse(core.group_closable(core.BY_STATE, core.WORKING))
+        self.assertTrue(core.group_closable(core.PROJECT, "/r/app"))
+        self.assertEqual(core.GROUP_CLOSE_REFUSAL, "Ctrl+X closes a project's group from the project view.")
+
+    def test_the_pinned_header_gets_its_own_refusal(self):
+        self.assertEqual(core.group_close_refusal(core.PINNED),
+                         "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+        self.assertEqual(core.group_close_refusal(core.WORKING), core.GROUP_CLOSE_REFUSAL)
+
+    def test_labels_read_close_and_count(self):
+        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertEqual(core.confirm_label(armed), "ctrl+x again to close")
+        self.assertEqual(core.group_confirm_label(1), "ctrl+x again to close 1 session")
+        self.assertEqual(core.group_confirm_label(3), "ctrl+x again to close 3 sessions")
+        group, _ = core.press_close(None, ("group", "/r/app"), self.group(self.running, mk(id="b")), 0.0)
+        self.assertEqual(core.confirm_label(group), "ctrl+x again to close 2 sessions")
+        self.assertEqual(core.CLOSING_LABEL, "closing…")
+
+    def test_a_header_reads_its_armed_label_or_closing_only_for_its_own_group(self):
+        b = mk(id="b", name="emx-test-b")
+        app, other = self.group(self.running, b), self.group(mk(id="z"), key="/r/other")
+        armed, _ = core.press_close(None, ("group", "/r/app"), app, 0.0)
+        self.assertEqual(core.header_label(armed, app, {}), "ctrl+x again to close 2 sessions")
+        self.assertIsNone(core.header_label(armed, other, {}))
+        self.assertEqual(core.header_label(None, app, {"a": None, "b": True}), "closing…")
+        self.assertIsNone(core.header_label(None, app, {"a": None}))
+        row, _ = core.press_close(None, self.on_a, self.running, 0.0)
+        self.assertIsNone(core.header_label(row, app, {}))
+
+    def test_closing_ids_stay_until_a_listing_lacks_them_after_success_and_go_at_once_on_failure(self):
+        closing = {"a": None, "b": None}
+        self.assertEqual(core.closing_after(closing, {}, ["a", "b"]), closing)
+        self.assertEqual(core.closing_after(closing, {}, ["c"]), closing)
+        after = core.closing_after(closing, {"a": True, "b": False}, None)
+        self.assertEqual(after, {"a": True})
+        self.assertEqual(core.closing_after(after, {}, ["a", "c"]), {"a": True})
+        self.assertEqual(core.closing_after(after, {}, []), {"a": True})
+        self.assertEqual(core.closing_after(after, {}, None), {"a": True})
+        self.assertEqual(core.closing_after(after, {}, ["c"]), {})
 
 
 def named(sid, name, cwd="/r/app", state="blocked", running=True, started=None):
@@ -2422,6 +2575,99 @@ class RenameChecks(unittest.TestCase):
         self.assertEqual(core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS), {})
         self.assertEqual(core.pending_renames(renaming, [named("a", "beta")], None, 101.0), {})
         self.assertEqual(core.pending_renames(renaming, [], None, 101.0), {})
+
+
+def interrupt_screen(viewer, x=2, y=26, shown=True, in_mode=False, flagged=False):
+    captured, width = real_screen(viewer)
+    return core.RenameScreen(core.strip_ansi(captured), "", "", x, y, shown, width, in_mode, flagged)
+
+
+class InterruptChecks(unittest.TestCase):
+    def setUp(self):
+        self.interrupt = core.Interrupt("w", "emx-test-working")
+        self.working = named("w", "emx-test-working", state="working")
+
+    def test_only_a_working_running_not_idle_row_is_interruptible(self):
+        self.assertTrue(core.interruptible(mk(state="working", status="busy")))
+        self.assertTrue(core.interruptible(mk(state="working")))
+        for s in (mk(state="working", status="idle"), mk(state="blocked"), mk(state="done", status="idle"),
+                  mk(state="working", running=False), mk(state="stopped", running=False)):
+            with self.subTest(state=s.state, status=s.status, running=s.running):
+                self.assertFalse(core.interruptible(s))
+
+    def test_listing_refusals(self):
+        self.assertIsNone(core.interrupt_listing_refusal(self.interrupt, self.working, True))
+        cases = {
+            "Couldn't list": (self.working, False),
+            "isn't listed": (None, True),
+            "isn't running": (named("w", "emx-test-working", state="stopped", running=False), True),
+        }
+        for want, (session, fresh) in cases.items():
+            with self.subTest(want=want):
+                refusal = core.interrupt_listing_refusal(self.interrupt, session, fresh)
+                self.assertIn(want, refusal)
+                self.assertIn("emx-test-working", refusal)
+        for done in (core.Session("w", "emx-test-working", "", "working", "idle", "", None, True),
+                     named("w", "emx-test-working", state="blocked")):
+            with self.subTest(state=done.state):
+                self.assertIs(core.interrupt_listing_refusal(self.interrupt, done, True), core.NOTHING_TO_INTERRUPT)
+        self.assertIn("nothing to interrupt", core.nothing_to_interrupt_text(self.interrupt))
+
+    def test_screen_checks_on_real_captures(self):
+        perm = named("p", "emx-test-perm", state="working")
+        others = [named("b", "bee")]
+        ok = {"working-streaming": (self.working, self.interrupt), "working-spinner": (perm, core.Interrupt("p", "emx-test-perm"))}
+        for screen, (session, interrupt) in ok.items():
+            with self.subTest(screen=screen):
+                self.assertIsNone(core.interrupt_screen_refusal(interrupt, session, [session] + others, interrupt_screen(screen)))
+        sessions = [self.working] + others
+
+        def refusal(screen):
+            return core.interrupt_screen_refusal(self.interrupt, self.working, sessions, screen)
+
+        self.assertIn("scrolled back", refusal(interrupt_screen("working-streaming", in_mode=True)))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", flagged=True)))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("agent-view")))
+        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", shown=False)))
+        twin = core.interrupt_screen_refusal(
+            self.interrupt, self.working, sessions + [named("d", "emx-test-working", state="working")],
+            interrupt_screen("working-streaming"),
+        )
+        self.assertIn("looks the same as another session's", twin)
+
+    def test_a_draft_does_not_refuse(self):
+        focus = named("f", "emx-test-focus", state="working")
+        line, below, x, shown, width = at_cursor("prompt-text")
+        screen = interrupt_screen("prompt-text", x=x, y=PROMPT_CURSORS["cursors"]["prompt-text"]["y"], shown=shown)
+        self.assertIsNone(core.interrupt_screen_refusal(core.Interrupt("f", "emx-test-focus"), focus, [focus], screen))
+        self.assertFalse(core.empty_prompt(line, below, x, shown, width))
+
+    def test_what_tmux_printed_names_the_interrupt_and_the_pinned_x(self):
+        i = core.Interrupt("abc", "alpha")
+        self.assertIsNone(core.gate_refusal(i, core.TYPED, 26, cursor_x=17))
+        cases = {
+            "1 0 1 17 26 abc": "alpha's viewer was scrolled back just before emx sent Esc, so it didn't. Press q in it, then try again.",
+            "0 0 1 17 26 other": "alpha's viewer changed just before emx sent Esc, so emx didn't interrupt it.",
+            "0 0 1 2 26 abc": "alpha's prompt changed just before emx sent Esc, so emx didn't interrupt it.",
+            "0 0 1 17 26 abc": "Focus left the panel, so emx didn't interrupt alpha.",
+        }
+        for report, want in cases.items():
+            with self.subTest(report=report):
+                self.assertEqual(core.gate_refusal(i, report, 26, cursor_x=17), want)
+
+    def test_the_result_says_whether_it_stopped(self):
+        self.assertEqual(core.interrupted_text(self.interrupt, True), "Interrupted emx-test-working.")
+        self.assertEqual(core.interrupted_text(self.interrupt, False),
+                         "emx-test-working is still working; emx sent Esc but it didn't stop.")
+        self.assertEqual(core.left_listing_text(self.interrupt),
+                         "emx sent Esc to emx-test-working, which isn't listed any more.")
+
+
+class TypeGate(unittest.TestCase):
+    def test_cursor_x_is_pinned_where_given(self):
+        self.assertIn("#{==:#{cursor_x},17}", core.type_gate("%3", "%1", "abc", 26, "@emx_session", cursor_x=17))
+        self.assertNotIn("#{==:#{cursor_x},2}", core.type_gate("%3", "%1", "abc", 26, "@emx_session", cursor_x=17))
+        self.assertIn("#{==:#{cursor_x},2}", core.type_gate("%3", "%1", "abc", 26, "@emx_session"))
 
 
 class ErrorLine(unittest.TestCase):
