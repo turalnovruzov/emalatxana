@@ -561,6 +561,123 @@ class RowLayout(unittest.TestCase):
         self.assertNotIn("age", [p for _, _, p in got])
 
 
+class RowLines(unittest.TestCase):
+    """A row too long for the panel wraps onto indented lines instead of being cut."""
+
+    NAMES = ("x", "emx-test-perm", "emx-test-a-very-long-session-name", "日本語の名前", "emx test 🎉 party")
+    DETAILS = ("", "approve Bash: x", "Running the whole unittest suite with verbose output", "完了しました 🎉 すべて合格")
+
+    def lines(self, width, name="emx-test-perm", worktree="", word="Needs input", detail="", age="12m", align=0):
+        return core.row_lines(name, worktree, word, detail, age, width, align)
+
+    def test_a_row_that_fits_is_row_layouts_line_unchanged(self):
+        self.assertEqual(self.lines(60, name="emx-test-wt", worktree="feat-x", word="Working"),
+                         [core.row_layout("emx-test-wt", "feat-x", "Working", "", "12m", 60)])
+        a = self.lines(40, name="emx-test-a", word="Working", age="1m", align=13)
+        self.assertEqual(a, [core.row_layout("emx-test-a", "", "Working", "", "1m", 40, 13)])
+        self.assertEqual(rendered(a[0]), "   emx-test-a     Working" + " " * 12 + "1m")
+
+    def test_at_40_columns_the_detail_wraps_under_the_row_and_nothing_is_cut(self):
+        got = [rendered(p) for p in self.lines(40, detail="approve Bash: touch made-by-test.txt")]
+        self.assertEqual(got, [
+            "   emx-test-perm  Needs input       12m",
+            "     approve Bash: touch",
+            "     made-by-test.txt",
+        ])
+
+    def test_at_60_columns_the_detail_continues_after_the_state_word(self):
+        got = [rendered(p) for p in self.lines(60, detail="approve Bash: touch made-by-test.txt and more words")]
+        self.assertEqual(got, [
+            "   emx-test-perm  Needs input · approve Bash: touch     12m",
+            "     made-by-test.txt and more words",
+        ])
+
+    def test_a_long_name_and_branch_wrap_whole_and_the_age_stays_on_the_first_line(self):
+        got = [rendered(p) for p in self.lines(40, "emx-test-a-very-long-session-name", "feature/3-grouped-panel",
+                                               "Working", "Running the tests", "3h")]
+        self.assertEqual(got, [
+            "   emx-test-a-very-long-session-name 3h",
+            "     ⎇ feature/3-grouped-panel  Working",
+            "     Running the tests",
+        ])
+
+    def test_a_branch_cut_only_to_line_up_is_shown_whole_without_the_column(self):
+        long = [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")]
+        got = self.lines(60, "emx-test-wt", "feature/3-grouped-panel", "Working", align=core.name_column(long, 60))
+        self.assertEqual(got, [core.row_layout("emx-test-wt", "feature/3-grouped-panel", "Working", "", "12m", 60)])
+        self.assertIn("⎇ feature/3-grouped-panel  Working", rendered(got[0]))
+
+    def test_wide_characters_wrap_by_display_columns(self):
+        got = [rendered(p) for p in self.lines(30, name="日本語の名前のセッションです", word="Done", detail="完了 🎉 nice", age="1d")]
+        self.assertEqual(got, [
+            "   日本語の名前のセッショ  1d",
+            "     ンです  Done · 完了 🎉",
+            "     nice",
+        ])
+
+    def test_every_part_is_whole_somewhere_and_every_line_fits(self):
+        for width in range(0, 71):
+            for name in self.NAMES:
+                for detail in self.DETAILS:
+                    for worktree in ("", "feature/3-grouped-panel"):
+                        with self.subTest(width=width, name=name, detail=detail, worktree=worktree):
+                            lines = self.lines(width, name=name, worktree=worktree, detail=detail)
+                            texts = []
+                            for parts in lines:
+                                line = rendered(parts)
+                                self.assertLessEqual(core.display_width(line), max(0, width - 1))
+                                texts += [t for _, t, p in parts if p != "age"]
+                            if len(lines) > 1:
+                                self.assertEqual(lines[0][-1], (width - 1 - 3, "12m", "age"))
+                                for parts in lines[1:]:
+                                    self.assertGreaterEqual(parts[0][0], core.ROW_INDENT)
+                            if width - 1 - core.ROW_INDENT >= 2:
+                                joined = "".join(" ".join(texts).split()).replace("·", "")
+                                for whole in (name, core.WORKTREE_MARK + worktree if worktree else "", "Needs input", detail):
+                                    self.assertIn("".join(whole.split()), joined)
+                                self.assertNotIn("…", " ".join(texts))
+
+    def test_the_armed_label_wraps_too(self):
+        self.assertEqual(core.confirm_lines("ctrl+x again to stop", 40), [[(3, "ctrl+x again to stop", "confirm")]])
+        got = [rendered(p) for p in core.confirm_lines("ctrl+x again to remove", 19)]
+        self.assertEqual(got, ["   ctrl+x again to", "     remove"])
+
+
+class ListWindow(unittest.TestCase):
+    """Scrolling and clicks count screen rows, so a wrapped row is kept whole on screen and every line of it is his click."""
+
+    def test_one_row_lines_scroll_as_before(self):
+        self.assertEqual(core.list_window([1] * 10, 0, 0, 4), 0)
+        self.assertEqual(core.list_window([1] * 10, 6, 0, 4), 3)
+        self.assertEqual(core.list_window([1] * 10, 4, 3, 4), 3)
+        self.assertEqual(core.list_window([1] * 10, 1, 3, 4), 1)
+        self.assertEqual(core.list_window([1] * 3, 0, 5, 4), 0)
+
+    def test_the_cursor_row_is_shown_whole(self):
+        heights = [1, 3, 1, 4, 1]
+        self.assertEqual(core.list_window(heights, 3, 0, 5), 4)
+        self.assertEqual(core.list_window(heights, 1, 3, 5), 1)
+        self.assertEqual(core.list_window(heights, 4, 0, 5), 5)
+
+    def test_a_row_taller_than_the_view_shows_from_its_top(self):
+        self.assertEqual(core.list_window([1, 6, 1], 1, 0, 3), 1)
+        self.assertEqual(core.list_window([1, 6, 1], 1, 4, 3), 1)
+
+    def test_every_line_of_a_wrapped_row_maps_to_it(self):
+        lines = [("group", "/p"), ("session", "a"), ("session", "b"), None, ("group", "/q"), ("session", "c")]
+        heights = [1, 3, 1, 1, 1, 2]
+        self.assertEqual(core.row_hits(lines, heights, 0, 2, 20), {
+            2: ("group", "/p"), 3: ("session", "a"), 4: ("session", "a"), 5: ("session", "a"),
+            6: ("session", "b"), 8: ("group", "/q"), 9: ("session", "c"), 10: ("session", "c"),
+        })
+
+    def test_a_row_cut_by_the_view_maps_only_its_lines_on_screen(self):
+        lines = [("session", "a"), ("session", "b"), ("session", "c")]
+        self.assertEqual(core.row_hits(lines, [3, 3, 3], 2, 2, 5), {
+            2: ("session", "a"), 3: ("session", "b"), 4: ("session", "b"), 5: ("session", "b"), 6: ("session", "c"),
+        })
+
+
 class HeaderLayout(unittest.TestCase):
     def test_project_header_keeps_the_folder_name_last_to_go(self):
         got = core.header_layout(core.PROJECT, "/h/me/code/app", 3, True, 40, "/h/me")

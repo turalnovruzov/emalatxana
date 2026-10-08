@@ -1092,6 +1092,145 @@ def _row(name: str, extra: str, status: str, age: str, age_x: int, pad: int = 0)
     return parts
 
 
+ROW_INDENT = ROW_LEAD + 2
+
+
+def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
+    """A session row as lines of (x, text, part), the parts `row_layout` names.
+
+    A row `row_layout` shows whole, at the column `align` or else without it,
+    is that one line. Any other row wraps rather than losing a part: the name
+    starts the first line, which keeps the age at its right, and the
+    worktree label, state word and detail follow on the line they fit,
+    continuing on lines indented to ROW_INDENT. Words split only when longer
+    than a line. A pane too narrow to indent gets `row_layout`'s line.
+    """
+    for column in dict.fromkeys((align, 0)):
+        parts = row_layout(name, worktree, word, detail, age, width, column)
+        if _shows_all(parts, name, worktree, word, detail, age):
+            return [parts]
+    usable = width - 1
+    rest = usable - ROW_INDENT
+    if rest < 2:
+        return [row_layout(name, worktree, word, detail, age, width, align)]
+    age = fit(age, max(0, usable - ROW_LEAD))
+    age_x = usable - display_width(age)
+    flow = _Flow(ROW_LEAD, age_x - 1 if age else usable, usable)
+    flow.words(name, "name", 0)
+    if worktree:
+        flow.unit(WORKTREE_MARK + worktree, "extra", 1)
+    if word:
+        flow.unit(word, "status", 2, ROW_LEAD + align + 2 if align else 0)
+    if detail:
+        flow.words(detail, "status", 1 if word else 2, "· " if word else "")
+    if age:
+        flow.lines[0].append((age_x, age, "age"))
+    return flow.lines
+
+
+def confirm_lines(label: str, width: int) -> list:
+    """The armed close label in place of a row's parts, wrapped like a row so it is read whole."""
+    usable = width - 1
+    if usable - ROW_INDENT < 2:
+        return [[(ROW_LEAD, fit(label, usable - ROW_LEAD), "confirm")]]
+    flow = _Flow(ROW_LEAD, usable, usable)
+    flow.words(label, "confirm", 0)
+    return flow.lines
+
+
+def _shows_all(parts: list, name: str, worktree: str, word: str, detail: str, age: str) -> bool:
+    shown = {part: text for _, text, part in parts}
+    status = " · ".join(p for p in (word, detail) if p)
+    want = {"name": name, "extra": WORKTREE_MARK + worktree if worktree else None,
+            "status": status or None, "age": age or None}
+    return all(shown.get(part) == text for part, text in want.items())
+
+
+class _Flow:
+    """Places a row's parts left to right, starting a line indented to ROW_INDENT when the next part doesn't fit."""
+
+    def __init__(self, x: int, end: int, usable: int):
+        self.lines, self.x, self.end, self.usable = [[]], x, end, usable
+        self.rest = usable - ROW_INDENT
+
+    def newline(self) -> None:
+        self.lines.append([])
+        self.x, self.end = ROW_INDENT, self.usable
+
+    def place(self, x: int, text: str, part: str) -> None:
+        self.lines[-1].append((x, text, part))
+        self.x = x + display_width(text)
+
+    def unit(self, text: str, part: str, gap: int, at: int = 0) -> None:
+        """A part kept on one line when any line can hold it; on the first line it starts at column `at` if that fits."""
+        busy = bool(self.lines[-1])
+        w = display_width(text)
+        if len(self.lines) == 1 and at > self.x + gap and at + w <= self.end:
+            self.place(at, text, part)
+        elif self.x + (gap if busy else 0) + w <= self.end:
+            self.place(self.x + (gap if busy else 0), text, part)
+        elif w <= self.rest:
+            self.newline()
+            self.place(self.x, text, part)
+        else:
+            self.words(text, part, gap)
+
+    def words(self, text: str, part: str, gap: int, lead: str = "") -> None:
+        """A part wrapped at spaces, its first words on the current line when they fit, there after `lead`."""
+        busy = bool(self.lines[-1])
+        start = self.x + (gap if busy else 0)
+        first = self.end - start - display_width(lead if busy else "")
+        chunks = _flow_words(text, first, self.rest, busy)
+        if chunks[0]:
+            self.place(start, (lead if busy else "") + chunks[0], part)
+        for chunk in chunks[1:]:
+            self.newline()
+            self.place(self.x, chunk, part)
+
+
+def _flow_words(text: str, first: int, rest: int, busy: bool) -> list:
+    """`text` in lines of at most `first` columns, then `rest`. The first line is "" when even its first word would not fit on a line already `busy`; a word longer than its line is split there."""
+    lines, line, room = [], "", first
+    for word in text.split():
+        gap = " " if line else ""
+        if display_width(line + gap + word) <= room:
+            line += gap + word
+            continue
+        if line or busy or room <= 0:
+            lines.append(line)
+            line, room, busy = "", rest, False
+            if display_width(word) <= room:
+                line = word
+                continue
+        for ch in word:
+            if display_width(line + ch) > room:
+                lines.append(line)
+                line, room = "", rest
+            line += ch
+    lines.append(line)
+    return lines
+
+
+def list_window(heights: list, at: int, scroll: int, height: int) -> int:
+    """The first screen row to show of a list whose lines take `heights` rows, in a view `height` rows tall.
+
+    Line `at`, the cursor's, is shown whole, or from its top when it is
+    taller than the view; otherwise `scroll` moves only as far as it must.
+    """
+    total = sum(heights)
+    scroll = max(0, min(scroll, total - height))
+    if not 0 <= at < len(heights):
+        return scroll
+    top = sum(heights[:at])
+    return min(max(scroll, top + heights[at] - height), top)
+
+
+def row_hits(lines: list, heights: list, scroll: int, top: int, height: int) -> dict:
+    """The screen y of every row shown, mapped to the line drawn there, for clicks; every row of a wrapped line maps to it."""
+    rows = [line for line, h in zip(lines, heights) for _ in range(h)]
+    return {top + slot: line for slot, line in enumerate(rows[scroll:scroll + height]) if line}
+
+
 def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, home: str | None = None) -> list:
     """(x, text, part) for a group header: "arrow", then "dir" and "name" (the path, folder name last), then "count".
 

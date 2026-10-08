@@ -1541,9 +1541,6 @@ class App:
     def draw_list(self, top: int, bottom: int, width: int) -> None:
         lines = self.lines()
         height = max(1, bottom - top)
-        at = lines.index(self.cursor) if self.cursor in lines else 0
-        self.scroll = max(0, min(self.scroll, len(lines) - height))
-        self.scroll = min(max(self.scroll, at - height + 1), at)
         main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
         cursor_group = core.cursor_group(self.cursor, self.groups)
         groups = {g.key: g for g in self.groups}
@@ -1554,25 +1551,32 @@ class App:
             aligns.update((s.id, column) for s in g.sessions)
         now_ms = time.time() * 1000
         frame = int(time.monotonic() / FRAME_SECONDS)
-        for slot, line in enumerate(lines[self.scroll:self.scroll + height]):
-            if line is None:
+        rows = {}
+        for line in lines:
+            session = self.session(line[1]) if line and line[0] == "session" else None
+            if session is not None:
+                armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
+                rows[line] = self.session_lines(session, width, aligns.get(session.id, 0), now_ms, armed,
+                                                group_of.get(session.id, ""))
+        heights = [len(rows.get(line, [None])) for line in lines]
+        at = lines.index(self.cursor) if self.cursor in lines else 0
+        self.scroll = core.list_window(heights, at, self.scroll, height)
+        self.row_map = core.row_hits(lines, heights, self.scroll, top, height)
+        y = top - self.scroll
+        for line, rows_taken in zip(lines, heights):
+            first, y = y, y + rows_taken
+            if line is None or y <= top or first >= top + height:
                 continue
-            y = top + slot
             selected = core.selection_bar(line == self.cursor, self.focused is not False)
-            self.row_map[y] = line
+            shown = [r for r in range(first, y) if top <= r < top + height]
             if selected:
-                self.put(y, 0, " " * width, self.palette.attr("plain", selected))
+                for r in shown:
+                    self.put(r, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
-                self.draw_header(y, groups[line[1]], selected, line[1] == cursor_group, width)
-            else:
+                self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width)
+            elif line in rows:
                 session = self.session(line[1])
-                if session is not None:
-                    in_main = session.id == main_sid
-                    armed = self.confirm if self.confirm is not None and self.confirm.id == session.id else None
-                    self.draw_session(
-                        y, session, selected, in_main, width, aligns.get(session.id, 0), now_ms, frame, armed,
-                        group_of.get(session.id, ""),
-                    )
+                self.draw_session(first, shown, rows[line], session, selected, session.id == main_sid, frame)
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int) -> None:
         view = self.view()
@@ -1588,10 +1592,23 @@ class App:
     def worktree(self, s) -> str:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
+    def session_lines(
+        self, s, width: int, align: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
+    ) -> list:
+        """The row's lines as `core.row_lines` gives them, or the armed close label's while it is armed, or the rename edit's while it is renamed."""
+        if armed is not None:
+            return core.confirm_lines(core.confirm_label(armed), width)
+        if self.rename_edit is not None and self.rename_edit["id"] == s.id:
+            return [[(core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD), "rename")]]
+        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
+        age = core.session_age(s, now_ms)
+        detail = core.row_detail(s, self.transcripts.get(s.id))
+        return core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
+
     def draw_session(
-        self, y: int, s, selected: str | None, in_main: bool, width: int, align: int, now_ms: float, frame: int,
-        armed: core.Confirm | None = None, group_key: str = "",
+        self, y: int, shown: list, rows: list, s, selected: str | None, in_main: bool, frame: int,
     ) -> None:
+        """Draw the row's `rows` from screen row `y`, only on the screen rows in `shown`."""
         cat = core.category(s)
         stopped = cat == core.STOPPED
         pal = self.palette
@@ -1601,26 +1618,22 @@ class App:
                 return pal.attr("stopped", selected) | curses.A_DIM | extra
             return pal.attr(tone, selected) | extra
 
-        if in_main:
-            self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
         glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
-        self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
-        if armed is not None:
-            self.put(y, core.ROW_LEAD, core.fit(core.confirm_label(armed), width - 1 - core.ROW_LEAD),
-                     pal.attr("error", selected) | curses.A_BOLD)
-            return
-        if self.rename_edit is not None and self.rename_edit["id"] == s.id:
-            self.put(y, core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD),
-                     pal.attr("accent", selected) | curses.A_BOLD)
-            return
-        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
-        age = core.session_age(s, now_ms)
-        detail = core.row_detail(s, self.transcripts.get(s.id))
-        parts = core.row_layout(s.name, self.worktree(s), word, detail, age, width, align)
         tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
-        for x, text, part in parts:
-            emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
-            self.put(y, x, text, attr(tones[part], emphasis))
+        for i, parts in enumerate(rows):
+            if y + i not in shown:
+                continue
+            if in_main:
+                self.put(y + i, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
+            if i == 0:
+                self.put(y, 1, core.glyph(cat, frame), attr(glyph_tone))
+            for x, text, part in parts:
+                if part in ("confirm", "rename"):
+                    tone = "error" if part == "confirm" else "accent"
+                    self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
+                    continue
+                emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
+                self.put(y + i, x, text, attr(tones[part], emphasis))
 
     def take_poll(self) -> bool:
         result = self.poller.take()
