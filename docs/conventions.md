@@ -209,11 +209,11 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: `subprocess.run(core.summary_args(claude), input=excerpt, cwd=scratch, ...)` in `sidebar.summarise`.
 4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`, `NameArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps, the instruction and the 30 s timeout (ADR 0002).
 
-### Text emx speaks or shows outside its screen goes through `core.clean_notice`, and reaches `say`, `osascript` and the terminal only one way
+### Text emx speaks goes through `core.clean_notice`, and reaches `say` only on stdin
 
-1. **Rule**: every text emx speaks, puts in a banner or sends as a terminal notification (Haiku's words and the plain fallback line alike) goes through `core.clean_notice` first. `say` gets it on stdin; `osascript` gets it as the argument after `--`, never inside the AppleScript source; OSC 9 is written only by the panel, wrapped for tmux passthrough, after `draw()`, with `allow-passthrough` on the panel's pane only (never `set -g`). Control characters are judged on code points (C0, DEL and C1), not bytes.
-2. **Why**: `say` runs `[[ ]]` commands embedded in its text; ESC, BEL or ST end an OSC early and let the rest run as a terminal command; a leading `-` makes `osascript` read the text as an option; a global passthrough lets Claude Code's own OSC 9 out of every viewer and doubles each notice.
-3. **Minimal example**: `self.write_out(core.osc9(text))` in `App.flush_notices`; `["osascript", "-e", script, "--", text]` in `Voice.show_banner`.
+1. **Rule**: every text emx speaks (Haiku's words and the plain fallback line alike) goes through `core.clean_notice` first. `say` gets it on stdin, never in its command line. Control characters are judged on code points (C0, DEL and C1), not bytes.
+2. **Why**: `say` runs `[[ ]]` commands embedded in its text, and a leading `-` in its command line would be read as an option.
+3. **Minimal example**: `proc.communicate(text)` in `Voice.speak_aloud`.
 4. **Gotcha**: a C1 control such as U+009C (ST) is two bytes in UTF-8 and slips past a byte check; the cleaning must run on the decoded string. A name or project taken from a session is untrusted too, so the fallback line is cleaned like Haiku's.
 
 ### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it

@@ -3961,7 +3961,6 @@ class NoticeText(unittest.TestCase):
     def test_ordinary_punctuation_survives(self):
         text = "It’s done — sir."
         self.assertEqual(core.clean_notice(text), text)
-        self.assertEqual(core.osc9(text)[len(b"\x1bPtmux;\x1b\x1b]9;"):-3], text.encode("utf-8"))
 
     def test_say_speech_commands_cannot_get_through(self):
         for text in ("Done [[slnc 9000]] now.", "Done [[volm 2]] now.", "[[[slnc 1]]]", "a[\x01[b]\x01]c"):
@@ -3969,20 +3968,15 @@ class NoticeText(unittest.TestCase):
             self.assertNotIn("[[", got)
             self.assertNotIn("]]", got)
 
-    START, END = b"\x1bPtmux;\x1b\x1b]9;", b"\x07\x1b\\"
-
     def check_body(self, text):
-        data = core.osc9(text)
-        self.assertTrue(data.startswith(self.START))
-        self.assertTrue(data.endswith(self.END))
-        body = data[len(self.START):-len(self.END)].decode("utf-8")
+        body = core.clean_notice(text)
         for c in body:
             self.assertFalse(ord(c) <= 0x1F or 0x7F <= ord(c) <= 0x9F, hex(ord(c)))
         return body
 
     HOSTILE = "x\x1b\\y\x07z\x9c\x1b]9;w"
 
-    def test_hostile_text_cannot_end_the_escape_early(self):
+    def test_hostile_text_loses_its_control_characters(self):
         self.assertEqual(self.check_body(self.HOSTILE), "x\\yz]9;w")
 
     def test_a_fallback_line_built_from_a_hostile_name_is_safe_too(self):

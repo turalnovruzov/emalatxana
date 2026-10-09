@@ -35,7 +35,7 @@ SUMMARY_CALLS_KEPT = 500
 NOTICE_TIMEOUT = 15
 NOTICE_TICK_SECONDS = 0.5
 SPEAK_TIMEOUT = 60
-BANNER_TIMEOUT = 10
+VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 WHATS_NEW_SECONDS = 60
@@ -66,7 +66,7 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
-    ("m", "mute or unmute spoken notices; banners still show"),
+    ("m", "mute or unmute spoken notices"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
@@ -847,7 +847,7 @@ def say_command() -> str:
 
 
 def under_test() -> bool:
-    """An emx a live check started: it must never make real sound or banners on his Mac."""
+    """An emx a live check started: it must never make real sound on his Mac."""
     return os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
 
 
@@ -856,7 +856,7 @@ def list_voices(say: str) -> list:
     try:
         done = subprocess.run(
             [say, "-v", "?"], capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT,
+            stdin=subprocess.DEVNULL, timeout=VOICES_TIMEOUT,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
@@ -1234,7 +1234,7 @@ class Summaries(threading.Thread):
 
 
 class Voice(threading.Thread):
-    """Speaks notices with `say` and shows `osascript` banners, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
+    """Speaks notices with `say`, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -1252,25 +1252,18 @@ class Voice(threading.Thread):
         if not self.muted:
             self.put(("say", text))
 
-    def banner(self, text: str) -> None:
-        """Goes ahead of the speech queued, behind earlier banners."""
-        self.put(("banner", text))
-
     def put(self, item: tuple) -> None:
         with self.lock:
-            if item[0] == "say" and self.muted:
+            if self.muted:
                 return
-            at = len(self.queue)
-            if item[0] == "banner":
-                at = next((i for i, queued in enumerate(self.queue) if queued[0] == "say"), at)
-            self.queue.insert(at, item)
+            self.queue.append(item)
         self.wake.set()
 
     def silence(self) -> None:
-        """Stop what is being said and drop the speech queued; banners stay queued."""
+        """Stop what is being said and drop the speech queued."""
         with self.lock:
             self.generation += 1
-            self.queue = [item for item in self.queue if item[0] != "say"]
+            self.queue = []
             proc = self.playing
         if proc is not None:
             self.stop(proc)
@@ -1303,10 +1296,8 @@ class Voice(threading.Thread):
         if item is None:
             self.wake.wait()
             self.wake.clear()
-        elif item[0] == "say":
-            self.speak_aloud(item[1], generation)
         else:
-            self.show_banner(item[1])
+            self.speak_aloud(item[1], generation)
 
     def speak_aloud(self, text: str, generation: int) -> None:
         """The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
@@ -1341,19 +1332,6 @@ class Voice(threading.Thread):
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
-
-    def show_banner(self, text: str) -> None:
-        """The text is an argument after `--`, never inside the AppleScript source, and `--` stops osascript reading a text that starts with `-` as an option."""
-        if under_test():
-            return
-        argv = [
-            "osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "emx"',
-            "-e", "end run", "--", text,
-        ]
-        try:
-            subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            pass
 
 
 class Notices(threading.Thread):
@@ -1550,7 +1528,6 @@ class App:
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
-        self.passthrough_for = None
         self.listings = Listings()
         self.home = os.path.expanduser("~")
         self.starter = None
@@ -1684,9 +1661,6 @@ class App:
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.take_focus(sidebar)
-                if self.passthrough_for != sidebar.id:
-                    self.tmux.allow_passthrough(sidebar.id)
-                    self.passthrough_for = sidebar.id
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -2759,25 +2733,7 @@ class App:
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
 
     def flush_notices(self) -> None:
-        """Shows the notices that are ready: as a terminal notification while a client is attached (read now, since he may have detached since the transition), else as a macOS banner."""
-        texts = self.poller.notices.take()
-        if not texts:
-            return
-        try:
-            attached = self.tmux.client_state()[0]
-        except TmuxError:
-            attached = 0
-        for text in texts:
-            if attached > 0:
-                self.write_out(core.osc9(text))
-            else:
-                self.poller.voice.banner(text)
-
-    def write_out(self, data: bytes) -> None:
-        try:
-            os.write(1, data)
-        except OSError as exc:
-            self.say(f"Couldn't send a notification: {exc}", error=True)
+        self.poller.notices.take()
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()

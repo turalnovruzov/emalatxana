@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, sidebar
-from emx.tmux import Pane, TmuxError
+from emx.tmux import Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -211,15 +211,11 @@ class ClientTmux:
 
     def __init__(self, state=(0, "", "", None)):
         self.state = state
-        self.passthrough = []
 
     def client_state(self):
         if isinstance(self.state, Exception):
             raise self.state
         return self.state
-
-    def allow_passthrough(self, pane):
-        self.passthrough.append(pane)
 
 
 class AppCase(unittest.TestCase):
@@ -232,13 +228,11 @@ class AppCase(unittest.TestCase):
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
             # A worker a test didn't mean to start must never run his real claude.
             mock.patch.object(sidebar, "fetch_sessions", lambda claude: (None, "no claude in tests")),
-            # No test may speak, show a banner, ask Haiku or write to the real terminal.
+            # No test may speak, ask Haiku or write to the real terminal.
             mock.patch.object(sidebar, "announce", self.recorder("announced", method=False, result=(None, "no haiku in tests"))),
             mock.patch.object(sidebar, "list_voices", lambda say: []),
             mock.patch.object(sidebar.Voice, "speak", self.recorder("spoken")),
-            mock.patch.object(sidebar.Voice, "banner", self.recorder("banners")),
             mock.patch.object(sidebar.Voice, "silence", self.recorder("silenced")),
-            mock.patch.object(sidebar.App, "write_out", self.recorder("written")),
         ]
         for p in patches:
             p.start()
@@ -4444,13 +4438,10 @@ class Announce(unittest.TestCase):
 
 class StubVoice:
     def __init__(self):
-        self.spoken, self.banners = [], []
+        self.spoken = []
 
     def speak(self, text):
         self.spoken.append(text)
-
-    def banner(self, text):
-        self.banners.append(text)
 
 
 class NoticesWorker(unittest.TestCase):
@@ -4658,11 +4649,10 @@ class VoiceQueue(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.voice = sidebar.Voice()
 
-    def test_a_sentence_put_after_a_mute_is_dropped_but_a_banner_is_kept(self):
+    def test_a_sentence_put_after_a_mute_is_dropped(self):
         self.voice.muted = True
         self.voice.put(("say", "late"))
-        self.voice.put(("banner", "shown"))
-        self.assertEqual(self.voice.queue, [("banner", "shown")])
+        self.assertEqual(self.voice.queue, [])
 
     def test_five_texts_from_two_threads_play_one_at_a_time_in_order_with_the_text_on_stdin(self):
         self.voice.start()
@@ -4707,60 +4697,33 @@ class VoiceQueue(unittest.TestCase):
         self.voice.speak("heard")
         self.assertEqual(self.voice.queue, [("say", "heard")])
 
-    def test_a_banner_goes_ahead_of_the_speech_queued_and_behind_earlier_banners(self):
-        self.voice.speak("s1")
-        self.voice.speak("s2")
-        self.voice.banner("b1")
-        self.voice.banner("b2")
-        self.assertEqual(self.voice.queue, [("banner", "b1"), ("banner", "b2"), ("say", "s1"), ("say", "s2")])
-
-    def test_a_banner_survives_a_silence(self):
-        with mock.patch.object(sidebar.subprocess, "run") as run:
-            self.voice.banner("kept")
-            self.voice.speak("dropped")
-            self.voice.silence()
-            self.voice.step()
-        self.assertEqual(run.call_args.args[0][-1], "kept")
-
-    def test_the_banner_text_is_the_last_argument_after_a_double_dash_and_never_in_the_script(self):
-        for text in ("Alpha is done.", "-e display dialog"):
-            with self.subTest(text=text), mock.patch.object(sidebar.subprocess, "run") as run:
-                self.voice.show_banner(text)
-            argv = run.call_args.args[0]
-            self.assertEqual(argv[0], "osascript")
-            self.assertEqual(argv[-2:], ["--", text])
-            scripts = [argv[i + 1] for i, a in enumerate(argv[:-2]) if a == "-e"]
-            self.assertTrue(scripts)
-            self.assertFalse(any(text in script for script in scripts))
-
-    def test_a_banner_goes_through_the_same_queue(self):
-        with mock.patch.object(sidebar.subprocess, "run") as run:
-            self.voice.start()
-            self.voice.banner("queued")
-            wait_until(self, lambda: run.called, "the banner")
-        self.assertEqual(run.call_args.args[0][-1], "queued")
-
-    def test_under_test_nothing_real_is_spoken_or_shown(self):
+    def test_under_test_nothing_real_is_spoken(self):
         with mock.patch.dict(sidebar.os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}), \
                 mock.patch.object(sidebar.subprocess, "run") as run, \
                 mock.patch.object(sidebar, "list_voices") as voices:
             sidebar.os.environ.pop("EMX_SAY", None)
             self.voice.start()
             self.voice.speak("quiet")
-            self.voice.banner("silent")
             self.voice.speak_aloud("quiet", self.voice.generation)
-            self.voice.show_banner("silent")
             wait_until(self, lambda: not self.voice.queue, "the voice queue to drain")
         self.assertEqual(FakeSay.made, [])
         run.assert_not_called()
         voices.assert_not_called()
 
-    def test_under_test_with_emx_say_set_only_that_command_runs_and_no_banner(self):
+    def test_under_test_with_emx_say_set_only_that_command_runs(self):
         with mock.patch.dict(sidebar.os.environ, {"EMX_SHOW_TEST_SESSIONS": "1", "EMX_SAY": "fake-say"}), \
                 mock.patch.object(sidebar.subprocess, "run") as run:
             voice = sidebar.Voice()
             voice.speak_aloud("heard", voice.generation)
-            voice.show_banner("silent")
+        (proc,) = FakeSay.made
+        self.assertEqual(proc.argv[0], "fake-say")
+        run.assert_not_called()
+
+    def test_a_spoken_notice_runs_only_the_say_command(self):
+        self.voice.say = "fake-say"
+        with mock.patch.object(sidebar.subprocess, "run") as run:
+            self.voice.speak("x")
+            self.voice.step()
         (proc,) = FakeSay.made
         self.assertEqual(proc.argv[0], "fake-say")
         run.assert_not_called()
@@ -4803,9 +4766,6 @@ class VoiceQueue(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
         self.assertIsNone(poller.voice.voice)
         self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive())
-
-
-REAL_WRITE_OUT = sidebar.App.write_out
 
 
 class NoticeWiring(AppCase):
@@ -4896,60 +4856,56 @@ class NoticeWiring(AppCase):
         self.step(session("a", "/p/alpha", "done"))
         self.assertEqual(len(self.pending()), 1)
 
-    def test_flushing_while_attached_writes_the_terminal_notification_and_no_banner(self):
-        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
-        self.app.poller.notices.outbox = ["Alpha is done."]
-        self.app.flush_notices()
-        self.assertEqual(self.written, [(core.osc9("Alpha is done."),)])
-        self.assertEqual(self.banners, [])
-        self.assertEqual(self.app.poller.notices.outbox, [])
+class NoBanner(AppCase):
+    def test_no_banner_code_is_left(self):
+        self.assertFalse(hasattr(core, "osc9"))
+        self.assertFalse(hasattr(sidebar.Voice, "banner"))
+        self.assertFalse(hasattr(sidebar.Voice, "show_banner"))
+        self.assertFalse(hasattr(sidebar.App, "write_out"))
+        self.assertFalse(hasattr(Tmux, "allow_passthrough"))
+        root = Path(sidebar.__file__).parent
+        for path in [*root.glob("*.py"), root / "emx.tmux.conf"]:
+            text = path.read_text(encoding="utf-8")
+            for word in ("osascript", "]9;", "allow-passthrough", "display notification"):
+                self.assertNotIn(word, text, f"{path.name} mentions {word}")
 
-    def test_flushing_while_detached_shows_a_banner_and_writes_nothing(self):
-        self.app.tmux = ClientTmux((0, "", "%1", None))
-        self.app.poller.notices.outbox = ["Alpha is done."]
-        self.app.flush_notices()
-        self.assertEqual(self.banners, [("Alpha is done.",)])
-        self.assertEqual(self.written, [])
+    def test_housekeep_sets_no_pane_option_but_its_own(self):
+        calls = []
 
-    def test_detaching_between_the_transition_and_delivery_still_shows_the_notice(self):
-        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
-        self.step(session("a", "/p/alpha", "working"))
-        self.step(session("a", "/p/alpha", "done"))
-        self.assertEqual(len(self.pending()), 1)
-        self.app.tmux = ClientTmux((0, "", "%1", None))
-        self.app.poller.notices.outbox = ["Alpha is done."]
-        self.app.refresh()
-        self.assertEqual(self.banners, [("Alpha is done.",)])
-        self.assertEqual(self.written, [])
-
-    def test_a_tmux_error_at_delivery_falls_back_to_the_banner(self):
-        self.app.tmux = ClientTmux(TmuxError("gone"))
-        self.app.poller.notices.outbox = ["Alpha is done."]
-        self.app.flush_notices()
-        self.assertEqual(self.banners, [("Alpha is done.",)])
-
-    def test_a_failed_terminal_write_shows_on_the_panel_and_not_as_a_crash(self):
-        with mock.patch.object(sidebar.os, "write", side_effect=OSError("closed")):
-            REAL_WRITE_OUT(self.app, b"x")
-        self.assertIn("closed", self.app.notice)
-        self.assertTrue(self.app.notice_error)
-
-    def test_a_real_housekeep_opens_passthrough_for_the_sidebar_pane_only_once(self):
         class Housekeeping(ClientTmux):
-            socket = "emx-test-wiring"
+            socket = "emx-test-nobanner"
 
             def panes(self):
                 return [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "", "", 100, 141)]
 
             def __getattr__(self, name):
-                return lambda *args, **kwargs: None
+                return lambda *args, **kwargs: calls.append((name, args, kwargs))
 
         self.app.tmux = Housekeeping()
         self.app.me = "%1"
         sidebar.App.housekeep(self.app, False)
-        sidebar.App.housekeep(self.app, False)
-        self.assertEqual(self.app.tmux.passthrough, ["%1"])
-        self.assertNotIn("%2", self.app.tmux.passthrough)
+        self.assertNotIn("allow-passthrough", repr(calls))
+        self.assertNotIn("allow_passthrough", [name for name, _, _ in calls])
+
+    def test_the_m_help_line_mentions_no_banner(self):
+        for key, text in sidebar.HELP:
+            self.assertNotIn("banner", text.lower(), key)
+
+    def test_a_delivered_notice_reaches_neither_the_terminal_nor_osascript(self):
+        for state in ((1, "0", "%1", 3.0), (0, "", "%1", None)):
+            with self.subTest(state=state):
+                self.app.tmux = ClientTmux(state)
+                self.app.poller.notices.outbox = ["Alpha is done."]
+                with mock.patch.object(sidebar.os, "write") as write, \
+                        mock.patch.object(sidebar.subprocess, "run") as run, \
+                        mock.patch.object(sidebar.subprocess, "Popen") as popen:
+                    self.app.refresh()
+                for call in write.call_args_list:
+                    self.assertNotIn(b"]9;", call.args[1])
+                    self.assertNotIn(b"\x1bPtmux;", call.args[1])
+                for call in [*run.call_args_list, *popen.call_args_list]:
+                    self.assertNotEqual(call.args[0][0], "osascript")
+                self.assertEqual(self.app.poller.notices.outbox, [])
 
 
 class MuteKey(AppCase):
@@ -4991,7 +4947,7 @@ class MuteKey(AppCase):
         self.assertTrue(core.voice_on(self.app.prefs))
 
     def test_the_help_has_the_m_line(self):
-        self.assertIn(("m", "mute or unmute spoken notices; banners still show"), sidebar.HELP)
+        self.assertIn(("m", "mute or unmute spoken notices"), sidebar.HELP)
 
     def test_the_top_line_shows_muted_only_while_muted(self):
         def top_line():

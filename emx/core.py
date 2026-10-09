@@ -3341,11 +3341,6 @@ def fallback_notice(project: str, name: str, sid: str, kind: str) -> str:
     return f"{name}, in {project}, {words}."
 
 
-def osc9(text: str) -> bytes:
-    """An iTerm2 notification for `text`, wrapped in tmux's passthrough so it reaches the terminal. The text is cleaned, so it cannot end the escape early."""
-    return b"\x1bPtmux;\x1b\x1b]9;" + clean_notice(text).encode("utf-8") + b"\x07\x1b\\"
-
-
 def parse_voices(text: str) -> list:
     """The voice names in `say -v '?'` output, whose lines read `Name  en_GB    # sample`."""
     names = []

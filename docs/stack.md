@@ -17,4 +17,4 @@ What is in use in this repo, and why each piece is here. This is the record the 
 | tmux (≥ 3.7) | Panes, the session pane beside the panel, and instant switching via `swap-pane` between live `claude attach` viewers | [0001](./adr/0001-tmux-and-python-standard-library.md) |
 | Python 3, standard library only | The `emx` launcher and the curses session sidebar; nothing pip-installed | [0001](./adr/0001-tmux-and-python-standard-library.md) |
 | Claude Haiku via `claude -p` on his login | The one-line summary under each session's name, the name Tab suggests in the rename box, and the words of each notice; no library, no API key | [0002](./adr/0002-haiku-row-summaries-through-claude-p.md), [0003](./adr/0003-haiku-suggests-a-name-on-tab.md), [0004](./adr/0004-spoken-notices.md) |
-| macOS `say` and `osascript` (built in) | Spoken notices; banners when detached | [0004](./adr/0004-spoken-notices.md) |
+| macOS `say` (built in) | Spoken notices | [0004](./adr/0004-spoken-notices.md) |
