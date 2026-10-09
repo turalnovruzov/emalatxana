@@ -30,6 +30,10 @@ TRANSCRIPT_SECONDS = 3
 SUMMARY_TIMEOUT = 30
 SUMMARY_TICK_SECONDS = 1
 SUMMARY_CALLS_KEPT = 500
+NOTICE_TIMEOUT = 15
+NOTICE_TICK_SECONDS = 0.5
+SPEAK_TIMEOUT = 60
+BANNER_TIMEOUT = 10
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 WHATS_NEW_SECONDS = 60
@@ -702,6 +706,11 @@ class Resolver(threading.Thread):
             self.wake.wait(core.RETRY_FIRST_SECONDS)
             self.wake.clear()
 
+    def snapshot(self) -> dict:
+        """A copy of the placements resolved so far, leaving `take`'s changed flag alone."""
+        with self.lock:
+            return dict(self.placements)
+
     def take(self):
         """A copy of the placements when any resolved since the last take, else None."""
         with self.lock:
@@ -750,13 +759,34 @@ def suggest_name(claude: str, excerpt: str, cwd: str) -> tuple:
     return (call, error) if error != core.HAIKU_DECLINED else (None, NAME_REFUSED)
 
 
-def _run_haiku(args: list, text: str, cwd: str) -> tuple:
+def announce(claude: str, excerpt: str, cwd: str) -> tuple:
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku word a notice from `excerpt`, or (None, one-line error). Never raises."""
+    return _run_haiku(core.notice_args(claude), excerpt, cwd, NOTICE_TIMEOUT, core.clean_notice)
+
+
+def say_command() -> str:
+    return os.environ.get("EMX_SAY") or "say"
+
+
+def list_voices(say: str) -> list:
+    """The names of the voices `say` offers, or [] when it can't say. Never raises."""
+    try:
+        done = subprocess.run(
+            [say, "-v", "?"], capture_output=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+    return core.parse_voices(done.stdout) if done.returncode == 0 else []
+
+
+def _run_haiku(args: list, text: str, cwd: str, timeout: float = SUMMARY_TIMEOUT, clean=None) -> tuple:
     """The text goes on stdin so text starting with `-` can't be read as a flag, and `cwd` is an empty folder so no CLAUDE.md of his is loaded."""
     started = time.monotonic()
     try:
         done = subprocess.run(
             args, input=text, cwd=cwd, capture_output=True, encoding="utf-8",
-            errors="replace", timeout=SUMMARY_TIMEOUT,
+            errors="replace", timeout=timeout,
         )
     except FileNotFoundError:
         return None, f"can't find the claude command ({args[0]})"
@@ -766,11 +796,11 @@ def _run_haiku(args: list, text: str, cwd: str) -> tuple:
         return None, f"can't run claude: {exc}"
     wall_ms = (time.monotonic() - started) * 1000
     if done.returncode != 0:
-        call, error = core.parse_summary_output(done.stdout, wall_ms)
+        call, error = core.parse_summary_output(done.stdout, wall_ms, clean)
         if error and done.stdout.strip().startswith("{"):
             return None, error
         return None, core.first_message(done.stderr) or f"claude -p exited with {done.returncode}"
-    return core.parse_summary_output(done.stdout, wall_ms)
+    return core.parse_summary_output(done.stdout, wall_ms, clean)
 
 
 def read_requests(path: str) -> tuple:
@@ -1037,6 +1067,226 @@ class Summaries(threading.Thread):
             return dict(self.found)
 
 
+class Voice(threading.Thread):
+    """Speaks notices with `say` and shows `osascript` banners, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.say = say_command()
+        self.voice = None
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.queue = []
+        self.generation = 0
+        self.playing = None
+
+    def speak(self, text: str) -> None:
+        self.put(("say", text))
+
+    def banner(self, text: str) -> None:
+        self.put(("banner", text))
+
+    def put(self, item: tuple) -> None:
+        with self.lock:
+            self.queue.append(item)
+        self.wake.set()
+
+    def silence(self) -> None:
+        """Stop what is being said and drop the speech queued; banners stay queued."""
+        with self.lock:
+            self.generation += 1
+            self.queue = [item for item in self.queue if item[0] != "say"]
+            proc = self.playing
+        if proc is not None:
+            self.stop(proc)
+
+    @staticmethod
+    def stop(proc) -> None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+
+    def run(self) -> None:
+        try:
+            self.voice = core.pick_voice(list_voices(self.say))
+        except Exception:
+            self.voice = None
+        while True:
+            try:
+                self.step()
+            except Exception:
+                pass
+
+    def step(self) -> None:
+        """Plays the oldest queued item, or waits for one."""
+        with self.lock:
+            item = self.queue.pop(0) if self.queue else None
+            generation = self.generation
+        if item is None:
+            self.wake.wait()
+            self.wake.clear()
+        elif item[0] == "say":
+            self.speak_aloud(item[1], generation)
+        else:
+            self.show_banner(item[1])
+
+    def speak_aloud(self, text: str, generation: int) -> None:
+        """The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
+        argv = [self.say] + (["-v", self.voice] if self.voice else [])
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                encoding="utf-8", errors="replace",
+            )
+        except (OSError, ValueError):
+            return
+        with self.lock:
+            # A silence that came while this one was starting must still stop it.
+            muted = generation != self.generation
+            if not muted:
+                self.playing = proc
+        try:
+            if muted:
+                self.stop(proc)
+            proc.communicate("" if muted else text, timeout=SPEAK_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+        except (OSError, ValueError):
+            pass
+        finally:
+            with self.lock:
+                if self.playing is proc:
+                    self.playing = None
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+    def show_banner(self, text: str) -> None:
+        """The text is an argument after `--`, never inside the AppleScript source, and `--` stops osascript reading a text that starts with `-` as an option."""
+        argv = [
+            "osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "emx"',
+            "-e", "end run", "--", text,
+        ]
+        try:
+            subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+
+class Notices(threading.Thread):
+    """Words each notice with Haiku, one call at a time on its own thread, and hands the text on for showing and speaking.
+
+    A notice waits until the session's transcript holds the words for its
+    state (or `core.NOTICE_SETTLE_SECONDS` pass), and is dropped when the
+    listing shows the session in another state by then. A failed call
+    never loses it: a plain line takes the place of Haiku's.
+    """
+
+    def __init__(self, claude: str, transcripts: Transcripts, resolver: Resolver, speaker: Voice):
+        super().__init__(daemon=True)
+        self.claude = claude
+        self.transcripts = transcripts
+        self.resolver = resolver
+        self.speaker = speaker
+        self.voice = True
+        self.lock = threading.Lock()
+        self.wanted = {}
+        self.pending = []
+        self.outbox = []
+        self.calls = []
+        self.scratch = None
+
+    def want(self, sessions) -> None:
+        with self.lock:
+            self.wanted = {s.id: s for s in sessions}
+
+    def add(self, notice: core.Notice) -> None:
+        with self.lock:
+            self.pending.append(notice)
+
+    def take(self) -> list:
+        """The texts to show since the last take, oldest first."""
+        with self.lock:
+            out, self.outbox = self.outbox, []
+        return out
+
+    def run(self) -> None:
+        while True:
+            try:
+                worked = self.step()
+            except Exception:
+                worked = False
+            if not worked:
+                time.sleep(NOTICE_TICK_SECONDS)
+
+    def session_for(self, notice: core.Notice, wanted: dict):
+        """The listed session, or while it is absent from the listing, one built from what the notice remembers."""
+        listed = wanted.get(notice.id)
+        if listed is not None:
+            return listed
+        state = "blocked" if notice.kind == core.NOTICE_NEEDS else "done"
+        return core.Session(notice.id, notice.name, notice.cwd, state, "", "")
+
+    def stale(self, notice: core.Notice) -> bool:
+        with self.lock:
+            listed = self.wanted.get(notice.id)
+        return listed is not None and core.category(listed) != notice.kind
+
+    def step(self) -> bool:
+        """Sends the oldest notice that is ready, if any is. True when it handled one."""
+        now = time.monotonic()
+        with self.lock:
+            pending, wanted = list(self.pending), dict(self.wanted)
+        transcripts = self.transcripts.snapshot()
+        for notice in pending:
+            if self.stale(notice):
+                self.drop(notice)
+                return True
+            session = self.session_for(notice, wanted)
+            transcript = transcripts.get(notice.id)
+            if not core.notice_ready(notice.kind, session, transcript, now - notice.at):
+                continue
+            self.send(notice, session, transcript)
+            return True
+        return False
+
+    def drop(self, notice: core.Notice) -> None:
+        with self.lock:
+            if notice in self.pending:
+                self.pending.remove(notice)
+
+    def send(self, notice: core.Notice, session: core.Session, transcript) -> None:
+        placements = self.resolver.snapshot()
+        project = core.notice_project(session, placements)
+        excerpt = core.notice_excerpt(project, session, transcript)
+        call, text = None, ""
+        if excerpt:
+            try:
+                if self.scratch is None:
+                    self.scratch = summary_scratch()
+                call, _ = announce(self.claude, excerpt, self.scratch)
+            except OSError:
+                call = None
+            text = core.clean_notice(call.text) if call is not None else ""
+        if not text:
+            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.id, notice.kind))
+        if self.stale(notice):
+            self.drop(notice)
+            return
+        with self.lock:
+            if notice not in self.pending:
+                return
+            self.pending.remove(notice)
+            if call is not None:
+                self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
+            self.outbox.append(text)
+            speak = self.voice
+        if speak and text:
+            self.speaker.speak(text)
+
+
 class Poller(threading.Thread):
     """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either."""
 
@@ -1049,6 +1299,8 @@ class Poller(threading.Thread):
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
         self.transcripts = Transcripts(claude_home())
         self.summaries = Summaries(claude, self.transcripts)
+        self.voice = Voice()
+        self.notices = Notices(claude, self.transcripts, self.resolver, self.voice)
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.claude)
@@ -1058,12 +1310,15 @@ class Poller(threading.Thread):
             self.resolver.want(s.cwd for s in sessions)
             self.transcripts.want(sessions)
             self.summaries.want(sessions)
+            self.notices.want(sessions)
         return sessions, None
 
     def run(self) -> None:
         self.resolver.start()
         self.transcripts.start()
         self.summaries.start()
+        self.voice.start()
+        self.notices.start()
         while True:
             try:
                 result = self.poll()

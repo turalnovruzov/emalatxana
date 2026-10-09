@@ -2771,8 +2771,12 @@ def clean_summary(text: str) -> str:
 HAIKU_DECLINED = "Haiku declined to answer."
 
 
-def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
-    """(SummaryCall, None) from `claude -p --output-format json`, or (None, one-line error). Never raises."""
+def parse_summary_output(stdout: str, wall_ms: float, clean: Callable[[str], str] | None = None) -> tuple:
+    """(SummaryCall, None) from `claude -p --output-format json`, or (None, one-line error). Never raises.
+
+    The answer is tidied by `clean`, `clean_summary` unless given: that one
+    keeps a single line cut at 120 characters, which would clip a spoken notice.
+    """
     try:
         data = json.loads(stdout)
     except (ValueError, TypeError):
@@ -2793,7 +2797,7 @@ def parse_summary_output(stdout: str, wall_ms: float) -> tuple:
     models = data.get("modelUsage")
     model = next(iter(models), "") if isinstance(models, dict) and models else ""
     return SummaryCall(
-        text=clean_summary(result), model=str(model), wall_ms=float(wall_ms),
+        text=(clean or clean_summary)(result), model=str(model), wall_ms=float(wall_ms),
         duration_ms=_count(data.get("duration_ms")), cost_usd=_count(data.get("total_cost_usd")),
         input_tokens=int(_count(usage.get("input_tokens"))), output_tokens=int(_count(usage.get("output_tokens"))),
         cache_creation_tokens=int(_count(usage.get("cache_creation_input_tokens"))),
