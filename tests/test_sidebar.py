@@ -4996,6 +4996,14 @@ class MissedWiring(AppCase):
         self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
         self.assertIn(lines[-1], sidebar.FOOTERS)
 
+    def test_a_short_pane_shows_the_newest_notice_with_the_count_in_the_title(self):
+        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5), ("s2", "Beta is done.", time.monotonic() - 9),
+                     ("s3", "Gamma is done.", time.monotonic() - 9))
+        lines = self.bottom(11)
+        self.assertEqual(lines[-3], "Notices (3)")
+        self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
+        self.assertFalse(any("more" in t for t in lines), lines)
+
     def test_a_muted_notice_is_listed(self):
         self.app.handle_key("m")
         self.assertFalse(self.app.poller.notices.voice)
@@ -5018,6 +5026,18 @@ class MissedWiring(AppCase):
     def test_a_refused_or_failed_open_keeps_it(self):
         self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
         self.open_s1(fail=True)
+        self.assertEqual([m.id for m in self.app.missed], ["s1"])
+        self.assertNotIn("s1", self.app.opened)
+
+    def test_a_refused_attach_keeps_it(self):
+        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
+        self.app.tmux = SwitchTmux()
+        self.app.me = "%1"
+        self.poll(session("s1", "/p/alpha"))
+        self.app.refresh()
+        stale = session("s1", "/p/alpha")
+        self.assertFalse(core.attach_allowed(stale, core.RESTART, False))
+        sidebar.App.switch_to(self.app, "s1", core.RESTART, (stale, False))
         self.assertEqual([m.id for m in self.app.missed], ["s1"])
         self.assertNotIn("s1", self.app.opened)
 

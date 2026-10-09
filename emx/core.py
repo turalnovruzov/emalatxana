@@ -3342,9 +3342,11 @@ def fallback_notice(project: str, name: str, sid: str, kind: str) -> str:
 
 
 def hush_due(seen: str | None, value: str) -> tuple:
-    """(seen, due) after reading the hush token. The first read, `seen` None, is the baseline and is never due, so a hush from before the panel started is not replayed; any later change is due."""
+    """(seen, due) after reading the hush token. The first read, `seen` None, is the baseline and is never due, so a hush from before the panel started is not replayed; any later change is due. Empty after that is no change: a `-q` read cannot tell an unset option from a failed read."""
     if seen is None:
         return value, False
+    if not value:
+        return seen, False
     return value, value != seen
 
 
@@ -3390,13 +3392,20 @@ def missed_room(height: int | None, used: int) -> int:
 
 
 def missed_lines(missed: list, now: float, width: int, room: int) -> list:
-    """The area's lines in at most `room` rows: the title, one row per notice cut to `width`, and `… N more` when not all are shown."""
+    """The area's lines in at most `room` rows: the title, one row per notice cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest notice shows under `Notices (N)` instead."""
     if not missed or room < 2:
         return []
     cap = min(MISSED_SHOWN, room - 1)
-    shown = missed if len(missed) <= cap else missed[:min(cap, room - 2)]
-    lines = [MISSED_TITLE] + [fit(f"{format_age(now - m.at)} {m.text}", width) for m in shown]
-    if len(shown) < len(missed):
+    title = MISSED_TITLE
+    if len(missed) <= cap:
+        shown = missed
+    elif room == 2:
+        shown = missed[:1]
+        title = f"{MISSED_TITLE} ({len(missed)})"
+    else:
+        shown = missed[:min(cap, room - 2)]
+    lines = [title] + [fit(f"{format_age(now - m.at)} {m.text}", width) for m in shown]
+    if room > 2 and len(shown) < len(missed):
         lines.append(fit(f"… {len(missed) - len(shown)} more", width))
     return lines
 

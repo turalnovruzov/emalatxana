@@ -233,6 +233,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: a test that feeds `emx-test-` rows with a temporary cwd must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; a row is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden.
 
+### A command from outside reaches the running panel through a session option, never a signal
+
+1. **Rule**: a command run from outside (`emx hush`) reaches the running panel only by writing a fresh token (`time.time_ns()`) to a session user option on emx's own socket. The command checks `has_session()` first, uses no `-f`, and never starts a server. The panel reads the option on each housekeep tick and acts on a change, decided by a pure core function (`core.hush_due`); never a signal.
+2. **Why**: a panel on an older version would be killed by SIGUSR1's default action, a handler could deadlock on `Voice.lock`, and an option on emx's socket cannot reach his default tmux server.
+3. **Minimal example**:
+   ```python
+   tmux.set_session_option(HUSH_OPT, str(time.time_ns()))              # cli.hush
+   self.hush_seen, due = core.hush_due(self.hush_seen, value)          # App.check_hush
+   ```
+4. **Gotcha**: the panel's first read is a baseline, so a write before it is ignored; a `-q` read cannot prove the option is unset, so an empty value is no change.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

@@ -4061,6 +4061,10 @@ class HushDue(unittest.TestCase):
         self.assertEqual((seen, due), ("", False))
         self.assertEqual(core.hush_due(seen, "456"), ("456", True))
 
+    def test_an_empty_read_after_the_baseline_is_no_change(self):
+        self.assertEqual(core.hush_due("123", ""), ("123", False))
+        self.assertEqual(core.hush_due("", ""), ("", False))
+
     def test_a_change_is_due_and_the_same_value_is_not(self):
         self.assertEqual(core.hush_due("123", "456"), ("456", True))
         self.assertEqual(core.hush_due("456", "456"), ("456", False))
@@ -4117,6 +4121,11 @@ class MissedList(unittest.TestCase):
         two = core.missed_lines(five[:2], 10, 40, 5)
         self.assertEqual(two, ["Notices", "6s t4", "7s t3"])
 
+    def test_two_rows_show_the_newest_notice_with_the_count_in_the_title(self):
+        three = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(3)])
+        self.assertEqual(core.missed_lines(three, 10, 40, 2), ["Notices (3)", "8s t2"])
+        self.assertEqual(core.missed_lines(three[:1], 10, 40, 2), ["Notices", "8s t2"])
+
     def test_lines_are_one_row_each_and_fit_the_width(self):
         text = " ".join(["word"] * 28)
         missed = [core.Missed("s1", text, 0.0)]
@@ -4135,6 +4144,7 @@ class MissedList(unittest.TestCase):
     def test_room_leaves_the_list_its_minimum(self):
         self.assertEqual(core.missed_room(12, 1), 3)
         self.assertEqual(core.missed_room(9, 1), 0)
+        self.assertEqual(core.missed_room(11, 1), 2)
         self.assertEqual(core.missed_room(40, 1), core.MISSED_SHOWN + 2)
         self.assertEqual(core.missed_room(None, 1), core.MISSED_SHOWN + 2)
 

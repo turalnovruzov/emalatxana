@@ -391,6 +391,7 @@ class HushAcrossServers(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.tmpdir = tmp.name
         env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name})
         env.start()
         self.addCleanup(env.stop)
@@ -410,7 +411,7 @@ class HushAcrossServers(unittest.TestCase):
 
     def hush(self, name):
         env = {**os.environ, "EMX_SOCKET": self.servers[name].socket}
-        self.assertEqual(env["TMUX_TMPDIR"], os.environ["TMUX_TMPDIR"])
+        self.assertEqual(env["TMUX_TMPDIR"], self.tmpdir)
         self.assertTrue(env["EMX_SOCKET"].startswith("emx-test-"))
         done = subprocess.run(
             [sys.executable, cli.BIN, "hush"], capture_output=True, text=True, timeout=30, env=env,
