@@ -3780,6 +3780,11 @@ class TopLineMuted(unittest.TestCase):
         placed = core.top_line([mk(state="working")], "1.0.0", 60, True, True)
         self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("muted", "muted")])
 
+    def test_muted_stays_visible_beside_cut_counts_in_a_default_panel(self):
+        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, True)
+        self.assertIn("muted", [tag for _, _, tag in placed])
+        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
+
     def test_muted_never_overflows_and_never_costs_the_version(self):
         for width in range(0, 81):
             with self.subTest(width=width):
