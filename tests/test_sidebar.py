@@ -4393,7 +4393,7 @@ class VoiceQueue(unittest.TestCase):
             self.voice.banner("silent")
             self.voice.speak_aloud("quiet", self.voice.generation)
             self.voice.show_banner("silent")
-            time.sleep(0.3)
+            wait_until(self, lambda: not self.voice.queue, "the voice queue to drain")
         self.assertEqual(FakeSay.made, [])
         run.assert_not_called()
         voices.assert_not_called()

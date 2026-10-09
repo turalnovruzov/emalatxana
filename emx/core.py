@@ -66,21 +66,33 @@ TEST_SESSION_PREFIX = "emx-test-"
 TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
 
 
-def in_temp_dir(cwd: str) -> bool:
-    """True when `cwd` is under a temporary directory, symlinks resolved on both sides (macOS /tmp and /var are links into /private)."""
+def temp_roots() -> set:
+    """The temporary directories with symlinks resolved (macOS /tmp and /var are links into /private)."""
+    roots = set()
+    for root in (tempfile.gettempdir(), *TEMP_ROOTS):
+        try:
+            roots.add(Path(root).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return roots
+
+
+def in_temp_dir(cwd: str, roots: set = None) -> bool:
+    """True when `cwd` is under a temporary directory, symlinks resolved on both sides."""
     if not cwd:
         return False
     try:
         path = Path(cwd).resolve()
-        roots = {Path(r).resolve() for r in (tempfile.gettempdir(), *TEMP_ROOTS)}
     except (OSError, RuntimeError, ValueError):
         return False
+    if roots is None:
+        roots = temp_roots()
     return any(path == root or root in path.parents for root in roots)
 
 
-def is_test_session(name: str, cwd: str) -> bool:
+def is_test_session(name: str, cwd: str, roots: set = None) -> bool:
     """Both halves must hold, so a session he names `emx-test-…` in a real project stays visible."""
-    return name.startswith(TEST_SESSION_PREFIX) and in_temp_dir(cwd)
+    return name.startswith(TEST_SESSION_PREFIX) and in_temp_dir(cwd, roots)
 
 
 def background_sessions(rows: list) -> list:
@@ -91,12 +103,13 @@ def background_sessions(rows: list) -> list:
     `EMX_SHOW_TEST_SESSIONS=1` is set, as emx's own live checks do.
     """
     show_test = os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
+    roots = temp_roots()
     sessions = []
     for row in rows:
         sid = row.get("id")
         if row.get("kind") != "background" or not isinstance(sid, str) or not sid:
             continue
-        if not show_test and is_test_session(_text(row.get("name")), _text(row.get("cwd"))):
+        if not show_test and is_test_session(_text(row.get("name")), _text(row.get("cwd")), roots):
             continue
         sessions.append(
             Session(
