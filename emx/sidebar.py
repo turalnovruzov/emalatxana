@@ -21,6 +21,8 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
+PROMPT_SETTLE_SECONDS = 1.0
+PROMPT_SETTLE_STEP = 0.05
 # Longer than a `claude agents` call's own timeout, so an interrupt cancelled mid-listing still ends inside it.
 INTERRUPT_JOIN_SECONDS = 20
 GIT_SECONDS = 5
@@ -382,11 +384,17 @@ class Closer(threading.Thread):
 class Renamer(threading.Thread):
     """Renames a session off the curses thread by typing `/rename` into its open viewer.
 
-    It types only once a fresh listing shows the session running and not
-    working, the viewer's screen shows this session's empty prompt, and
-    tmux, in the same command that types, finds none of that changed and
-    his focus still on the panel. Then it waits for the listing to show the
-    new name. `result` is (renamed, message, typed).
+    It types only once a fresh listing shows the session running, the
+    viewer's screen shows this session's empty prompt, and tmux, in the same
+    command that types, finds none of that changed and his focus still on
+    the panel. A working session is typed into too: Claude Code runs
+    `/rename` as a command without ending the turn, queueing it when it must.
+    The line goes in without Enter. Enter follows only after a second look
+    finds the prompt holding that line alone, again through tmux's check; a
+    prompt that changed in between (a dialog opened, a draft added) gets no
+    Enter, and the line is cleared if the prompt still holds it alone. Then
+    it waits for the listing to show the new name. `result` is (renamed,
+    message, typed).
     """
 
     def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
@@ -411,27 +419,77 @@ class Renamer(threading.Thread):
             viewer = core.live_viewer(self.tmux.panes(), self.rename.id)
             if viewer is None:
                 return False, core.viewer_closed_text(self.rename), False
-            captured = self.tmux.capture(viewer.id)
-            x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
-            line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-            screen = core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+            screen = self.read_screen(viewer)
             refusal = core.rename_screen_refusal(self.rename, session, sessions, screen)
             if refusal:
                 return False, refusal, False
-            gate = core.type_gate(viewer.id, self.panel, self.rename.id, y, SESSION_OPT)
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
             if gate is None:
                 return False, f"emx can't check {self.rename.old}'s viewer safely, so it didn't rename it.", False
             report = self.tmux.type_if(
                 viewer.id, gate, core.rename_line(self.rename.new), core.TYPED, core.gate_report(SESSION_OPT),
+                enter=False,
             )
-            refusal = core.gate_refusal(self.rename, report, y)
+            refusal = core.gate_refusal(self.rename, report, screen.cursor_y)
             if refusal:
                 return False, refusal, False
         except TmuxError as exc:
             return False, f"tmux: {exc}", False
-        name = self.wait_for_name()
+        unsent = self.submit(viewer, session, sessions)
+        if unsent is not None:
+            return unsent
+        name, last = self.wait_for_name()
         prompt_empty = True if name is not None else self.prompt_empty(viewer.id)
-        return name is not None, core.renamed_text(self.rename, name, prompt_empty), True
+        queued = last is not None and core.category(last) == core.WORKING
+        done = name is not None or (queued and prompt_empty)
+        return done, core.renamed_text(self.rename, name, prompt_empty, queued), True
+
+    def read_screen(self, viewer: Pane) -> core.RenameScreen:
+        captured = self.tmux.capture(viewer.id)
+        x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
+        line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
+        return core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+
+    def submit(self, viewer: Pane, session, sessions) -> tuple | None:
+        """None once Enter went in on the line alone, else the result for a line left unsent. Nothing here may press Enter on a prompt that changed since the line was typed."""
+        unconfirmed = False
+        try:
+            screen = self.read_screen(viewer)
+            deadline = time.monotonic() + PROMPT_SETTLE_SECONDS
+            while core.typed_line_arriving(self.rename, screen) and time.monotonic() < deadline:
+                time.sleep(PROMPT_SETTLE_STEP)
+                screen = self.read_screen(viewer)
+            if core.typed_line_stands(self.rename, session, sessions, screen):
+                gate = core.type_gate(
+                    viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x,
+                )
+                if gate is not None:
+                    unconfirmed = True
+                    report = self.tmux.submit_if(viewer.id, gate, core.TYPED, core.gate_report(SESSION_OPT))
+                    unconfirmed = False
+                    if core.gate_refusal(self.rename, report, screen.cursor_y, screen.cursor_x) is None:
+                        return None
+        except TmuxError:
+            pass
+        cleared = self.clear_line(viewer)
+        return False, core.line_unsent_text(self.rename, cleared, unconfirmed), not cleared
+
+    def clear_line(self, viewer: Pane) -> bool:
+        """Whether the typed line was taken back: only while the prompt holds it alone, through tmux's check, and then seen empty."""
+        try:
+            screen = self.read_screen(viewer)
+            if not core.prompt_has_only_line(self.rename, screen):
+                return False
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x)
+            if gate is None:
+                return False
+            report = self.tmux.clear_if(viewer.id, gate, core.TYPED, core.gate_report(SESSION_OPT))
+            if report != core.TYPED:
+                return False
+            after = self.read_screen(viewer)
+            return core.empty_prompt(after.line, after.below, after.cursor_x, after.cursor_shown, after.width)
+        except TmuxError:
+            return False
 
     def prompt_empty(self, pane: str) -> bool:
         """Whether the viewer's prompt is empty now; True when tmux can't tell, so only text seen there is reported."""
@@ -442,14 +500,18 @@ class Renamer(threading.Thread):
             return True
         return core.empty_prompt(line, below, x, shown, width)
 
-    def wait_for_name(self) -> str | None:
+    def wait_for_name(self) -> tuple:
+        """(the new name or None, the last row of the session seen listed or None)."""
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        last = None
         while True:
             sessions, _ = fetch_sessions(self.claude)
-            session, _ = core.checked_row(sessions, self.rename.id)
+            session, fresh = core.checked_row(sessions, self.rename.id)
+            if fresh and session is not None:
+                last = session
             name = core.renamed_to(self.rename, session)
             if name is not None or time.monotonic() >= deadline:
-                return name
+                return name, last
             time.sleep(LISTED_CHECK_SECONDS)
 
 
@@ -739,6 +801,21 @@ def read_transcript(path: str, size: int) -> tuple:
     return found, True
 
 
+def read_continuation(path: str) -> str | None:
+    """The id of the session the transcript at `path` continued into, from the end of the file, or None. Never raises, and never writes."""
+    try:
+        size = os.stat(path).st_size
+        want = min(size, core.CONTINUED_TAIL_BYTES)
+        with open(path, "rb") as f:
+            f.seek(size - want)
+            lines = f.read(want).decode("utf-8", errors="replace").split("\n")
+    except (OSError, ValueError):
+        return None
+    if want < size:
+        lines = lines[1:]
+    return core.continued_in(lines, os.path.basename(path)[:-len(".jsonl")])
+
+
 def summary_scratch() -> str:
     """The empty private folder every summary call runs in, one per user so a panel killed mid-run leaves nothing new behind."""
     path = os.path.join(tempfile.gettempdir(), f"emx-summary-{os.getuid()}")
@@ -882,6 +959,13 @@ class Transcripts(threading.Thread):
     Claude Code keeps it for the session's folder; failing that, by its file
     name in each project folder, which is retried later, backing off, rather
     than on every pass.
+
+    A session reopened after Claude Code continued it elsewhere can have a
+    file with no turn in it; the earlier transcript names it in a
+    `continued-in` entry. Then the transcript read is the nearest earlier
+    one that says something, found in the same project folder and never
+    merged with another, so no request is counted twice. A session whose own
+    file says something never looks.
     """
 
     def __init__(self, root: str):
@@ -893,6 +977,12 @@ class Transcripts(threading.Thread):
         self.stamps = {}
         self.paths = {}
         self.misses = {}
+        self.reads = {}
+        self.links = {}
+        self.previous = {}
+        self.link_misses = {}
+        self.reached = set()
+        self.touched = set()
         self.changed = False
 
     def want(self, sessions) -> None:
@@ -910,6 +1000,7 @@ class Transcripts(threading.Thread):
     def read_all(self) -> None:
         with self.lock:
             wanted = dict(self.wanted)
+        self.reached, self.touched = set(), set()
         for sid, (cwd, uuid) in wanted.items():
             try:
                 self.read_one(sid, cwd, uuid)
@@ -920,6 +1011,11 @@ class Transcripts(threading.Thread):
             del self.paths[uuid]
         for uuid in set(self.misses) - uuids:
             del self.misses[uuid]
+        for table in (self.previous, self.link_misses):
+            for uuid in set(table) - self.reached:
+                del table[uuid]
+        for path in set(self.reads) - self.touched:
+            del self.reads[path]
         with self.lock:
             gone = (set(self.found) | set(self.stamps)) - set(wanted)
             for sid in gone:
@@ -931,18 +1027,82 @@ class Transcripts(threading.Thread):
         path = self.locate(cwd, uuid)
         if path is None:
             return
-        info = os.stat(path)
-        stamp = (path, info.st_mtime_ns, info.st_size)
-        if self.stamps.get(sid) == stamp:
+        kept = self.read_file(path)
+        if kept is None:
             return
-        found, ok = read_transcript(path, info.st_size)
-        if not ok:
-            return
+        found = kept[2]
+        seen, current, hops = {path}, path, 0
+        while found is None and hops < core.MAX_CONTINUATION_HOPS:
+            hops += 1
+            earlier = self.predecessor(os.path.dirname(current), os.path.basename(current)[:-len(".jsonl")])
+            if earlier is None or earlier in seen:
+                break
+            seen.add(earlier)
+            read = self.read_file(earlier)
+            if read is None:
+                break
+            current = earlier
+            if read[2] is not None:
+                kept, found = read, read[2]
+        path, stamp, found = kept
         with self.lock:
-            self.stamps[sid] = stamp
+            self.stamps[sid] = (path, *stamp)
             if self.found.get(sid) != found:
                 self.found[sid] = found
                 self.changed = True
+
+    def read_file(self, path: str) -> tuple | None:
+        """(path, (mtime_ns, size), what its end says) for the transcript at `path`, read again only when its stat changed; None when it can't be read."""
+        info = os.stat(path)
+        stamp = (info.st_mtime_ns, info.st_size)
+        self.touched.add(path)
+        cached = self.reads.get(path)
+        if cached is not None and cached[0] == stamp:
+            return path, stamp, cached[1]
+        found, ok = read_transcript(path, info.st_size)
+        if not ok:
+            return None
+        self.reads[path] = (stamp, found)
+        return path, stamp, found
+
+    def predecessor(self, folder: str, uuid: str) -> str | None:
+        """The transcript in `folder` whose `continued-in` entry names `uuid`, or None. Only this folder is looked in, a link once found is kept, and a miss backs off.
+
+        Candidates are taken in name order and the first to name `uuid` wins,
+        so two that claim the same session resolve the same way every pass.
+        Each candidate's end is read again only when its stat changed.
+        """
+        self.reached.add(uuid)
+        known = self.previous.get(uuid)
+        if known and os.path.isfile(known):
+            return known
+        tries, after = self.link_misses.get(uuid, (0, 0.0))
+        if after > time.monotonic():
+            return None
+        # Recorded before the scan, so a scan that raises backs off too.
+        self.link_misses[uuid] = (tries + 1, time.monotonic() + core.retry_after(tries + 1))
+        with os.scandir(folder) as entries:
+            names = sorted(e.name for e in entries if e.name.endswith(".jsonl") and e.is_file())
+        paths = [os.path.join(folder, n) for n in names]
+        for path in set(self.links) - set(paths):
+            if os.path.dirname(path) == folder:
+                del self.links[path]
+        for name, path in zip(names, paths):
+            if name == uuid + ".jsonl" or not core.is_session_id(name[:-len(".jsonl")]):
+                continue
+            try:
+                info = os.stat(path)
+            except OSError:
+                continue
+            stamp = (info.st_mtime_ns, info.st_size)
+            cached = self.links.get(path)
+            if cached is None or cached[0] != stamp:
+                cached = self.links[path] = (stamp, read_continuation(path))
+            if cached[1] == uuid:
+                self.previous[uuid] = path
+                self.link_misses.pop(uuid, None)
+                return path
+        return None
 
     def locate(self, cwd: str, uuid: str) -> str | None:
         if not core.is_session_id(uuid):

@@ -1843,8 +1843,15 @@ class RenameTmux:
         self.in_mode = False
         self.gate_says = core.TYPED
         self.prompt_after = None
+        self.after_typing = None
+        self.empty = None
+        self.clear_says = core.TYPED
+        self.enter_says = core.TYPED
         self.typed = []
         self.gates = []
+        self.enter_gates = []
+        self.clear_gates = []
+        self.events = []
         self.threads = []
 
     def view(self, screen, prompt):
@@ -1863,6 +1870,7 @@ class RenameTmux:
 
     def capture(self, pane):
         self.note()
+        self.events.append("capture")
         return self.screen
 
     def prompt_probe(self, pane):
@@ -1873,16 +1881,52 @@ class RenameTmux:
         self.note()
         return list(self.prompt)
 
-    def type_if(self, pane, gate, text, typed, report):
+    def type_if(self, pane, gate, text, typed, report, enter=True):
         self.note()
         self.gates.append(gate)
+        self.events.append("type_if")
         if self.gate_says == typed:
             self.typed.append((pane, text))
-            if self.prompt_after == "gone":
-                self.prompt_probe = mock.Mock(side_effect=TmuxError("can't find pane"))
-            elif self.prompt_after is not None:
-                self.view("named-viewer", self.prompt_after)
+            self.type_into_prompt(text)
+            if self.after_typing is not None:
+                self.after_typing()
+            if enter:
+                self.press_enter()
         return self.gate_says
+
+    def type_into_prompt(self, text):
+        """What the real prompt shows once the line is in it: the line after the mark, the cursor after the line, the rule under it."""
+        self.empty = (self.prompt, self.cursor_at)
+        x, y, shown, width = self.cursor_at
+        self.prompt = ("\x1b[39m❯\xa0" + text, self.prompt[1])
+        self.cursor_at = (2 + core.display_width(text), y, shown, width)
+
+    def press_enter(self):
+        self.events.append("enter")
+        if self.empty is not None:
+            self.prompt, self.cursor_at = self.empty
+            self.empty = None
+        if self.prompt_after == "gone":
+            self.prompt_probe = mock.Mock(side_effect=TmuxError("can't find pane"))
+        elif self.prompt_after is not None:
+            self.view("named-viewer", self.prompt_after)
+
+    def submit_if(self, pane, gate, typed, report):
+        self.note()
+        self.events.append("submit_if")
+        self.enter_gates.append(gate)
+        if self.enter_says == typed:
+            self.press_enter()
+        return self.enter_says
+
+    def clear_if(self, pane, gate, typed, report):
+        self.note()
+        self.events.append("clear_if")
+        self.clear_gates.append(gate)
+        if self.clear_says == typed and self.empty is not None:
+            self.prompt, self.cursor_at = self.empty
+            self.empty = None
+        return self.clear_says
 
 
 class RenameSession(AppCase):
@@ -2061,14 +2105,179 @@ class RenameSession(AppCase):
         self.settle()
         self.refused("isn't showing its prompt")
 
-    def test_a_working_or_stopped_session_is_never_typed_into(self):
-        for state, pid in (("working", 1), ("stopped", None)):
-            with self.subTest(state=state):
-                self.listings = [[session("named", "/p/alpha", state=state, pid=pid)]]
-                self.rename_to("fresh name")
-                self.settle()
-                self.assertEqual(self.app.tmux.typed, [])
-                self.assertTrue(self.app.notice_error)
+    def test_a_stopped_session_is_never_typed_into(self):
+        self.listings = [[session("named", "/p/alpha", state="stopped", pid=None)]]
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [])
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_working_session_is_typed_into_and_the_queued_rename_is_said_plainly(self):
+        working = session("named", "/p/alpha", state="working")
+        self.listings = [[working]]
+        self.after = working
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
+        self.assertIn("applies the name when this turn ends", self.app.notice)
+        self.assertNotIn("doesn't show", self.app.notice)
+        self.assertFalse(self.app.notice_error)
+        self.assertIn("named", self.app.renaming)
+
+    def test_a_working_session_whose_name_applies_at_once_is_reported_renamed(self):
+        self.listings = [[session("named", "/p/alpha", state="working")]]
+        self.after = core.Session("named", "fresh name", "/p/alpha", "working", "", "", 0.0, True)
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
+        self.assertEqual((self.app.notice, self.app.notice_error), ("Renamed emx-test-named to fresh name.", False))
+
+    def test_a_working_session_whose_prompt_holds_text_is_never_typed_into(self):
+        self.listings = [[session("named", "/p/alpha", state="working")]]
+        self.app.tmux.view("named-viewer", "prompt-text")
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
+        self.assertIn("prompt isn't empty", self.app.notice)
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_queued_rename_landing_late_does_not_flag_main(self):
+        working = session("named", "/p/alpha", state="working")
+        self.listings = [[working]]
+        self.after = working
+        self.rename_to("emx-test-renamed")
+        self.settle()
+        self.assertIn("named", self.app.renaming)
+        late = time.monotonic() + 10 * core.RENAME_PENDING_SECONDS
+        self.poll(working)
+        text, width = fixture_screen("named-viewer")
+        rule = next(line for line in text.split("\n") if line.endswith(" emx-test-named ─"))
+        self.app.tmux.screen = text.replace(rule, "─" * (width - 19) + " emx-test-renamed ─")
+        main = self.app.tmux.list[1]
+        with mock.patch.object(sidebar.time, "monotonic", lambda: late):
+            self.app.refresh()
+            self.app.check_main(main)
+        self.assertNotIn("%2", self.app.flagged_viewers)
+        self.assertIn("named", self.app.renaming)
+
+    def test_the_line_goes_in_without_enter_and_enter_follows_only_the_exact_line_check(self):
+        self.rename_to("fresh name")
+        self.settle()
+        tmux = self.app.tmux
+        self.assertEqual(tmux.events, ["capture", "type_if", "capture", "submit_if", "enter"])
+        at = 2 + len("/rename fresh name")
+        self.assertEqual(tmux.enter_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
+        self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
+        self.assertEqual(tmux.clear_gates, [])
+
+    def test_a_wide_name_gets_its_enter_gate_pinned_by_display_width(self):
+        self.rename_to("名前です")
+        self.settle()
+        tmux = self.app.tmux
+        self.assertEqual(tmux.events, ["capture", "type_if", "capture", "submit_if", "enter"])
+        at = 2 + core.display_width("/rename 名前です")
+        self.assertEqual(tmux.enter_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
+
+    def slow_to_draw(self, whole_after):
+        """The prompt first shows only the start of the line; the rest is drawn at the `whole_after`th capture of the Enter step."""
+        tmux = self.app.tmux
+        captures = []
+
+        def partial():
+            tmux.full = (tmux.prompt, tmux.cursor_at)
+            text = "/rename fre"
+            tmux.prompt = ("\x1b[39m❯\xa0" + text, tmux.prompt[1])
+            tmux.cursor_at = (2 + len(text), *tmux.cursor_at[1:])
+
+        def capture(pane):
+            captures.append(1)
+            if len(captures) >= whole_after:
+                tmux.prompt, tmux.cursor_at = tmux.full
+            return tmux.screen
+
+        tmux.after_typing = partial
+        tmux.capture = capture
+
+    def test_enter_waits_while_the_prompt_shows_only_the_start_of_the_line(self):
+        self.slow_to_draw(whole_after=4)
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.events[-2:], ["submit_if", "enter"])
+        self.assertEqual(self.app.tmux.clear_gates, [])
+
+    def test_a_line_that_never_finishes_drawing_gets_no_enter_after_the_bounded_wait(self):
+        self.slow_to_draw(whole_after=10 ** 6)
+        with mock.patch.object(sidebar, "PROMPT_SETTLE_SECONDS", 0.1), \
+                mock.patch.object(sidebar, "PROMPT_SETTLE_STEP", 0.01):
+            self.rename_to("fresh name")
+            self.settle()
+        self.assertNotIn("submit_if", self.app.tmux.events)
+        self.assertNotIn("enter", self.app.tmux.events)
+        self.assertTrue(self.app.notice_error)
+
+    def test_an_enter_whose_tmux_command_fails_is_not_reported_as_not_pressed(self):
+        tmux = self.app.tmux
+        tmux.submit_if = mock.Mock(side_effect=TmuxError("lost"))
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertIn("couldn't confirm Enter", self.app.notice)
+        self.assertNotIn("didn't press", self.app.notice)
+
+    def test_a_dialog_opening_between_the_typing_and_enter_gets_no_enter(self):
+        tmux = self.app.tmux
+        tmux.after_typing = lambda: tmux.view("prompt-permission", "prompt-permission")
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
+        self.assertNotIn("submit_if", tmux.events)
+        self.assertNotIn("enter", tmux.events)
+        self.assertNotIn("clear_if", tmux.events)
+        self.assertIn("didn't press Enter", self.app.notice)
+        self.assertIn("may still be in it", self.app.notice)
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_draft_added_to_the_line_gets_no_enter_and_is_not_cleared(self):
+        tmux = self.app.tmux
+
+        def add_draft():
+            tmux.prompt = (tmux.prompt[0] + " and more", tmux.prompt[1])
+            tmux.cursor_at = (tmux.cursor_at[0] + 9, *tmux.cursor_at[1:])
+
+        tmux.after_typing = add_draft
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual([e for e in tmux.events if e not in ("capture", "type_if")], [])
+        self.assertIn("may still be in it", self.app.notice)
+
+    def test_a_viewer_that_stopped_showing_this_session_gets_no_enter_and_the_line_is_cleared(self):
+        tmux = self.app.tmux
+        tmux.after_typing = lambda: setattr(tmux, "screen", fixture_screen("cross-wired")[0])
+        self.rename_to("fresh name")
+        self.settle()
+        at = 2 + len("/rename fresh name")
+        self.assertNotIn("submit_if", tmux.events)
+        self.assertEqual(tmux.clear_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
+        self.assertIn("cleared the line", self.app.notice)
+        self.assertNotIn("named", self.app.renaming)
+
+    def test_an_enter_tmux_refuses_clears_the_line_and_says_so(self):
+        tmux = self.app.tmux
+        tmux.enter_says = "0 0 1 20 27 named"
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(tmux.events[-4:], ["submit_if", "capture", "clear_if", "capture"])
+        self.assertNotIn("enter", tmux.events)
+        self.assertIn("cleared the line", self.app.notice)
+
+    def test_a_line_that_cannot_be_cleared_is_left_and_said_so(self):
+        tmux = self.app.tmux
+        tmux.after_typing = lambda: setattr(tmux, "screen", fixture_screen("cross-wired")[0])
+        tmux.clear_says = "0 0 1 20 26 named"
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(len(tmux.clear_gates), 1)
+        self.assertIn("may still be in it", self.app.notice)
+        self.assertIn("named", self.app.renaming)
 
     def test_a_failed_listing_types_nothing(self):
         self.listings = [None]
@@ -2102,14 +2311,15 @@ class RenameSession(AppCase):
         self.assertEqual(self.app.notice, "Open emx-test-c once, then press ctrl+r to rename it.")
 
     def test_a_name_the_listing_never_shows_is_reported_and_stops_being_pending(self):
-        self.after = self.named
+        stopped_turn = session("named", "/p/alpha", state="done")
+        self.after = stopped_turn
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual(len(self.app.tmux.typed), 1)
         self.assertIn("doesn't show a new name yet", self.app.notice)
         self.assertIn("named", self.app.renaming)
         later = time.monotonic() + core.RENAME_PENDING_SECONDS
-        self.poll(self.named)
+        self.poll(stopped_turn)
         with mock.patch.object(sidebar.time, "monotonic", lambda: later):
             self.app.refresh()
         self.assertNotIn("named", self.app.renaming)
@@ -2511,6 +2721,138 @@ class TranscriptReader(unittest.TestCase):
         self.assertTrue(self.reader.path("s1").endswith(f"{U1}.jsonl"))
         self.assertIsNone(self.reader.path("unknown"))
 
+    @staticmethod
+    def uid(n):
+        return f"{n:08d}-0000-4000-8000-000000000000"
+
+    def stub(self, uuid, folder="-tmp-a"):
+        return self.write(
+            folder, uuid, json.dumps({"type": "ai-title", "aiTitle": "A title"}),
+            json.dumps({"type": "agent-name", "agentName": "a-name"}),
+        )
+
+    def earlier(self, uuid, into, reply="Went there.", folder="-tmp-a"):
+        """A made-up transcript with one turn, which the session `into` continued."""
+        return self.write(
+            folder, uuid, transcript_line("user", "go"), transcript_line("assistant", [{"type": "text", "text": reply}]),
+            json.dumps({"type": "continued-in", "sessionId": uuid, "continuedInSessionId": into}),
+            json.dumps({"type": "last-prompt", "lastPrompt": "go"}), json.dumps({"type": "cost-state"}),
+        )
+
+    def stub_and_earlier(self):
+        self.stub(U2)
+        self.write("-tmp-a", f"{U2}.orphaned-1-ab", json.dumps({"type": "agent-name"}))
+        return self.earlier(U1, U2)
+
+    def test_a_stub_session_reads_the_transcript_that_continued_in_it(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertEqual(self.reader.take()["s2"].reply, "Went there.")
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+
+    def test_a_session_with_turns_of_its_own_never_looks_for_a_predecessor(self):
+        own = self.write("-tmp-a", U2, transcript_line("user", "mine"))
+        self.earlier(U1, U2)
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("looked")):
+            self.reader.read_all()
+        self.assertEqual(self.reader.path("s2"), own)
+        self.assertEqual(self.reader.take()["s2"].prompt, "mine")
+
+    def link(self, me, into, *lines):
+        """A made-up transcript `me` that continued into `into`, holding `lines` before the link."""
+        entry = {"type": "continued-in", "sessionId": me, "continuedInSessionId": into}
+        return self.write("-tmp-a", me, *lines, json.dumps(entry))
+
+    def test_the_chain_is_followed_across_hops(self):
+        a, b, c = self.uid(1), self.uid(2), self.uid(3)
+        self.link(a, b, transcript_line("user", "go"), transcript_line("assistant", [{"type": "text", "text": "From a."}]))
+        self.link(b, c, json.dumps({"type": "agent-name"}))
+        self.stub(c)
+        self.reader.want([self.row("s", "/tmp/a", c)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s").endswith(f"{a}.jsonl"))
+        self.assertEqual(self.reader.take()["s"].reply, "From a.")
+
+    def test_a_cycle_ends_at_the_own_file(self):
+        b, c = self.uid(2), self.uid(3)
+        self.link(b, c)
+        self.link(c, b)
+        self.reader.want([self.row("s", "/tmp/a", b)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s").endswith(f"{b}.jsonl"))
+        self.assertIsNone(self.reader.take())
+
+    def test_a_chain_longer_than_the_cap_stops_there(self):
+        length = core.MAX_CONTINUATION_HOPS + 2
+        self.stub(self.uid(1))
+        for n in range(2, length):
+            self.link(self.uid(n), self.uid(n - 1))
+        self.link(self.uid(length), self.uid(length - 1), transcript_line("user", "far away"))
+        self.reader.want([self.row("s", "/tmp/a", self.uid(1))])
+        with mock.patch.object(self.reader, "predecessor", wraps=self.reader.predecessor) as lookups:
+            self.reader.read_all()
+        self.assertLessEqual(lookups.call_count, core.MAX_CONTINUATION_HOPS)
+        self.assertTrue(self.reader.path("s").endswith(f"{self.uid(1)}.jsonl"))
+        self.assertIsNone(self.reader.take())
+
+    def test_two_files_continuing_into_the_same_session_resolve_to_the_first_by_name_every_pass(self):
+        first, second = self.uid(5), self.uid(6)
+        self.stub(U2)
+        self.earlier(second, U2, reply="Second.")
+        self.earlier(first, U2, reply="First.")
+        self.reader.want([self.row("s", "/tmp/a", U2)])
+        for _ in range(2):
+            self.reader.read_all()
+            self.assertTrue(self.reader.path("s").endswith(f"{first}.jsonl"))
+        self.assertEqual(self.reader.take()["s"].reply, "First.")
+
+    def test_a_stub_whose_own_file_gains_a_turn_switches_back_to_it(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        self.write("-tmp-a", U2, transcript_line("user", "again"), transcript_line("assistant", [{"type": "text", "text": "Own."}]))
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U2}.jsonl"))
+        self.assertEqual(self.reader.take()["s2"].reply, "Own.")
+
+    def test_a_found_link_is_not_searched_again_and_a_miss_backs_off(self):
+        self.stub_and_earlier()
+        self.stub(self.uid(7))
+        self.reader.want([self.row("s2", "/tmp/a", U2), self.row("s7", "/tmp/a", self.uid(7))])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        self.assertTrue(self.reader.path("s7").endswith(f"{self.uid(7)}.jsonl"))
+        with mock.patch.object(sidebar.os, "scandir") as scandir:
+            self.reader.read_all()
+        self.assertFalse(scandir.called)
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        with mock.patch.object(sidebar.time, "monotonic", return_value=time.monotonic() + 1e6), \
+                mock.patch.object(sidebar, "read_continuation", wraps=sidebar.read_continuation) as tails:
+            self.reader.read_all()
+        self.assertEqual(tails.call_count, 0)
+        self.assertNotIn(self.uid(7), self.reader.previous)
+
+    def test_only_the_sessions_own_folder_is_scanned(self):
+        self.stub(U2)
+        self.earlier(U1, U2, folder="-tmp-elsewhere")
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"-tmp-a/{U2}.jsonl"))
+
+    def test_unchanged_files_of_a_stub_chain_are_not_read_again(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        with mock.patch.object(sidebar, "read_transcript", wraps=sidebar.read_transcript) as reads, \
+                mock.patch.object(sidebar, "read_continuation", wraps=sidebar.read_continuation) as tails:
+            self.reader.read_all()
+            self.reader.read_all()
+        self.assertEqual((reads.call_count, tails.call_count), (0, 0))
+        self.assertEqual(self.reader.take()["s2"].reply, "Went there.")
+
 
 def requests_file(folder, *requests, name="s.jsonl"):
     path = Path(folder, name)
@@ -2625,6 +2967,21 @@ class NamerWorker(unittest.TestCase):
         path = requests_file(self.dir, "write a poem")
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
             name, error, _ = self.run_namer(path)
+        self.assertEqual((name, error), ("tea poem and csv parser", None))
+        self.assertIn("write a poem", run.call_args.kwargs["input"])
+
+    def test_tab_on_a_stub_session_reads_the_continued_transcripts_requests(self):
+        folder = Path(self.dir, "projects", "-tmp-a")
+        folder.mkdir(parents=True)
+        requests_file(folder, "write a poem", name=f"{U1}.jsonl")
+        with open(folder / f"{U1}.jsonl", "a") as f:
+            f.write(json.dumps({"type": "continued-in", "sessionId": U1, "continuedInSessionId": U2}) + "\n")
+        (folder / f"{U2}.jsonl").write_text(json.dumps({"type": "agent-name", "agentName": "x"}) + "\n")
+        reader = sidebar.Transcripts(self.dir)
+        reader.want([core.Session("s2", "s2", "/tmp/a", "done", "", "", None, True, U2)])
+        reader.read_all()
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            name, error, _ = self.run_namer(reader.path("s2"))
         self.assertEqual((name, error), ("tea poem and csv parser", None))
         self.assertIn("write a poem", run.call_args.kwargs["input"])
 

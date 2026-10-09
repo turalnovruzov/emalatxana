@@ -1831,6 +1831,120 @@ class EmptyPromptOnRealScreens(unittest.TestCase):
         self.assertFalse(core.empty_prompt(" " + line, below, x, shown, width))
 
 
+class PromptHoldsOnly(unittest.TestCase):
+    def test_the_box_must_hold_exactly_the_text_with_the_cursor_after_it_and_the_rule_under_it(self):
+        line, below, x, shown, width = at_cursor("prompt-slash-menu")
+        self.assertTrue(core.prompt_holds_only(line, below, x, shown, width, "/model"))
+        for label, args in {
+            "other text": (line, below, x, shown, width, "/mode"),
+            "cursor not after it": (line, below, x + 1, shown, width, "/model"),
+            "cursor hidden": (line, below, x, False, width, "/model"),
+            "rule of another width": (line, below, x, shown, width + 1, "/model"),
+            "a second line under it": (line, "  more", x, shown, width, "/model"),
+        }.items():
+            with self.subTest(label):
+                self.assertFalse(core.prompt_holds_only(*args))
+        for name in ("prompt-empty", "prompt-permission", "prompt-multiline", "prompt-model-menu", "prompt-text"):
+            with self.subTest(screen=name):
+                line, below, x, shown, width = at_cursor(name)
+                self.assertFalse(core.prompt_holds_only(line, below, x, shown, width, "/model"))
+
+    def test_text_typed_in_the_box_holds_when_the_cursor_is_at_its_end(self):
+        line, below, x, shown, width = at_cursor("prompt-text")
+        self.assertTrue(core.prompt_holds_only(line, below, 2 + len("hello world"), shown, width, "hello world"))
+        self.assertFalse(core.prompt_holds_only(line, below, x, shown, width, "hello world"))
+
+    def test_dim_example_text_is_not_text_that_was_typed(self):
+        line, below, x, shown, width = at_cursor("prompt-empty")
+        example = core.strip_ansi(line).replace("\xa0", " ")[2:].rstrip()
+        self.assertTrue(example)
+        self.assertFalse(core.prompt_holds_only(line, below, 2 + core.display_width(example), shown, width, example))
+
+
+class TypedLineStands(unittest.TestCase):
+    def setUp(self):
+        self.rename = core.Rename("a", "emx-test-named", "beta")
+        self.session = named("a", "emx-test-named", state="working")
+        self.others = [named("b", "bee")]
+        _, below, _, shown, self.width = at_cursor("prompt-empty")
+        self.below, self.shown = below, shown
+        self.captured, _ = real_screen("named-viewer")
+
+    def screen(self, text="/rename beta", **changes):
+        line = "\x1b[39m❯\xa0" + text
+        fields = dict(captured=self.captured, line=line, below=self.below, cursor_x=2 + core.display_width(text),
+                      cursor_y=26, cursor_shown=self.shown, width=self.width, in_mode=False, flagged=False)
+        return core.RenameScreen(**{**fields, **changes})
+
+    def stands(self, screen):
+        return core.typed_line_stands(self.rename, self.session, [self.session] + self.others, screen)
+
+    def test_the_line_alone_in_this_sessions_prompt_stands(self):
+        self.assertTrue(self.stands(self.screen()))
+
+    def test_anything_else_on_screen_after_typing_does_not(self):
+        permission, _ = real_screen("prompt-permission")
+        line, below, x, shown, width = at_cursor("prompt-permission")
+        agent_view, _ = real_screen("agent-view")
+        cases = {
+            "a dialog opened": self.screen(captured=permission, line=line, below=below, cursor_x=x, cursor_shown=shown),
+            "a draft added to the line": self.screen("/rename beta and more"),
+            "another name typed": self.screen("/rename other"),
+            "scrolled back": self.screen(in_mode=True),
+            "flagged as showing something else": self.screen(flagged=True),
+            "another screen in the viewer": self.screen(captured=agent_view),
+            "the cursor moved": self.screen(cursor_x=5),
+        }
+        for label, screen in cases.items():
+            with self.subTest(label):
+                self.assertFalse(self.stands(screen))
+
+    def test_the_line_alone_is_found_even_when_the_identity_is_in_doubt(self):
+        twin = [self.session, named("d", "emx-test-named")]
+        self.assertFalse(core.typed_line_stands(self.rename, self.session, twin, self.screen()))
+        self.assertTrue(core.prompt_has_only_line(self.rename, self.screen(flagged=True)))
+        self.assertFalse(core.prompt_has_only_line(self.rename, self.screen(in_mode=True)))
+
+    def test_the_unsent_text_says_whether_the_line_was_cleared(self):
+        self.assertIn("cleared the line", core.line_unsent_text(self.rename, True))
+        left = core.line_unsent_text(self.rename, False)
+        self.assertIn("may still be in it", left)
+        self.assertNotIn("cleared", left)
+
+    def test_a_wide_name_stands_by_display_width_not_by_character_count(self):
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
+        line = "/rename 名前です"
+        self.assertTrue(self.stands(self.screen(line)))
+        self.assertFalse(self.stands(self.screen(line, cursor_x=2 + len(line))))
+
+    def test_a_line_drawn_only_in_part_is_arriving_and_nothing_else_is(self):
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
+        full = "/rename 名前です"
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename 名")))
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/ren")))
+        self.rename = core.Rename("a", "emx-test-named", "fresh name")
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename fresh ")))
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
+        cases = {
+            "all of it": self.screen(full),
+            "something else": self.screen("/rename 名x"),
+            "more than it": self.screen(full + "x"),
+            "nothing yet": self.screen(""),
+            "cursor not after it": self.screen("/ren", cursor_x=9),
+            "scrolled back": self.screen("/ren", in_mode=True),
+            "cursor hidden": self.screen("/ren", cursor_shown=False),
+        }
+        for label, screen in cases.items():
+            with self.subTest(label):
+                self.assertFalse(core.typed_line_arriving(self.rename, screen))
+
+    def test_an_unconfirmed_enter_is_not_worded_as_not_pressed(self):
+        for cleared in (True, False):
+            text = core.line_unsent_text(self.rename, cleared, unconfirmed=True)
+            self.assertIn("couldn't confirm Enter", text)
+            self.assertNotIn("didn't press", text)
+
+
 class StyledCells(unittest.TestCase):
     def test_dim_follows_sgr_and_skips_colour_numbers(self):
         cases = [
@@ -2532,14 +2646,14 @@ class RenameChecks(unittest.TestCase):
         self.assertIn("Can't list", core.rename_blocked(True, None, running, True))
         self.assertIn("Still renaming", core.rename_blocked(False, self.rename, running, True))
 
-    def test_the_fresh_listing_must_show_it_running_and_not_working(self):
+    def test_the_fresh_listing_must_show_it_running(self):
         self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="blocked"), True))
         self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="done"), True))
+        self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="working"), True))
         cases = {
             "Couldn't list": (named("a", "alpha"), False),
             "isn't listed": (None, True),
             "isn't running": (named("a", "alpha", state="stopped", running=False), True),
-            "is working": (named("a", "alpha", state="working"), True),
         }
         for want, (session, fresh) in cases.items():
             with self.subTest(want=want):
@@ -2675,11 +2789,41 @@ class RenameChecks(unittest.TestCase):
     def test_a_typed_rename_is_pending_while_the_listing_shows_the_old_name_until_its_time_is_up(self):
         r = core.Rename("a", "alpha", "beta")
         renaming = core.rename_finished(core.rename_started({}, r), r, True, 100.0)
-        sessions = [named("a", "alpha")]
+        sessions = [named("a", "alpha", state="done")]
         self.assertIn("a", core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS - 1))
         self.assertEqual(core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS), {})
         self.assertEqual(core.pending_renames(renaming, [named("a", "beta")], None, 101.0), {})
         self.assertEqual(core.pending_renames(renaming, [], None, 101.0), {})
+
+    def test_a_pending_rename_lives_while_the_session_works_with_its_old_name(self):
+        r = core.Rename("a", "alpha", "beta")
+        renaming = core.rename_finished(core.rename_started({}, r), r, True, 100.0)
+        late = 100.0 + 10 * core.RENAME_PENDING_SECONDS
+        for state in ("working", "blocked"):
+            with self.subTest(state=state):
+                kept = core.pending_renames(renaming, [named("a", "alpha", state=state)], None, late)
+                self.assertEqual(kept, {"a": ("alpha", "beta", late + core.RENAME_PENDING_SECONDS)})
+        interrupted = core.Session("a", "alpha", "/r/app", "working", "idle", "", None, True)
+        self.assertEqual(core.pending_renames(renaming, [interrupted], None, late), {})
+        self.assertEqual(core.pending_renames(renaming, [named("a", "beta", state="working")], None, late), {})
+        self.assertEqual(core.pending_renames(renaming, [named("a", "alpha", state="done")], None, late), {})
+
+    def test_renamed_text_says_a_working_sessions_rename_is_queued(self):
+        r = core.Rename("a", "alpha", "beta")
+        text = core.renamed_text(r, None, queued=True)
+        self.assertIn("alpha", text)
+        self.assertNotIn("doesn't show a new name yet", text)
+        self.assertEqual(core.renamed_text(r, "beta", queued=True), "Renamed alpha to beta.")
+        self.assertIn("prompt isn't empty", core.renamed_text(r, None, prompt_empty=False, queued=True))
+
+    def test_a_working_session_showing_a_permission_dialog_is_refused(self):
+        working = named("named", "emx-test-named", state="working")
+        rename = core.Rename("named", "emx-test-named", "fresh")
+        screen = rename_screen("prompt-permission", "prompt-permission")
+        self.assertEqual(
+            core.rename_screen_refusal(rename, working, [working], screen),
+            "emx-test-named's viewer isn't showing its prompt, so emx didn't rename it.",
+        )
 
 
 def interrupt_screen(viewer, x=2, y=26, shown=True, in_mode=False, flagged=False):
@@ -3013,6 +3157,31 @@ class TailBytes(unittest.TestCase):
             found, read = core.parse_transcript(data[-want:].decode(), partial=want < len(data)), want
         self.assertEqual(found.reply, "Found me.")
         self.assertEqual(read, len(data))
+
+
+class ContinuedIn(unittest.TestCase):
+    OLD = "11111111-1111-4111-8111-111111111111"
+    NEW = "22222222-2222-4222-8222-222222222222"
+    LATER = "33333333-3333-4333-8333-333333333333"
+
+    def entry(self, **changes):
+        return json.dumps({"type": "continued-in", "sessionId": self.OLD, "continuedInSessionId": self.NEW, **changes})
+
+    def test_continued_in_reads_only_a_valid_entry_for_this_file(self):
+        self.assertEqual(core.continued_in([self.entry()], self.OLD), self.NEW)
+        for label, lines in (
+            ("another file's entry", [self.entry(sessionId=self.LATER)]),
+            ("a target that is no session id", [self.entry(continuedInSessionId="../x")]),
+            ("no target", [json.dumps({"type": "continued-in", "sessionId": self.OLD})]),
+            ("another type", [self.entry(type="last-prompt")]),
+            ("the words in a message", [json.dumps({"type": "user", "message": {"content": self.entry()}})]),
+            ("lines that are not JSON", ["{not json continued-in", "", "[]", "7"]),
+        ):
+            with self.subTest(label):
+                self.assertIsNone(core.continued_in(lines, self.OLD))
+        self.assertIsNone(core.continued_in([self.entry()], "not-an-id"))
+        later = self.entry(continuedInSessionId=self.LATER)
+        self.assertEqual(core.continued_in([self.entry(), "{bad", later], self.OLD), self.LATER)
 
 
 class TranscriptDir(unittest.TestCase):
