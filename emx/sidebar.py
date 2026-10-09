@@ -14,7 +14,7 @@ import time
 
 from emx import __version__, core
 from emx.cli import read_changelog, self_command
-from emx.tmux import ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -67,6 +67,7 @@ HELP = (
     ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("m", "mute or unmute spoken notices"),
+    ("h", "stop the voice now; later notices still speak"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
@@ -1246,22 +1247,24 @@ class Voice(threading.Thread):
         self.generation = 0
         self.playing = None
         self.muted = False
+        self.hushed_at = float("-inf")
 
-    def speak(self, text: str) -> None:
-        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through."""
+    def speak(self, text: str, at: float | None = None) -> None:
+        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through. `at` is when the notice's transition happened: a hush after that drops it too."""
         if not self.muted:
-            self.put(("say", text))
+            self.put(("say", text), at)
 
-    def put(self, item: tuple) -> None:
+    def put(self, item: tuple, at: float | None = None) -> None:
         with self.lock:
-            if self.muted:
+            if self.muted or (at is not None and at <= self.hushed_at):
                 return
             self.queue.append(item)
         self.wake.set()
 
     def silence(self) -> None:
-        """Stop what is being said and drop the speech queued."""
+        """Stop what is being said and drop the speech queued. A notice whose transition came before this is dropped too, if it is still being worded."""
         with self.lock:
+            self.hushed_at = time.monotonic()
             self.generation += 1
             self.queue = []
             proc = self.playing
@@ -1443,7 +1446,7 @@ class Notices(threading.Thread):
             self.outbox.append((notice.id, text, notice.at))
             speak = self.voice
         if speak and text:
-            self.speaker.speak(text)
+            self.speaker.speak(text, notice.at)
 
 
 class Poller(threading.Thread):
@@ -1528,6 +1531,7 @@ class App:
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
+        self.hush_seen = None
         self.missed = []
         self.missed_misses = {}
         self.opened = {}
@@ -1672,6 +1676,21 @@ class App:
             self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
+        self.check_hush()
+
+    def check_hush(self) -> None:
+        """`emx hush` from outside writes a fresh token to a session option; a change since the last read stops the voice. A failed read changes nothing."""
+        try:
+            value = self.tmux.session_option(HUSH_OPT)
+        except TmuxError:
+            return
+        self.hush_seen, due = core.hush_due(self.hush_seen, value)
+        if due:
+            self.hush()
+
+    def hush(self) -> None:
+        self.poller.voice.silence()
+        self.say("Stopped speaking.", seconds=RESTORED_NOTICE_SECONDS)
 
     def set_focus(self, focused: bool, back: bool = False) -> None:
         """Note whether the panel has focus.
@@ -2381,6 +2400,8 @@ class App:
             self.open_prompt()
         elif key == "m":
             self.toggle_voice()
+        elif key == "h":
+            self.hush()
         elif key == "r":
             self.restart_viewer()
         elif key == "s":

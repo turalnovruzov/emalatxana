@@ -4052,6 +4052,20 @@ class TopLineMuted(unittest.TestCase):
                 if "version" in plain:
                     self.assertIn("version", [tag for _, _, tag in placed])
 
+class HushDue(unittest.TestCase):
+    def test_the_first_read_is_a_baseline_and_is_not_due(self):
+        self.assertEqual(core.hush_due(None, "123"), ("123", False))
+
+    def test_an_empty_first_read_is_a_baseline_too(self):
+        seen, due = core.hush_due(None, "")
+        self.assertEqual((seen, due), ("", False))
+        self.assertEqual(core.hush_due(seen, "456"), ("456", True))
+
+    def test_a_change_is_due_and_the_same_value_is_not(self):
+        self.assertEqual(core.hush_due("123", "456"), ("456", True))
+        self.assertEqual(core.hush_due("456", "456"), ("456", False))
+
+
 class MissedList(unittest.TestCase):
     def item(self, sid, at, text=None):
         return core.Missed(sid, text or f"{sid} at {at}", at)

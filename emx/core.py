@@ -3341,6 +3341,13 @@ def fallback_notice(project: str, name: str, sid: str, kind: str) -> str:
     return f"{name}, in {project}, {words}."
 
 
+def hush_due(seen: str | None, value: str) -> tuple:
+    """(seen, due) after reading the hush token. The first read, `seen` None, is the baseline and is never due, so a hush from before the panel started is not replayed; any later change is due."""
+    if seen is None:
+        return value, False
+    return value, value != seen
+
+
 MISSED_SHOWN = 3
 MISSED_KEPT = 20
 MISSED_MIN_LIST_ROWS = 6

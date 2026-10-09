@@ -211,6 +211,12 @@ class ClientTmux:
 
     def __init__(self, state=(0, "", "", None)):
         self.state = state
+        self.hush = ""
+
+    def session_option(self, name):
+        if isinstance(self.hush, Exception):
+            raise self.hush
+        return self.hush
 
     def client_state(self):
         if isinstance(self.state, Exception):
@@ -4440,7 +4446,7 @@ class StubVoice:
     def __init__(self):
         self.spoken = []
 
-    def speak(self, text):
+    def speak(self, text, at=None):
         self.spoken.append(text)
 
 
@@ -4731,6 +4737,31 @@ class VoiceQueue(unittest.TestCase):
         (proc,) = FakeSay.made
         self.assertEqual(proc.argv[0], "fake-say")
         run.assert_not_called()
+
+    def test_hush_stops_the_playing_process_and_drops_the_queue_but_does_not_mute(self):
+        FakeSay.reset(hold=5)
+        self.voice.start()
+        for text in ("one", "two", "three"):
+            self.voice.speak(text)
+        wait_until(self, lambda: FakeSay.made and FakeSay.made[0].entered.is_set(), "the first to start")
+        self.voice.silence()
+        self.assertTrue(FakeSay.made[0].ended.is_set())
+        self.assertEqual(self.voice.queue, [])
+        self.assertFalse(self.voice.muted)
+        FakeSay.hold = 0.05
+        self.voice.speak("later")
+        wait_until(self, lambda: any(p.text == "later" and p.returncode == 0 for p in FakeSay.made), "the later text")
+
+    def test_a_notice_from_before_the_hush_is_never_spoken_and_one_after_is(self):
+        before = time.monotonic()
+        self.voice.silence()
+        after = time.monotonic()
+        self.voice.speak("old", before)
+        self.assertEqual(self.voice.queue, [])
+        self.voice.speak("new", after)
+        self.assertEqual(self.voice.queue, [("say", "new")])
+        self.voice.speak("untimed")
+        self.assertEqual(len(self.voice.queue), 2)
 
     def test_a_missing_say_does_not_raise_and_the_next_item_still_runs(self):
         calls = []
@@ -5030,6 +5061,60 @@ class MissedWiring(AppCase):
         self.app.refresh()
         self.assertEqual(self.app.poller.notices.pending, [])
         self.assertEqual(self.app.missed, [])
+
+
+class HushTmux(ClientTmux):
+    """What a real housekeep asks: one panel pane and no main pane, and anything else it may call does nothing."""
+    socket = "emx-test-hush"
+
+    def panes(self):
+        return [Pane("%1", "@1", False, "sidebar", "", 40, 141)]
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+class HushWiring(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = HushTmux()
+        self.app.me = "%1"
+
+    def housekeep(self, value):
+        self.app.tmux.hush = value
+        sidebar.App.housekeep(self.app, False)
+
+    def test_h_hushes_without_muting(self):
+        before = dict(self.app.prefs)
+        self.app.handle_key("h")
+        self.assertEqual(len(self.silenced), 1)
+        self.assertEqual(self.app.prefs, before)
+        self.assertTrue(core.voice_on(self.app.prefs))
+        self.assertFalse(self.app.poller.voice.muted)
+        self.assertEqual(self.app.notice, "Stopped speaking.")
+
+    def test_the_first_read_is_a_baseline_and_a_changed_token_hushes_once(self):
+        self.housekeep("100")
+        self.assertEqual(self.silenced, [])
+        self.housekeep("100")
+        self.assertEqual(self.silenced, [])
+        self.housekeep("200")
+        self.assertEqual(len(self.silenced), 1)
+        self.housekeep("200")
+        self.assertEqual(len(self.silenced), 1)
+
+    def test_a_tmux_error_while_reading_changes_nothing(self):
+        self.housekeep("100")
+        self.housekeep(TmuxError("gone"))
+        self.assertEqual(self.silenced, [])
+        self.assertEqual(self.app.hush_seen, "100")
+        self.housekeep("100")
+        self.assertEqual(self.silenced, [])
+
+    def test_the_help_lists_h_and_m(self):
+        keys = dict(sidebar.HELP)
+        self.assertIn("stop the voice", keys["h"])
+        self.assertIn("mute", keys["m"])
 
 
 class MuteKey(AppCase):

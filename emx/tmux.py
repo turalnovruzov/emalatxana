@@ -14,6 +14,7 @@ VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
 FOCUS_OPT = "@emx_focus"
+HUSH_OPT = "@emx_hush"
 
 
 _PANE_ID = re.compile(r"%\d+")

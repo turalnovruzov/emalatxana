@@ -1,6 +1,7 @@
 import os
 import pty
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -8,8 +9,8 @@ import unittest
 import uuid
 from unittest import mock
 
-from emx import core
-from emx.tmux import BACK_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
+from emx import cli, core
+from emx.tmux import BACK_OPT, HUSH_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
@@ -382,6 +383,53 @@ class Focus(PrivateServer):
         self.assertLess(idle, 5)
         os.write(self.client_fd, b"\x1b[O")
         self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class HushAcrossServers(unittest.TestCase):
+    """The real launcher's `hush` against two private servers: only the one named by EMX_SOCKET is touched."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.servers = {}
+        for name in ("a", "b"):
+            tmux = Tmux(f"emx-test-{name}-{uuid.uuid4().hex[:8]}", os.devnull)
+            self.addCleanup(self.kill, tmux)
+            tmux.run("new-session", "-d", "-s", SESSION, "sleep 30")
+            self.servers[name] = tmux
+
+    @staticmethod
+    def kill(tmux):
+        try:
+            tmux.run("kill-server")
+        except TmuxError:
+            pass
+
+    def hush(self, name):
+        env = {**os.environ, "EMX_SOCKET": self.servers[name].socket}
+        self.assertEqual(env["TMUX_TMPDIR"], os.environ["TMUX_TMPDIR"])
+        self.assertTrue(env["EMX_SOCKET"].startswith("emx-test-"))
+        done = subprocess.run(
+            [sys.executable, cli.BIN, "hush"], capture_output=True, text=True, timeout=30, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+
+    def token(self, name):
+        return self.servers[name].run("show-options", "-qv", "-t", f"={SESSION}:", HUSH_OPT).strip()
+
+    def test_it_sets_a_token_on_the_named_server_and_never_on_the_other(self):
+        self.hush("a")
+        first = self.token("a")
+        self.assertTrue(first.isdigit())
+        self.assertEqual(self.token("b"), "")
+        self.hush("a")
+        self.assertNotEqual(self.token("a"), first)
+        self.assertEqual(self.token("b"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
