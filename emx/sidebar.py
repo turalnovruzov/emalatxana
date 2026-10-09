@@ -64,6 +64,7 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
+    ("m", "mute or unmute spoken notices; banners still show"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
@@ -1366,6 +1367,9 @@ class App:
         self.scroll = 0
         self.last_housekeep = 0.0
         self.poller = Poller(claude)
+        self.poller.notices.voice = core.voice_on(self.prefs)
+        self.notice_seen = None
+        self.passthrough_for = None
         self.listings = Listings()
         self.home = os.path.expanduser("~")
         self.starter = None
@@ -1499,6 +1503,9 @@ class App:
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.take_focus(sidebar)
+                if self.passthrough_for != sidebar.id:
+                    self.tmux.allow_passthrough(sidebar.id)
+                    self.passthrough_for = sidebar.id
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -2211,6 +2218,8 @@ class App:
             self.start_rename()
         elif key == "n":
             self.open_prompt()
+        elif key == "m":
+            self.toggle_voice()
         elif key == "r":
             self.restart_viewer()
         elif key == "s":
@@ -2221,6 +2230,15 @@ class App:
             self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
+
+    def toggle_voice(self) -> None:
+        self.prefs = core.toggle_voice(self.prefs)
+        self.save_prefs()
+        on = core.voice_on(self.prefs)
+        self.poller.notices.voice = on
+        if not on:
+            self.poller.voice.silence()
+        self.say("Spoken notices on" if on else "Spoken notices off", seconds=RESTORED_NOTICE_SECONDS)
 
     def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
@@ -2369,8 +2387,9 @@ class App:
 
     def draw_top_line(self, width: int) -> None:
         style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM}
-        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded):
+        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM, "muted": curses.A_DIM}
+        muted = not core.voice_on(self.prefs)
+        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, muted):
             if tag in logo:
                 attr = logo[tag]
             else:
@@ -2526,6 +2545,7 @@ class App:
                 self.say(f"{self.rename_edit['old']} isn't listed any more, so emx dropped the rename.", error=True)
                 self.rename_edit = None
                 self.rename_misses = {}
+        self.queue_notices(sessions)
         self.loaded = True
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
@@ -2535,6 +2555,47 @@ class App:
             self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
         self.regroup()
         return True
+
+    def queue_notices(self, sessions: list) -> None:
+        """Hands the notices this listing earned to the worker that words them. Haiku is never called here."""
+        quiet = set(self.closing) | set(self.interrupters)
+        if self.renamer is not None:
+            quiet.add(self.renamer.rename.id)
+        self.notice_seen, events = core.notice_transitions(self.notice_seen, sessions, quiet)
+        if not events:
+            return
+        try:
+            attached, focus, active, idle = self.tmux.client_state()
+        except TmuxError:
+            attached, focus, active, idle = 0, "", "", None
+        main = self.main_pane
+        main_sid = main.session if main is not None and not self.main_is_off() else ""
+        main_id = main.id if main is not None else ""
+        now = time.monotonic()
+        for session in events:
+            if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
+                self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
+
+    def flush_notices(self) -> None:
+        """Shows the notices that are ready: as a terminal notification while a client is attached (read now, since he may have detached since the transition), else as a macOS banner."""
+        texts = self.poller.notices.take()
+        if not texts:
+            return
+        try:
+            attached = self.tmux.client_state()[0]
+        except TmuxError:
+            attached = 0
+        for text in texts:
+            if attached > 0:
+                self.write_out(core.osc9(text))
+            else:
+                self.poller.voice.banner(text)
+
+    def write_out(self, data: bytes) -> None:
+        try:
+            os.write(1, data)
+        except OSError as exc:
+            self.say(f"Couldn't send a notification: {exc}", error=True)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
@@ -2608,6 +2669,7 @@ class App:
                 # Lines under the list squeezed the box to nothing; the pane is not too short, so no notice says it is.
                 self.peeking = False
             self.draw()
+            self.flush_notices()
         except Exception as exc:
             self.say(f"emx error: {core.error_line(exc)}", error=True)
 

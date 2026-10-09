@@ -206,6 +206,22 @@ class FakePalette:
         return 0
 
 
+class ClientTmux:
+    """The two tmux calls a listing makes for notices; anything else is an error, as it is with no tmux at all."""
+
+    def __init__(self, state=(0, "", "", None)):
+        self.state = state
+        self.passthrough = []
+
+    def client_state(self):
+        if isinstance(self.state, Exception):
+            raise self.state
+        return self.state
+
+    def allow_passthrough(self, pane):
+        self.passthrough.append(pane)
+
+
 class AppCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -216,17 +232,34 @@ class AppCase(unittest.TestCase):
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
             # A worker a test didn't mean to start must never run his real claude.
             mock.patch.object(sidebar, "fetch_sessions", lambda claude: (None, "no claude in tests")),
+            # No test may speak, show a banner, ask Haiku or write to the real terminal.
+            mock.patch.object(sidebar, "announce", self.recorder("announced", method=False, result=(None, "no haiku in tests"))),
+            mock.patch.object(sidebar, "list_voices", lambda say: []),
+            mock.patch.object(sidebar.Voice, "speak", self.recorder("spoken")),
+            mock.patch.object(sidebar.Voice, "banner", self.recorder("banners")),
+            mock.patch.object(sidebar.Voice, "silence", self.recorder("silenced")),
+            mock.patch.object(sidebar.App, "write_out", self.recorder("written")),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
         self.scr = FakeScr()
-        self.app = sidebar.App(self.scr, tmux=None, claude="claude")
+        self.app = sidebar.App(self.scr, tmux=ClientTmux(), claude="claude")
         self.app.housekeep = lambda fresh_list: None
         self.opened = []
         self.app.switch_to = lambda sid, trigger, checked=None: self.opened.append(
             (sid, trigger) if checked is None else (sid, trigger, checked)
         )
+
+    def recorder(self, name, method=True, result=None):
+        calls = []
+        setattr(self, name, calls)
+
+        def record(*args, **kwargs):
+            calls.append(args[1:] if method else args)
+            return result
+
+        return record
 
     def poll(self, *sessions):
         self.app.poller.result = (list(sessions), None)
@@ -800,6 +833,9 @@ class CloseTmux:
 
     def kill_pane(self, pane):
         self.calls.append(("kill", pane))
+
+    def client_state(self):
+        return 0, "", "", None
 
 
 class CloseStaleOnListings(AppCase):
@@ -4364,6 +4400,201 @@ class VoiceQueue(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
         self.assertIsNone(poller.voice.voice)
         self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive())
+
+
+REAL_WRITE_OUT = sidebar.App.write_out
+
+
+class NoticeWiring(AppCase):
+    """A listing that moves a session into Needs input or Done queues one notice, unless he is looking at that session."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(lambda: self.assertEqual(self.announced, [], "Haiku was asked on the curses thread"))
+
+    def pending(self):
+        return list(self.app.poller.notices.pending)
+
+    def step(self, *sessions):
+        self.poll(*sessions)
+        self.app.refresh()
+
+    def main_shows(self, sid, state=(1, "1", "%2", 3.0)):
+        self.app.main_pane = Pane("%2", "@1", False, "", sid, 100, 141)
+        self.app.tmux = ClientTmux(state)
+
+    def test_working_then_done_gives_one_notice_and_a_third_identical_poll_none(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        (notice,) = self.pending()
+        self.assertEqual((notice.id, notice.kind, notice.name, notice.cwd), ("a", core.DONE, "emx-test-a", "/p/alpha"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_needing_input_is_a_notice_of_its_own_kind(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "blocked"))
+        self.assertEqual([n.kind for n in self.pending()], [core.NEEDS_INPUT])
+
+    def test_a_first_poll_already_done_gives_none(self):
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "blocked"))
+        self.assertEqual(self.pending(), [])
+
+    def test_an_error_and_an_empty_listing_in_between_give_none(self):
+        self.step(session("a", "/p/alpha", "done"))
+        self.app.poller.result = (None, "listing failed")
+        self.app.refresh()
+        self.step()
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_a_session_being_closed_gives_none(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.app.closing = {"a": True}
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_a_session_being_interrupted_or_renamed_gives_none(self):
+        self.step(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.app.interrupters = {"a": object()}
+        self.app.renamer = mock.Mock(rename=mock.Mock(id="b"))
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_the_session_in_front_is_quiet_and_another_is_not(self):
+        self.main_shows("a")
+        self.step(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "done"))
+        self.assertEqual([n.id for n in self.pending()], ["b"])
+
+    def test_each_condition_alone_makes_the_open_session_notify(self):
+        cases = {
+            "focus out": (1, "0", "%2", 3.0),
+            "focus unknown": (1, "", "%2", 3.0),
+            "no client": (0, "1", "%2", 3.0),
+            "panel active": (1, "1", "%1", 3.0),
+            "away": (1, "1", "%2", core.AWAY_SECONDS + 1.0),
+            "activity unknown": (1, "1", "%2", None),
+            "tmux failed": TmuxError("gone"),
+        }
+        for name, state in cases.items():
+            with self.subTest(name):
+                self.app.poller.notices.pending.clear()
+                self.app.notice_seen = None
+                self.main_shows("a", state)
+                self.step(session("a", "/p/alpha", "working"))
+                self.step(session("a", "/p/alpha", "done"))
+                self.assertEqual([n.id for n in self.pending()], ["a"])
+
+    def test_a_main_pane_flagged_off_is_not_in_front(self):
+        self.main_shows("a")
+        self.app.flagged_viewers = frozenset({"%2"})
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_flushing_while_attached_writes_the_terminal_notification_and_no_banner(self):
+        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.written, [(core.osc9("Alpha is done."),)])
+        self.assertEqual(self.banners, [])
+        self.assertEqual(self.app.poller.notices.outbox, [])
+
+    def test_flushing_while_detached_shows_a_banner_and_writes_nothing(self):
+        self.app.tmux = ClientTmux((0, "", "%1", None))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+        self.assertEqual(self.written, [])
+
+    def test_detaching_between_the_transition_and_delivery_still_shows_the_notice(self):
+        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+        self.app.tmux = ClientTmux((0, "", "%1", None))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.refresh()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+        self.assertEqual(self.written, [])
+
+    def test_a_tmux_error_at_delivery_falls_back_to_the_banner(self):
+        self.app.tmux = ClientTmux(TmuxError("gone"))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+
+    def test_a_failed_terminal_write_shows_on_the_panel_and_not_as_a_crash(self):
+        with mock.patch.object(sidebar.os, "write", side_effect=OSError("closed")):
+            REAL_WRITE_OUT(self.app, b"x")
+        self.assertIn("closed", self.app.notice)
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_real_housekeep_opens_passthrough_for_the_sidebar_pane_only_once(self):
+        class Housekeeping(ClientTmux):
+            socket = "emx-test-wiring"
+
+            def panes(self):
+                return [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "", "", 100, 141)]
+
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+
+        self.app.tmux = Housekeeping()
+        self.app.me = "%1"
+        sidebar.App.housekeep(self.app, False)
+        sidebar.App.housekeep(self.app, False)
+        self.assertEqual(self.app.tmux.passthrough, ["%1"])
+        self.assertNotIn("%2", self.app.tmux.passthrough)
+
+
+class MuteKey(AppCase):
+    def prefs_on_disk(self):
+        return json.loads(self.app.prefs_file.read_text(encoding="utf-8"))
+
+    def test_m_mutes_and_saves_and_a_new_panel_starts_muted(self):
+        self.assertTrue(self.app.poller.notices.voice)
+        self.app.handle_key("m")
+        self.assertIs(self.prefs_on_disk()["voice"], False)
+        self.assertFalse(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Spoken notices off")
+        again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+        self.assertFalse(again.poller.notices.voice)
+
+    def test_m_again_unmutes(self):
+        self.app.handle_key("m")
+        self.app.handle_key("m")
+        self.assertIs(self.prefs_on_disk()["voice"], True)
+        self.assertTrue(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Spoken notices on")
+
+    def test_muting_silences_the_voice_and_unmuting_does_not(self):
+        self.app.handle_key("m")
+        self.assertEqual(len(self.silenced), 1)
+        self.app.handle_key("m")
+        self.assertEqual(len(self.silenced), 1)
+
+    def test_m_while_typing_in_the_find_box_is_text(self):
+        self.app.handle_key("/")
+        self.app.handle_key("m")
+        self.assertTrue(core.voice_on(self.app.prefs))
+
+    def test_the_help_has_the_m_line(self):
+        self.assertIn(("m", "mute or unmute spoken notices; banners still show"), sidebar.HELP)
+
+    def test_the_top_line_shows_muted_only_while_muted(self):
+        def top_line():
+            drawn = []
+            self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+            self.app.draw_top_line(60)
+            return drawn
+
+        self.assertNotIn("muted", top_line())
+        self.app.handle_key("m")
+        self.assertIn("muted", top_line())
+        self.app.handle_key("m")
+        self.assertNotIn("muted", top_line())
 
 if __name__ == "__main__":
     unittest.main()
