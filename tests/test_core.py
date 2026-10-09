@@ -1074,6 +1074,24 @@ class Prefs(unittest.TestCase):
             with self.subTest(collapsed=bad):
                 self.assertEqual(core.normalize_prefs({"collapsed": bad}), core.DEFAULT_PREFS)
 
+    def test_voice_false_survives_a_save_and_load(self):
+        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": False})
+        self.assertIs(core.load_prefs(self.path)["voice"], False)
+
+    def test_a_non_bool_is_dropped(self):
+        for bad in ("no", 0, 1, None, []):
+            self.assertNotIn("voice", core.normalize_prefs({"voice": bad}))
+
+    def test_the_default_is_absent_and_voice_is_on(self):
+        self.assertNotIn("voice", core.DEFAULT_PREFS)
+        self.assertTrue(core.voice_on(core.load_prefs(self.path)))
+
+    def test_toggle_voice_flips_it(self):
+        off = core.toggle_voice(core.DEFAULT_PREFS)
+        self.assertIs(off["voice"], False)
+        self.assertFalse(core.voice_on(off))
+        self.assertTrue(core.voice_on(core.toggle_voice(off)))
+
 
 class Folders(unittest.TestCase):
     def test_tilde_expansion(self):
@@ -3657,8 +3675,6 @@ class NoticeText(unittest.TestCase):
         self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_NEEDS), "A session in app needs you.")
         self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_DONE), "A session in app is done.")
 
-
-class CleanNotice(unittest.TestCase):
     def test_no_control_character_survives(self):
         got = core.clean_notice("a\x1b]9;x\x07b\x9c")
         self.assertTrue(all(not (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F) for c in got))
@@ -3695,8 +3711,6 @@ class CleanNotice(unittest.TestCase):
             self.assertNotIn("[[", got)
             self.assertNotIn("]]", got)
 
-
-class Osc9(unittest.TestCase):
     START, END = b"\x1bPtmux;\x1b\x1b]9;", b"\x07\x1b\\"
 
     def check_body(self, text):
@@ -3752,31 +3766,6 @@ class Voices(unittest.TestCase):
     def test_none_when_none_is_listed_and_never_a_novelty_voice(self):
         self.assertIsNone(core.pick_voice([]))
         self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
-
-
-class VoicePrefs(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.path = Path(tmp.name) / "emx" / "prefs.json"
-
-    def test_voice_false_survives_a_save_and_load(self):
-        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": False})
-        self.assertIs(core.load_prefs(self.path)["voice"], False)
-
-    def test_a_non_bool_is_dropped(self):
-        for bad in ("no", 0, 1, None, []):
-            self.assertNotIn("voice", core.normalize_prefs({"voice": bad}))
-
-    def test_the_default_is_absent_and_voice_is_on(self):
-        self.assertNotIn("voice", core.DEFAULT_PREFS)
-        self.assertTrue(core.voice_on(core.load_prefs(self.path)))
-
-    def test_toggle_voice_flips_it(self):
-        off = core.toggle_voice(core.DEFAULT_PREFS)
-        self.assertIs(off["voice"], False)
-        self.assertFalse(core.voice_on(off))
-        self.assertTrue(core.voice_on(core.toggle_voice(off)))
 
 
 class TopLineMuted(unittest.TestCase):

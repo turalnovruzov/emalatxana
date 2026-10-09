@@ -122,10 +122,14 @@ class Tmux:
         )
         attached, focus, active, activity = (out.rstrip("\n").split("\t") + ["", "", "", ""])[:4]
         try:
+            count = int(attached or 0)
+        except ValueError:
+            raise TmuxError(f"tmux gave an unreadable client state: {out!r}") from None
+        try:
             idle = max(0.0, (time.time() if now is None else now) - float(activity))
         except ValueError:
             idle = None
-        return int(attached or 0), focus, active, idle
+        return count, focus, active, idle
 
     def new_hidden_window(self, command: str) -> str:
         return self.run("new-window", "-d", "-t", f"={SESSION}:", "-P", "-F", "#{pane_id}", command).strip()

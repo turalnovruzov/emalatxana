@@ -325,6 +325,12 @@ class ClientStateParse(unittest.TestCase):
         self.assertEqual(self.state("0\t\t\t\n")[0], (0, "", "", None))
         self.assertEqual(self.state("")[0], (0, "", "", None))
 
+    def test_an_unreadable_answer_is_a_tmux_error_not_a_crash(self):
+        for out in ("x\t1\t%1\t5", "1.5\t1\t%1\t5"):
+            with self.subTest(out=out), self.assertRaises(TmuxError):
+                self.state(out)
+        self.assertEqual(self.state("1\t1\t%1\tnot-a-time")[0], (1, "1", "%1", None))
+
     def test_a_focus_out_report_and_an_activity_in_the_future(self):
         self.assertEqual(self.state("1\t0\t%1\t1005\n")[0], (1, "0", "%1", 0.0))
 

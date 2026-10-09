@@ -2545,7 +2545,6 @@ class App:
                 self.say(f"{self.rename_edit['old']} isn't listed any more, so emx dropped the rename.", error=True)
                 self.rename_edit = None
                 self.rename_misses = {}
-        self.queue_notices(sessions)
         self.loaded = True
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
@@ -2554,6 +2553,7 @@ class App:
         if sessions:
             self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
         self.regroup()
+        self.queue_notices(sessions)
         return True
 
     def queue_notices(self, sessions: list) -> None:
