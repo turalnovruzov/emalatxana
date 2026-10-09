@@ -60,6 +60,7 @@ HELP = (
     ("↵ click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
+    ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
     ("^x", "interrupt a working session; twice closes it (stop, then remove)"),
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
@@ -1656,6 +1657,17 @@ class App:
             self.say(core.still_closing(shown.name if shown else item[1]))
         else:
             self.switch_to(item[1], core.OPEN)
+            self.remember_open(item[1])
+
+    def remember_open(self, sid: str) -> None:
+        session = self.session(sid)
+        if session is None or not session.cwd:
+            return
+        folder = core.opened_folder(session.cwd, self.placements.get(session.cwd))
+        new = core.remember_opened(self.prefs, folder)
+        if new is not self.prefs:
+            self.prefs = new
+            self.save_prefs()
 
     def housekeep(self, fresh_list: bool) -> None:
         try:
@@ -2240,6 +2252,8 @@ class App:
                 self.open_picker()
             else:
                 self.complete_suggestion()
+        elif p["stage"] == "folder" and key == CTRL_T:
+            self.toggle_favourite()
         elif p["stage"] == "folder" and key in (curses.KEY_UP, curses.KEY_DOWN):
             self.move_pick(-1 if key == curses.KEY_UP else 1)
         elif isinstance(key, str) and key.isprintable():
@@ -2256,7 +2270,32 @@ class App:
             names = self.listings.get(folder)
             if names is not None:
                 listed[folder] = names
-        return core.folder_suggestions(p["text"], folders, recent, listed, self.home, roots=roots)
+        favourites = core.favourite_folders(self.prefs)
+        readable = {f: self.listings.readable(f) for f in favourites}
+        present = 0
+        for folder in recent:
+            if present >= core.RECENT_SHOWN:
+                break
+            if folder not in readable:
+                readable[folder] = self.listings.readable(folder)
+            present += readable[folder] is not False
+        return core.folder_suggestions(
+            p["text"], folders, core.present_folders(recent, readable), listed, self.home,
+            roots=roots, favourites=core.present_folders(favourites, readable),
+        )
+
+    def toggle_favourite(self) -> None:
+        """Ctrl+T in the picker: star or unstar the highlighted folder, else the top row (as Tab picks)."""
+        rows = self.suggestions()
+        target = self.prompt.get("picked") or (rows[0].path if rows else None)
+        if target is None:
+            return
+        self.prefs, on = core.toggle_favourite(self.prefs, target)
+        self.save_prefs()
+        name = core.tilde_path(target, self.home)
+        hint = f"★ {name} is a favourite" if on else f"{name} is no longer a favourite"
+        still_listed = target in {r.path for r in self.suggestions()}
+        self.prompt.update(picked=target if still_listed else None, hint=hint)
 
     def move_pick(self, delta: int) -> None:
         """The highlight is kept by path: a listing arriving late can move rows, and the folder he chose must not change under him."""
@@ -2479,7 +2518,7 @@ class App:
             hint = "Enter start · Tab folder · Esc cancel"
         else:
             head = [("New session · pick a folder:", curses.A_BOLD)]
-            hint = "↑↓ pick · Tab fill · ↵ use · Esc " + ("back" if p.get("back") else "cancel")
+            hint = "↑↓ pick · Tab fill · ↵ use · ^t ★ · Esc " + ("back" if p.get("back") else "cancel")
         head += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
         tail = [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]] if p["hint"] else []
         tail += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]
@@ -2499,8 +2538,10 @@ class App:
         picked = self.prompt.get("picked")
         shown = rows if len(rows) <= fits else rows[:max(0, fits - 1)]
         lines = []
+        starred = set(core.favourite_folders(self.prefs))
         for row in shown:
-            text = core.fit((" " + core.short_path(row.path, width - 1, self.home)).ljust(width), width)
+            mark = "★" if row.path in starred else " "
+            text = core.fit((mark + core.short_path(row.path, width - 1, self.home)).ljust(width), width)
             lines.append((text, self.palette.attr("plain", "focused") if row.path == picked else self.palette.attr("path")))
         hidden = rows[len(shown):]
         if hidden and fits > 0:

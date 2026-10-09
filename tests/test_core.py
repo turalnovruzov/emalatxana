@@ -1217,6 +1217,66 @@ class RecentFolders(unittest.TestCase):
             self.assertNotIn("recent_folders", core.normalize_prefs({"recent_folders": bad}))
 
 
+    def test_an_open_moves_a_folder_first_without_touching_last_folder(self):
+        prefs = {**core.DEFAULT_PREFS, "recent_folders": ["/x", "/y"], "last_folder": "/x"}
+        got = core.remember_opened(prefs, "/y")
+        self.assertEqual(got["recent_folders"], ["/y", "/x"])
+        self.assertEqual(got["last_folder"], "/x")
+        self.assertIs(core.remember_opened(got, "/y"), got)
+        self.assertIs(core.remember_opened(got, ""), got)
+
+    def test_a_start_and_an_open_of_the_same_folder_share_one_slot(self):
+        prefs = core.remember_folder(dict(core.DEFAULT_PREFS), "/a/")
+        got = core.remember_opened(prefs, "/a")
+        self.assertEqual(got["recent_folders"], ["/a"])
+
+    def test_an_open_is_capped(self):
+        prefs = dict(core.DEFAULT_PREFS)
+        for i in range(core.RECENT_FOLDERS + 3):
+            prefs = core.remember_opened(prefs, f"/f/{i}")
+        self.assertEqual(len(prefs["recent_folders"]), core.RECENT_FOLDERS)
+
+    def test_an_open_worktree_records_its_repo_only_once_placed(self):
+        self.assertEqual(core.opened_folder("/w/k/.claude/worktrees/f", core.Placement("/w/k", "f")), "/w/k")
+        self.assertEqual(core.opened_folder("/w/k/sub", core.Placement("/w/k")), "/w/k/sub")
+        self.assertEqual(core.opened_folder("/w/k/x", None), "/w/k/x")
+
+    def test_present_folders_hides_only_confirmed_missing(self):
+        self.assertEqual(core.present_folders(["/a", "/b", "/c"], {"/a": False, "/b": True}), ["/b", "/c"])
+
+
+class FavouriteFolders(unittest.TestCase):
+    def test_toggle_adds_then_removes_and_normalizes(self):
+        prefs = dict(core.DEFAULT_PREFS)
+        starred, on = core.toggle_favourite(prefs, "/a/")
+        self.assertEqual(starred["favourite_folders"], ["/a"])
+        self.assertTrue(on)
+        self.assertEqual(prefs, core.DEFAULT_PREFS)
+        cleared, on = core.toggle_favourite(starred, "/a")
+        self.assertNotIn("/a", cleared.get("favourite_folders", []))
+        self.assertFalse(on)
+        self.assertEqual(starred["favourite_folders"], ["/a"])
+
+    def test_they_keep_the_order_starred(self):
+        prefs, _ = core.toggle_favourite(dict(core.DEFAULT_PREFS), "/b")
+        prefs, _ = core.toggle_favourite(prefs, "/a")
+        self.assertEqual(core.favourite_folders(prefs), ["/b", "/a"])
+
+    def test_they_survive_a_save_and_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "prefs.json"
+            prefs, _ = core.toggle_favourite(dict(core.DEFAULT_PREFS), "/f/a")
+            core.save_prefs(path, prefs)
+            self.assertEqual(core.load_prefs(path)["favourite_folders"], ["/f/a"])
+
+    def test_normalize_drops_bad_entries_and_repeats(self):
+        got = core.normalize_prefs({"favourite_folders": ["/a", "", 3, None, "/a/", "/b"]})
+        self.assertEqual(got["favourite_folders"], ["/a", "/b"])
+        for bad in ("/a", [], [""], None):
+            self.assertNotIn("favourite_folders", core.normalize_prefs({"favourite_folders": bad}))
+        self.assertNotIn("favourite_folders", core.DEFAULT_PREFS)
+
+
 class FuzzyMatch(unittest.TestCase):
     FOLDERS = [
         "~/Workspace/email-export",
@@ -1288,15 +1348,39 @@ class FuzzyMatch(unittest.TestCase):
 
 
 class FolderSuggestions(unittest.TestCase):
-    def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS, roots=None):
-        rows = core.folder_suggestions(text, sessions, recent, listed or {}, HOME, limit, roots)
+    def shown(self, text, sessions=(), recent=(), listed=None, limit=core.PICKER_ROWS, roots=None, favourites=()):
+        rows = core.folder_suggestions(text, sessions, recent, listed or {}, HOME, limit, roots, favourites=favourites)
         return [(r.shown, r.source) for r in rows]
 
     def test_sources_in_order_each_keeping_its_own_order_when_nothing_is_typed(self):
         got = self.shown("", ["/h/me/zeta", "/h/me/alpha"], ["/h/me/beta", "/h/me/zeta/"], {HOME: ["Gamma", "alpha", ".git"]})
         self.assertEqual(got, [
-            ("~/zeta", core.SESSIONS), ("~/alpha", core.SESSIONS), ("~/beta", core.RECENT), ("~/Gamma", core.LISTED),
+            ("~/beta", core.RECENT), ("~/zeta", core.RECENT), ("~/alpha", core.SESSIONS), ("~/Gamma", core.LISTED),
         ])
+
+    def test_favourites_then_recents_then_sessions_when_nothing_is_typed(self):
+        got = self.shown("", ["/h/me/s"], ["/h/me/r1", "/h/me/f"], {HOME: ["l"]}, favourites=["/h/me/f"])
+        self.assertEqual(got, [("~/f", core.FAVOURITE), ("~/r1", core.RECENT), ("~/s", core.SESSIONS), ("~/l", core.LISTED)])
+
+    def test_at_most_eight_recents_show_untyped(self):
+        recent = [f"/h/me/r{i}" for i in range(12)]
+        got = self.shown("", recent=recent)
+        self.assertEqual([s for s, _ in got], [f"~/r{i}" for i in range(core.RECENT_SHOWN)])
+
+    def test_favourites_and_recents_are_never_cut(self):
+        favs = [f"/h/me/f{i}" for i in range(6)]
+        recent = [f"/h/me/r{i}" for i in range(8)]
+        got = self.shown("", ["/h/me/s1", "/h/me/s2", "/h/me/s3"], recent, favourites=favs)
+        self.assertEqual(len(got), 14)
+        self.assertEqual([s for s, _ in got[:6]], [f"~/f{i}" for i in range(6)])
+        self.assertNotIn(core.SESSIONS, [src for _, src in got])
+        got = self.shown("", [f"/h/me/s{i}" for i in range(10)], ["/h/me/r1", "/h/me/r2"], favourites=["/h/me/f1", "/h/me/f2"])
+        self.assertEqual(len(got), core.PICKER_ROWS)
+
+    def test_typing_still_ranks_every_source_and_a_favourite_wins_a_tie(self):
+        got = self.shown("kiw", [], [], {HOME: ["kiwi"]}, favourites=["/h/me/kiwa"])
+        self.assertEqual(got, [("~/kiwa", core.FAVOURITE), ("~/kiwi", core.LISTED)])
+        self.assertEqual(self.shown("zz", favourites=["/h/me/kiwa"]), [])
 
     def test_a_bare_word_ranks_every_source_together_and_drops_non_matches(self):
         got = self.shown("emx", ["/h/me/Workspace/email-export", "/h/me/Workspace/emberlynx", "/h/me/notes"],

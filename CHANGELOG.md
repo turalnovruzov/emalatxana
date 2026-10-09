@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.6.0 — 2026-10-09
+
+- When you press n and Tab, the folder list opens with your favourites (★) and then your last 8 folders, before you type. Typing still searches everything.
+- Ctrl+T in that list stars or unstars the highlighted folder. Favourites stay in emx's own settings on this Mac (`~/.config/emx/prefs.json`), never in the repo.
+- A folder counts as recent when you start a session there or open a session in it. A folder that no longer exists is left out of the list until it is back.
+
 ## 1.5.0 — 2026-10-09
 
 - emx no longer shows banners or plays a notification sound; a notice is only the spoken sentence. iTerm2's own notifications are left as they are.
