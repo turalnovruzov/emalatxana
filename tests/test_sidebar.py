@@ -2170,6 +2170,59 @@ class RenameSession(AppCase):
         self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
         self.assertEqual(tmux.clear_gates, [])
 
+    def test_a_wide_name_gets_its_enter_gate_pinned_by_display_width(self):
+        self.rename_to("名前です")
+        self.settle()
+        tmux = self.app.tmux
+        self.assertEqual(tmux.events, ["capture", "type_if", "capture", "submit_if", "enter"])
+        at = 2 + core.display_width("/rename 名前です")
+        self.assertEqual(tmux.enter_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
+
+    def slow_to_draw(self, whole_after):
+        """The prompt first shows only the start of the line; the rest is drawn at the `whole_after`th capture of the Enter step."""
+        tmux = self.app.tmux
+        captures = []
+
+        def partial():
+            tmux.full = (tmux.prompt, tmux.cursor_at)
+            text = "/rename fre"
+            tmux.prompt = ("\x1b[39m❯\xa0" + text, tmux.prompt[1])
+            tmux.cursor_at = (2 + len(text), *tmux.cursor_at[1:])
+
+        def capture(pane):
+            captures.append(1)
+            if len(captures) >= whole_after:
+                tmux.prompt, tmux.cursor_at = tmux.full
+            return tmux.screen
+
+        tmux.after_typing = partial
+        tmux.capture = capture
+
+    def test_enter_waits_while_the_prompt_shows_only_the_start_of_the_line(self):
+        self.slow_to_draw(whole_after=4)
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(self.app.tmux.events[-2:], ["submit_if", "enter"])
+        self.assertEqual(self.app.tmux.clear_gates, [])
+
+    def test_a_line_that_never_finishes_drawing_gets_no_enter_after_the_bounded_wait(self):
+        self.slow_to_draw(whole_after=10 ** 6)
+        with mock.patch.object(sidebar, "PROMPT_SETTLE_SECONDS", 0.1), \
+                mock.patch.object(sidebar, "PROMPT_SETTLE_STEP", 0.01):
+            self.rename_to("fresh name")
+            self.settle()
+        self.assertNotIn("submit_if", self.app.tmux.events)
+        self.assertNotIn("enter", self.app.tmux.events)
+        self.assertTrue(self.app.notice_error)
+
+    def test_an_enter_whose_tmux_command_fails_is_not_reported_as_not_pressed(self):
+        tmux = self.app.tmux
+        tmux.submit_if = mock.Mock(side_effect=TmuxError("lost"))
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertIn("couldn't confirm Enter", self.app.notice)
+        self.assertNotIn("didn't press", self.app.notice)
+
     def test_a_dialog_opening_between_the_typing_and_enter_gets_no_enter(self):
         tmux = self.app.tmux
         tmux.after_typing = lambda: tmux.view("prompt-permission", "prompt-permission")
@@ -2772,8 +2825,9 @@ class TranscriptReader(unittest.TestCase):
         self.reader.read_all()
         self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
         self.assertTrue(self.reader.path("s7").endswith(f"{self.uid(7)}.jsonl"))
-        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("scanned again")):
+        with mock.patch.object(sidebar.os, "scandir") as scandir:
             self.reader.read_all()
+        self.assertFalse(scandir.called)
         self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
         with mock.patch.object(sidebar.time, "monotonic", return_value=time.monotonic() + 1e6), \
                 mock.patch.object(sidebar, "read_continuation", wraps=sidebar.read_continuation) as tails:

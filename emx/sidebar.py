@@ -21,6 +21,8 @@ HOUSEKEEP_SECONDS = 0.5
 FRESH_GRACE_SECONDS = 60
 LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
+PROMPT_SETTLE_SECONDS = 1.0
+PROMPT_SETTLE_STEP = 0.05
 # Longer than a `claude agents` call's own timeout, so an interrupt cancelled mid-listing still ends inside it.
 INTERRUPT_JOIN_SECONDS = 20
 GIT_SECONDS = 5
@@ -450,20 +452,27 @@ class Renamer(threading.Thread):
 
     def submit(self, viewer: Pane, session, sessions) -> tuple | None:
         """None once Enter went in on the line alone, else the result for a line left unsent. Nothing here may press Enter on a prompt that changed since the line was typed."""
+        unconfirmed = False
         try:
             screen = self.read_screen(viewer)
+            deadline = time.monotonic() + PROMPT_SETTLE_SECONDS
+            while core.typed_line_arriving(self.rename, screen) and time.monotonic() < deadline:
+                time.sleep(PROMPT_SETTLE_STEP)
+                screen = self.read_screen(viewer)
             if core.typed_line_stands(self.rename, session, sessions, screen):
                 gate = core.type_gate(
                     viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x,
                 )
                 if gate is not None:
+                    unconfirmed = True
                     report = self.tmux.submit_if(viewer.id, gate, core.TYPED, core.gate_report(SESSION_OPT))
+                    unconfirmed = False
                     if core.gate_refusal(self.rename, report, screen.cursor_y, screen.cursor_x) is None:
                         return None
         except TmuxError:
             pass
         cleared = self.clear_line(viewer)
-        return False, core.line_unsent_text(self.rename, cleared), not cleared
+        return False, core.line_unsent_text(self.rename, cleared, unconfirmed), not cleared
 
     def clear_line(self, viewer: Pane) -> bool:
         """Whether the typed line was taken back: only while the prompt holds it alone, through tmux's check, and then seen empty."""

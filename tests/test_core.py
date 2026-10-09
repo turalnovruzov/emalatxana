@@ -1911,6 +1911,36 @@ class TypedLineStands(unittest.TestCase):
         self.assertIn("may still be in it", left)
         self.assertNotIn("cleared", left)
 
+    def test_a_wide_name_stands_by_display_width_not_by_character_count(self):
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
+        line = "/rename 名前です"
+        self.assertTrue(self.stands(self.screen(line)))
+        self.assertFalse(self.stands(self.screen(line, cursor_x=2 + len(line))))
+
+    def test_a_line_drawn_only_in_part_is_arriving_and_nothing_else_is(self):
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
+        full = "/rename 名前です"
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename 名")))
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/ren")))
+        cases = {
+            "all of it": self.screen(full),
+            "something else": self.screen("/rename 名x"),
+            "more than it": self.screen(full + "x"),
+            "nothing yet": self.screen(""),
+            "cursor not after it": self.screen("/ren", cursor_x=9),
+            "scrolled back": self.screen("/ren", in_mode=True),
+            "cursor hidden": self.screen("/ren", cursor_shown=False),
+        }
+        for label, screen in cases.items():
+            with self.subTest(label):
+                self.assertFalse(core.typed_line_arriving(self.rename, screen))
+
+    def test_an_unconfirmed_enter_is_not_worded_as_not_pressed(self):
+        for cleared in (True, False):
+            text = core.line_unsent_text(self.rename, cleared, unconfirmed=True)
+            self.assertIn("couldn't confirm Enter", text)
+            self.assertNotIn("didn't press", text)
+
 
 class StyledCells(unittest.TestCase):
     def test_dim_follows_sgr_and_skips_colour_numbers(self):

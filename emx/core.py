@@ -651,7 +651,23 @@ def typed_line_stands(rename: Rename, session: Session, sessions, screen: Rename
     return identity == "ok"
 
 
-def line_unsent_text(rename: Rename, cleared: bool) -> str:
+def typed_line_arriving(rename: Rename, screen: RenameScreen) -> bool:
+    """Whether the prompt shows only the start of the `/rename` line, cursor right after it: the keys are in but not all drawn yet."""
+    if screen.in_mode or not screen.cursor_shown:
+        return False
+    text = "".join(ch for ch, _ in _styled_cells(screen.line)).replace("\xa0", " ").rstrip()
+    if not text.startswith("❯ "):
+        return False
+    shown, line = text[2:], rename_line(rename.new)
+    return 0 < len(shown) < len(line) and line.startswith(shown) and screen.cursor_x == PROMPT_TEXT_X + display_width(shown)
+
+
+def line_unsent_text(rename: Rename, cleared: bool, unconfirmed: bool = False) -> str:
+    if unconfirmed:
+        if cleared:
+            return f"emx couldn't confirm Enter on {rename.old}'s /rename, found the line still in the prompt and cleared it."
+        return (f"emx couldn't confirm Enter on {rename.old}'s /rename."
+                f" Check the prompt there; the line may still be in it.")
     if cleared:
         return f"{rename.old}'s prompt changed right after emx typed /rename, so emx didn't press Enter and cleared the line."
     return (f"{rename.old}'s prompt changed right after emx typed /rename, so emx didn't press Enter."
