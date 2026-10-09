@@ -382,11 +382,17 @@ class Closer(threading.Thread):
 class Renamer(threading.Thread):
     """Renames a session off the curses thread by typing `/rename` into its open viewer.
 
-    It types only once a fresh listing shows the session running and not
-    working, the viewer's screen shows this session's empty prompt, and
-    tmux, in the same command that types, finds none of that changed and
-    his focus still on the panel. Then it waits for the listing to show the
-    new name. `result` is (renamed, message, typed).
+    It types only once a fresh listing shows the session running, the
+    viewer's screen shows this session's empty prompt, and tmux, in the same
+    command that types, finds none of that changed and his focus still on
+    the panel. A working session is typed into too: Claude Code runs
+    `/rename` as a command without ending the turn, queueing it when it must.
+    The line goes in without Enter. Enter follows only after a second look
+    finds the prompt holding that line alone, again through tmux's check; a
+    prompt that changed in between (a dialog opened, a draft added) gets no
+    Enter, and the line is cleared if the prompt still holds it alone. Then
+    it waits for the listing to show the new name. `result` is (renamed,
+    message, typed).
     """
 
     def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
@@ -411,27 +417,70 @@ class Renamer(threading.Thread):
             viewer = core.live_viewer(self.tmux.panes(), self.rename.id)
             if viewer is None:
                 return False, core.viewer_closed_text(self.rename), False
-            captured = self.tmux.capture(viewer.id)
-            x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
-            line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-            screen = core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+            screen = self.read_screen(viewer)
             refusal = core.rename_screen_refusal(self.rename, session, sessions, screen)
             if refusal:
                 return False, refusal, False
-            gate = core.type_gate(viewer.id, self.panel, self.rename.id, y, SESSION_OPT)
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
             if gate is None:
                 return False, f"emx can't check {self.rename.old}'s viewer safely, so it didn't rename it.", False
             report = self.tmux.type_if(
                 viewer.id, gate, core.rename_line(self.rename.new), core.TYPED, core.gate_report(SESSION_OPT),
+                enter=False,
             )
-            refusal = core.gate_refusal(self.rename, report, y)
+            refusal = core.gate_refusal(self.rename, report, screen.cursor_y)
             if refusal:
                 return False, refusal, False
         except TmuxError as exc:
             return False, f"tmux: {exc}", False
-        name = self.wait_for_name()
+        unsent = self.submit(viewer, session, sessions)
+        if unsent is not None:
+            return unsent
+        name, last = self.wait_for_name()
         prompt_empty = True if name is not None else self.prompt_empty(viewer.id)
-        return name is not None, core.renamed_text(self.rename, name, prompt_empty), True
+        queued = last is not None and core.category(last) == core.WORKING
+        done = name is not None or (queued and prompt_empty)
+        return done, core.renamed_text(self.rename, name, prompt_empty, queued), True
+
+    def read_screen(self, viewer: Pane) -> core.RenameScreen:
+        captured = self.tmux.capture(viewer.id)
+        x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
+        line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
+        return core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+
+    def submit(self, viewer: Pane, session, sessions) -> tuple | None:
+        """None once Enter went in on the line alone, else the result for a line left unsent. Nothing here may press Enter on a prompt that changed since the line was typed."""
+        try:
+            screen = self.read_screen(viewer)
+            if core.typed_line_stands(self.rename, session, sessions, screen):
+                gate = core.type_gate(
+                    viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x,
+                )
+                if gate is not None:
+                    report = self.tmux.submit_if(viewer.id, gate, core.TYPED, core.gate_report(SESSION_OPT))
+                    if core.gate_refusal(self.rename, report, screen.cursor_y, screen.cursor_x) is None:
+                        return None
+        except TmuxError:
+            pass
+        cleared = self.clear_line(viewer)
+        return False, core.line_unsent_text(self.rename, cleared), not cleared
+
+    def clear_line(self, viewer: Pane) -> bool:
+        """Whether the typed line was taken back: only while the prompt holds it alone, through tmux's check, and then seen empty."""
+        try:
+            screen = self.read_screen(viewer)
+            if not core.prompt_has_only_line(self.rename, screen):
+                return False
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x)
+            if gate is None:
+                return False
+            report = self.tmux.clear_if(viewer.id, gate, core.TYPED, core.gate_report(SESSION_OPT))
+            if report != core.TYPED:
+                return False
+            after = self.read_screen(viewer)
+            return core.empty_prompt(after.line, after.below, after.cursor_x, after.cursor_shown, after.width)
+        except TmuxError:
+            return False
 
     def prompt_empty(self, pane: str) -> bool:
         """Whether the viewer's prompt is empty now; True when tmux can't tell, so only text seen there is reported."""
@@ -442,14 +491,18 @@ class Renamer(threading.Thread):
             return True
         return core.empty_prompt(line, below, x, shown, width)
 
-    def wait_for_name(self) -> str | None:
+    def wait_for_name(self) -> tuple:
+        """(the new name or None, the last row of the session seen listed or None)."""
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        last = None
         while True:
             sessions, _ = fetch_sessions(self.claude)
-            session, _ = core.checked_row(sessions, self.rename.id)
+            session, fresh = core.checked_row(sessions, self.rename.id)
+            if fresh and session is not None:
+                last = session
             name = core.renamed_to(self.rename, session)
             if name is not None or time.monotonic() >= deadline:
-                return name
+                return name, last
             time.sleep(LISTED_CHECK_SECONDS)
 
 

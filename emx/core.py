@@ -544,8 +544,10 @@ def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | N
 def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool) -> str | None:
     """Why a confirmed rename may not type into the session, judged on a listing taken just before, or None.
 
-    A working session would queue `/rename` behind its turn, or treat it as
-    a reply; a session with no live process has nothing to type into.
+    A working session is typed into like any other: Claude Code runs
+    `/rename` as a command and never as the model's input, and the screen
+    checks keep it away from a question or a permission prompt. A session
+    with no live process has nothing to type into.
     """
     if not fresh:
         return f"Couldn't list sessions to check {rename.old}, so emx didn't rename it."
@@ -553,8 +555,6 @@ def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool)
         return f"{rename.old} isn't listed any more, so emx didn't rename it."
     if not session.running:
         return f"{rename.old} isn't running, so emx didn't rename it."
-    if category(session) == WORKING:
-        return f"{rename.old} is working. Rename it once it stops."
     return None
 
 
@@ -629,6 +629,33 @@ def rename_screen_refusal(rename: Rename, session: Session, sessions, screen: Re
     if not empty_prompt(screen.line, screen.below, screen.cursor_x, screen.cursor_shown, screen.width):
         return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
     return None
+
+
+def prompt_has_only_line(rename: Rename, screen: RenameScreen) -> bool:
+    """Whether the viewer, not in a mode, shows the `/rename` line emx typed alone in its prompt."""
+    return not screen.in_mode and prompt_holds_only(
+        screen.line, screen.below, screen.cursor_x, screen.cursor_shown, screen.width, rename_line(rename.new),
+    )
+
+
+def typed_line_stands(rename: Rename, session: Session, sessions, screen: RenameScreen) -> bool:
+    """Whether the screen, looked at after `/rename` was typed and before Enter, still shows this session's prompt holding that line alone.
+
+    A dialog that opened in between, a draft of his added to it, or
+    a viewer swapped for another session's all fail it, and then Enter is
+    not sent.
+    """
+    if not prompt_has_only_line(rename, screen):
+        return False
+    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
+    return identity == "ok"
+
+
+def line_unsent_text(rename: Rename, cleared: bool) -> str:
+    if cleared:
+        return f"{rename.old}'s prompt changed right after emx typed /rename, so emx didn't press Enter and cleared the line."
+    return (f"{rename.old}'s prompt changed right after emx typed /rename, so emx didn't press Enter."
+            f" Check the prompt there; the line may still be in it.")
 
 
 @dataclass(frozen=True)
@@ -765,13 +792,15 @@ def renamed_to(rename: Rename, session: Session | None) -> str | None:
     return session.name
 
 
-def renamed_text(rename: Rename, name: str | None, prompt_empty: bool = True) -> str:
-    """`prompt_empty` is whether the viewer's prompt was empty when no new name showed: text left there may be the unsent line, or a draft he began since."""
+def renamed_text(rename: Rename, name: str | None, prompt_empty: bool = True, queued: bool = False) -> str:
+    """`prompt_empty` is whether the viewer's prompt was empty when no new name showed: text left there may be the unsent line, or a draft he began since. `queued` says the session was working, so Claude Code may apply the name when its turn ends."""
     if name is not None:
         return f"Renamed {rename.old} to {name}."
     if not prompt_empty:
         return (f"Typed /rename into {rename.old}, but no new name shows and its prompt isn't empty:"
                 f" the line may not have been sent. Check it before you press Enter there.")
+    if queued:
+        return f"Typed /rename into {rename.old}; it's working, so Claude Code applies the name when this turn ends."
     return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
 
 
@@ -789,12 +818,24 @@ def rename_finished(renaming: Mapping, rename: Rename, typed: bool, now: float) 
 
 
 def pending_renames(renaming: Mapping, sessions, in_flight: str | None, now: float) -> dict:
-    """The entries of `renaming` still pending: the one being typed and checked, and any whose listing still shows the old name and whose time is not up."""
-    names = {s.id: s.name for s in sessions}
-    return {
-        sid: (old, new, until) for sid, (old, new, until) in renaming.items()
-        if sid == in_flight or (names.get(sid) == old and until is not None and now < until)
-    }
+    """The entries of `renaming` still pending: the one being typed and checked, and any whose listing still shows the old name and whose time is not up.
+
+    A session still in its turn (working, or stopped for you) keeps its
+    entry with the time renewed, because Claude Code may run a queued
+    `/rename` only when the turn ends.
+    """
+    by_id = {s.id: s for s in sessions}
+    kept = {}
+    for sid, (old, new, until) in renaming.items():
+        session = by_id.get(sid)
+        if sid == in_flight:
+            kept[sid] = (old, new, until)
+        elif session is not None and session.name == old and until is not None:
+            if category(session) in (WORKING, NEEDS_INPUT) and not idle(session):
+                kept[sid] = (old, new, now + RENAME_PENDING_SECONDS)
+            elif now < until:
+                kept[sid] = (old, new, until)
+    return kept
 
 
 def viewer_names(session: Session, renaming: Mapping) -> list:
@@ -2262,8 +2303,29 @@ def empty_prompt(line: str, below: str, cursor_x: int, cursor_shown: bool, pane_
         return False
     if any(not ch.isspace() and not dim for ch, dim in cells[PROMPT_TEXT_X:]):
         return False
+    return _rule_below(below, pane_width)
+
+
+def _rule_below(below: str, pane_width: int) -> bool:
     rule = strip_ansi(below).rstrip()
     return bool(_FULL_RULE.match(rule)) and display_width(rule) == pane_width
+
+
+def prompt_holds_only(line: str, below: str, cursor_x: int, cursor_shown: bool, pane_width: int, text: str) -> bool:
+    """Whether the input box holds exactly `text` and nothing else, with the cursor right after it, as `capture-pane -e` shows `line` and `below`.
+
+    Typed text is drawn undimmed, so a dim suggestion after it fails this
+    too, and a second line of input sits between the first and the rule.
+    """
+    if not cursor_shown or cursor_x != PROMPT_TEXT_X + display_width(text):
+        return False
+    cells = _styled_cells(line)
+    # Claude Code draws a no-break space after the mark.
+    if "".join(ch for ch, _ in cells).replace("\xa0", " ").rstrip() != "❯ " + text:
+        return False
+    if any(dim for ch, dim in cells[PROMPT_TEXT_X:] if not ch.isspace()):
+        return False
+    return _rule_below(below, pane_width)
 
 
 _SGR = re.compile(r"\x1b\[([0-9;:]*)m")

@@ -212,8 +212,8 @@ class Tmux:
         x, y, shown, width, in_mode = out.strip().split("\t")
         return int(x), int(y), shown == "1", int(width), in_mode not in ("", "0")
 
-    def type_if(self, pane: str, gate: str, text: str, typed: str, report: str) -> str:
-        """Type `text` and Enter into the pane only while the format `gate` is true there, all in one tmux command, so no other key lands between the check and the typing.
+    def type_if(self, pane: str, gate: str, text: str, typed: str, report: str, enter: bool = True) -> str:
+        """Type `text` into the pane, and Enter after it unless `enter` is False, only while the format `gate` is true there, all in one tmux command, so no other key lands between the check and the typing.
 
         Prints back `typed` when it typed, else `report` expanded on the
         pane. The text goes as hex bytes (`-H`): tmux reads an argument
@@ -222,8 +222,19 @@ class Tmux:
         if not _PANE_ID.fullmatch(pane):
             raise TmuxError(f"not a pane id: {pane!r}")
         keys = " ".join(format(b, "02x") for b in text.encode("utf-8"))
-        send = f"send-keys -t {pane} -H {keys} ; send-keys -t {pane} Enter ; display-message -p {typed}"
+        send = f"send-keys -t {pane} -H {keys} ; "
+        if enter:
+            send += f"send-keys -t {pane} Enter ; "
+        send += f"display-message -p {typed}"
         return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()
+
+    def submit_if(self, pane: str, gate: str, typed: str, report: str) -> str:
+        """Press Enter in the pane only while the format `gate` is true there, in one tmux command as `type_if` does. For the line `type_if` typed without it."""
+        return self._key_if(pane, gate, "Enter", typed, report)
+
+    def clear_if(self, pane: str, gate: str, typed: str, report: str) -> str:
+        """Press Ctrl+U, which empties Claude Code's input box, only while the format `gate` is true there. For taking back a line `type_if` typed."""
+        return self._key_if(pane, gate, "C-u", typed, report)
 
     def key_if(self, pane: str, gate: str, key: str, typed: str, report: str) -> str:
         """Send the one named `key`, with no Enter, into the pane only while the format `gate` is true there, in one tmux command as `type_if` does.
@@ -233,6 +244,9 @@ class Tmux:
         """
         if key not in KEYS_SENT:
             raise TmuxError(f"not a key emx sends: {key!r}")
+        return self._key_if(pane, gate, key, typed, report)
+
+    def _key_if(self, pane: str, gate: str, key: str, typed: str, report: str) -> str:
         if not _PANE_ID.fullmatch(pane):
             raise TmuxError(f"not a pane id: {pane!r}")
         send = f"send-keys -t {pane} {key} ; display-message -p {typed}"

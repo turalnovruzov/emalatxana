@@ -196,6 +196,28 @@ class TypeIf(PrivateServer):
         self.assertEqual(self.typed("main"), want)
         self.assertEqual(self.typed("sidebar"), b"")
 
+    def test_it_types_the_text_and_no_enter_when_asked_not_to(self):
+        gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        report = self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT), enter=False)
+        self.assertEqual(report, core.TYPED)
+        self.wait_for(lambda: len(self.typed("main")) >= len(self.TEXT.encode("utf-8")), "the line in main")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), self.TEXT.encode("utf-8"))
+
+    def test_enter_and_ctrl_u_go_only_through_their_own_gated_methods(self):
+        gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        refused = core.type_gate(self.main, self.sidebar, "s1", 5, SESSION_OPT)
+        report = core.gate_report(SESSION_OPT)
+        self.assertNotEqual(self.tmux.submit_if(self.main, refused, core.TYPED, report), core.TYPED)
+        self.assertNotEqual(self.tmux.clear_if(self.main, refused, core.TYPED, report), core.TYPED)
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        self.assertEqual(self.tmux.submit_if(self.main, gate, core.TYPED, report), core.TYPED)
+        self.assertEqual(self.tmux.clear_if(self.main, gate, core.TYPED, report), core.TYPED)
+        self.wait_for(lambda: len(self.typed("main")) >= 2, "both keys in main")
+        self.assertEqual(self.typed("main"), b"\r\x15")
+        self.assertEqual(self.typed("sidebar"), b"")
+
     def test_it_types_into_a_viewer_in_a_hidden_window(self):
         hidden = self.tmux.new_hidden_window(f"{sys.executable} -I {os.path.join(self.dir, 'recorder.py')} {self.keys('hidden')}")
         self.tmux.set_pane_option(hidden, SESSION_OPT, "s2")
