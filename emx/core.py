@@ -1821,6 +1821,11 @@ def normalize_prefs(raw) -> dict:
         recent = list(dict.fromkeys(f for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
         if recent:
             prefs["recent_folders"] = recent
+    favourites = raw.get("favourite_folders")
+    if isinstance(favourites, list):
+        favourites = list(dict.fromkeys(os.path.normpath(f) for f in favourites if isinstance(f, str) and f))
+        if favourites:
+            prefs["favourite_folders"] = favourites
     pinned = raw.get("pinned")
     if isinstance(pinned, list):
         pinned = list(dict.fromkeys(p for p in pinned if isinstance(p, str) and p))
@@ -1907,9 +1912,10 @@ def resolve_folder(text: str, base: str) -> str:
 
 
 RECENT_FOLDERS = 20
+RECENT_SHOWN = 8
 PICKER_ROWS = 8
-SESSIONS, RECENT, LISTED = "sessions", "recent", "listed"
-_SOURCE_RANK = {SESSIONS: 0, RECENT: 1, LISTED: 2}
+FAVOURITE, SESSIONS, RECENT, LISTED = "favourite", "sessions", "recent", "listed"
+_SOURCE_RANK = {FAVOURITE: 0, SESSIONS: 1, RECENT: 2, LISTED: 3}
 SEARCHED_PARENTS = 6
 MAX_LISTED_NAMES = 5000
 _BOUNDARY = "/-_. "
@@ -1938,6 +1944,45 @@ def remember_folder(prefs: dict, folder: str) -> dict:
     """`prefs` after a session started in `folder`: it becomes the last folder and the newest of the recent ones."""
     recent = [folder] + [f for f in prefs.get("recent_folders", ()) if f != folder]
     return {**prefs, "last_folder": folder, "recent_folders": recent[:RECENT_FOLDERS]}
+
+
+def favourite_folders(prefs: dict) -> list:
+    return prefs.get("favourite_folders", [])
+
+
+def toggle_favourite(prefs: dict, folder: str) -> tuple[dict, bool]:
+    """(`prefs` with `folder` starred or unstarred, whether it is a favourite now); `prefs` itself is not changed."""
+    folder = os.path.normpath(folder)
+    current = favourite_folders(prefs)
+    on = folder not in current
+    updated = [*current, folder] if on else [f for f in current if f != folder]
+    new = {k: v for k, v in prefs.items() if k != "favourite_folders"}
+    if updated:
+        new["favourite_folders"] = updated
+    return new, on
+
+
+def opened_folder(cwd: str, placement: "Placement | None") -> str:
+    """The folder an opened session counts as: its repo when it runs in a known worktree, else its own."""
+    if placement is not None and placement.worktree:
+        return placement.repo
+    return cwd
+
+
+def remember_opened(prefs: dict, folder: str) -> dict:
+    """`prefs` with `folder` newest among the recent ones, `last_folder` untouched; `prefs` itself when nothing changes."""
+    if not folder:
+        return prefs
+    folder = os.path.normpath(folder)
+    recent = prefs.get("recent_folders", [])
+    if recent[:1] == [folder]:
+        return prefs
+    return {**prefs, "recent_folders": ([folder] + [f for f in recent if f != folder])[:RECENT_FOLDERS]}
+
+
+def present_folders(folders, readable: Mapping) -> list:
+    """`folders` without those a read has found missing or unreadable; one not read yet stays."""
+    return [f for f in folders if readable.get(f) is not False]
 
 
 def tilde_path(path: str, home: str) -> str:
@@ -2044,13 +2089,15 @@ def _searched(session_folders, recent_folders, home: str, roots) -> list:
     return search_folders(roots, [], home)
 
 
-def folder_suggestions(text: str, session_folders, recent_folders, listed: Mapping, home: str, limit: int = PICKER_ROWS, roots=None) -> list:
-    """The picker's rows for `text`, from folders with sessions, recent folders, and listings of folders.
+def folder_suggestions(text: str, session_folders, recent_folders, listed: Mapping, home: str, limit: int = PICKER_ROWS, roots=None, favourites=()) -> list:
+    """The picker's rows for `text`, from favourites, folders with sessions, recent folders, and listings of folders.
 
     `listed` maps a folder to the names of its subfolders, from listings
     taken off the curses thread; a folder not yet listed is missing. With
-    nothing typed, the sources follow each other in their own order, with
-    home's subfolders last. Once a path is typed (it has a `/`), only folders
+    nothing typed, the sources follow each other in this order: favourites,
+    the first `RECENT_SHOWN` recent folders, folders with sessions, then
+    home's subfolders. Favourites and those recents are never cut by
+    `limit`. Once a path is typed (it has a `/`), only folders
     under the folder being typed into are offered, each matched on its path
     from there. A bare word is matched against the whole path of every known
     folder and of the subfolders of `search_folders`. Typed text ranks every
@@ -2061,7 +2108,12 @@ def folder_suggestions(text: str, session_folders, recent_folders, listed: Mappi
     as in `folders_to_list`.
     """
     query = text.strip()
-    known = [(SESSIONS, f) for f in session_folders if f] + [(RECENT, f) for f in recent_folders if f]
+    stars = [(FAVOURITE, f) for f in favourites if f]
+    known = stars + [(SESSIONS, f) for f in session_folders if f] + [(RECENT, f) for f in recent_folders if f]
+    if not query:
+        shown = [(RECENT, f) for f in recent_folders if f][:RECENT_SHOWN]
+        known = stars + shown + [(SESSIONS, f) for f in session_folders if f]
+        limit = max(limit, len({os.path.normpath(f) for _, f in stars + shown}))
     candidates = []
     if _path_mode(query):
         parent, match_on = picker_query(query, home)
@@ -2091,7 +2143,8 @@ def folder_suggestions(text: str, session_folders, recent_folders, listed: Mappi
         else:
             match = fuzzy_match(match_on, target) if match_on else ()
         if match is not None:
-            ranked.append(((match, _SOURCE_RANK[source], order), key, source))
+            rank = (match, _SOURCE_RANK[source], order) if query else (order,)
+            ranked.append((rank, key, source))
     return [Suggestion(key, tilde_path(key, home), source) for _, key, source in sorted(ranked)[:limit]]
 
 
