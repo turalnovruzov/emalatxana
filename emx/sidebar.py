@@ -1366,7 +1366,7 @@ class Notices(threading.Thread):
             self.pending.append(notice)
 
     def take(self) -> list:
-        """The texts to show since the last take, oldest first."""
+        """The (session id, text, transition time) of each notice worded since the last take, oldest first."""
         with self.lock:
             out, self.outbox = self.outbox, []
         return out
@@ -1440,7 +1440,7 @@ class Notices(threading.Thread):
             self.pending.remove(notice)
             if call is not None:
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
-            self.outbox.append(text)
+            self.outbox.append((notice.id, text, notice.at))
             speak = self.voice
         if speak and text:
             self.speaker.speak(text)
@@ -1528,6 +1528,9 @@ class App:
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
+        self.missed = []
+        self.missed_misses = {}
+        self.opened = {}
         self.listings = Listings()
         self.home = os.path.expanduser("~")
         self.starter = None
@@ -1808,6 +1811,9 @@ class App:
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
+            if trigger == core.OPEN:
+                self.opened[sid] = time.monotonic()
+                self.missed = core.missed_clear(self.missed, sid)
             self.say("")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -2405,7 +2411,7 @@ class App:
                 pass
 
     def bottom_lines(self, width: int, height: int | None = None) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
+        """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
         if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
             session = self.session(self.main_pane.session)
@@ -2438,6 +2444,8 @@ class App:
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
+        shown = core.missed_lines(self.missed, time.monotonic(), width, core.missed_room(height, len(lines) + 1))
+        lines += [(t, curses.A_BOLD if i == 0 else 0) for i, t in enumerate(shown)]
         lines.append((footer, curses.A_DIM))
         return lines
 
@@ -2690,6 +2698,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.missed, self.missed_misses = core.missed_prune(self.missed, [s.id for s in sessions], self.missed_misses)
         self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
@@ -2732,8 +2741,9 @@ class App:
             if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
 
-    def flush_notices(self) -> None:
-        self.poller.notices.take()
+    def take_notices(self) -> None:
+        for sid, text, at in self.poller.notices.take():
+            self.missed = core.missed_add(self.missed, core.Missed(sid, text, at), self.opened)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
@@ -2790,6 +2800,7 @@ class App:
             self.take_placements()
             self.take_transcripts()
             self.take_summaries()
+            self.take_notices()
             # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
             if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False
@@ -2807,7 +2818,6 @@ class App:
                 # Lines under the list squeezed the box to nothing; the pane is not too short, so no notice says it is.
                 self.peeking = False
             self.draw()
-            self.flush_notices()
         except Exception as exc:
             self.say(f"emx error: {core.error_line(exc)}", error=True)
 

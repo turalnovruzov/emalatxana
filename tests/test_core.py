@@ -4052,5 +4052,82 @@ class TopLineMuted(unittest.TestCase):
                 if "version" in plain:
                     self.assertIn("version", [tag for _, _, tag in placed])
 
+class MissedList(unittest.TestCase):
+    def item(self, sid, at, text=None):
+        return core.Missed(sid, text or f"{sid} at {at}", at)
+
+    def added(self, *items, opened=None):
+        missed = []
+        for item in items:
+            missed = core.missed_add(missed, item, opened or {})
+        return missed
+
+    def test_newest_first(self):
+        missed = self.added(self.item("a", 2), self.item("b", 9), self.item("c", 5))
+        self.assertEqual([m.id for m in missed], ["b", "c", "a"])
+
+    def test_a_newer_notice_for_a_session_replaces_its_older_one(self):
+        missed = self.added(self.item("s1", 1, "first"), self.item("s1", 2, "second"))
+        self.assertEqual([(m.id, m.text) for m in missed], [("s1", "second")])
+
+    def test_kept_is_capped(self):
+        missed = self.added(*[self.item(f"s{i}", i) for i in range(25)])
+        self.assertEqual(len(missed), core.MISSED_KEPT)
+        self.assertEqual(missed[0].id, "s24")
+        self.assertEqual(missed[-1].id, "s5")
+
+    def test_clear_removes_only_that_session(self):
+        missed = self.added(self.item("a", 1), self.item("b", 2))
+        self.assertEqual([m.id for m in core.missed_clear(missed, "a")], ["b"])
+
+    def test_a_notice_from_before_the_last_open_never_lands(self):
+        for at, lands in ((9, False), (10, False), (11, True)):
+            with self.subTest(at=at):
+                self.assertEqual(len(self.added(self.item("s1", at), opened={"s1": 10})), int(lands))
+        self.assertEqual(len(self.added(self.item("s2", 1), opened={"s1": 10})), 1)
+
+    def test_prune_drops_after_stale_after_misses_and_not_on_an_empty_listing(self):
+        missed = self.added(self.item("s1", 1), self.item("s2", 2))
+        missed, misses = core.missed_prune(missed, ["s2"], {})
+        self.assertEqual([m.id for m in missed], ["s2", "s1"])
+        for _ in range(core.STALE_AFTER_MISSES - 1):
+            missed, misses = core.missed_prune(missed, ["s2"], misses)
+        self.assertEqual([m.id for m in missed], ["s2"])
+
+    def test_an_empty_listing_changes_nothing(self):
+        missed = self.added(self.item("s1", 1))
+        for _ in range(5):
+            missed, misses = core.missed_prune(missed, [], {})
+        self.assertEqual([m.id for m in missed], ["s1"])
+
+    def test_lines_cap_and_more(self):
+        five = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(5)])
+        got = core.missed_lines(five, 10, 40, 5)
+        self.assertEqual(got, ["Notices", "6s t4", "7s t3", "8s t2", "… 2 more"])
+        two = core.missed_lines(five[:2], 10, 40, 5)
+        self.assertEqual(two, ["Notices", "6s t4", "7s t3"])
+
+    def test_lines_are_one_row_each_and_fit_the_width(self):
+        text = " ".join(["word"] * 28)
+        missed = [core.Missed("s1", text, 0.0)]
+        (title, line) = core.missed_lines(missed, 125, 30, 5)
+        self.assertEqual(title, "Notices")
+        self.assertLessEqual(core.display_width(line), 30)
+        self.assertTrue(line.endswith("…"))
+        self.assertTrue(line.startswith("2m "))
+
+    def test_room_below_two_or_empty_shows_nothing(self):
+        missed = [core.Missed("s1", "x", 0.0)]
+        self.assertEqual(core.missed_lines(missed, 1, 40, 1), [])
+        self.assertEqual(core.missed_lines(missed, 1, 40, 0), [])
+        self.assertEqual(core.missed_lines([], 1, 40, 5), [])
+
+    def test_room_leaves_the_list_its_minimum(self):
+        self.assertEqual(core.missed_room(12, 1), 3)
+        self.assertEqual(core.missed_room(9, 1), 0)
+        self.assertEqual(core.missed_room(40, 1), core.MISSED_SHOWN + 2)
+        self.assertEqual(core.missed_room(None, 1), core.MISSED_SHOWN + 2)
+
+
 if __name__ == "__main__":
     unittest.main()
