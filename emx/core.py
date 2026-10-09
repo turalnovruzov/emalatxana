@@ -1818,7 +1818,7 @@ def normalize_prefs(raw) -> dict:
         prefs["last_folder"] = raw["last_folder"]
     recent = raw.get("recent_folders")
     if isinstance(recent, list):
-        recent = list(dict.fromkeys(f for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
+        recent = list(dict.fromkeys(os.path.normpath(f) for f in recent if isinstance(f, str) and f))[:RECENT_FOLDERS]
         if recent:
             prefs["recent_folders"] = recent
     favourites = raw.get("favourite_folders")
@@ -1942,6 +1942,7 @@ def default_folder(cursor, groups, sessions, view: str, last_folder: str = "") -
 
 def remember_folder(prefs: dict, folder: str) -> dict:
     """`prefs` after a session started in `folder`: it becomes the last folder and the newest of the recent ones."""
+    folder = os.path.normpath(folder)
     recent = [folder] + [f for f in prefs.get("recent_folders", ()) if f != folder]
     return {**prefs, "last_folder": folder, "recent_folders": recent[:RECENT_FOLDERS]}
 

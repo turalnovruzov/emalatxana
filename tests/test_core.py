@@ -1225,6 +1225,11 @@ class RecentFolders(unittest.TestCase):
         self.assertIs(core.remember_opened(got, "/y"), got)
         self.assertIs(core.remember_opened(got, ""), got)
 
+    def test_a_start_and_an_open_of_the_same_folder_share_one_slot(self):
+        prefs = core.remember_folder(dict(core.DEFAULT_PREFS), "/a/")
+        got = core.remember_opened(prefs, "/a")
+        self.assertEqual(got["recent_folders"], ["/a"])
+
     def test_an_open_is_capped(self):
         prefs = dict(core.DEFAULT_PREFS)
         for i in range(core.RECENT_FOLDERS + 3):
