@@ -223,6 +223,16 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: the 1.0.0 entry in `CHANGELOG.md`.
 4. **Gotcha**: no `###` subheadings (Keep-a-Changelog's "### Fixed"). Any `#` line that is not a version heading ends the entry, so lines after it silently never reach the panel.
 
+### Every consumer of `claude agents` reads it through `core.background_sessions`
+
+1. **Rule**: whatever lists sessions (the panel, the counts, the notices) takes them from `core.background_sessions`, through `sidebar.fetch_sessions` or `core.listed_session`, and never from raw `list_rows` rows.
+2. **Why**: it is the one place interactive sessions and the `emx-test-` throwaway sessions agents start for checks are dropped, so none of them reach his panel, counts or spoken notices.
+3. **Minimal example**:
+   ```python
+   sessions = core.background_sessions(rows)   # not: for row in rows
+   ```
+4. **Gotcha**: a test that feeds `emx-test-` rows with a temporary cwd must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; a row is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

@@ -4383,6 +4383,31 @@ class VoiceQueue(unittest.TestCase):
             wait_until(self, lambda: run.called, "the banner")
         self.assertEqual(run.call_args.args[0][-1], "queued")
 
+    def test_under_test_nothing_real_is_spoken_or_shown(self):
+        with mock.patch.dict(sidebar.os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}), \
+                mock.patch.object(sidebar.subprocess, "run") as run, \
+                mock.patch.object(sidebar, "list_voices") as voices:
+            sidebar.os.environ.pop("EMX_SAY", None)
+            self.voice.start()
+            self.voice.speak("quiet")
+            self.voice.banner("silent")
+            self.voice.speak_aloud("quiet", self.voice.generation)
+            self.voice.show_banner("silent")
+            wait_until(self, lambda: not self.voice.queue, "the voice queue to drain")
+        self.assertEqual(FakeSay.made, [])
+        run.assert_not_called()
+        voices.assert_not_called()
+
+    def test_under_test_with_emx_say_set_only_that_command_runs_and_no_banner(self):
+        with mock.patch.dict(sidebar.os.environ, {"EMX_SHOW_TEST_SESSIONS": "1", "EMX_SAY": "fake-say"}), \
+                mock.patch.object(sidebar.subprocess, "run") as run:
+            voice = sidebar.Voice()
+            voice.speak_aloud("heard", voice.generation)
+            voice.show_banner("silent")
+        (proc,) = FakeSay.made
+        self.assertEqual(proc.argv[0], "fake-say")
+        run.assert_not_called()
+
     def test_a_missing_say_does_not_raise_and_the_next_item_still_runs(self):
         calls = []
 

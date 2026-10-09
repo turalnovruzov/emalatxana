@@ -7,8 +7,10 @@ import json
 import os
 import re
 import shlex
+import tempfile
 import textwrap
 import unicodedata
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -60,12 +62,54 @@ def _text(value) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
+TEST_SESSION_PREFIX = "emx-test-"
+TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+
+
+def temp_roots() -> set:
+    """The temporary directories with symlinks resolved (macOS /tmp and /var are links into /private)."""
+    roots = set()
+    for root in (tempfile.gettempdir(), *TEMP_ROOTS):
+        try:
+            roots.add(Path(root).resolve())
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return roots
+
+
+def in_temp_dir(cwd: str, roots: set = None) -> bool:
+    """True when `cwd` is under a temporary directory, symlinks resolved on both sides."""
+    if not cwd:
+        return False
+    try:
+        path = Path(cwd).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if roots is None:
+        roots = temp_roots()
+    return any(path == root or root in path.parents for root in roots)
+
+
+def is_test_session(name: str, cwd: str, roots: set = None) -> bool:
+    """Both halves must hold, so a session he names `emx-test-…` in a real project stays visible."""
+    return name.startswith(TEST_SESSION_PREFIX) and in_temp_dir(cwd, roots)
+
+
 def background_sessions(rows: list) -> list:
-    """Background rows with an id, in the order the CLI gave them. Interactive rows have no id and are hidden."""
+    """Background rows with an id, in the order the CLI gave them. Interactive rows have no id and are hidden.
+
+    Sessions named `emx-test-…` that run in a temporary directory (the
+    throwaway ones agents start for checks) are dropped here, the one place every consumer reads from, unless
+    `EMX_SHOW_TEST_SESSIONS=1` is set, as emx's own live checks do.
+    """
+    show_test = os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
+    roots = temp_roots()
     sessions = []
     for row in rows:
         sid = row.get("id")
         if row.get("kind") != "background" or not isinstance(sid, str) or not sid:
+            continue
+        if not show_test and is_test_session(_text(row.get("name")), _text(row.get("cwd")), roots):
             continue
         sessions.append(
             Session(
@@ -2056,8 +2100,13 @@ def session_folders(sessions, groups, view: str) -> list:
 
 
 def new_session_args(claude: str, message: str) -> list:
-    """`--` stops a first message that starts with `-` being read as a flag."""
+    """`--` stops a first message that starts with `-` being read as a flag.
+
+    An emx under test (`EMX_SHOW_TEST_SESSIONS=1`) names every session it starts `emx-test-…`, so one started with `n` there is a throwaway too.
+    """
     args = [claude, "--bg"]
+    if os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1":
+        args += ["-n", f"{TEST_SESSION_PREFIX}{uuid.uuid4().hex[:6]}"]
     if message.strip():
         args += ["--", message]
     return args

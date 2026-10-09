@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -62,6 +63,49 @@ class BackgroundSessions(unittest.TestCase):
         self.assertEqual(core.background_sessions([]), [])
 
 
+class TestSessionsHidden(unittest.TestCase):
+    def setUp(self):
+        saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
+        self.addCleanup(lambda: os.environ.pop("EMX_SHOW_TEST_SESSIONS", None))
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "EMX_SHOW_TEST_SESSIONS", saved)
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        home = os.path.expanduser("~")
+        self.rows = [
+            {"id": "t", "kind": "background", "name": "emx-test-x", "cwd": self.tmp},
+            {"id": "n", "kind": "background", "name": "normal", "cwd": self.tmp},
+            {"id": "k", "kind": "background", "name": "my emx-test-notes", "cwd": self.tmp},
+            {"id": "e", "kind": "background", "name": "emx-test-elsewhere", "cwd": home},
+        ]
+
+    def ids(self):
+        return [s.id for s in core.background_sessions(self.rows)]
+
+    def test_hidden_in_a_temp_cwd_visible_with_the_name_elsewhere_and_visible_in_temp_without_the_name(self):
+        self.assertEqual(self.ids(), ["n", "k", "e"])
+
+    def test_the_symlinked_and_the_resolved_temp_spelling_both_count(self):
+        for cwd in (os.path.join(self.tmp, "deeper"), os.path.realpath(self.tmp), "/tmp/x", "/private/var/folders/zz/y"):
+            with self.subTest(cwd=cwd):
+                self.assertTrue(core.in_temp_dir(cwd))
+        for cwd in ("", "/Users", os.path.expanduser("~")):
+            with self.subTest(cwd=cwd):
+                self.assertFalse(core.in_temp_dir(cwd))
+
+    def test_the_env_var_shows_them_again(self):
+        os.environ["EMX_SHOW_TEST_SESSIONS"] = "1"
+        self.assertEqual(self.ids(), ["t", "n", "k", "e"])
+
+    def test_a_test_session_changing_state_gives_no_notice(self):
+        def listing(state):
+            return core.background_sessions([{"id": "t", "kind": "background", "name": "emx-test-x", "cwd": self.tmp, "state": state},
+                                             {"id": "n", "kind": "background", "name": "normal", "state": "working"}])
+        seen, _ = core.notice_transitions(None, listing("working"), ())
+        _, found = core.notice_transitions(seen, listing("done"), ())
+        self.assertEqual(found, [])
+
+
 def mk(**kw):
     base = dict(id="i", name="n", cwd="", state="working", status="", waiting_for="", started_at=None, running=True)
     base.update(kw)
@@ -79,6 +123,7 @@ REAL_ROWS = [
 
 
 class RunningOrStopped(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"})
     def test_real_rows(self):
         done, stopped = core.background_sessions(REAL_ROWS)
         self.assertEqual((done.running, core.category(done)), (True, core.DONE))
@@ -1437,8 +1482,20 @@ class ClaudeCommands(unittest.TestCase):
         self.assertEqual(core.new_session_args("claude", "-n oops"), ["claude", "--bg", "--", "-n oops"])
         self.assertEqual(core.new_session_args("claude", "--help"), ["claude", "--bg", "--", "--help"])
 
-    def test_no_name_flag(self):
-        self.assertNotIn("-n", core.new_session_args("claude", "x"))
+    def test_no_name_flag_normally(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
+            self.assertNotIn("-n", core.new_session_args("claude", "x"))
+
+    def test_under_test_a_new_session_is_named_with_a_unique_test_prefix(self):
+        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
+            a = core.new_session_args("claude", "hi")
+            b = core.new_session_args("claude", "")
+        self.assertEqual(a[:3], ["claude", "--bg", "-n"])
+        self.assertTrue(a[3].startswith("emx-test-") and len(a[3]) > len("emx-test-"))
+        self.assertEqual(a[4:], ["--", "hi"])
+        self.assertEqual(b[:3], ["claude", "--bg", "-n"])
+        self.assertNotEqual(a[3], b[3])
 
     def test_parse_session_id(self):
         self.assertEqual(core.parse_new_session_id("started\n  claude attach abc123\n"), "abc123")
