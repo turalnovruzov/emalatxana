@@ -62,6 +62,35 @@ class BackgroundSessions(unittest.TestCase):
         self.assertEqual(core.background_sessions([]), [])
 
 
+class TestSessionsHidden(unittest.TestCase):
+    ROWS = [
+        {"id": "t", "kind": "background", "name": "emx-test-x"},
+        {"id": "n", "kind": "background", "name": "normal"},
+        {"id": "k", "kind": "background", "name": "my emx-test-notes"},
+    ]
+
+    def setUp(self):
+        saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
+        self.addCleanup(lambda: os.environ.pop("EMX_SHOW_TEST_SESSIONS", None))
+        if saved is not None:
+            self.addCleanup(os.environ.__setitem__, "EMX_SHOW_TEST_SESSIONS", saved)
+
+    def test_a_test_session_is_dropped_and_a_name_merely_containing_the_prefix_is_kept(self):
+        self.assertEqual([s.id for s in core.background_sessions(self.ROWS)], ["n", "k"])
+
+    def test_the_env_var_shows_them_again(self):
+        os.environ["EMX_SHOW_TEST_SESSIONS"] = "1"
+        self.assertEqual([s.id for s in core.background_sessions(self.ROWS)], ["t", "n", "k"])
+
+    def test_a_test_session_changing_state_gives_no_notice(self):
+        def listing(state):
+            return core.background_sessions([{"id": "t", "kind": "background", "name": "emx-test-x", "state": state},
+                                             {"id": "n", "kind": "background", "name": "normal", "state": "working"}])
+        seen, _ = core.notice_transitions(None, listing("working"), ())
+        _, found = core.notice_transitions(seen, listing("done"), ())
+        self.assertEqual(found, [])
+
+
 def mk(**kw):
     base = dict(id="i", name="n", cwd="", state="working", status="", waiting_for="", started_at=None, running=True)
     base.update(kw)
@@ -79,6 +108,7 @@ REAL_ROWS = [
 
 
 class RunningOrStopped(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"})
     def test_real_rows(self):
         done, stopped = core.background_sessions(REAL_ROWS)
         self.assertEqual((done.running, core.category(done)), (True, core.DONE))

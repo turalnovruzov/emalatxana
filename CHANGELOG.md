@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.4.1 — 2026-10-08
+
+- Test sessions emx starts for its own checks no longer show in your panel or speak.
+
 ## 1.4.0 — 2026-10-08
 
 - emx now tells you when a session needs you (a permission or a question) or has finished: a banner and one or two short spoken sentences written by Claude Haiku (28 words at most), with the project and what it was doing first and then what is waiting on you. For a more natural voice, download a Premium British one under System Settings → Accessibility → Spoken Content; emx picks it up on the next start. If Haiku can't be reached it says a plain line instead, so a notice is never lost.
