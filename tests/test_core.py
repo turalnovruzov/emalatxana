@@ -4104,15 +4104,11 @@ class MissedList(unittest.TestCase):
         missed = self.added(self.item("s1", 1), self.item("s2", 2))
         missed, misses = core.missed_prune(missed, ["s2"], {})
         self.assertEqual([m.id for m in missed], ["s2", "s1"])
-        for _ in range(core.STALE_AFTER_MISSES - 1):
-            missed, misses = core.missed_prune(missed, ["s2"], misses)
-        self.assertEqual([m.id for m in missed], ["s2"])
-
-    def test_an_empty_listing_changes_nothing(self):
-        missed = self.added(self.item("s1", 1))
         for _ in range(5):
-            missed, misses = core.missed_prune(missed, [], {})
-        self.assertEqual([m.id for m in missed], ["s1"])
+            missed, misses = core.missed_prune(missed, [], misses)
+        self.assertEqual([m.id for m in missed], ["s2", "s1"])
+        missed, misses = core.missed_prune(missed, ["s2"], misses)
+        self.assertEqual([m.id for m in missed], ["s2"])
 
     def test_lines_cap_and_more(self):
         five = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(5)])
