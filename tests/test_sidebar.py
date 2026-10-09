@@ -1438,12 +1438,16 @@ class NewSession(AppCase):
 
     def test_the_picker_never_touches_the_filesystem_on_this_thread(self):
         self.app.cursor = ("session", "b")
+        self.app.prefs.update(favourite_folders=["/f/star"], recent_folders=["/f/r1"])
+        saves = []
         with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("scanned")), \
-                mock.patch.object(sidebar.os.path, "isdir", side_effect=AssertionError("stat")):
-            self.keys("n", "\t")
+                mock.patch.object(sidebar.os.path, "isdir", side_effect=AssertionError("stat")), \
+                mock.patch.object(sidebar.App, "save_prefs", lambda app: saves.append(1)):
+            self.keys("n", "\t", "\x14")
             self.type("~/some/path")
             self.app.draw()
             self.keys(curses.KEY_DOWN, "\t", "\n")
+        self.assertEqual(len(saves), 1)
 
     def test_n_enter_enter_never_reopens_the_stopped_row_under_the_cursor(self):
         self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
@@ -1647,6 +1651,116 @@ class NewSession(AppCase):
 
     def test_the_help_says_where_n_starts(self):
         self.assertIn("Tab", dict(sidebar.HELP)["n"])
+
+    def picker_with(self, favourites=(), recent=()):
+        if favourites:
+            self.app.prefs["favourite_folders"] = list(favourites)
+        if recent:
+            self.app.prefs["recent_folders"] = list(recent)
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\t")
+
+    def paths(self):
+        return [r.path for r in self.app.suggestions()]
+
+    def saved(self):
+        return core.load_prefs(self.app.prefs_file)
+
+    def test_the_picker_opens_with_favourites_then_recents_before_any_typing(self):
+        self.picker_with(["/f/star"], ["/f/r1", "/f/r2"])
+        paths = self.paths()
+        self.assertEqual(paths[:3], ["/f/star", "/f/r1", "/f/r2"])
+        self.assertIn("/p/beta", paths[3:])
+        lines = [text for text, _ in self.app.bottom_lines(39, 30)]
+        self.assertTrue(next(t for t in lines if "/f/star" in t).startswith("★"))
+        self.assertTrue(next(t for t in lines if "/f/r1" in t).startswith(" "))
+
+    def test_ctrl_t_stars_the_highlight_saves_it_and_keeps_the_highlight(self):
+        self.picker_with(recent=["/f/r1", "/f/r2"])
+        self.keys(curses.KEY_DOWN, curses.KEY_DOWN, "\x14")
+        self.assertEqual(self.saved()["favourite_folders"], ["/f/r2"])
+        self.assertEqual(self.app.suggestions()[0].path, "/f/r2")
+        self.assertEqual(self.app.prompt["picked"], "/f/r2")
+        self.assertIn("favourite", self.app.prompt["hint"])
+        self.keys("\x14")
+        self.assertNotIn("favourite_folders", self.saved())
+
+    def test_ctrl_t_with_nothing_highlighted_stars_the_top_row(self):
+        self.picker_with(recent=["/f/r1"])
+        self.keys("\x14")
+        self.assertEqual(self.saved()["favourite_folders"], ["/f/r1"])
+
+    def test_ctrl_t_in_the_message_stage_does_nothing(self):
+        self.app.cursor = ("session", "b")
+        self.keys("n", "\x14")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("message", ""))
+        self.assertNotIn("favourite_folders", self.app.prefs)
+
+    def test_unstarring_a_folder_that_leaves_the_list_clears_the_highlight(self):
+        self.picker_with(favourites=["/f/only"])
+        self.keys(curses.KEY_DOWN)
+        self.assertEqual(self.app.prompt["picked"], "/f/only")
+        self.keys("\x14")
+        self.assertNotIn("/f/only", self.paths())
+        self.assertIsNone(self.app.prompt["picked"])
+
+    def test_a_remembered_folder_found_missing_is_hidden_and_kept(self):
+        self.app.listings.readable_cache.update({"/f/gone": False, "/f/gonefav": False})
+        self.picker_with(["/f/gonefav"], ["/f/gone", "/f/r1"])
+        for typed in ("", "gone"):
+            self.type(typed)
+            self.assertNotIn("/f/gone", self.paths())
+            self.assertNotIn("/f/gonefav", self.paths())
+        self.assertIn("/f/gone", self.app.prefs["recent_folders"])
+        self.assertIn("/f/gonefav", self.app.prefs["favourite_folders"])
+
+    def test_a_ninth_recent_fills_in_for_a_missing_one_and_is_checked(self):
+        self.app.listings.readable_cache["/f/r1"] = False
+        self.picker_with(recent=[f"/f/r{i}" for i in range(1, 10)])
+        rows = [r.path for r in self.app.suggestions() if r.source == core.RECENT]
+        self.assertEqual(rows, [f"/f/r{i}" for i in range(2, 10)])
+        self.assertIn("/f/r9", self.app.listings.asked)
+
+    def test_the_picker_hint_names_ctrl_t(self):
+        self.picker_with()
+        drawn = " ".join(text.strip() for text, _ in self.app.bottom_lines(39, 30))
+        self.assertIn("^t ★", drawn)
+
+    def test_the_help_names_the_favourite_key(self):
+        self.assertTrue(any("^t" in text and "★" in text for _, text in sidebar.HELP))
+        self.assertIn("Tab", dict(sidebar.HELP)["n"])
+
+    def test_opening_a_session_makes_its_folder_recent_but_not_last(self):
+        self.app.prefs["last_folder"] = "/p/last"
+        self.app.activate(("session", "a"))
+        saved = self.saved()
+        self.assertEqual(saved["recent_folders"][0], "/p/alpha/sub")
+        self.assertEqual(saved["last_folder"], "/p/last")
+        self.assertIn(("a", core.OPEN), self.opened)
+
+    def test_opening_a_placed_worktree_session_records_its_repo(self):
+        wt = "/w/k/.claude/worktrees/f"
+        self.poll(session("w", wt))
+        self.app.refresh()
+        self.app.placements = {wt: core.Placement("/w/k", "f")}
+        self.app.activate(("session", "w"))
+        self.assertEqual(self.saved()["recent_folders"][0], "/w/k")
+
+    def test_opening_a_group_header_records_nothing(self):
+        self.app.activate(("group", "/p/beta"))
+        self.assertNotIn("recent_folders", self.app.prefs)
+
+    def test_reopening_the_first_recent_does_not_rewrite_prefs(self):
+        saves = []
+        with mock.patch.object(sidebar.App, "save_prefs", lambda app: saves.append(1)):
+            self.app.activate(("session", "a"))
+            self.app.activate(("session", "a"))
+        self.assertEqual(len(saves), 1)
+
+    def test_enter_from_find_records_the_folder(self):
+        self.keys(sidebar.CTRL_F, *"beta", "\r")
+        self.assertEqual(self.app.prefs["recent_folders"][0], "/p/beta")
+        self.assertIn(("b", core.OPEN), self.opened)
 
 
 class FindSessions(AppCase):
