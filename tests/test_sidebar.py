@@ -4301,6 +4301,12 @@ class VoiceQueue(unittest.TestCase):
             self.addCleanup(patch.stop)
         self.voice = sidebar.Voice()
 
+    def test_a_sentence_put_after_a_mute_is_dropped_but_a_banner_is_kept(self):
+        self.voice.muted = True
+        self.voice.put(("say", "late"))
+        self.voice.put(("banner", "shown"))
+        self.assertEqual(self.voice.queue, [("banner", "shown")])
+
     def test_five_texts_from_two_threads_play_one_at_a_time_in_order_with_the_text_on_stdin(self):
         self.voice.start()
         def queue(texts):

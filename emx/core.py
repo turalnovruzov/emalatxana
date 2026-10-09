@@ -3162,8 +3162,9 @@ def clean_notice(text: str) -> str:
         whole = " ".join(words[:NOTICE_MAX_WORDS])
         cut = whole[:NOTICE_MAX_CHARS]
         ends = [m.end() for m in re.finditer(r"[.!?](?=\s|$)", cut)]
-        if ends:
-            text = cut[: ends[-1]]
+        keeps = [end for end in ends if len(cut[:end].split()) * 2 >= NOTICE_MAX_WORDS]
+        if keeps:
+            text = cut[: keeps[-1]]
         else:
             text = cut.rsplit(" ", 1)[0] if cut != whole and " " in cut else cut
         text = text.rstrip(" ,;:-")

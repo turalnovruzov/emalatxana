@@ -3695,6 +3695,11 @@ class NoticeText(unittest.TestCase):
         text = "The invoicing app is ready. Pull request forty-one waits on you."
         self.assertEqual(core.clean_notice(text), text)
 
+    def test_a_short_first_sentence_alone_is_not_all_that_is_kept(self):
+        got = core.clean_notice("Sir. " + " ".join(["word"] * 30))
+        self.assertGreater(len(got), len("Sir."))
+        self.assertLessEqual(len(got.split()), core.NOTICE_MAX_WORDS)
+
     def test_a_long_text_is_cut_at_a_sentence_with_no_ellipsis(self):
         got = core.clean_notice(("First sentence here. " * 30).strip())
         self.assertLessEqual(len(got), core.NOTICE_MAX_CHARS)
@@ -3706,8 +3711,9 @@ class NoticeText(unittest.TestCase):
         self.assertTrue(got.endswith("word"))
 
     def test_a_long_text_is_cut_at_the_word_cap_at_a_sentence_end(self):
-        text = "One two three four five six seven. " + " ".join(["more"] * 40) + "."
-        self.assertEqual(core.clean_notice(text), "One two three four five six seven.")
+        first = " ".join(["first"] * 13) + " end."
+        text = first + " " + " ".join(["more"] * 40) + "."
+        self.assertEqual(core.clean_notice(text), first)
 
     def test_a_long_text_without_a_sentence_end_is_cut_at_the_last_word_of_the_cap(self):
         got = core.clean_notice(" ".join(f"w{i}" for i in range(60)))

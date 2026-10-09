@@ -1093,6 +1093,8 @@ class Voice(threading.Thread):
 
     def put(self, item: tuple) -> None:
         with self.lock:
+            if item[0] == "say" and self.muted:
+                return
             at = len(self.queue)
             if item[0] == "banner":
                 at = next((i for i, queued in enumerate(self.queue) if queued[0] == "say"), at)
