@@ -4,9 +4,9 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 1.4.0 — 2026-10-08
 
-- emx now tells you when a session needs you (a permission or a question) or has finished: a banner and a short spoken sentence written by Claude Haiku, with the project and what it was doing first and then what is waiting on you. If Haiku can't be reached it says a plain line instead, so a notice is never lost.
+- emx now tells you when a session needs you (a permission or a question) or has finished: a banner and one or two short spoken sentences written by Claude Haiku (28 words at most), with the project and what it was doing first and then what is waiting on you. For a more natural voice, download a Premium British one under System Settings → Accessibility → Spoken Content; emx picks it up on the next start. If Haiku can't be reached it says a plain line instead, so a notice is never lost.
 - It stays quiet about the session you are looking at, but if you are in the panel, have switched to another window, or have been away for five minutes, you hear about it too. Press m in the panel to mute or unmute the voice; banners keep showing and the top line says muted.
-- To stop Claude Code sending its own notices as well, add `"preferredNotifChannel": "notifications_disabled"` to your Claude Code settings; emx does not change them. After that, a `claude` you run outside emx, and anything while emx is closed, gives no notice at all.
+- To stop Claude Code sending its own notices as well, add `"preferredNotifChannel": "notifications_disabled"` to `~/.claude/settings.json`; emx does not change them. After that, a `claude` you run outside emx, and anything while emx is closed, gives no notice at all.
 
 ## 1.3.0 — 2026-10-08
 

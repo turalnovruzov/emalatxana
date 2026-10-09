@@ -1080,16 +1080,23 @@ class Voice(threading.Thread):
         self.queue = []
         self.generation = 0
         self.playing = None
+        self.muted = False
 
     def speak(self, text: str) -> None:
-        self.put(("say", text))
+        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through."""
+        if not self.muted:
+            self.put(("say", text))
 
     def banner(self, text: str) -> None:
+        """Goes ahead of the speech queued, behind earlier banners."""
         self.put(("banner", text))
 
     def put(self, item: tuple) -> None:
         with self.lock:
-            self.queue.append(item)
+            at = len(self.queue)
+            if item[0] == "banner":
+                at = next((i for i, queued in enumerate(self.queue) if queued[0] == "say"), at)
+            self.queue.insert(at, item)
         self.wake.set()
 
     def silence(self) -> None:
@@ -1368,6 +1375,7 @@ class App:
         self.last_housekeep = 0.0
         self.poller = Poller(claude)
         self.poller.notices.voice = core.voice_on(self.prefs)
+        self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
         self.passthrough_for = None
         self.listings = Listings()
@@ -2236,6 +2244,7 @@ class App:
         self.save_prefs()
         on = core.voice_on(self.prefs)
         self.poller.notices.voice = on
+        self.poller.voice.muted = not on
         if not on:
             self.poller.voice.silence()
         self.say("Spoken notices on" if on else "Spoken notices off", seconds=RESTORED_NOTICE_SECONDS)

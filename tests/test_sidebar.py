@@ -4336,6 +4336,21 @@ class VoiceQueue(unittest.TestCase):
         self.assertTrue(proc.ended.is_set())
         self.assertEqual(proc.text, "")
 
+    def test_speaking_while_muted_queues_nothing_and_unmuting_lets_it_through(self):
+        self.voice.muted = True
+        self.voice.speak("late")
+        self.assertEqual(self.voice.queue, [])
+        self.voice.muted = False
+        self.voice.speak("heard")
+        self.assertEqual(self.voice.queue, [("say", "heard")])
+
+    def test_a_banner_goes_ahead_of_the_speech_queued_and_behind_earlier_banners(self):
+        self.voice.speak("s1")
+        self.voice.speak("s2")
+        self.voice.banner("b1")
+        self.voice.banner("b2")
+        self.assertEqual(self.voice.queue, [("banner", "b1"), ("banner", "b2"), ("say", "s1"), ("say", "s2")])
+
     def test_a_banner_survives_a_silence(self):
         with mock.patch.object(sidebar.subprocess, "run") as run:
             self.voice.banner("kept")
@@ -4561,6 +4576,13 @@ class MuteKey(AppCase):
         self.assertEqual(self.app.notice, "Spoken notices off")
         again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
         self.assertFalse(again.poller.notices.voice)
+
+    def test_m_sets_the_voice_muted_flag_both_ways(self):
+        self.app.poller.voice = sidebar.Voice()
+        self.app.handle_key("m")
+        self.assertTrue(self.app.poller.voice.muted)
+        self.app.handle_key("m")
+        self.assertFalse(self.app.poller.voice.muted)
 
     def test_m_again_unmutes(self):
         self.app.handle_key("m")

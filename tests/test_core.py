@@ -3567,9 +3567,20 @@ class NoticeTransitions(unittest.TestCase):
         _, events = self.run_listings(five, listed(a="done"), listed(a="done"), listed(a="done"), five)
         self.assertEqual(events, [[]] * 5)
 
-    def test_new_session_after_baseline_already_needing_input_gives_one(self):
-        _, events = self.run_listings(listed(a="working"), listed(a="working", b="blocked"))
-        self.assertEqual(events, [[], ["b"]])
+    def test_new_session_after_the_baseline_window_already_needing_input_gives_one(self):
+        steady = [listed(a="working")] * (core.STALE_AFTER_MISSES - 1)
+        _, events = self.run_listings(listed(a="working"), *steady, listed(a="working", b="blocked"))
+        self.assertEqual(events, [[]] * core.STALE_AFTER_MISSES + [["b"]])
+
+    def test_a_partial_first_listing_gives_no_burst_when_the_rest_arrive(self):
+        seen, events = self.run_listings(
+            listed(a="working"), listed(a="working", b="done", c="done", d="blocked"))
+        self.assertEqual(events, [[], []])
+        self.assertEqual(set(seen), {"a", "b", "c", "d"})
+
+    def test_a_baseline_session_still_gives_an_event_inside_the_window(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="done", b="done"))
+        self.assertEqual(events, [[], ["a"]])
 
     def test_events_come_in_listing_order(self):
         _, events = self.run_listings(listed(a="working", b="working"), listed(b="done", a="blocked"))
@@ -3694,6 +3705,21 @@ class NoticeText(unittest.TestCase):
         self.assertNotIn("…", got)
         self.assertTrue(got.endswith("word"))
 
+    def test_a_long_text_is_cut_at_the_word_cap_at_a_sentence_end(self):
+        text = "One two three four five six seven. " + " ".join(["more"] * 40) + "."
+        self.assertEqual(core.clean_notice(text), "One two three four five six seven.")
+
+    def test_a_long_text_without_a_sentence_end_is_cut_at_the_last_word_of_the_cap(self):
+        got = core.clean_notice(" ".join(f"w{i}" for i in range(60)))
+        self.assertEqual(got.split(), [f"w{i}" for i in range(core.NOTICE_MAX_WORDS)])
+
+    def test_a_text_at_the_word_cap_is_kept_whole(self):
+        text = " ".join(["word"] * core.NOTICE_MAX_WORDS)
+        self.assertEqual(core.clean_notice(text), text)
+
+    def test_the_instruction_forbids_file_names(self):
+        self.assertIn("Never name a file or a path", core.NOTICE_INSTRUCTION)
+
     def test_markdown_list_markers_and_a_leading_dash_are_stripped(self):
         self.assertEqual(core.clean_notice("- **Done** with `tests`"), "Done with tests")
         self.assertEqual(core.clean_notice("# Heading\n* item one"), "Heading item one")
@@ -3756,7 +3782,13 @@ class Voices(unittest.TestCase):
         self.assertEqual(core.pick_voice(["Daniel", "Jamie (Premium)"]), "Jamie (Premium)")
         self.assertEqual(core.pick_voice(["Daniel", "Daniel (Enhanced)"]), "Daniel (Enhanced)")
         self.assertEqual(core.pick_voice(["Daniel", "Kate (Enhanced)"]), "Kate (Enhanced)")
-        self.assertEqual(core.pick_voice(["Daniel (Premium)", "Jamie (Premium)"]), "Daniel (Premium)")
+
+    def test_daniel_then_serena_come_first_at_each_quality(self):
+        order = ["Daniel (Premium)", "Daniel (Enhanced)", "Serena (Premium)", "Serena (Enhanced)"]
+        self.assertEqual(core.VOICES[:4], tuple(order))
+        for i, best in enumerate(order):
+            self.assertEqual(core.pick_voice(["Jamie (Premium)", "Kate (Enhanced)", *order[i:]]), best)
+        self.assertEqual(core.pick_voice(["Jamie (Premium)", "Serena (Enhanced)"]), "Serena (Enhanced)")
 
     def test_every_premium_or_enhanced_voice_ranks_above_every_compact_one(self):
         compact = [i for i, v in enumerate(core.VOICES) if "(" not in v]
