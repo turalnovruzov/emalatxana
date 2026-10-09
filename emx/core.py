@@ -3341,9 +3341,73 @@ def fallback_notice(project: str, name: str, sid: str, kind: str) -> str:
     return f"{name}, in {project}, {words}."
 
 
-def osc9(text: str) -> bytes:
-    """An iTerm2 notification for `text`, wrapped in tmux's passthrough so it reaches the terminal. The text is cleaned, so it cannot end the escape early."""
-    return b"\x1bPtmux;\x1b\x1b]9;" + clean_notice(text).encode("utf-8") + b"\x07\x1b\\"
+def hush_due(seen: str | None, value: str) -> tuple:
+    """(seen, due) after reading the hush token. The first read, `seen` None, is the baseline and is never due, so a hush from before the panel started is not replayed; any later change is due. Empty after that is no change: a `-q` read cannot tell an unset option from a failed read."""
+    if seen is None:
+        return value, False
+    if not value:
+        return seen, False
+    return value, value != seen
+
+
+MISSED_SHOWN = 3
+MISSED_KEPT = 20
+MISSED_MIN_LIST_ROWS = 6
+MISSED_TITLE = "Notices"
+
+
+@dataclass(frozen=True)
+class Missed:
+    """The sentence of a notice he may have missed. `at` is the transition's monotonic time, not the time the words landed."""
+    id: str
+    text: str
+    at: float
+
+
+def missed_add(missed: list, item: Missed, opened: dict) -> list:
+    """`missed` with `item` in, newest first. A session has one line, so a newer notice replaces its older one, and a notice whose transition came before he last opened that session never lands."""
+    last_open = opened.get(item.id)
+    if last_open is not None and last_open >= item.at:
+        return list(missed)
+    kept = [m for m in missed if m.id != item.id] + [item]
+    return sorted(kept, key=lambda m: m.at, reverse=True)[:MISSED_KEPT]
+
+
+def missed_clear(missed: list, sid: str) -> list:
+    return [m for m in missed if m.id != sid]
+
+
+def missed_prune(missed: list, live_ids, misses: dict) -> tuple:
+    """(missed, misses) with the lines of sessions gone from `STALE_AFTER_MISSES` listings in a row dropped, judged like a viewer's."""
+    misses, gone = stale_viewers([m.id for m in missed], live_ids, misses)
+    return [m for m in missed if m.id not in gone], misses
+
+
+def missed_room(height: int | None, used: int) -> int:
+    """The rows the notices area may take on a pane of `height` that already has `used` other bottom rows (footer included), leaving the session list `MISSED_MIN_LIST_ROWS` rows and the panel's two top lines."""
+    room = MISSED_SHOWN + 2
+    if height is None:
+        return room
+    return max(0, min(room, height - 2 - used - MISSED_MIN_LIST_ROWS))
+
+
+def missed_lines(missed: list, now: float, width: int, room: int) -> list:
+    """The area's lines in at most `room` rows: the title, one row per notice cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest notice shows under `Notices (N)` instead."""
+    if not missed or room < 2:
+        return []
+    cap = min(MISSED_SHOWN, room - 1)
+    title = MISSED_TITLE
+    if len(missed) <= cap:
+        shown = missed
+    elif room == 2:
+        shown = missed[:1]
+        title = f"{MISSED_TITLE} ({len(missed)})"
+    else:
+        shown = missed[:min(cap, room - 2)]
+    lines = [title] + [fit(f"{format_age(now - m.at)} {m.text}", width) for m in shown]
+    if room > 2 and len(shown) < len(missed):
+        lines.append(fit(f"… {len(missed) - len(shown)} more", width))
+    return lines
 
 
 def parse_voices(text: str) -> list:

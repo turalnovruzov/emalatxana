@@ -7,9 +7,10 @@ import shlex
 import shutil
 import signal
 import sys
+import time
 
 from emx import __version__, core
-from emx.tmux import ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
+from emx.tmux import HUSH_OPT, ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin", "emx")
@@ -18,10 +19,11 @@ CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 
-USAGE = """usage: emx [--version]
+USAGE = """usage: emx [--version | hush]
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
+hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command."""
 
@@ -123,6 +125,27 @@ def launch() -> int:
     return 1
 
 
+def hush() -> int:
+    """Asks the running panel to stop speaking, through an option on emx's own tmux server. Starts nothing, and never touches another server."""
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    if shutil.which("tmux") is None:
+        print("emx needs tmux, and it is not on PATH.", file=sys.stderr)
+        return 1
+    tmux = Tmux(socket)
+    if not tmux.has_session():
+        print("emx isn't running.", file=sys.stderr)
+        return 1
+    try:
+        tmux.set_session_option(HUSH_OPT, str(time.time_ns()))
+    except TmuxError as exc:
+        print(f"emx: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def blank(message: str) -> int:
     """An inert pane: shows `message`, swallows any keys typed into it, never exits on its own."""
     import termios
@@ -184,6 +207,8 @@ def main(argv: list) -> int:
         from emx.sidebar import run
 
         return run(argv[1])
+    if argv[0] == "hush" and len(argv) == 1:
+        return hush()
     if argv[0] == "left":
         return left_check(argv[1:])
     if argv[0] == "blank":

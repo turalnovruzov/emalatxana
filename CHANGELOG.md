@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.5.0 — 2026-10-09
+
+- emx no longer shows banners or plays a notification sound; a notice is only the spoken sentence. iTerm2's own notifications are left as they are.
+- Notices you may have missed show at the bottom of the panel under "Notices", newest first, with how long ago and the spoken sentence cut to one row each. They show even while muted, opening that session (Enter, → or a click) clears its line, and they are gone when emx restarts.
+- Press h in the panel, or run `emx hush`, to stop the voice mid-sentence and drop what was waiting to be said. Later notices still speak; m still mutes.
+- To stop it from any app: in the Shortcuts app make a shortcut with one "Run Shell Script" action containing `PATH="<the folder holding tmux, which is what command -v tmux prints minus /tmux, e.g. /opt/homebrew/bin>:$PATH" <full path to emx>/bin/emx hush`, and give it a keyboard shortcut in the shortcut's details. Shortcuts runs scripts with a short PATH where tmux is usually missing, hence the first part. If your shell sets `TMUX_TMPDIR`, put it in the command too. Shortcuts may first need Settings → Advanced → Allow Running Scripts.
+
 ## 1.4.2 — 2026-10-08
 
 - Ctrl+R now renames a session while it works, without interrupting it. emx types the `/rename`, looks once more that the prompt holds only that line, and only then presses Enter; if a question or permission box opened in between, it presses nothing and tells you; the line may still be in that prompt.

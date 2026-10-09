@@ -14,7 +14,7 @@ import time
 
 from emx import __version__, core
 from emx.cli import read_changelog, self_command
-from emx.tmux import ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -35,7 +35,7 @@ SUMMARY_CALLS_KEPT = 500
 NOTICE_TIMEOUT = 15
 NOTICE_TICK_SECONDS = 0.5
 SPEAK_TIMEOUT = 60
-BANNER_TIMEOUT = 10
+VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
 RESTORED_NOTICE_SECONDS = 4
 WHATS_NEW_SECONDS = 60
@@ -66,7 +66,8 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
     ("^s", "by project / by state"),
-    ("m", "mute or unmute spoken notices; banners still show"),
+    ("m", "mute or unmute spoken notices"),
+    ("h", "stop the voice now; later notices still speak"),
     ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
@@ -847,7 +848,7 @@ def say_command() -> str:
 
 
 def under_test() -> bool:
-    """An emx a live check started: it must never make real sound or banners on his Mac."""
+    """An emx a live check started: it must never make real sound on his Mac."""
     return os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
 
 
@@ -856,7 +857,7 @@ def list_voices(say: str) -> list:
     try:
         done = subprocess.run(
             [say, "-v", "?"], capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT,
+            stdin=subprocess.DEVNULL, timeout=VOICES_TIMEOUT,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
@@ -1234,7 +1235,7 @@ class Summaries(threading.Thread):
 
 
 class Voice(threading.Thread):
-    """Speaks notices with `say` and shows `osascript` banners, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
+    """Speaks notices with `say`, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
 
     def __init__(self):
         super().__init__(daemon=True)
@@ -1246,31 +1247,26 @@ class Voice(threading.Thread):
         self.generation = 0
         self.playing = None
         self.muted = False
+        self.hushed_at = float("-inf")
 
-    def speak(self, text: str) -> None:
-        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through."""
+    def speak(self, text: str, at: float | None = None) -> None:
+        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through. `at` is when the notice's transition happened: a hush after that drops it too."""
         if not self.muted:
-            self.put(("say", text))
+            self.put(("say", text), at)
 
-    def banner(self, text: str) -> None:
-        """Goes ahead of the speech queued, behind earlier banners."""
-        self.put(("banner", text))
-
-    def put(self, item: tuple) -> None:
+    def put(self, item: tuple, at: float | None = None) -> None:
         with self.lock:
-            if item[0] == "say" and self.muted:
+            if self.muted or (at is not None and at <= self.hushed_at):
                 return
-            at = len(self.queue)
-            if item[0] == "banner":
-                at = next((i for i, queued in enumerate(self.queue) if queued[0] == "say"), at)
-            self.queue.insert(at, item)
+            self.queue.append(item)
         self.wake.set()
 
     def silence(self) -> None:
-        """Stop what is being said and drop the speech queued; banners stay queued."""
+        """Stop what is being said and drop the speech queued. A notice whose transition came before this is dropped too, if it is still being worded."""
         with self.lock:
+            self.hushed_at = time.monotonic()
             self.generation += 1
-            self.queue = [item for item in self.queue if item[0] != "say"]
+            self.queue = []
             proc = self.playing
         if proc is not None:
             self.stop(proc)
@@ -1303,10 +1299,8 @@ class Voice(threading.Thread):
         if item is None:
             self.wake.wait()
             self.wake.clear()
-        elif item[0] == "say":
-            self.speak_aloud(item[1], generation)
         else:
-            self.show_banner(item[1])
+            self.speak_aloud(item[1], generation)
 
     def speak_aloud(self, text: str, generation: int) -> None:
         """The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
@@ -1342,19 +1336,6 @@ class Voice(threading.Thread):
                 proc.kill()
                 proc.wait()
 
-    def show_banner(self, text: str) -> None:
-        """The text is an argument after `--`, never inside the AppleScript source, and `--` stops osascript reading a text that starts with `-` as an option."""
-        if under_test():
-            return
-        argv = [
-            "osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "emx"',
-            "-e", "end run", "--", text,
-        ]
-        try:
-            subprocess.run(argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=BANNER_TIMEOUT)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            pass
-
 
 class Notices(threading.Thread):
     """Words each notice with Haiku, one call at a time on its own thread, and hands the text on for showing and speaking.
@@ -1388,7 +1369,7 @@ class Notices(threading.Thread):
             self.pending.append(notice)
 
     def take(self) -> list:
-        """The texts to show since the last take, oldest first."""
+        """The (session id, text, transition time) of each notice worded since the last take, oldest first."""
         with self.lock:
             out, self.outbox = self.outbox, []
         return out
@@ -1462,10 +1443,10 @@ class Notices(threading.Thread):
             self.pending.remove(notice)
             if call is not None:
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
-            self.outbox.append(text)
+            self.outbox.append((notice.id, text, notice.at))
             speak = self.voice
         if speak and text:
-            self.speaker.speak(text)
+            self.speaker.speak(text, notice.at)
 
 
 class Poller(threading.Thread):
@@ -1550,7 +1531,10 @@ class App:
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
-        self.passthrough_for = None
+        self.hush_seen = None
+        self.missed = []
+        self.missed_misses = {}
+        self.opened = {}
         self.listings = Listings()
         self.home = os.path.expanduser("~")
         self.starter = None
@@ -1684,9 +1668,6 @@ class App:
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.take_focus(sidebar)
-                if self.passthrough_for != sidebar.id:
-                    self.tmux.allow_passthrough(sidebar.id)
-                    self.passthrough_for = sidebar.id
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -1695,6 +1676,21 @@ class App:
             self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
+        self.check_hush()
+
+    def check_hush(self) -> None:
+        """`emx hush` from outside writes a fresh token to a session option; a change since the last read stops the voice. A failed read changes nothing."""
+        try:
+            value = self.tmux.session_option(HUSH_OPT)
+        except TmuxError:
+            return
+        self.hush_seen, due = core.hush_due(self.hush_seen, value)
+        if due:
+            self.hush()
+
+    def hush(self) -> None:
+        self.poller.voice.silence()
+        self.say("Stopped speaking.", seconds=RESTORED_NOTICE_SECONDS)
 
     def set_focus(self, focused: bool, back: bool = False) -> None:
         """Note whether the panel has focus.
@@ -1834,6 +1830,9 @@ class App:
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
+            if trigger == core.OPEN:
+                self.opened[sid] = time.monotonic()
+                self.missed = core.missed_clear(self.missed, sid)
             self.say("")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -2401,6 +2400,8 @@ class App:
             self.open_prompt()
         elif key == "m":
             self.toggle_voice()
+        elif key == "h":
+            self.hush()
         elif key == "r":
             self.restart_viewer()
         elif key == "s":
@@ -2431,7 +2432,7 @@ class App:
                 pass
 
     def bottom_lines(self, width: int, height: int | None = None) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
+        """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
         if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
             session = self.session(self.main_pane.session)
@@ -2464,6 +2465,8 @@ class App:
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
+        shown = core.missed_lines(self.missed, time.monotonic(), width, core.missed_room(height, len(lines) + 1))
+        lines += [(t, curses.A_BOLD if i == 0 else 0) for i, t in enumerate(shown)]
         lines.append((footer, curses.A_DIM))
         return lines
 
@@ -2716,6 +2719,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.missed, self.missed_misses = core.missed_prune(self.missed, [s.id for s in sessions], self.missed_misses)
         self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
@@ -2758,26 +2762,9 @@ class App:
             if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
 
-    def flush_notices(self) -> None:
-        """Shows the notices that are ready: as a terminal notification while a client is attached (read now, since he may have detached since the transition), else as a macOS banner."""
-        texts = self.poller.notices.take()
-        if not texts:
-            return
-        try:
-            attached = self.tmux.client_state()[0]
-        except TmuxError:
-            attached = 0
-        for text in texts:
-            if attached > 0:
-                self.write_out(core.osc9(text))
-            else:
-                self.poller.voice.banner(text)
-
-    def write_out(self, data: bytes) -> None:
-        try:
-            os.write(1, data)
-        except OSError as exc:
-            self.say(f"Couldn't send a notification: {exc}", error=True)
+    def take_notices(self) -> None:
+        for sid, text, at in self.poller.notices.take():
+            self.missed = core.missed_add(self.missed, core.Missed(sid, text, at), self.opened)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
@@ -2834,6 +2821,7 @@ class App:
             self.take_placements()
             self.take_transcripts()
             self.take_summaries()
+            self.take_notices()
             # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
             if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False
@@ -2851,7 +2839,6 @@ class App:
                 # Lines under the list squeezed the box to nothing; the pane is not too short, so no notice says it is.
                 self.peeking = False
             self.draw()
-            self.flush_notices()
         except Exception as exc:
             self.say(f"emx error: {core.error_line(exc)}", error=True)
 

@@ -209,11 +209,11 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: `subprocess.run(core.summary_args(claude), input=excerpt, cwd=scratch, ...)` in `sidebar.summarise`.
 4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`, `NameArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps, the instruction and the 30 s timeout (ADR 0002).
 
-### Text emx speaks or shows outside its screen goes through `core.clean_notice`, and reaches `say`, `osascript` and the terminal only one way
+### Text emx speaks goes through `core.clean_notice`, and reaches `say` only on stdin
 
-1. **Rule**: every text emx speaks, puts in a banner or sends as a terminal notification (Haiku's words and the plain fallback line alike) goes through `core.clean_notice` first. `say` gets it on stdin; `osascript` gets it as the argument after `--`, never inside the AppleScript source; OSC 9 is written only by the panel, wrapped for tmux passthrough, after `draw()`, with `allow-passthrough` on the panel's pane only (never `set -g`). Control characters are judged on code points (C0, DEL and C1), not bytes.
-2. **Why**: `say` runs `[[ ]]` commands embedded in its text; ESC, BEL or ST end an OSC early and let the rest run as a terminal command; a leading `-` makes `osascript` read the text as an option; a global passthrough lets Claude Code's own OSC 9 out of every viewer and doubles each notice.
-3. **Minimal example**: `self.write_out(core.osc9(text))` in `App.flush_notices`; `["osascript", "-e", script, "--", text]` in `Voice.show_banner`.
+1. **Rule**: every text emx speaks (Haiku's words and the plain fallback line alike) goes through `core.clean_notice` first. `say` gets it on stdin, never in its command line. Control characters are judged on code points (C0, DEL and C1), not bytes.
+2. **Why**: `say` runs `[[ ]]` commands embedded in its text, and a leading `-` in its command line would be read as an option.
+3. **Minimal example**: `proc.communicate(text)` in `Voice.speak_aloud`.
 4. **Gotcha**: a C1 control such as U+009C (ST) is two bytes in UTF-8 and slips past a byte check; the cleaning must run on the decoded string. A name or project taken from a session is untrusted too, so the fallback line is cleaned like Haiku's.
 
 ### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it
@@ -232,6 +232,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    sessions = core.background_sessions(rows)   # not: for row in rows
    ```
 4. **Gotcha**: a test that feeds `emx-test-` rows with a temporary cwd must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; a row is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden.
+
+### A command from outside reaches the running panel through a session option, never a signal
+
+1. **Rule**: a command run from outside (`emx hush`) reaches the running panel only by writing a fresh token (`time.time_ns()`) to a session user option on emx's own socket. The command checks `has_session()` first, uses no `-f`, and never starts a server. The panel reads the option on each housekeep tick and acts on a change, decided by a pure core function (`core.hush_due`); never a signal.
+2. **Why**: a panel on an older version would be killed by SIGUSR1's default action, a handler could deadlock on `Voice.lock`, and an option on emx's socket cannot reach his default tmux server.
+3. **Minimal example**:
+   ```python
+   tmux.set_session_option(HUSH_OPT, str(time.time_ns()))              # cli.hush
+   self.hush_seen, due = core.hush_due(self.hush_seen, value)          # App.check_hush
+   ```
+4. **Gotcha**: the panel's first read is a baseline, so a write before it is ignored; a `-q` read cannot prove the option is unset, so an empty value is no change.
 
 ## The contract for this file
 

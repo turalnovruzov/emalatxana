@@ -14,6 +14,7 @@ VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
 FOCUS_OPT = "@emx_focus"
+HUSH_OPT = "@emx_hush"
 
 
 _PANE_ID = re.compile(r"%\d+")
@@ -109,10 +110,6 @@ class Tmux:
 
     def set_pane_option(self, pane: str, name: str, value: str) -> None:
         self.run("set-option", "-p", "-t", pane, name, value)
-
-    def allow_passthrough(self, pane: str) -> None:
-        """Let escape sequences the pane wraps in tmux's passthrough reach his terminal. Pane-only on purpose: set globally, Claude Code's own notifications would get out of every viewer too."""
-        self.run("set-option", "-p", "-t", pane, "allow-passthrough", "on")
 
     def client_state(self, now: float | None = None) -> tuple:
         """(clients attached, last focus report "1" in, "0" out or "" unknown, the active pane's id, seconds since the client's last input or None when unknown)."""

@@ -1,8 +1,7 @@
 import os
 import pty
-import select
-import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -10,8 +9,8 @@ import unittest
 import uuid
 from unittest import mock
 
-from emx import core
-from emx.tmux import BACK_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
+from emx import cli, core
+from emx.tmux import BACK_OPT, HUSH_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
@@ -357,15 +356,6 @@ class ClientStateParse(unittest.TestCase):
         self.assertEqual(self.state("1\t0\t%1\t1005\n")[0], (1, "0", "%1", 0.0))
 
 
-class AllowPassthroughArgv(unittest.TestCase):
-    def test_the_argv_is_pane_only(self):
-        tmux = Tmux("emx-test-unused")
-        with mock.patch.object(tmux, "run") as run:
-            tmux.allow_passthrough("%1")
-        run.assert_called_once_with("set-option", "-p", "-t", "%1", "allow-passthrough", "on")
-        self.assertNotIn("-g", run.call_args.args)
-
-
 class ShippedConf(unittest.TestCase):
     def test_both_focus_hooks_are_there_and_passthrough_is_not_set_globally(self):
         self.assertIn("set-hook -g client-focus-in 'set-option -t \"=emx:\" @emx_focus 1'", SHELL_CONF)
@@ -374,27 +364,13 @@ class ShippedConf(unittest.TestCase):
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
-class FocusAndPassthrough(PrivateServer):
-    """The shipped conf sourced onto a private server, with focus reports and OSC 9 written through an attached pty client."""
+class Focus(PrivateServer):
+    """The shipped conf sourced onto a private server, with focus reports written through an attached pty client."""
 
     def setUp(self):
         super().setUp()
-        self.log = b""
         self.tmux.config = CONF
         self.tmux.source_config()
-
-    def drain(self):
-        while select.select([self.client_fd], [], [], 0.05)[0]:
-            try:
-                data = os.read(self.client_fd, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            self.log += data
-
-    def run_in(self, pane, script):
-        self.tmux.respawn(pane, f"/bin/sh -c {shlex.quote(script)}")
 
     def test_sourcing_the_conf_twice_succeeds(self):
         self.tmux.source_config()
@@ -408,21 +384,53 @@ class FocusAndPassthrough(PrivateServer):
         os.write(self.client_fd, b"\x1b[O")
         self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
 
-    def test_the_sidebars_wrapped_notification_arrives_and_a_viewers_does_not(self):
-        self.tmux.allow_passthrough(self.sidebar)
-        raw, wrapped = "\\033]9;viewer-raw\\a", "\\033Ptmux;\\033\\033]9;viewer-wrapped\\a\\033\\\\"
-        side = "\\033Ptmux;\\033\\033]9;sidebar-wrapped\\a\\033\\\\"
-        self.run_in(self.main, f"printf '{raw}{wrapped}'; sleep 5")
-        self.run_in(self.sidebar, f"printf '{side}'; sleep 5")
-        for _ in range(40):
-            self.drain()
-            if b"sidebar-wrapped" in self.log:
-                break
-        self.drain()
-        self.assertIn(b"sidebar-wrapped", self.log)
-        self.assertNotIn(b"viewer-raw", self.log)
-        self.assertNotIn(b"viewer-wrapped", self.log)
-        self.assertEqual(self.tmux.run("show-options", "-gv", "allow-passthrough").strip(), "off")
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class HushAcrossServers(unittest.TestCase):
+    """The real launcher's `hush` against two private servers: only the one named by EMX_SOCKET is touched."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmpdir = tmp.name
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.servers = {}
+        for name in ("a", "b"):
+            tmux = Tmux(f"emx-test-{name}-{uuid.uuid4().hex[:8]}", os.devnull)
+            self.addCleanup(self.kill, tmux)
+            tmux.run("new-session", "-d", "-s", SESSION, "sleep 30")
+            self.servers[name] = tmux
+
+    @staticmethod
+    def kill(tmux):
+        try:
+            tmux.run("kill-server")
+        except TmuxError:
+            pass
+
+    def hush(self, name):
+        env = {**os.environ, "EMX_SOCKET": self.servers[name].socket}
+        self.assertEqual(env["TMUX_TMPDIR"], self.tmpdir)
+        self.assertTrue(env["EMX_SOCKET"].startswith("emx-test-"))
+        done = subprocess.run(
+            [sys.executable, cli.BIN, "hush"], capture_output=True, text=True, timeout=30, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+
+    def token(self, name):
+        return self.servers[name].run("show-options", "-qv", "-t", f"={SESSION}:", HUSH_OPT).strip()
+
+    def test_it_sets_a_token_on_the_named_server_and_never_on_the_other(self):
+        self.hush("a")
+        first = self.token("a")
+        self.assertTrue(first.isdigit())
+        self.assertEqual(self.token("b"), "")
+        self.hush("a")
+        self.assertNotEqual(self.token("a"), first)
+        self.assertEqual(self.token("b"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
