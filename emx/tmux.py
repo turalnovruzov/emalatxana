@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 
 SESSION = "emx"
@@ -12,6 +13,7 @@ SESSION_OPT = "@emx_session"
 VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
+FOCUS_OPT = "@emx_focus"
 
 
 _PANE_ID = re.compile(r"%\d+")
@@ -107,6 +109,23 @@ class Tmux:
 
     def set_pane_option(self, pane: str, name: str, value: str) -> None:
         self.run("set-option", "-p", "-t", pane, name, value)
+
+    def allow_passthrough(self, pane: str) -> None:
+        """Let escape sequences the pane wraps in tmux's passthrough reach his terminal. Pane-only on purpose: set globally, Claude Code's own notifications would get out of every viewer too."""
+        self.run("set-option", "-p", "-t", pane, "allow-passthrough", "on")
+
+    def client_state(self, now: float | None = None) -> tuple:
+        """(clients attached, last focus report "1" in, "0" out or "" unknown, the active pane's id, seconds since the client's last input or None when unknown)."""
+        out = self.run(
+            "display-message", "-p", "-t", f"={SESSION}:",
+            "#{session_attached}\t#{" + FOCUS_OPT + "}\t#{pane_id}\t#{client_activity}",
+        )
+        attached, focus, active, activity = (out.rstrip("\n").split("\t") + ["", "", "", ""])[:4]
+        try:
+            idle = max(0.0, (time.time() if now is None else now) - float(activity))
+        except ValueError:
+            idle = None
+        return int(attached or 0), focus, active, idle
 
     def new_hidden_window(self, command: str) -> str:
         return self.run("new-window", "-d", "-t", f"={SESSION}:", "-P", "-F", "#{pane_id}", command).strip()

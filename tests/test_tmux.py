@@ -1,5 +1,7 @@
 import os
 import pty
+import select
+import shlex
 import shutil
 import sys
 import tempfile
@@ -70,6 +72,7 @@ class PrivateServer(unittest.TestCase):
             finally:
                 os._exit(127)
         self.addCleanup(self.reap, pid, fd)
+        self.client_fd = fd
         self.wait_for(lambda: self.tmux.run("list-clients", "-F", "#{client_name}").strip(), "an attached client")
         return self.tmux.run("list-clients", "-F", "#{client_name}").strip()
 
@@ -292,6 +295,106 @@ class TypeIfTarget(unittest.TestCase):
                         tmux.type_if(pane, "#{==:1,1}", "/rename x", core.TYPED, "")
         run.assert_not_called()
 
+
+
+CONF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "emx", "emx.tmux.conf")
+SHELL_CONF = open(CONF, encoding="utf-8").read()
+
+
+class ClientStateParse(unittest.TestCase):
+    def state(self, out, now=1000.0):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run", return_value=out) as run:
+            got = tmux.client_state(now)
+        return got, run.call_args.args
+
+    def test_it_asks_the_emx_session_exactly(self):
+        _, args = self.state("1\t1\t%2\t990\n")
+        self.assertEqual(args[:3], ("display-message", "-p", "-t"))
+        self.assertEqual(args[3], "=emx:")
+        self.assertIn("#{session_attached}", args[4])
+        self.assertIn("#{@emx_focus}", args[4])
+        self.assertIn("#{pane_id}", args[4])
+        self.assertIn("#{client_activity}", args[4])
+
+    def test_an_attached_focused_client(self):
+        self.assertEqual(self.state("1\t1\t%2\t990\n")[0], (1, "1", "%2", 10.0))
+
+    def test_no_client_and_nothing_known(self):
+        self.assertEqual(self.state("0\t\t%0\t\n")[0], (0, "", "%0", None))
+        self.assertEqual(self.state("0\t\t\t\n")[0], (0, "", "", None))
+        self.assertEqual(self.state("")[0], (0, "", "", None))
+
+    def test_a_focus_out_report_and_an_activity_in_the_future(self):
+        self.assertEqual(self.state("1\t0\t%1\t1005\n")[0], (1, "0", "%1", 0.0))
+
+
+class AllowPassthroughArgv(unittest.TestCase):
+    def test_the_argv_is_pane_only(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            tmux.allow_passthrough("%1")
+        run.assert_called_once_with("set-option", "-p", "-t", "%1", "allow-passthrough", "on")
+        self.assertNotIn("-g", run.call_args.args)
+
+
+class ShippedConf(unittest.TestCase):
+    def test_both_focus_hooks_are_there_and_passthrough_is_not_set_globally(self):
+        self.assertIn("set-hook -g client-focus-in 'set-option -t \"=emx:\" @emx_focus 1'", SHELL_CONF)
+        self.assertIn("set-hook -g client-focus-out 'set-option -t \"=emx:\" @emx_focus 0'", SHELL_CONF)
+        self.assertNotIn("allow-passthrough", SHELL_CONF)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class FocusAndPassthrough(PrivateServer):
+    """The shipped conf sourced onto a private server, with focus reports and OSC 9 written through an attached pty client."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = b""
+        self.tmux.config = CONF
+        self.tmux.source_config()
+
+    def drain(self):
+        while select.select([self.client_fd], [], [], 0.05)[0]:
+            try:
+                data = os.read(self.client_fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            self.log += data
+
+    def run_in(self, pane, script):
+        self.tmux.respawn(pane, f"/bin/sh -c {shlex.quote(script)}")
+
+    def test_sourcing_the_conf_twice_succeeds(self):
+        self.tmux.source_config()
+
+    def test_focus_in_and_out_reach_the_session_option(self):
+        os.write(self.client_fd, b"\x1b[I")
+        self.wait_for(lambda: self.tmux.client_state()[1] == "1", "focus in")
+        attached, focus, active, idle = self.tmux.client_state()
+        self.assertEqual((attached, focus, active), (1, "1", self.main))
+        self.assertLess(idle, 5)
+        os.write(self.client_fd, b"\x1b[O")
+        self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
+
+    def test_the_sidebars_wrapped_notification_arrives_and_a_viewers_does_not(self):
+        self.tmux.allow_passthrough(self.sidebar)
+        raw, wrapped = "\\033]9;viewer-raw\\a", "\\033Ptmux;\\033\\033]9;viewer-wrapped\\a\\033\\\\"
+        side = "\\033Ptmux;\\033\\033]9;sidebar-wrapped\\a\\033\\\\"
+        self.run_in(self.main, f"printf '{raw}{wrapped}'; sleep 5")
+        self.run_in(self.sidebar, f"printf '{side}'; sleep 5")
+        for _ in range(40):
+            self.drain()
+            if b"sidebar-wrapped" in self.log:
+                break
+        self.drain()
+        self.assertIn(b"sidebar-wrapped", self.log)
+        self.assertNotIn(b"viewer-raw", self.log)
+        self.assertNotIn(b"viewer-wrapped", self.log)
+        self.assertEqual(self.tmux.run("show-options", "-gv", "allow-passthrough").strip(), "off")
 
 if __name__ == "__main__":
     unittest.main()
