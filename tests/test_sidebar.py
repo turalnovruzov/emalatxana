@@ -206,6 +206,22 @@ class FakePalette:
         return 0
 
 
+class ClientTmux:
+    """The two tmux calls a listing makes for notices; anything else is an error, as it is with no tmux at all."""
+
+    def __init__(self, state=(0, "", "", None)):
+        self.state = state
+        self.passthrough = []
+
+    def client_state(self):
+        if isinstance(self.state, Exception):
+            raise self.state
+        return self.state
+
+    def allow_passthrough(self, pane):
+        self.passthrough.append(pane)
+
+
 class AppCase(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -216,17 +232,34 @@ class AppCase(unittest.TestCase):
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
             # A worker a test didn't mean to start must never run his real claude.
             mock.patch.object(sidebar, "fetch_sessions", lambda claude: (None, "no claude in tests")),
+            # No test may speak, show a banner, ask Haiku or write to the real terminal.
+            mock.patch.object(sidebar, "announce", self.recorder("announced", method=False, result=(None, "no haiku in tests"))),
+            mock.patch.object(sidebar, "list_voices", lambda say: []),
+            mock.patch.object(sidebar.Voice, "speak", self.recorder("spoken")),
+            mock.patch.object(sidebar.Voice, "banner", self.recorder("banners")),
+            mock.patch.object(sidebar.Voice, "silence", self.recorder("silenced")),
+            mock.patch.object(sidebar.App, "write_out", self.recorder("written")),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
         self.scr = FakeScr()
-        self.app = sidebar.App(self.scr, tmux=None, claude="claude")
+        self.app = sidebar.App(self.scr, tmux=ClientTmux(), claude="claude")
         self.app.housekeep = lambda fresh_list: None
         self.opened = []
         self.app.switch_to = lambda sid, trigger, checked=None: self.opened.append(
             (sid, trigger) if checked is None else (sid, trigger, checked)
         )
+
+    def recorder(self, name, method=True, result=None):
+        calls = []
+        setattr(self, name, calls)
+
+        def record(*args, **kwargs):
+            calls.append(args[1:] if method else args)
+            return result
+
+        return record
 
     def poll(self, *sessions):
         self.app.poller.result = (list(sessions), None)
@@ -800,6 +833,9 @@ class CloseTmux:
 
     def kill_pane(self, pane):
         self.calls.append(("kill", pane))
+
+    def client_state(self):
+        return 0, "", "", None
 
 
 class CloseStaleOnListings(AppCase):
@@ -4004,6 +4040,589 @@ class InterruptSession(AppCase):
         self.assertEqual(self.app.notice, "emx-test-working is still working; emx sent Esc but it didn't stop.")
         self.assertTrue(self.app.notice_error)
 
+
+
+LONG_ANSWER = (
+    "The invoicing app, sir: the tax rounding bug is fixed, three tests added. "
+    "Pull request forty-one is ready for you, and the whole suite is green."
+)
+LONG_JSON = json.dumps({"result": LONG_ANSWER, "is_error": False, "duration_ms": 900, "total_cost_usd": 0.0004,
+                        "usage": {"input_tokens": 3, "output_tokens": 30}, "modelUsage": {"claude-haiku-5-5": {}}})
+
+
+class Announce(unittest.TestCase):
+    def test_every_failure_is_a_line_never_a_raise(self):
+        for exc in (FileNotFoundError(), subprocess.TimeoutExpired("claude", 15), OSError("boom")):
+            with self.subTest(exc=exc), mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                call, error = sidebar.announce("claude", "x", "/tmp")
+                self.assertIsNone(call)
+                self.assertIsInstance(error, str)
+
+    def test_the_call_is_the_notice_command_with_the_excerpt_on_stdin_in_the_folder_given(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, LONG_JSON)) as run:
+            call, error = sidebar.announce("claude", "--Project: app", "/tmp/scratch")
+        self.assertIsNone(error)
+        self.assertEqual(run.call_args.args[0], core.notice_args("claude"))
+        self.assertEqual(run.call_args.kwargs["input"], "--Project: app")
+        self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/scratch")
+        self.assertEqual(run.call_args.kwargs["timeout"], sidebar.NOTICE_TIMEOUT)
+
+    def test_a_two_sentence_answer_arrives_whole_not_cut_to_a_summary_line(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, LONG_JSON)):
+            call, _ = sidebar.announce("claude", "x", "/tmp")
+        self.assertEqual(call.text, LONG_ANSWER)
+        self.assertGreater(len(LONG_ANSWER), core.SUMMARY_MAX_CHARS)
+
+    def test_a_refusal_is_reported_as_declined(self):
+        refused = json.dumps({"is_error": True, "result": "", "stop_reason": "refusal"})
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, refused)):
+            self.assertEqual(sidebar.announce("claude", "x", "/tmp"), (None, core.HAIKU_DECLINED))
+
+    def test_summaries_still_use_their_own_timeout_and_cleaning(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, LONG_JSON)) as run:
+            call, _ = sidebar.summarise("claude", "x", "/tmp")
+        self.assertEqual(run.call_args.kwargs["timeout"], sidebar.SUMMARY_TIMEOUT)
+        self.assertLessEqual(len(call.text), core.SUMMARY_MAX_CHARS)
+
+
+class StubVoice:
+    def __init__(self):
+        self.spoken, self.banners = [], []
+
+    def speak(self, text):
+        self.spoken.append(text)
+
+    def banner(self, text):
+        self.banners.append(text)
+
+
+class NoticesWorker(unittest.TestCase):
+    def setUp(self):
+        self.transcripts = sidebar.Transcripts("/nonexistent")
+        self.speaker = StubVoice()
+        self.worker = sidebar.Notices("claude", self.transcripts, sidebar.Resolver("/h"), self.speaker)
+        self.alpha = session("a", "/p/alpha", "done")
+        self.worker.want([self.alpha])
+        self.transcripts.found = {"a": core.Transcript(prompt="Fix it", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")}
+        self.asked = []
+        self.answer = (core.SummaryCall("Alpha, sir: all fixed.", "claude-haiku-5-5", 1, 1, 0.0, 1, 1, 0, 0), None)
+
+        def fake(claude, excerpt, cwd):
+            self.asked.append(excerpt)
+            return self.answer
+
+        for name, value in (("announce", fake), ("summary_scratch", lambda: "/tmp/emx-test-scratch")):
+            patch = mock.patch.object(sidebar, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def notice(self, kind=core.NOTICE_DONE, age=0.0, sid="a"):
+        notice = core.Notice(sid, kind, f"emx-test-{sid}", "/p/alpha", time.monotonic() - age)
+        self.worker.add(notice)
+        return notice
+
+    def test_a_good_answer_reaches_the_outbox_the_voice_and_the_calls(self):
+        self.notice()
+        self.assertTrue(self.worker.step())
+        self.assertEqual(self.worker.take(), ["Alpha, sir: all fixed."])
+        self.assertEqual(self.speaker.spoken, ["Alpha, sir: all fixed."])
+        self.assertEqual([c.text for c in self.worker.calls], ["Alpha, sir: all fixed."])
+        self.assertEqual(self.worker.pending, [])
+        self.assertTrue(self.asked[0].startswith("Project: alpha\nSession: emx-test-a\nWhat happened: it has finished"))
+        self.assertEqual(self.worker.take(), [])
+
+    def test_an_error_a_refusal_or_an_empty_answer_gives_the_plain_line(self):
+        empty = core.SummaryCall("", "m", 1, 1, 0.0, 1, 1, 0, 0)
+        for answer in ((None, "boom"), (None, core.HAIKU_DECLINED), (empty, None)):
+            with self.subTest(answer=answer):
+                self.answer = answer
+                self.notice()
+                self.worker.step()
+                self.assertEqual(self.worker.take(), ["emx-test-a, in alpha, is done."])
+        self.assertEqual(len(self.worker.calls), 1)
+
+    def test_an_empty_excerpt_makes_no_call_and_gives_the_plain_line(self):
+        self.transcripts.found = {}
+        self.notice(age=core.NOTICE_SETTLE_SECONDS + 1)
+        self.worker.step()
+        self.assertEqual(self.asked, [])
+        self.assertEqual(self.worker.take(), ["emx-test-a, in alpha, is done."])
+        self.assertEqual(self.worker.calls, [])
+
+    def test_a_needs_input_fallback_says_needs_you(self):
+        self.worker.want([session("a", "/p/alpha", "blocked")])
+        self.transcripts.found = {}
+        self.answer = (None, "boom")
+        self.notice(core.NOTICE_NEEDS, age=core.NOTICE_SETTLE_SECONDS + 1)
+        self.worker.step()
+        self.assertEqual(self.worker.take(), ["emx-test-a, in alpha, needs you."])
+
+    def test_not_ready_sends_nothing_until_the_settle_time_has_passed(self):
+        self.transcripts.found = {"a": core.Transcript(prompt="Fix it", latest="prompt")}
+        self.notice(age=1)
+        self.assertFalse(self.worker.step())
+        self.assertEqual((self.worker.take(), self.asked), ([], []))
+        self.worker.pending.clear()
+        self.notice(age=core.NOTICE_SETTLE_SECONDS)
+        self.assertTrue(self.worker.step())
+        self.assertEqual(len(self.worker.take()), 1)
+
+    def test_a_notice_for_a_session_now_in_another_state_is_dropped(self):
+        self.worker.want([session("a", "/p/alpha", "working")])
+        self.notice()
+        self.worker.step()
+        self.assertEqual((self.worker.take(), self.worker.pending, self.asked, self.speaker.spoken), ([], [], [], []))
+
+    def test_a_session_that_changed_state_during_the_call_is_dropped_too(self):
+        def slow(claude, excerpt, cwd):
+            self.worker.want([session("a", "/p/alpha", "working")])
+            return self.answer
+
+        with mock.patch.object(sidebar, "announce", slow):
+            self.notice()
+            self.worker.step()
+        self.assertEqual((self.worker.take(), self.worker.pending, self.speaker.spoken), ([], [], []))
+
+    def test_a_session_absent_from_the_listing_keeps_its_notice(self):
+        self.worker.want([session("b", "/p/beta")])
+        self.transcripts.found = {}
+        self.notice(age=1)
+        self.assertFalse(self.worker.step())
+        self.assertEqual(len(self.worker.pending), 1)
+        self.worker.pending.clear()
+        self.notice(age=core.NOTICE_SETTLE_SECONDS + 1)
+        self.worker.step()
+        self.assertEqual(self.worker.take(), ["emx-test-a, in alpha, is done."])
+
+    def test_with_the_voice_off_the_outbox_still_gets_it_and_nothing_is_spoken(self):
+        self.worker.voice = False
+        self.notice()
+        self.worker.step()
+        self.assertEqual(self.worker.take(), ["Alpha, sir: all fixed."])
+        self.assertEqual(self.speaker.spoken, [])
+
+    def test_a_refused_scratch_folder_still_gives_the_plain_line(self):
+        with mock.patch.object(sidebar, "summary_scratch", side_effect=OSError("refused")):
+            self.notice()
+            self.worker.step()
+        self.assertEqual((self.asked, self.worker.take()), ([], ["emx-test-a, in alpha, is done."]))
+
+    def test_hostile_words_are_cleaned_before_they_are_shown_or_spoken(self):
+        self.answer = (core.SummaryCall("Done [[slnc 9000]] \x1b]9;x\x07 now.", "m", 1, 1, 0.0, 1, 1, 0, 0), None)
+        self.notice()
+        self.worker.step()
+        (text,) = self.worker.take()
+        self.assertNotIn("[[", text)
+        self.assertNotIn("\x1b", text)
+        self.assertEqual(self.speaker.spoken, [text])
+
+    def test_notices_go_out_oldest_first(self):
+        self.worker.want([self.alpha, session("b", "/p/beta", "done")])
+        self.transcripts.found["b"] = self.transcripts.found["a"]
+        self.notice(sid="a", age=3)
+        self.notice(sid="b", age=2)
+        self.worker.step()
+        self.worker.step()
+        self.assertEqual(len(self.asked), 2)
+        self.assertIn("Project: alpha", self.asked[0])
+        self.assertIn("Project: beta", self.asked[1])
+
+
+class FakeSay:
+    """Stands in for a `say` process: communicate takes `hold` seconds unless terminated, and the peak of concurrent runs is counted."""
+    lock = threading.Lock()
+    running = peak = 0
+    hold = 0.05
+    made = []
+
+    def __init__(self, argv, **kwargs):
+        self.argv, self.kwargs, self.text = argv, kwargs, None
+        self.ended, self.entered = threading.Event(), threading.Event()
+        self.returncode = None
+        with FakeSay.lock:
+            FakeSay.made.append(self)
+
+    @classmethod
+    def reset(cls, hold=0.05):
+        cls.running = cls.peak = 0
+        cls.made = []
+        cls.hold = hold
+
+    def communicate(self, text=None, timeout=None):
+        with FakeSay.lock:
+            FakeSay.running += 1
+            FakeSay.peak = max(FakeSay.peak, FakeSay.running)
+        self.text = text
+        self.entered.set()
+        self.ended.wait(FakeSay.hold)
+        with FakeSay.lock:
+            FakeSay.running -= 1
+        self.returncode = 0
+        return "", ""
+
+    def terminate(self):
+        self.ended.set()
+
+    def kill(self):
+        self.ended.set()
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self):
+        return 0
+
+
+def wait_until(test, ready, what, seconds=5):
+    deadline = time.monotonic() + seconds
+    while not ready():
+        if time.monotonic() > deadline:
+            test.fail(f"timed out waiting for {what}")
+        time.sleep(0.01)
+
+
+class ListVoices(unittest.TestCase):
+    def test_it_never_raises(self):
+        for exc in (FileNotFoundError(), OSError("x"), subprocess.TimeoutExpired("say", 1)):
+            with mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                self.assertEqual(sidebar.list_voices("say"), [])
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(1, "Daniel en_GB # x")):
+            self.assertEqual(sidebar.list_voices("say"), [])
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, "Daniel   en_GB    # x")):
+            self.assertEqual(sidebar.list_voices("say"), ["Daniel"])
+
+
+class VoiceQueue(unittest.TestCase):
+    def setUp(self):
+        FakeSay.reset()
+        for target, name, value in ((sidebar.subprocess, "Popen", FakeSay), (sidebar, "list_voices", lambda say: ["Daniel"])):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.voice = sidebar.Voice()
+
+    def test_a_sentence_put_after_a_mute_is_dropped_but_a_banner_is_kept(self):
+        self.voice.muted = True
+        self.voice.put(("say", "late"))
+        self.voice.put(("banner", "shown"))
+        self.assertEqual(self.voice.queue, [("banner", "shown")])
+
+    def test_five_texts_from_two_threads_play_one_at_a_time_in_order_with_the_text_on_stdin(self):
+        self.voice.start()
+        def queue(texts):
+            for text in texts:
+                self.voice.speak(text)
+        first = threading.Thread(target=queue, args=(["a1", "a2", "a3"],))
+        second = threading.Thread(target=queue, args=(["b1", "b2"],))
+        first.start(), second.start(), first.join(), second.join()
+        wait_until(self, lambda: len([p for p in FakeSay.made if p.returncode == 0]) == 5, "five texts")
+        played = [p.text for p in FakeSay.made]
+        self.assertEqual(sorted(played), ["a1", "a2", "a3", "b1", "b2"])
+        self.assertEqual([t for t in played if t[0] == "a"], ["a1", "a2", "a3"])
+        self.assertEqual([t for t in played if t[0] == "b"], ["b1", "b2"])
+        self.assertEqual(FakeSay.peak, 1)
+        for proc in FakeSay.made:
+            self.assertNotIn(proc.text, proc.argv)
+            self.assertEqual(proc.argv[:3], ["say", "-v", "Daniel"])
+
+    def test_silence_stops_the_one_playing_and_the_queued_ones_never_run(self):
+        FakeSay.reset(hold=5)
+        self.voice.start()
+        for text in ("one", "two", "three"):
+            self.voice.speak(text)
+        wait_until(self, lambda: FakeSay.made and FakeSay.made[0].entered.is_set(), "the first to start")
+        self.voice.silence()
+        self.assertTrue(FakeSay.made[0].ended.is_set())
+        time.sleep(0.3)
+        self.assertEqual([p.text for p in FakeSay.made], ["one"])
+
+    def test_a_silence_that_came_while_the_process_was_starting_still_stops_it(self):
+        self.voice.speak_aloud("late", self.voice.generation - 1)
+        (proc,) = FakeSay.made
+        self.assertTrue(proc.ended.is_set())
+        self.assertEqual(proc.text, "")
+
+    def test_speaking_while_muted_queues_nothing_and_unmuting_lets_it_through(self):
+        self.voice.muted = True
+        self.voice.speak("late")
+        self.assertEqual(self.voice.queue, [])
+        self.voice.muted = False
+        self.voice.speak("heard")
+        self.assertEqual(self.voice.queue, [("say", "heard")])
+
+    def test_a_banner_goes_ahead_of_the_speech_queued_and_behind_earlier_banners(self):
+        self.voice.speak("s1")
+        self.voice.speak("s2")
+        self.voice.banner("b1")
+        self.voice.banner("b2")
+        self.assertEqual(self.voice.queue, [("banner", "b1"), ("banner", "b2"), ("say", "s1"), ("say", "s2")])
+
+    def test_a_banner_survives_a_silence(self):
+        with mock.patch.object(sidebar.subprocess, "run") as run:
+            self.voice.banner("kept")
+            self.voice.speak("dropped")
+            self.voice.silence()
+            self.voice.step()
+        self.assertEqual(run.call_args.args[0][-1], "kept")
+
+    def test_the_banner_text_is_the_last_argument_after_a_double_dash_and_never_in_the_script(self):
+        for text in ("Alpha is done.", "-e display dialog"):
+            with self.subTest(text=text), mock.patch.object(sidebar.subprocess, "run") as run:
+                self.voice.show_banner(text)
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[0], "osascript")
+            self.assertEqual(argv[-2:], ["--", text])
+            scripts = [argv[i + 1] for i, a in enumerate(argv[:-2]) if a == "-e"]
+            self.assertTrue(scripts)
+            self.assertFalse(any(text in script for script in scripts))
+
+    def test_a_banner_goes_through_the_same_queue(self):
+        with mock.patch.object(sidebar.subprocess, "run") as run:
+            self.voice.start()
+            self.voice.banner("queued")
+            wait_until(self, lambda: run.called, "the banner")
+        self.assertEqual(run.call_args.args[0][-1], "queued")
+
+    def test_a_missing_say_does_not_raise_and_the_next_item_still_runs(self):
+        calls = []
+
+        def popen(argv, **kwargs):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise FileNotFoundError("say")
+            return FakeSay(argv, **kwargs)
+
+        with mock.patch.object(sidebar.subprocess, "Popen", popen):
+            self.voice.start()
+            self.voice.speak("lost")
+            self.voice.speak("heard")
+            wait_until(self, lambda: FakeSay.made and FakeSay.made[0].returncode == 0, "the second text")
+        self.assertEqual(FakeSay.made[0].text, "heard")
+
+    def test_no_voice_found_means_say_runs_with_its_default(self):
+        with mock.patch.object(sidebar, "list_voices", lambda say: []):
+            self.voice.start()
+            self.voice.speak("hello")
+            wait_until(self, lambda: FakeSay.made and FakeSay.made[0].returncode == 0, "the text")
+        self.assertEqual(FakeSay.made[0].argv, ["say"])
+
+    def test_the_say_command_can_be_overridden_by_the_environment(self):
+        with mock.patch.dict(os.environ, {"EMX_SAY": "/x/shim"}):
+            self.assertEqual(sidebar.say_command(), "/x/shim")
+        with mock.patch.dict(os.environ, {"EMX_SAY": ""}):
+            self.assertEqual(sidebar.say_command(), "say")
+
+    def test_building_a_poller_starts_no_thread_and_runs_no_command(self):
+        before = threading.active_count()
+        with mock.patch.object(sidebar.subprocess, "Popen", side_effect=AssertionError("Popen")), \
+                mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("run")), \
+                mock.patch.object(sidebar, "list_voices", side_effect=AssertionError("list_voices")):
+            poller = sidebar.Poller("claude")
+        self.assertEqual(threading.active_count(), before)
+        self.assertIsNone(poller.voice.voice)
+        self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive())
+
+
+REAL_WRITE_OUT = sidebar.App.write_out
+
+
+class NoticeWiring(AppCase):
+    """A listing that moves a session into Needs input or Done queues one notice, unless he is looking at that session."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(lambda: self.assertEqual(self.announced, [], "Haiku was asked on the curses thread"))
+
+    def pending(self):
+        return list(self.app.poller.notices.pending)
+
+    def step(self, *sessions):
+        self.poll(*sessions)
+        self.app.refresh()
+
+    def main_shows(self, sid, state=(1, "1", "%2", 3.0)):
+        self.app.main_pane = Pane("%2", "@1", False, "", sid, 100, 141)
+        self.app.tmux = ClientTmux(state)
+
+    def test_working_then_done_gives_one_notice_and_a_third_identical_poll_none(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        (notice,) = self.pending()
+        self.assertEqual((notice.id, notice.kind, notice.name, notice.cwd), ("a", core.DONE, "emx-test-a", "/p/alpha"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_needing_input_is_a_notice_of_its_own_kind(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "blocked"))
+        self.assertEqual([n.kind for n in self.pending()], [core.NEEDS_INPUT])
+
+    def test_a_first_poll_already_done_gives_none(self):
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "blocked"))
+        self.assertEqual(self.pending(), [])
+
+    def test_an_error_and_an_empty_listing_in_between_give_none(self):
+        self.step(session("a", "/p/alpha", "done"))
+        self.app.poller.result = (None, "listing failed")
+        self.app.refresh()
+        self.step()
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_a_session_being_closed_gives_none(self):
+        self.step(session("a", "/p/alpha", "working"))
+        self.app.closing = {"a": True}
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_a_session_being_interrupted_or_renamed_gives_none(self):
+        self.step(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.app.interrupters = {"a": object()}
+        self.app.renamer = mock.Mock(rename=mock.Mock(id="b"))
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "done"))
+        self.assertEqual(self.pending(), [])
+
+    def test_the_session_in_front_is_quiet_and_another_is_not(self):
+        self.main_shows("a")
+        self.step(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "done"))
+        self.assertEqual([n.id for n in self.pending()], ["b"])
+
+    def test_each_condition_alone_makes_the_open_session_notify(self):
+        cases = {
+            "focus out": (1, "0", "%2", 3.0),
+            "focus unknown": (1, "", "%2", 3.0),
+            "no client": (0, "1", "%2", 3.0),
+            "panel active": (1, "1", "%1", 3.0),
+            "away": (1, "1", "%2", core.AWAY_SECONDS + 1.0),
+            "activity unknown": (1, "1", "%2", None),
+            "tmux failed": TmuxError("gone"),
+        }
+        for name, state in cases.items():
+            with self.subTest(name):
+                self.app.poller.notices.pending.clear()
+                self.app.notice_seen = None
+                self.main_shows("a", state)
+                self.step(session("a", "/p/alpha", "working"))
+                self.step(session("a", "/p/alpha", "done"))
+                self.assertEqual([n.id for n in self.pending()], ["a"])
+
+    def test_a_main_pane_flagged_off_is_not_in_front(self):
+        self.main_shows("a")
+        self.app.flagged_viewers = frozenset({"%2"})
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_flushing_while_attached_writes_the_terminal_notification_and_no_banner(self):
+        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.written, [(core.osc9("Alpha is done."),)])
+        self.assertEqual(self.banners, [])
+        self.assertEqual(self.app.poller.notices.outbox, [])
+
+    def test_flushing_while_detached_shows_a_banner_and_writes_nothing(self):
+        self.app.tmux = ClientTmux((0, "", "%1", None))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+        self.assertEqual(self.written, [])
+
+    def test_detaching_between_the_transition_and_delivery_still_shows_the_notice(self):
+        self.app.tmux = ClientTmux((1, "0", "%1", 3.0))
+        self.step(session("a", "/p/alpha", "working"))
+        self.step(session("a", "/p/alpha", "done"))
+        self.assertEqual(len(self.pending()), 1)
+        self.app.tmux = ClientTmux((0, "", "%1", None))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.refresh()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+        self.assertEqual(self.written, [])
+
+    def test_a_tmux_error_at_delivery_falls_back_to_the_banner(self):
+        self.app.tmux = ClientTmux(TmuxError("gone"))
+        self.app.poller.notices.outbox = ["Alpha is done."]
+        self.app.flush_notices()
+        self.assertEqual(self.banners, [("Alpha is done.",)])
+
+    def test_a_failed_terminal_write_shows_on_the_panel_and_not_as_a_crash(self):
+        with mock.patch.object(sidebar.os, "write", side_effect=OSError("closed")):
+            REAL_WRITE_OUT(self.app, b"x")
+        self.assertIn("closed", self.app.notice)
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_real_housekeep_opens_passthrough_for_the_sidebar_pane_only_once(self):
+        class Housekeeping(ClientTmux):
+            socket = "emx-test-wiring"
+
+            def panes(self):
+                return [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "", "", 100, 141)]
+
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: None
+
+        self.app.tmux = Housekeeping()
+        self.app.me = "%1"
+        sidebar.App.housekeep(self.app, False)
+        sidebar.App.housekeep(self.app, False)
+        self.assertEqual(self.app.tmux.passthrough, ["%1"])
+        self.assertNotIn("%2", self.app.tmux.passthrough)
+
+
+class MuteKey(AppCase):
+    def prefs_on_disk(self):
+        return json.loads(self.app.prefs_file.read_text(encoding="utf-8"))
+
+    def test_m_mutes_and_saves_and_a_new_panel_starts_muted(self):
+        self.assertTrue(self.app.poller.notices.voice)
+        self.app.handle_key("m")
+        self.assertIs(self.prefs_on_disk()["voice"], False)
+        self.assertFalse(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Spoken notices off")
+        again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+        self.assertFalse(again.poller.notices.voice)
+
+    def test_m_sets_the_voice_muted_flag_both_ways(self):
+        self.app.poller.voice = sidebar.Voice()
+        self.app.handle_key("m")
+        self.assertTrue(self.app.poller.voice.muted)
+        self.app.handle_key("m")
+        self.assertFalse(self.app.poller.voice.muted)
+
+    def test_m_again_unmutes(self):
+        self.app.handle_key("m")
+        self.app.handle_key("m")
+        self.assertIs(self.prefs_on_disk()["voice"], True)
+        self.assertTrue(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Spoken notices on")
+
+    def test_muting_silences_the_voice_and_unmuting_does_not(self):
+        self.app.handle_key("m")
+        self.assertEqual(len(self.silenced), 1)
+        self.app.handle_key("m")
+        self.assertEqual(len(self.silenced), 1)
+
+    def test_m_while_typing_in_the_find_box_is_text(self):
+        self.app.handle_key("/")
+        self.app.handle_key("m")
+        self.assertTrue(core.voice_on(self.app.prefs))
+
+    def test_the_help_has_the_m_line(self):
+        self.assertIn(("m", "mute or unmute spoken notices; banners still show"), sidebar.HELP)
+
+    def test_the_top_line_shows_muted_only_while_muted(self):
+        def top_line():
+            drawn = []
+            self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+            self.app.draw_top_line(60)
+            return drawn
+
+        self.assertNotIn("muted", top_line())
+        self.app.handle_key("m")
+        self.assertIn("muted", top_line())
+        self.app.handle_key("m")
+        self.assertNotIn("muted", top_line())
 
 if __name__ == "__main__":
     unittest.main()
