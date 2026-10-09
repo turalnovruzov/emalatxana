@@ -2511,6 +2511,137 @@ class TranscriptReader(unittest.TestCase):
         self.assertTrue(self.reader.path("s1").endswith(f"{U1}.jsonl"))
         self.assertIsNone(self.reader.path("unknown"))
 
+    @staticmethod
+    def uid(n):
+        return f"{n:08d}-0000-4000-8000-000000000000"
+
+    def stub(self, uuid, folder="-tmp-a"):
+        return self.write(
+            folder, uuid, json.dumps({"type": "ai-title", "aiTitle": "A title"}),
+            json.dumps({"type": "agent-name", "agentName": "a-name"}),
+        )
+
+    def earlier(self, uuid, into, reply="Went there.", folder="-tmp-a"):
+        """A made-up transcript with one turn, which the session `into` continued."""
+        return self.write(
+            folder, uuid, transcript_line("user", "go"), transcript_line("assistant", [{"type": "text", "text": reply}]),
+            json.dumps({"type": "continued-in", "sessionId": uuid, "continuedInSessionId": into}),
+            json.dumps({"type": "last-prompt", "lastPrompt": "go"}), json.dumps({"type": "cost-state"}),
+        )
+
+    def stub_and_earlier(self):
+        self.stub(U2)
+        self.write("-tmp-a", f"{U2}.orphaned-1-ab", json.dumps({"type": "agent-name"}))
+        return self.earlier(U1, U2)
+
+    def test_a_stub_session_reads_the_transcript_that_continued_in_it(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertEqual(self.reader.take()["s2"].reply, "Went there.")
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+
+    def test_a_session_with_turns_of_its_own_never_looks_for_a_predecessor(self):
+        own = self.write("-tmp-a", U2, transcript_line("user", "mine"))
+        self.earlier(U1, U2)
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("looked")):
+            self.reader.read_all()
+        self.assertEqual(self.reader.path("s2"), own)
+        self.assertEqual(self.reader.take()["s2"].prompt, "mine")
+
+    def link(self, me, into, *lines):
+        """A made-up transcript `me` that continued into `into`, holding `lines` before the link."""
+        entry = {"type": "continued-in", "sessionId": me, "continuedInSessionId": into}
+        return self.write("-tmp-a", me, *lines, json.dumps(entry))
+
+    def test_the_chain_is_followed_across_hops(self):
+        a, b, c = self.uid(1), self.uid(2), self.uid(3)
+        self.link(a, b, transcript_line("user", "go"), transcript_line("assistant", [{"type": "text", "text": "From a."}]))
+        self.link(b, c, json.dumps({"type": "agent-name"}))
+        self.stub(c)
+        self.reader.want([self.row("s", "/tmp/a", c)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s").endswith(f"{a}.jsonl"))
+        self.assertEqual(self.reader.take()["s"].reply, "From a.")
+
+    def test_a_cycle_ends_at_the_own_file(self):
+        b, c = self.uid(2), self.uid(3)
+        self.link(b, c)
+        self.link(c, b)
+        self.reader.want([self.row("s", "/tmp/a", b)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s").endswith(f"{b}.jsonl"))
+        self.assertIsNone(self.reader.take())
+
+    def test_a_chain_longer_than_the_cap_stops_there(self):
+        length = core.MAX_CONTINUATION_HOPS + 2
+        self.stub(self.uid(1))
+        for n in range(2, length):
+            self.link(self.uid(n), self.uid(n - 1))
+        self.link(self.uid(length), self.uid(length - 1), transcript_line("user", "far away"))
+        self.reader.want([self.row("s", "/tmp/a", self.uid(1))])
+        with mock.patch.object(self.reader, "predecessor", wraps=self.reader.predecessor) as lookups:
+            self.reader.read_all()
+        self.assertLessEqual(lookups.call_count, core.MAX_CONTINUATION_HOPS)
+        self.assertTrue(self.reader.path("s").endswith(f"{self.uid(1)}.jsonl"))
+        self.assertIsNone(self.reader.take())
+
+    def test_two_files_continuing_into_the_same_session_resolve_to_the_first_by_name_every_pass(self):
+        first, second = self.uid(5), self.uid(6)
+        self.stub(U2)
+        self.earlier(second, U2, reply="Second.")
+        self.earlier(first, U2, reply="First.")
+        self.reader.want([self.row("s", "/tmp/a", U2)])
+        for _ in range(2):
+            self.reader.read_all()
+            self.assertTrue(self.reader.path("s").endswith(f"{first}.jsonl"))
+        self.assertEqual(self.reader.take()["s"].reply, "First.")
+
+    def test_a_stub_whose_own_file_gains_a_turn_switches_back_to_it(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        self.write("-tmp-a", U2, transcript_line("user", "again"), transcript_line("assistant", [{"type": "text", "text": "Own."}]))
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U2}.jsonl"))
+        self.assertEqual(self.reader.take()["s2"].reply, "Own.")
+
+    def test_a_found_link_is_not_searched_again_and_a_miss_backs_off(self):
+        self.stub_and_earlier()
+        self.stub(self.uid(7))
+        self.reader.want([self.row("s2", "/tmp/a", U2), self.row("s7", "/tmp/a", self.uid(7))])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        self.assertTrue(self.reader.path("s7").endswith(f"{self.uid(7)}.jsonl"))
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("scanned again")):
+            self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"{U1}.jsonl"))
+        with mock.patch.object(sidebar.time, "monotonic", return_value=time.monotonic() + 1e6), \
+                mock.patch.object(sidebar, "read_continuation", wraps=sidebar.read_continuation) as tails:
+            self.reader.read_all()
+        self.assertEqual(tails.call_count, 0)
+        self.assertNotIn(self.uid(7), self.reader.previous)
+
+    def test_only_the_sessions_own_folder_is_scanned(self):
+        self.stub(U2)
+        self.earlier(U1, U2, folder="-tmp-elsewhere")
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        self.assertTrue(self.reader.path("s2").endswith(f"-tmp-a/{U2}.jsonl"))
+
+    def test_unchanged_files_of_a_stub_chain_are_not_read_again(self):
+        self.stub_and_earlier()
+        self.reader.want([self.row("s2", "/tmp/a", U2)])
+        self.reader.read_all()
+        with mock.patch.object(sidebar, "read_transcript", wraps=sidebar.read_transcript) as reads, \
+                mock.patch.object(sidebar, "read_continuation", wraps=sidebar.read_continuation) as tails:
+            self.reader.read_all()
+            self.reader.read_all()
+        self.assertEqual((reads.call_count, tails.call_count), (0, 0))
+        self.assertEqual(self.reader.take()["s2"].reply, "Went there.")
+
 
 def requests_file(folder, *requests, name="s.jsonl"):
     path = Path(folder, name)
@@ -2625,6 +2756,21 @@ class NamerWorker(unittest.TestCase):
         path = requests_file(self.dir, "write a poem")
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
             name, error, _ = self.run_namer(path)
+        self.assertEqual((name, error), ("tea poem and csv parser", None))
+        self.assertIn("write a poem", run.call_args.kwargs["input"])
+
+    def test_tab_on_a_stub_session_reads_the_continued_transcripts_requests(self):
+        folder = Path(self.dir, "projects", "-tmp-a")
+        folder.mkdir(parents=True)
+        requests_file(folder, "write a poem", name=f"{U1}.jsonl")
+        with open(folder / f"{U1}.jsonl", "a") as f:
+            f.write(json.dumps({"type": "continued-in", "sessionId": U1, "continuedInSessionId": U2}) + "\n")
+        (folder / f"{U2}.jsonl").write_text(json.dumps({"type": "agent-name", "agentName": "x"}) + "\n")
+        reader = sidebar.Transcripts(self.dir)
+        reader.want([core.Session("s2", "s2", "/tmp/a", "done", "", "", None, True, U2)])
+        reader.read_all()
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, NAME_JSON)) as run:
+            name, error, _ = self.run_namer(reader.path("s2"))
         self.assertEqual((name, error), ("tea poem and csv parser", None))
         self.assertIn("write a poem", run.call_args.kwargs["input"])
 

@@ -3015,6 +3015,31 @@ class TailBytes(unittest.TestCase):
         self.assertEqual(read, len(data))
 
 
+class ContinuedIn(unittest.TestCase):
+    OLD = "11111111-1111-4111-8111-111111111111"
+    NEW = "22222222-2222-4222-8222-222222222222"
+    LATER = "33333333-3333-4333-8333-333333333333"
+
+    def entry(self, **changes):
+        return json.dumps({"type": "continued-in", "sessionId": self.OLD, "continuedInSessionId": self.NEW, **changes})
+
+    def test_continued_in_reads_only_a_valid_entry_for_this_file(self):
+        self.assertEqual(core.continued_in([self.entry()], self.OLD), self.NEW)
+        for label, lines in (
+            ("another file's entry", [self.entry(sessionId=self.LATER)]),
+            ("a target that is no session id", [self.entry(continuedInSessionId="../x")]),
+            ("no target", [json.dumps({"type": "continued-in", "sessionId": self.OLD})]),
+            ("another type", [self.entry(type="last-prompt")]),
+            ("the words in a message", [json.dumps({"type": "user", "message": {"content": self.entry()}})]),
+            ("lines that are not JSON", ["{not json continued-in", "", "[]", "7"]),
+        ):
+            with self.subTest(label):
+                self.assertIsNone(core.continued_in(lines, self.OLD))
+        self.assertIsNone(core.continued_in([self.entry()], "not-an-id"))
+        later = self.entry(continuedInSessionId=self.LATER)
+        self.assertEqual(core.continued_in([self.entry(), "{bad", later], self.OLD), self.LATER)
+
+
 class TranscriptDir(unittest.TestCase):
     def test_every_character_but_letters_and_digits_becomes_a_dash(self):
         self.assertEqual(core.transcript_dir("/private/tmp/emx10.f3TLDx/proj"), "-private-tmp-emx10-f3TLDx-proj")

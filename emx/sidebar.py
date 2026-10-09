@@ -739,6 +739,21 @@ def read_transcript(path: str, size: int) -> tuple:
     return found, True
 
 
+def read_continuation(path: str) -> str | None:
+    """The id of the session the transcript at `path` continued into, from the end of the file, or None. Never raises, and never writes."""
+    try:
+        size = os.stat(path).st_size
+        want = min(size, core.CONTINUED_TAIL_BYTES)
+        with open(path, "rb") as f:
+            f.seek(size - want)
+            lines = f.read(want).decode("utf-8", errors="replace").split("\n")
+    except (OSError, ValueError):
+        return None
+    if want < size:
+        lines = lines[1:]
+    return core.continued_in(lines, os.path.basename(path)[:-len(".jsonl")])
+
+
 def summary_scratch() -> str:
     """The empty private folder every summary call runs in, one per user so a panel killed mid-run leaves nothing new behind."""
     path = os.path.join(tempfile.gettempdir(), f"emx-summary-{os.getuid()}")
@@ -882,6 +897,13 @@ class Transcripts(threading.Thread):
     Claude Code keeps it for the session's folder; failing that, by its file
     name in each project folder, which is retried later, backing off, rather
     than on every pass.
+
+    A session reopened after Claude Code continued it elsewhere can have a
+    file with no turn in it; the earlier transcript names it in a
+    `continued-in` entry. Then the transcript read is the nearest earlier
+    one that says something, found in the same project folder and never
+    merged with another, so no request is counted twice. A session whose own
+    file says something never looks.
     """
 
     def __init__(self, root: str):
@@ -893,6 +915,12 @@ class Transcripts(threading.Thread):
         self.stamps = {}
         self.paths = {}
         self.misses = {}
+        self.reads = {}
+        self.links = {}
+        self.previous = {}
+        self.link_misses = {}
+        self.reached = set()
+        self.touched = set()
         self.changed = False
 
     def want(self, sessions) -> None:
@@ -910,6 +938,7 @@ class Transcripts(threading.Thread):
     def read_all(self) -> None:
         with self.lock:
             wanted = dict(self.wanted)
+        self.reached, self.touched = set(), set()
         for sid, (cwd, uuid) in wanted.items():
             try:
                 self.read_one(sid, cwd, uuid)
@@ -920,6 +949,11 @@ class Transcripts(threading.Thread):
             del self.paths[uuid]
         for uuid in set(self.misses) - uuids:
             del self.misses[uuid]
+        for table in (self.previous, self.link_misses):
+            for uuid in set(table) - self.reached:
+                del table[uuid]
+        for path in set(self.reads) - self.touched:
+            del self.reads[path]
         with self.lock:
             gone = (set(self.found) | set(self.stamps)) - set(wanted)
             for sid in gone:
@@ -931,18 +965,82 @@ class Transcripts(threading.Thread):
         path = self.locate(cwd, uuid)
         if path is None:
             return
-        info = os.stat(path)
-        stamp = (path, info.st_mtime_ns, info.st_size)
-        if self.stamps.get(sid) == stamp:
+        kept = self.read_file(path)
+        if kept is None:
             return
-        found, ok = read_transcript(path, info.st_size)
-        if not ok:
-            return
+        found = kept[2]
+        seen, current, hops = {path}, path, 0
+        while found is None and hops < core.MAX_CONTINUATION_HOPS:
+            hops += 1
+            earlier = self.predecessor(os.path.dirname(current), os.path.basename(current)[:-len(".jsonl")])
+            if earlier is None or earlier in seen:
+                break
+            seen.add(earlier)
+            read = self.read_file(earlier)
+            if read is None:
+                break
+            current = earlier
+            if read[2] is not None:
+                kept, found = read, read[2]
+        path, stamp, found = kept
         with self.lock:
-            self.stamps[sid] = stamp
+            self.stamps[sid] = (path, *stamp)
             if self.found.get(sid) != found:
                 self.found[sid] = found
                 self.changed = True
+
+    def read_file(self, path: str) -> tuple | None:
+        """(path, (mtime_ns, size), what its end says) for the transcript at `path`, read again only when its stat changed; None when it can't be read."""
+        info = os.stat(path)
+        stamp = (info.st_mtime_ns, info.st_size)
+        self.touched.add(path)
+        cached = self.reads.get(path)
+        if cached is not None and cached[0] == stamp:
+            return path, stamp, cached[1]
+        found, ok = read_transcript(path, info.st_size)
+        if not ok:
+            return None
+        self.reads[path] = (stamp, found)
+        return path, stamp, found
+
+    def predecessor(self, folder: str, uuid: str) -> str | None:
+        """The transcript in `folder` whose `continued-in` entry names `uuid`, or None. Only this folder is looked in, a link once found is kept, and a miss backs off.
+
+        Candidates are taken in name order and the first to name `uuid` wins,
+        so two that claim the same session resolve the same way every pass.
+        Each candidate's end is read again only when its stat changed.
+        """
+        self.reached.add(uuid)
+        known = self.previous.get(uuid)
+        if known and os.path.isfile(known):
+            return known
+        tries, after = self.link_misses.get(uuid, (0, 0.0))
+        if after > time.monotonic():
+            return None
+        # Recorded before the scan, so a scan that raises backs off too.
+        self.link_misses[uuid] = (tries + 1, time.monotonic() + core.retry_after(tries + 1))
+        with os.scandir(folder) as entries:
+            names = sorted(e.name for e in entries if e.name.endswith(".jsonl") and e.is_file())
+        paths = [os.path.join(folder, n) for n in names]
+        for path in set(self.links) - set(paths):
+            if os.path.dirname(path) == folder:
+                del self.links[path]
+        for name, path in zip(names, paths):
+            if name == uuid + ".jsonl" or not core.is_session_id(name[:-len(".jsonl")]):
+                continue
+            try:
+                info = os.stat(path)
+            except OSError:
+                continue
+            stamp = (info.st_mtime_ns, info.st_size)
+            cached = self.links.get(path)
+            if cached is None or cached[0] != stamp:
+                cached = self.links[path] = (stamp, read_continuation(path))
+            if cached[1] == uuid:
+                self.previous[uuid] = path
+                self.link_misses.pop(uuid, None)
+                return path
+        return None
 
     def locate(self, cwd: str, uuid: str) -> str | None:
         if not core.is_session_id(uuid):

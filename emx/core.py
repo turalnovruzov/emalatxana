@@ -2599,6 +2599,37 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
     return seen
 
 
+# How much of a transcript's end is read for its `continued-in` entry, which only `last-prompt` and `cost-state` entries follow.
+CONTINUED_TAIL_BYTES = 256 * 1024
+# How many transcripts back a continued session is followed; a real chain is short, this only bounds a broken one.
+MAX_CONTINUATION_HOPS = 8
+
+
+def continued_in(lines, stem: str) -> str | None:
+    """The id of the session the transcript named `stem` continued into, from its last valid `continued-in` entry in `lines`, or None. Never raises.
+
+    An entry counts only when its own type is `continued-in` and its
+    `sessionId` is this file's. A line that merely mentions the words, such
+    as a message quoting one, is skipped by the type test, not by a search.
+    """
+    if not is_session_id(stem):
+        return None
+    target = None
+    for line in lines:
+        if "continued-in" not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("type") != "continued-in" or entry.get("sessionId") != stem:
+            continue
+        following = entry.get("continuedInSessionId")
+        if is_session_id(following):
+            target = following
+    return target
+
+
 def tail_bytes(found: Transcript | None, read: int, size: int) -> int | None:
     """How many bytes from the end of a transcript of `size` bytes to read next, after reading the last `read` and finding `found`, or None to stop.
 
