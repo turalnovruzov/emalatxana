@@ -769,6 +769,11 @@ def say_command() -> str:
     return os.environ.get("EMX_SAY") or "say"
 
 
+def under_test() -> bool:
+    """An emx a live check started: it must never make real sound or banners on his Mac."""
+    return os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
+
+
 def list_voices(say: str) -> list:
     """The names of the voices `say` offers, or [] when it can't say. Never raises."""
     try:
@@ -1119,6 +1124,8 @@ class Voice(threading.Thread):
 
     def run(self) -> None:
         try:
+            if under_test() and not os.environ.get("EMX_SAY"):
+                raise OSError("no real say under test")
             self.voice = core.pick_voice(list_voices(self.say))
         except Exception:
             self.voice = None
@@ -1143,6 +1150,8 @@ class Voice(threading.Thread):
 
     def speak_aloud(self, text: str, generation: int) -> None:
         """The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
+        if under_test() and not os.environ.get("EMX_SAY"):
+            return
         argv = [self.say] + (["-v", self.voice] if self.voice else [])
         try:
             proc = subprocess.Popen(
@@ -1175,6 +1184,8 @@ class Voice(threading.Thread):
 
     def show_banner(self, text: str) -> None:
         """The text is an argument after `--`, never inside the AppleScript source, and `--` stops osascript reading a text that starts with `-` as an option."""
+        if under_test():
+            return
         argv = [
             "osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "emx"',
             "-e", "end run", "--", text,

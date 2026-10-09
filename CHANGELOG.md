@@ -4,7 +4,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 1.4.1 — 2026-10-08
 
-- Test sessions emx starts for its own checks no longer show in your panel or speak.
+- Test sessions emx starts for its own checks (named emx-test- and running in a temporary folder) no longer show in your panel or speak, and an emx run for a check makes no sound or banner on your Mac. A session you name emx-test- in a real project stays visible.
 
 ## 1.4.0 — 2026-10-08
 

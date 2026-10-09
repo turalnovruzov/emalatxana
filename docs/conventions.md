@@ -237,3 +237,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 **This is house style, not tutorial.** It says what this codebase does, not how the language works. And it obeys the [house rules](./README.md#house-rules-for-editing-these-docs); in particular, no code-knowable facts: an entry that lists exact signatures or versions is stale the moment someone edits the code.
 
 **Decisions belong in [`adr/`](./adr/README.md), not here.** This file carries the *how we write it*; the ADR carries the *why we chose it at all*, with the alternatives that lost. A new library, a new third-party service, or a major version bump earns an ADR, not a convention entry.
+
+### Every consumer of `claude agents` reads it through `core.background_sessions`
+
+1. **Rule**: whatever lists sessions (the panel, the counts, the notices) takes them from `core.background_sessions`, through `sidebar.fetch_sessions` or `core.listed_session`, and never from raw `list_rows` rows.
+2. **Why**: it is the one place interactive sessions and the `emx-test-` throwaway sessions agents start for checks are dropped, so none of them reach his panel, counts or spoken notices.
+3. **Minimal example**:
+   ```python
+   sessions = core.background_sessions(rows)   # not: for row in rows
+   ```
+4. **Gotcha**: a test that feeds raw `emx-test-` rows must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; a row is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden.
