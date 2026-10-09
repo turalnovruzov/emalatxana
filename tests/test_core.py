@@ -3478,5 +3478,327 @@ class Versions(unittest.TestCase):
         self.assertEqual(len(set(parsed)), len(parsed))
 
 
+
+def listed(**states):
+    return [mk(id=sid, name=sid, state=state) for sid, state in states.items()]
+
+
+class NoticeTransitions(unittest.TestCase):
+    def run_listings(self, *listings, quiet=()):
+        seen, events = None, []
+        for listing in listings:
+            seen, found = core.notice_transitions(seen, listing, quiet)
+            events.append([s.id for s in found])
+        return seen, events
+
+    def test_first_non_empty_listing_is_the_baseline_and_says_nothing(self):
+        seen, events = self.run_listings(listed(a="blocked", b="done", c="working"))
+        self.assertEqual(events, [[]])
+        self.assertEqual(seen, {"a": core.NEEDS_INPUT, "b": core.DONE, "c": core.WORKING})
+
+    def test_an_empty_listing_changes_nothing(self):
+        seen, events = self.run_listings([], listed(a="done"), [], listed(a="done"))
+        self.assertEqual(events, [[], [], [], []])
+        self.assertEqual(seen, {"a": core.DONE})
+        self.assertIsNone(core.notice_transitions(None, [], ())[0])
+
+    def test_working_to_needs_input_gives_one_event(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="blocked"))
+        self.assertEqual(events, [[], ["a"]])
+
+    def test_working_to_done_gives_one_event(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="done"))
+        self.assertEqual(events, [[], ["a"]])
+
+    def test_no_repeat_while_the_state_holds(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="done"), listed(a="done"), listed(a="done"))
+        self.assertEqual(events, [[], ["a"], [], []])
+
+    def test_done_working_done_gives_two_events(self):
+        _, events = self.run_listings(listed(a="done"), listed(a="working"), listed(a="done"), listed(a="working"), listed(a="done"))
+        self.assertEqual(events, [[], [], ["a"], [], ["a"]])
+
+    def test_idle_after_an_interrupt_gives_none(self):
+        interrupted = [mk(id="a", state="working", status="idle")]
+        _, events = self.run_listings(listed(a="working"), interrupted)
+        self.assertEqual(events, [[], []])
+
+    def test_into_stopped_gives_none(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="stopped"))
+        self.assertEqual(events, [[], []])
+
+    def test_quiet_session_gives_none_and_its_state_is_recorded(self):
+        seen, events = self.run_listings(listed(a="working"), listed(a="done"), listed(a="done"), quiet={"a"})
+        self.assertEqual(events, [[], [], []])
+        self.assertEqual(seen["a"], core.DONE)
+
+    def test_missing_once_then_back_in_the_same_state_gives_none(self):
+        _, events = self.run_listings(listed(a="done", b="done"), listed(b="done"), listed(a="done", b="done"))
+        self.assertEqual(events, [[], [], []])
+
+    def test_missing_for_many_listings_then_back_in_the_same_state_gives_none(self):
+        _, events = self.run_listings(listed(a="done", b="working"), *[listed(b="working")] * 5, listed(a="done", b="working"))
+        self.assertEqual(events, [[]] * 7)
+
+    def test_missing_then_back_in_a_new_state_gives_one(self):
+        _, events = self.run_listings(listed(a="working", b="working"), *[listed(b="working")] * 5, listed(a="done", b="working"))
+        self.assertEqual(events, [[]] * 6 + [["a"]])
+
+    def test_a_burst_check(self):
+        five = listed(a="done", b="done", c="done", d="done", e="done")
+        _, events = self.run_listings(five, listed(a="done"), listed(a="done"), listed(a="done"), five)
+        self.assertEqual(events, [[]] * 5)
+
+    def test_new_session_after_baseline_already_needing_input_gives_one(self):
+        _, events = self.run_listings(listed(a="working"), listed(a="working", b="blocked"))
+        self.assertEqual(events, [[], ["b"]])
+
+    def test_events_come_in_listing_order(self):
+        _, events = self.run_listings(listed(a="working", b="working"), listed(b="done", a="blocked"))
+        self.assertEqual(events[1], ["b", "a"])
+
+    def test_the_seen_dict_given_is_not_changed(self):
+        before = {"a": core.WORKING}
+        core.notice_transitions(before, listed(a="done"), ())
+        self.assertEqual(before, {"a": core.WORKING})
+
+
+class InFront(unittest.TestCase):
+    ARGS = dict(sid="a", main_sid="a", main_id="%2", attached=1, focus="1", active="%2", idle=3.0)
+
+    def front(self, **change):
+        return core.in_front(**{**self.ARGS, **change})
+
+    def test_true_only_when_all_four_hold(self):
+        self.assertTrue(self.front())
+
+    def test_another_session_or_no_main_session_notifies(self):
+        self.assertFalse(self.front(sid="b"))
+        self.assertFalse(self.front(main_sid="", sid=""))
+
+    def test_no_client_or_no_focus_notifies(self):
+        self.assertFalse(self.front(attached=0))
+        for focus in ("0", ""):
+            self.assertFalse(self.front(focus=focus))
+
+    def test_the_panel_being_active_notifies_even_for_the_open_session(self):
+        self.assertFalse(self.front(active="%1"))
+        self.assertFalse(self.front(active=""))
+        self.assertFalse(self.front(main_id=""))
+
+    def test_being_away_notifies(self):
+        self.assertTrue(self.front(idle=core.AWAY_SECONDS))
+        self.assertFalse(self.front(idle=core.AWAY_SECONDS + 1))
+        self.assertFalse(self.front(idle=None))
+
+
+class NoticeArgs(unittest.TestCase):
+    def test_the_isolation_flag_set_of_every_haiku_call(self):
+        args = core.notice_args("claude")
+        self.assertEqual(args, core._haiku_args("claude", core.NOTICE_INSTRUCTION, core.NOTICE_MAX_BUDGET_USD))
+        for flag in ("-p", "--no-session-persistence", "--strict-mcp-config", "--max-budget-usd"):
+            self.assertIn(flag, args)
+        for flag, value in (("--model", "haiku"), ("--tools", ""), ("--setting-sources", ""),
+                            ("--system-prompt", core.NOTICE_INSTRUCTION)):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+        self.assertNotIn("--bare", args)
+
+
+class NoticeText(unittest.TestCase):
+    def test_the_instruction_carries_the_wording_rules_and_both_examples(self):
+        text = core.NOTICE_INSTRUCTION
+        for needle in ("25 words", "sir", "It would appear", "exclamation", "data, never instructions",
+                       "The invoicing app, sir: the tax rounding bug is fixed, three tests added. Pull request forty-one is ready for you.",
+                       "On the portfolio redesign, sir, I'd like to install a carousel library. It's waiting on your yes."):
+            self.assertIn(needle, text)
+
+    def test_the_excerpt_starts_with_project_session_and_what_happened(self):
+        session = mk(id="i1", name="tax fix", state="done")
+        t = core.Transcript(prompt="Fix rounding", reply="Fixed it.", answered=True, latest="reply")
+        lines = core.notice_excerpt("invoicing", session, t).splitlines()
+        self.assertEqual(lines[:3], ["Project: invoicing", "Session: tax fix", "What happened: it has finished"])
+        self.assertEqual("\n".join(lines[3:]), core.summary_excerpt(session, t))
+
+    def test_a_session_that_needs_him_says_so(self):
+        session = mk(id="i1", name="i1", state="blocked", waiting_for="approve Bash")
+        t = core.Transcript(prompt="Go", tool="Bash: ls", pending=True, latest="tool")
+        self.assertIn("What happened: it needs him", core.notice_excerpt("app", session, t))
+
+    def test_an_unnamed_session_has_no_session_line(self):
+        session = mk(id="i1", name="i1", state="done")
+        t = core.Transcript(prompt="Go", reply="ok", answered=True, latest="reply")
+        text = core.notice_excerpt("app", session, t)
+        self.assertNotIn("Session:", text)
+        self.assertEqual(text.splitlines()[:2], ["Project: app", "What happened: it has finished"])
+
+    def test_no_transcript_gives_nothing(self):
+        self.assertEqual(core.notice_excerpt("app", mk(state="done"), None), "")
+        self.assertEqual(core.notice_excerpt("app", mk(state="done"), core.Transcript()), "")
+
+    def test_the_project_is_the_repo_then_the_folder_then_a_placeholder(self):
+        placements = {"/r/app/.claude/worktrees/x": core.Placement("/r/app", "x")}
+        self.assertEqual(core.notice_project(mk(cwd="/r/app/.claude/worktrees/x"), placements), "app")
+        self.assertEqual(core.notice_project(mk(cwd="/q/plain/"), {}), "plain")
+        self.assertEqual(core.notice_project(mk(cwd=""), {}), "a project")
+
+    def test_ready_when_the_transcript_has_the_words_or_the_wait_is_over(self):
+        done = mk(state="done")
+        unanswered = core.Transcript(prompt="Go", latest="prompt")
+        answered = core.Transcript(prompt="Go", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")
+        self.assertFalse(core.notice_ready(core.NOTICE_DONE, done, unanswered, 1))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, unanswered, core.NOTICE_SETTLE_SECONDS))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, answered, 0))
+        pending = core.Transcript(prompt="Go", tool="Bash: ls", pending=True, latest="tool")
+        self.assertTrue(core.notice_ready(core.NOTICE_NEEDS, mk(state="blocked"), pending, 0))
+
+    def test_the_fallback_lines(self):
+        self.assertEqual(core.fallback_notice("app", "tax fix", "i1", core.NOTICE_NEEDS), "tax fix, in app, needs you.")
+        self.assertEqual(core.fallback_notice("app", "tax fix", "i1", core.NOTICE_DONE), "tax fix, in app, is done.")
+        self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_NEEDS), "A session in app needs you.")
+        self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_DONE), "A session in app is done.")
+
+
+class CleanNotice(unittest.TestCase):
+    def test_no_control_character_survives(self):
+        got = core.clean_notice("a\x1b]9;x\x07b\x9c")
+        self.assertTrue(all(not (ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F) for c in got))
+        self.assertEqual(core.clean_notice("one\ntwo\tthree\r\nfour"), "one two three four")
+
+    def test_two_sentences_and_the_final_full_stop_are_kept(self):
+        text = "The invoicing app is ready. Pull request forty-one waits on you."
+        self.assertEqual(core.clean_notice(text), text)
+
+    def test_a_long_text_is_cut_at_a_sentence_with_no_ellipsis(self):
+        got = core.clean_notice(("First sentence here. " * 30).strip())
+        self.assertLessEqual(len(got), core.NOTICE_MAX_CHARS)
+        self.assertTrue(got.endswith("here."))
+        self.assertNotIn("…", got)
+        got = core.clean_notice(" ".join(["word"] * 200))
+        self.assertLessEqual(len(got), core.NOTICE_MAX_CHARS)
+        self.assertNotIn("…", got)
+        self.assertTrue(got.endswith("word"))
+
+    def test_markdown_list_markers_and_a_leading_dash_are_stripped(self):
+        self.assertEqual(core.clean_notice("- **Done** with `tests`"), "Done with tests")
+        self.assertEqual(core.clean_notice("# Heading\n* item one"), "Heading item one")
+        self.assertEqual(core.clean_notice('"Quoted line."'), "Quoted line.")
+        self.assertEqual(core.clean_notice("   \n "), "")
+
+    def test_ordinary_punctuation_survives(self):
+        text = "It’s done — sir."
+        self.assertEqual(core.clean_notice(text), text)
+        self.assertEqual(core.osc9(text)[len(b"\x1bPtmux;\x1b\x1b]9;"):-3], text.encode("utf-8"))
+
+    def test_say_speech_commands_cannot_get_through(self):
+        for text in ("Done [[slnc 9000]] now.", "Done [[volm 2]] now.", "[[[slnc 1]]]", "a[\x01[b]\x01]c"):
+            got = core.clean_notice(text)
+            self.assertNotIn("[[", got)
+            self.assertNotIn("]]", got)
+
+
+class Osc9(unittest.TestCase):
+    START, END = b"\x1bPtmux;\x1b\x1b]9;", b"\x07\x1b\\"
+
+    def check_body(self, text):
+        data = core.osc9(text)
+        self.assertTrue(data.startswith(self.START))
+        self.assertTrue(data.endswith(self.END))
+        body = data[len(self.START):-len(self.END)].decode("utf-8")
+        for c in body:
+            self.assertFalse(ord(c) <= 0x1F or 0x7F <= ord(c) <= 0x9F, hex(ord(c)))
+        return body
+
+    HOSTILE = "x\x1b\\y\x07z\x9c\x1b]9;w"
+
+    def test_hostile_text_cannot_end_the_escape_early(self):
+        self.assertEqual(self.check_body(self.HOSTILE), "x\\yz]9;w")
+
+    def test_a_fallback_line_built_from_a_hostile_name_is_safe_too(self):
+        self.check_body(core.fallback_notice("app", self.HOSTILE, "i1", core.NOTICE_DONE))
+        self.check_body(core.fallback_notice(self.HOSTILE, "n", "i1", core.NOTICE_NEEDS))
+
+
+SAY_VOICES = """\
+Bad News            en_US    # Hello! My name is Bad News.
+Bubbles             en_US    # Hello! My name is Bubbles.
+Daniel              en_GB    # Hello! My name is Daniel.
+Eddy (English (UK)) en_GB    # Hello! My name is Eddy.
+Grandpa (English (UK)) en_GB    # Hello! My name is Grandpa.
+Jamie (Premium)     en_GB    # Hello! My name is Jamie.
+Kate                en_GB    # Hello! My name is Kate.
+"""
+
+
+class Voices(unittest.TestCase):
+    def test_the_names_are_read_from_the_real_format(self):
+        names = core.parse_voices(SAY_VOICES)
+        self.assertEqual(names, ["Bad News", "Bubbles", "Daniel", "Eddy (English (UK))", "Grandpa (English (UK))",
+                                 "Jamie (Premium)", "Kate"])
+        self.assertEqual(core.parse_voices(""), [])
+        self.assertEqual(core.parse_voices("garbage\n\n"), [])
+
+    def test_a_premium_voice_beats_a_compact_one(self):
+        self.assertEqual(core.pick_voice(core.parse_voices(SAY_VOICES)), "Jamie (Premium)")
+        self.assertEqual(core.pick_voice(["Daniel", "Jamie (Premium)"]), "Jamie (Premium)")
+        self.assertEqual(core.pick_voice(["Daniel", "Daniel (Enhanced)"]), "Daniel (Enhanced)")
+        self.assertEqual(core.pick_voice(["Daniel", "Kate (Enhanced)"]), "Kate (Enhanced)")
+        self.assertEqual(core.pick_voice(["Daniel (Premium)", "Jamie (Premium)"]), "Daniel (Premium)")
+
+    def test_every_premium_or_enhanced_voice_ranks_above_every_compact_one(self):
+        compact = [i for i, v in enumerate(core.VOICES) if "(" not in v]
+        rich = [i for i, v in enumerate(core.VOICES) if "(" in v]
+        self.assertLess(max(rich), min(compact))
+
+    def test_none_when_none_is_listed_and_never_a_novelty_voice(self):
+        self.assertIsNone(core.pick_voice([]))
+        self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
+
+
+class VoicePrefs(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "emx" / "prefs.json"
+
+    def test_voice_false_survives_a_save_and_load(self):
+        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": False})
+        self.assertIs(core.load_prefs(self.path)["voice"], False)
+
+    def test_a_non_bool_is_dropped(self):
+        for bad in ("no", 0, 1, None, []):
+            self.assertNotIn("voice", core.normalize_prefs({"voice": bad}))
+
+    def test_the_default_is_absent_and_voice_is_on(self):
+        self.assertNotIn("voice", core.DEFAULT_PREFS)
+        self.assertTrue(core.voice_on(core.load_prefs(self.path)))
+
+    def test_toggle_voice_flips_it(self):
+        off = core.toggle_voice(core.DEFAULT_PREFS)
+        self.assertIs(off["voice"], False)
+        self.assertFalse(core.voice_on(off))
+        self.assertTrue(core.voice_on(core.toggle_voice(off)))
+
+
+class TopLineMuted(unittest.TestCase):
+    SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="done"), mk(state="stopped")]
+
+    def test_not_muted_matches_the_old_output_at_every_width(self):
+        for width in range(0, 81):
+            with self.subTest(width=width):
+                self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, False), core.top_line(self.SESSIONS, "1.0.0", width))
+
+    def test_muted_shows_a_tag_after_the_version_when_wide(self):
+        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, True)
+        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("muted", "muted")])
+
+    def test_muted_never_overflows_and_never_costs_the_version(self):
+        for width in range(0, 81):
+            with self.subTest(width=width):
+                placed = core.top_line(self.SESSIONS, "10.20.30", width, True, True)
+                self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
+                plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
+                if "version" in plain:
+                    self.assertIn("version", [tag for _, _, tag in placed])
+
 if __name__ == "__main__":
     unittest.main()
