@@ -5030,14 +5030,18 @@ class MissedWiring(AppCase):
         self.assertNotIn("s1", self.app.opened)
 
     def test_a_refused_attach_keeps_it(self):
+        class NoViewerTmux(SwitchTmux):
+            def panes(self):
+                return [p for p in super().panes() if p.session != "s1"]
+
         self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
-        self.app.tmux = SwitchTmux()
+        self.app.tmux = NoViewerTmux()
         self.app.me = "%1"
-        self.poll(session("s1", "/p/alpha"))
+        self.poll(session("s2", "/p/beta"))
         self.app.refresh()
-        stale = session("s1", "/p/alpha")
-        self.assertFalse(core.attach_allowed(stale, core.RESTART, False))
-        sidebar.App.switch_to(self.app, "s1", core.RESTART, (stale, False))
+        self.assertIsNone(self.app.session("s1"))
+        self.assertFalse(core.attach_allowed(self.app.session("s1"), core.OPEN))
+        sidebar.App.switch_to(self.app, "s1", core.OPEN)
         self.assertEqual([m.id for m in self.app.missed], ["s1"])
         self.assertNotIn("s1", self.app.opened)
 
