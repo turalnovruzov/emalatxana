@@ -659,7 +659,11 @@ def typed_line_arriving(rename: Rename, screen: RenameScreen) -> bool:
     if not text.startswith("❯ "):
         return False
     shown, line = text[2:], rename_line(rename.new)
-    return 0 < len(shown) < len(line) and line.startswith(shown) and screen.cursor_x == PROMPT_TEXT_X + display_width(shown)
+    gap = screen.cursor_x - PROMPT_TEXT_X - display_width(shown)
+    if gap < 0:
+        return False
+    shown += " " * gap
+    return 0 < len(shown) < len(line) and line.startswith(shown)
 
 
 def line_unsent_text(rename: Rename, cleared: bool, unconfirmed: bool = False) -> str:

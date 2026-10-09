@@ -1922,6 +1922,9 @@ class TypedLineStands(unittest.TestCase):
         full = "/rename 名前です"
         self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename 名")))
         self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/ren")))
+        self.rename = core.Rename("a", "emx-test-named", "fresh name")
+        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename fresh ")))
+        self.rename = core.Rename("a", "emx-test-named", "名前です")
         cases = {
             "all of it": self.screen(full),
             "something else": self.screen("/rename 名x"),

@@ -2,7 +2,7 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
-## 1.4.2 — 2026-10-09
+## 1.4.2 — 2026-10-08
 
 - Ctrl+R now renames a session while it works, without interrupting it. emx types the `/rename`, looks once more that the prompt holds only that line, and only then presses Enter; if a question or permission box opened in between, it presses nothing and tells you; the line may still be in that prompt.
 - Tab in the rename box, and the line under a row, now find what you asked in a session that continues an earlier one.
