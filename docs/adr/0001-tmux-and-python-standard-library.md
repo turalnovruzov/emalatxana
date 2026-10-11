@@ -1,6 +1,6 @@
 # 0001. tmux and the Python Standard Library
 
-- **Status**: Accepted
+- **Status**: Accepted. Its rule that session data comes only from the `claude` CLI is to be replaced by [0005](./0005-emx-runs-agents-in-its-own-tmux.md) once #41 is built.
 - **Date**: 2026-10-07
 
 ## Context
