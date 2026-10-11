@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.6.1 — 2026-10-11
+
+- Nothing changes in how emx works yet. This version records your decision that emx will start and keep every session itself, in its own tmux, so other agents can join later (issue #41).
+
 ## 1.6.0 — 2026-10-09
 
 - When you press n and Tab, the folder list opens with your favourites (★) and then your last 8 folders, before you type. Typing still searches everything.
