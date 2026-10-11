@@ -13,7 +13,7 @@ The research in that session covered nine engines, six ways of driving agents wi
 
 - **No engine keeps a process alive through a reboot.** Each one comes back by resuming the conversation (`claude --resume <id>`), so recovery after a reboot is the same whichever engine is picked.
 - **Of the terminal agents looked at, only Claude Code has its own background service.** Codex and Gemini end when their terminal closes, so something else has to hold them.
-- **Driving agents without a terminal** (ACP, the Claude Agent SDK, `claude -p` with stream-json) loses the Claude Code interface itself, which is what he likes, and Anthropic points that kind of tool at API keys rather than the subscription.
+- **Driving agents without a terminal** (ACP, the Claude Agent SDK, `claude -p` with stream-json) loses the Claude Code interface itself, and Anthropic points that kind of tool at API keys rather than the subscription.
 - **tmux** is mature, already in the stack, and its control mode (`tmux -C`) gives a stream of output and change events.
 
 The lead first recommended holding Claude on its own service and other agents in emx's tmux. Tural answered: *"but what happens when claude's service crashed? isnt the risk the same with the services crashing? if we do 2 we handle one service crashing if we do number 3 then we handle 2+ services."* That is right: a crash of whatever holds a session ends it, and two holders mean two ways to fail and two recovery paths. He decided: *"lets document the change to numerb 2. but not start in this session"*.
@@ -35,7 +35,7 @@ The first step, before any building, is to check that per-session hooks through 
 - **Harder:** emx now owns the job Claude's background service did: starting, keeping and resuming sessions, and working out each agent's state. If emx's tmux server dies, every session in it ends and comes back by resume.
 - **Lost:** sessions he starts outside emx with `claude --bg` do not show in emx unless emx also keeps reading `claude agents`. Whether it should is still his call (#41).
 - **Changes [0001](./0001-tmux-and-python-standard-library.md) once built:** its rule that session data comes only from the `claude` CLI is replaced. tmux and the Python standard library stay.
-- **Open, for Tural:** what happens to the Claude background sessions he already has; whether sessions come back by themselves after a reboot or wait for him; remote use (a server, and how notices reach him there).
+- **Open, for Tural:** what happens to the Claude background sessions he already has; whether sessions come back by themselves after a reboot or wait for him (coming back by themselves would also change 0001's rule that emx never resumes a session on its own); remote use (a server, and how notices reach him there).
 
 ## Alternatives considered
 
@@ -52,4 +52,4 @@ What Tural saw in-session on 2026-10-11, one line each:
   - **Our own PTY daemon:** needs a terminal emulator, weeks of work.
   - **WezTerm, kitty, GNU screen, dtach, abduco, shpool:** dormant, lack an API or events, or do not hold processes on their own.
   - **A native Mac app, Textual, or terminal-app integrations:** no phone path, tied to one app, or heavy.
-- **Products he tried instead of building:** herdr (turned down, see Context). Agent Deck (tmux with Claude hooks, close to this decision's shape) lost on one maintainer, about 345,000 lines, and updating and restarting itself by default.
+- **Existing products looked at:** herdr (he tried it and turned it down, see Context). Agent Deck (tmux with Claude hooks, close to this decision's shape) lost on one maintainer, about 345,000 lines, and updating and restarting itself by default.
