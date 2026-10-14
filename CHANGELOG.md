@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.1.2 — 2026-10-14
+
+- Nothing changes in how emx works. The project's working rules were updated again for how its changes get checked, including how a live check of emx is kept apart from your own sessions and settings; this version only records that.
+
 ## 2.1.1 — 2026-10-14
 
 - A session whose background subagents or commands are still running reads Working until they finish, instead of Done.

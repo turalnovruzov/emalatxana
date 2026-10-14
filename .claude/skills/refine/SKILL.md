@@ -2,7 +2,7 @@
 name: refine
 description: Refine an `idea` issue with Tural in one round (research first, one screen of every item, he answers once) until it is `ready`. Use when he asks to refine an idea, or picks an issue to work on that is neither `ready` nor tiny (labelled `tiny` or called tiny by him; an `idea`, or one with no label). A collaboration in the conversation: no background agents, and every needs-you decision is his unless he hands it over.
 ---
-<!-- template: product-owner @ 0.4.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.5.0 — shared; change it through Codery -->
 
 # refine
 

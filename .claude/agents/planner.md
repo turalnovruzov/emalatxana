@@ -4,7 +4,7 @@ description: Plan writer. Reads the lead's brief with Tural's own words, the iss
 tools: Read, Grep, Glob, Bash, Write, Edit
 model: opus
 ---
-<!-- template: product-owner @ 0.4.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.5.0 — shared; change it through Codery -->
 
 **Before starting:** read `CLAUDE.md`, including its `## This project` section, and `README.md` when the project has one. The README holds the idea; `CLAUDE.md` holds how the project runs. **If your plan and the README disagree, your plan is wrong.**
 
@@ -25,7 +25,7 @@ Written at the path the brief names (`.codery/run/<issue>-<slug>/plan.md` in the
 - **Coordinates:** files, line ranges, the call path, sibling contracts. When the issue has a canvas, a **Design reference** item: the canvas link and the chosen board names, then what those boards show (sections, their order, content, and the styles the source states) as excerpts of the board source, not whole files (Nizam's default). The coder and the auditor's ui-verifier read it here.
 - **Decisions that bind:** what the issue, the README, `CLAUDE.md`, `docs/conventions.md`, an ADR or his words lock; when the issue has a canvas, its link and the chosen boards. End with the merge line.
 - **What this run is not doing.**
-- **Steps.** Each carries: *files*; *read first* (the docs the coder reads before touching them, or none); *change* as the shape of the code (signatures, call path, what moves; exact code only where certain); *verify (automated)* as targeted commands (the test command in `## This project`, narrowed to the step) plus the tests the coder writes, **each assertion named and stated**; the full suite runs once, at the final pre-merge SHA, not per step; *verify (QA)* as what the auditor exercises in the real thing, as `### How to run and try it` in `CLAUDE.md` describes (the coder runs it too, as its own check, not the gate), and what must be seen. For a UI step, the verify (QA) names the plan's Design reference, when there is one, for the auditor's ui-verifier. A step without both lines is unfinished, and "tests pass" is not a verification. Then **Groups:** steps that touch no shared file.
+- **Steps.** Each carries: *files*; *read first* (the docs the coder reads before touching them, or none); *change* as the shape of the code (signatures, call path, what moves; exact code only where certain); *verify (automated)* as targeted commands (the test command in `## This project`, narrowed to the step) plus the tests the coder writes, **each assertion named and stated**; the full suite runs once, at the final pre-merge SHA, not per step; *verify (QA)* as what the auditor exercises in the real thing, within the concept and limits `### How to run and try it` in `CLAUDE.md` gives (the specifics are worked out from the project as it is now; the coder runs it too, as its own check, not the gate), and what must be seen. For a UI step, the verify (QA) names the plan's Design reference, when there is one, for the auditor's ui-verifier. A step without both lines is unfinished, and "tests pass" is not a verification. Then **Groups:** steps that touch no shared file.
 - **Risks and assumptions:** each default an internal engineering choice took, and why.
 - **Assumed, check these:** each default on something he will see, one line each (the issue, what was assumed, how to change it). The lead carries the list into the closing message.
 - **Gaps:** what you are not sure of.

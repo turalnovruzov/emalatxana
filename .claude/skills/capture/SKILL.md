@@ -2,7 +2,7 @@
 name: capture
 description: Capture an idea Tural states, briefly or at length, as one GitHub issue labelled `idea`, holding his words verbatim. Use when he says an idea, a wish or "I want X" and has not asked for it to be built now. Does no research and no refinement unless he asks.
 ---
-<!-- template: product-owner @ 0.4.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.5.0 — shared; change it through Codery -->
 
 # capture
 
