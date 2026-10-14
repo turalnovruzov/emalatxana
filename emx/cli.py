@@ -26,7 +26,8 @@ Opens the emx workspace in a private tmux server, or reattaches if it is running
 first moving a running workspace onto this version of emx. --version prints the version.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
-EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command."""
+EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
+EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too."""
 
 
 SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."

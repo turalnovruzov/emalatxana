@@ -1,6 +1,8 @@
+import ast
 import builtins
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -343,3 +345,52 @@ class EngineStore(StoreCase):
         self.assertEqual((record["name"], record["cwd"]), ("renamed", self.folder))
         self.assertFalse(engine.set_name(OTHER, "x", state=self.state)[0])
         self.assertFalse(engine.set_name("..", "x", state=self.state)[0])
+
+
+class EngineHandle(StoreCase):
+    """The object the panel's workers hold: every call goes to the same state folder, tmux server and claude command."""
+
+    def test_its_calls_reach_its_own_state_folder(self):
+        tmux = FakeTmux()
+        handle = engine.Engine(tmux, "claude", self.state)
+        session, error = handle.start(self.folder, "")
+        self.assertIsNone(error)
+        tmux.listed = [self.live(session.id)]
+        (listed,), _ = handle.list_sessions()
+        self.assertEqual((listed.id, listed.running), (session.id, True))
+        self.assertEqual(handle.set_name(session.id, "renamed"), (True, None))
+        command, _ = handle.resume_command(session.id)
+        self.assertEqual(shlex.split(command)[:3], ["exec", "claude", "--resume"])
+        self.assertEqual(handle.forget(session.id), (True, None))
+        self.assertEqual(os.listdir(os.path.join(self.state, "sessions")), [])
+
+
+SCANNED_WORDS = {"agents"}
+
+
+class NoBackgroundServiceCalls(unittest.TestCase):
+    """No string in emx's code names a `claude agents`, `claude attach` or `claude --bg` call: emx holds every session itself. Docstrings are prose and are not scanned."""
+
+    def literals(self):
+        words = re.compile(r"[A-Za-z0-9_-]+")
+        found = []
+        for path in sorted(Path(cli.HERE).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docs = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                        docs.add(id(first.value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+                    found.append((path.name, node.lineno, set(words.findall(node.value))))
+        return found
+
+    def test_the_scan_reads_every_module(self):
+        names = {name for name, _, _ in self.literals()}
+        self.assertTrue({"core.py", "sidebar.py", "engine.py", "tmux.py", "cli.py"} <= names, names)
+
+    def test_no_literal_names_one(self):
+        hits = [(name, line, words & SCANNED_WORDS) for name, line, words in self.literals() if words & SCANNED_WORDS]
+        self.assertEqual(hits, [])

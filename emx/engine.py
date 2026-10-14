@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 
 from emx import BIN, core
 from emx.tmux import AGENT_OPT, SESSION_OPT, Tmux, TmuxError
@@ -220,3 +221,27 @@ def set_name(key: str, name: str, state=None) -> tuple:
     except (OSError, ValueError) as exc:
         return False, f"Couldn't record the name: {' '.join(str(exc).split())}"
     return True, None
+
+
+@dataclass(frozen=True)
+class Engine:
+    """What the panel's workers are handed in place of the `claude` command: emx's tmux server, the claude command it launches and the state folder."""
+
+    tmux: Tmux
+    claude: str
+    state: object
+
+    def list_sessions(self) -> tuple:
+        return list_sessions(self.tmux, self.state)
+
+    def start(self, folder: str, message: str) -> tuple:
+        return start(self.tmux, self.claude, folder, message, self.state)
+
+    def resume_command(self, key: str) -> tuple:
+        return resume_command(key, self.claude, self.state)
+
+    def forget(self, key: str) -> tuple:
+        return forget(key, self.state)
+
+    def set_name(self, key: str, name: str) -> tuple:
+        return set_name(key, name, self.state)

@@ -10,60 +10,6 @@ from unittest import mock
 from emx import __version__, core
 from emx.tmux import Pane
 
-ROWS = [
-    {"id": "bg-1", "kind": "background", "name": "alpha", "cwd": "/tmp/x/proj", "state": "working", "status": "busy"},
-    {"kind": "interactive", "name": "terminal", "cwd": "/tmp/y"},
-    {"id": "bg-2", "kind": "background", "state": "blocked", "waitingFor": "approval"},
-    {"id": "int-1", "kind": "interactive"},
-    {"kind": "background"},
-    {"id": "", "kind": "background"},
-    {"id": 7, "kind": "background"},
-]
-
-
-class ParseAgents(unittest.TestCase):
-    def test_valid_list(self):
-        self.assertEqual(len(core.parse_agents(json.dumps(ROWS))), len(ROWS))
-
-    def test_empty_list_is_fine(self):
-        self.assertEqual(core.parse_agents("[]"), [])
-
-    def test_non_dict_entries_dropped(self):
-        self.assertEqual(core.parse_agents('[1, "x", null, {"id": "a"}]'), [{"id": "a"}])
-
-    def test_bad_inputs_raise_agents_error_not_crash(self):
-        for bad in ["", "   ", "{", "not json", "{}", '"str"', "null", "42", "[1,"]:
-            with self.subTest(bad=bad):
-                with self.assertRaises(core.AgentsError):
-                    core.parse_agents(bad)
-
-
-class BackgroundSessions(unittest.TestCase):
-    def test_only_background_rows_with_id(self):
-        got = core.background_sessions(core.parse_agents(json.dumps(ROWS)))
-        self.assertEqual([s.id for s in got], ["bg-1", "bg-2"])
-
-    def test_interactive_rows_hidden(self):
-        rows = [{"kind": "interactive", "name": "n"}, {"kind": "interactive", "id": "x"}]
-        self.assertEqual(core.background_sessions(rows), [])
-
-    def test_order_preserved(self):
-        rows = [{"id": c, "kind": "background"} for c in "cab"]
-        self.assertEqual([s.id for s in core.background_sessions(rows)], ["c", "a", "b"])
-
-    def test_missing_name_falls_back_to_id_and_fields_default_empty(self):
-        s = core.background_sessions([{"id": "z", "kind": "background"}])[0]
-        self.assertEqual((s.name, s.cwd, s.state, s.status, s.waiting_for), ("z", "", "", "", ""))
-
-    def test_non_string_values_become_text(self):
-        s = core.background_sessions([{"id": "z", "kind": "background", "state": 3, "waitingFor": {"a": 1}}])[0]
-        self.assertEqual(s.state, "3")
-        self.assertEqual(s.waiting_for, '{"a":1}')
-
-    def test_empty(self):
-        self.assertEqual(core.background_sessions([]), [])
-
-
 class TestSessionsHidden(unittest.TestCase):
     def setUp(self):
         saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
@@ -73,15 +19,26 @@ class TestSessionsHidden(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         home = os.path.expanduser("~")
-        self.rows = [
-            {"id": "t", "kind": "background", "name": "emx-test-x", "cwd": self.tmp},
-            {"id": "n", "kind": "background", "name": "normal", "cwd": self.tmp},
-            {"id": "k", "kind": "background", "name": "my emx-test-notes", "cwd": self.tmp},
-            {"id": "e", "kind": "background", "name": "emx-test-elsewhere", "cwd": home},
+        self.records = [
+            self.record("t", "emx-test-x", self.tmp, 1),
+            self.record("n", "normal", self.tmp, 2),
+            self.record("k", "my emx-test-notes", self.tmp, 3),
+            self.record("e", "emx-test-elsewhere", home, 4),
         ]
 
+    HEX = dict(zip("tnke", "abcd"))
+
+    def key(self, letter):
+        c = self.HEX[letter]
+        return f"{c * 8}-{c * 4}-4{c * 3}-8{c * 3}-{c * 12}"
+
+    def record(self, letter, name, cwd, started):
+        return {"key": self.key(letter), "name": name, "cwd": cwd, "started_at": float(started)}
+
     def ids(self):
-        return [s.id for s in core.background_sessions(self.rows)]
+        got = core.engine_sessions(self.records, {}, [], {})
+        letters = {self.key(c): c for c in self.HEX}
+        return [letters[s.id] for s in got]
 
     def test_hidden_in_a_temp_cwd_visible_with_the_name_elsewhere_and_visible_in_temp_without_the_name(self):
         self.assertEqual(self.ids(), ["n", "k", "e"])
@@ -99,59 +56,22 @@ class TestSessionsHidden(unittest.TestCase):
         self.assertEqual(self.ids(), ["t", "n", "k", "e"])
 
     def test_a_test_session_changing_state_gives_no_notice(self):
-        def listing(state):
-            return core.background_sessions([{"id": "t", "kind": "background", "name": "emx-test-x", "cwd": self.tmp, "state": state},
-                                             {"id": "n", "kind": "background", "name": "normal", "state": "working"}])
-        seen, _ = core.notice_transitions(None, listing("working"), ())
-        _, found = core.notice_transitions(seen, listing("done"), ())
-        self.assertEqual(found, [])
+        live = [Pane("%1", "@1", False, "", self.key(c), 80, 80, agent="claude") for c in "tn"]
+        records = self.records[:2]
+
+        def listing(event):
+            states = {self.key(c): core.fold_events([{"event": "UserPromptSubmit", "at": 10}, {"event": event, "at": 20}])
+                      for c in "tn"}
+            return core.engine_sessions(records, states, live, {})
+        seen, _ = core.notice_transitions(None, listing("PostToolUse"), ())
+        _, found = core.notice_transitions(seen, listing("Stop"), ())
+        self.assertEqual([s.name for s in found], ["normal"])
 
 
 def mk(**kw):
     base = dict(id="i", name="n", cwd="", state="working", status="", waiting_for="", started_at=None, running=True)
     base.update(kw)
     return core.Session(**base)
-
-
-# The shapes `claude agents --json --all` (2.1.293) gave for throwaway sessions: running and done rows
-# carry pid and status; a row stopped with `claude stop` has neither, and its state is "stopped".
-REAL_ROWS = [
-    {"pid": 30464, "id": "41673d92", "cwd": "<tmp>/proj-alpha", "kind": "background", "startedAt": 1791434633618,
-     "sessionId": "<uuid>", "name": "emx-test-repo", "status": "idle", "state": "done"},
-    {"id": "e1a0dfc9", "cwd": "<tmp>/alpha-feat-x", "kind": "background", "startedAt": 1791434634417,
-     "sessionId": "<uuid>", "name": "emx-test-wt", "state": "stopped"},
-]
-
-
-class RunningOrStopped(unittest.TestCase):
-    @mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"})
-    def test_real_rows(self):
-        done, stopped = core.background_sessions(REAL_ROWS)
-        self.assertEqual((done.running, core.category(done)), (True, core.DONE))
-        self.assertEqual((stopped.running, core.category(stopped)), (False, core.STOPPED))
-        self.assertEqual(stopped.started_at, 1791434634417.0)
-
-    def test_no_pid_is_not_running_whatever_the_state(self):
-        for state, shown in (("done", core.DONE), ("working", core.WORKING), ("blocked", core.NEEDS_INPUT), ("", core.WORKING)):
-            with self.subTest(state=state):
-                (s,) = core.background_sessions([{"id": "a", "kind": "background", "state": state}])
-                self.assertFalse(s.running)
-                self.assertEqual(core.category(s), shown)
-
-    def test_display_follows_state_only_stopped_shows_stopped(self):
-        (s,) = core.background_sessions([{"id": "a", "kind": "background", "state": "stopped"}])
-        self.assertEqual((s.running, core.category(s), core.state_word(s)), (False, core.STOPPED, "Stopped"))
-
-    def test_stopped_state_with_a_pid_is_still_stopped(self):
-        (s,) = core.background_sessions([{"id": "a", "kind": "background", "pid": 5, "state": "stopped"}])
-        self.assertFalse(s.running)
-
-    def test_odd_pid_and_started_at_values(self):
-        for pid in (True, "12", None, 1.5):
-            with self.subTest(pid=pid):
-                (s,) = core.background_sessions([{"id": "a", "kind": "background", "pid": pid, "startedAt": True}])
-                self.assertFalse(s.running)
-                self.assertIsNone(s.started_at)
 
 
 class StateWords(unittest.TestCase):
@@ -216,7 +136,7 @@ class ReopenRule(unittest.TestCase):
                     self.assertFalse(core.attach_allowed(stopped, trigger, fresh=fresh))
 
     def test_done_session_without_a_process_reopens_only_on_open(self):
-        exited = core.background_sessions([{"id": "a", "kind": "background", "state": "done"}])[0]
+        exited = mk(state="done", running=False)
         self.assertFalse(core.attach_allowed(exited, core.RESTART, fresh=True))
         self.assertTrue(core.attach_allowed(exited, core.OPEN))
 
@@ -1107,6 +1027,17 @@ class Prefs(unittest.TestCase):
         self.assertEqual(core.prefs_path({}), want)
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": ""}), want)
         self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "rel/dir"}), want)
+
+    def test_emx_config_home_moves_the_prefs_without_xdg_config_home(self):
+        self.assertEqual(core.prefs_path({"EMX_CONFIG_HOME": "/check"}), Path("/check/emx/prefs.json"))
+        self.assertEqual(
+            core.prefs_path({"EMX_CONFIG_HOME": "/check", "XDG_CONFIG_HOME": "/cfg"}), Path("/check/emx/prefs.json"),
+        )
+        for unusable in ("", "rel/dir"):
+            with self.subTest(value=unusable):
+                self.assertEqual(
+                    core.prefs_path({"EMX_CONFIG_HOME": unusable, "XDG_CONFIG_HOME": "/cfg"}), Path("/cfg/emx/prefs.json"),
+                )
 
     def test_adjust_panel_width_clamped(self):
         p = dict(core.DEFAULT_PREFS)
@@ -2246,26 +2177,6 @@ class LatchOffMain(unittest.TestCase):
         core.latch_off_main(before, "%2", "mismatch")
         core.latch_off_main(before, "%1", "ok")
         self.assertEqual(before, frozenset({"%1"}))
-
-
-class ListedSession(unittest.TestCase):
-    ROWS = [{"id": "abc123", "kind": "background", "state": "working"}, {"kind": "interactive"}, {"id": 5}]
-
-    def test_exact_id_is_listed_with_its_running_state(self):
-        found = core.listed_session(self.ROWS, "abc123")
-        self.assertEqual((found.id, found.running), ("abc123", False))
-        with_pid = core.listed_session([{**self.ROWS[0], "pid": 9}], "abc123")
-        self.assertTrue(with_pid.running)
-
-    def test_prefix_suffix_or_case_variants_are_not(self):
-        for sid in ("abc", "abc1234", "ABC123", " abc123", "bc123"):
-            with self.subTest(sid=sid):
-                self.assertIsNone(core.listed_session(self.ROWS, sid))
-
-    def test_empty_inputs(self):
-        self.assertIsNone(core.listed_session([], "abc123"))
-        self.assertIsNone(core.listed_session(self.ROWS, ""))
-        self.assertIsNone(core.listed_session([{"id": "", "kind": "background"}], ""))
 
 
 class RestartCheck(unittest.TestCase):

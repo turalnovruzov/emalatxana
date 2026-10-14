@@ -14,6 +14,7 @@ import time
 
 from emx import __version__, core
 from emx.cli import read_changelog, self_command
+from emx.engine import Engine, claude_home
 from emx.tmux import HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
@@ -118,35 +119,9 @@ BAR_BG = {"focused": 24, "unfocused": 236}
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
-def list_rows(claude: str) -> tuple:
-    """(rows of `claude agents --json --all`, None) on success, (None, one-line error) on any failure. Never raises.
-
-    `--all` keeps stopped and completed sessions listed, as `claude agents` shows them, until he removes them.
-    """
-    try:
-        done = subprocess.run(
-            [claude, "agents", "--json", "--all"], capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=15,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, "claude agents --json timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.first_message(done.stderr) or f"claude agents exited with {done.returncode}"
-    try:
-        return core.parse_agents(done.stdout), None
-    except core.AgentsError as exc:
-        return None, str(exc)
-
-
-def fetch_sessions(claude: str) -> tuple:
-    rows, error = list_rows(claude)
-    if error:
-        return None, error
-    return core.background_sessions(rows), None
+def fetch_sessions(engine: Engine) -> tuple:
+    """(emx's own sessions, None), or (None, one-line error). Off the curses thread only: it reads files and asks tmux."""
+    return engine.list_sessions()
 
 
 def run_git(cwd: str, *args: str) -> tuple:
@@ -210,24 +185,20 @@ def start_session(claude: str, folder: str, message: str) -> tuple:
     return sid, None
 
 
-def wait_until_running(claude: str, sid: str) -> tuple:
-    """(session, None) once `claude agents --json` lists `sid` with a live process, else (None, error) after a few seconds.
-
-    A session can be listed a moment before its pid is. The listing that
-    finds it running is the fresh one the new viewer attaches on.
-    """
+def wait_until_running(engine: Engine, sid: str) -> tuple:
+    """(session, None) once emx's listing shows `sid` running, else (None, error) after a few seconds. The listing that finds it running is the fresh one it opens on."""
     deadline = time.monotonic() + LISTED_WAIT_SECONDS
     seen = False
     while True:
-        rows, _ = list_rows(claude)
-        session = core.listed_session(rows, sid) if rows is not None else None
+        sessions, _ = fetch_sessions(engine)
+        session, _ = core.checked_row(sessions, sid)
         if session is not None and session.running:
             return session, None
         seen = seen or session is not None
         if time.monotonic() >= deadline:
             if seen:
-                return None, f"claude agents lists session {sid}, but it isn't running, so no viewer was opened"
-            return None, f"claude --bg reported session {sid}, but claude agents doesn't list it, so no viewer was opened"
+                return None, f"Session {sid} started, but it isn't running, so it wasn't opened"
+            return None, f"Session {sid} started, but emx doesn't list it, so it wasn't opened"
         time.sleep(LISTED_CHECK_SECONDS)
 
 
@@ -334,9 +305,9 @@ class Closer(threading.Thread):
     being closed now. `result` is (all closed, message, {id: closed}).
     """
 
-    def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
+    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = ()):
         super().__init__(daemon=True)
-        self.claude, self.targets, self.wait_for = claude, tuple(targets), tuple(wait_for)
+        self.engine, self.targets, self.wait_for = engine, tuple(targets), tuple(wait_for)
         self.current = self.targets[0]
         self.result = None
 
@@ -371,12 +342,12 @@ class Closer(threading.Thread):
         return all(finished.values()), " ".join(messages), finished
 
     def close_one(self, confirm: core.Confirm) -> tuple:
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, confirm.id)
         if not core.close_still_applies(confirm, session, fresh):
             return False, core.close_refusal(confirm, session, fresh)
         output = ""
-        for args in core.close_args(self.claude, confirm):
+        for args in core.close_args(self.engine.claude, confirm):
             output, error = close_session(args)
             if error and args[1] == "rm" and confirm.running:
                 return False, core.stopped_not_removed_text(confirm, error)
@@ -401,9 +372,9 @@ class Renamer(threading.Thread):
     message, typed).
     """
 
-    def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
+    def __init__(self, engine: Engine, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
         super().__init__(daemon=True)
-        self.claude, self.tmux, self.rename = claude, tmux, rename
+        self.engine, self.tmux, self.rename = engine, tmux, rename
         self.panel, self.flagged = panel, flagged
         self.result = None
 
@@ -414,7 +385,7 @@ class Renamer(threading.Thread):
             self.result = (False, f"rename failed: {core.error_line(exc)}", False)
 
     def attempt(self) -> tuple:
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, self.rename.id)
         refusal = core.rename_listing_refusal(self.rename, session, fresh)
         if refusal:
@@ -509,7 +480,7 @@ class Renamer(threading.Thread):
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         last = None
         while True:
-            sessions, _ = fetch_sessions(self.claude)
+            sessions, _ = fetch_sessions(self.engine)
             session, fresh = core.checked_row(sessions, self.rename.id)
             if fresh and session is not None:
                 last = session
@@ -537,10 +508,10 @@ class Interrupter(threading.Thread):
     `result` is (stopped, message).
     """
 
-    def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
+    def __init__(self, engine: Engine, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
                  list_failing: bool):
         super().__init__(daemon=True)
-        self.claude, self.tmux, self.interrupt = claude, tmux, interrupt
+        self.engine, self.tmux, self.interrupt = engine, tmux, interrupt
         self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
         self.cancel = threading.Event()
         self.opened = None
@@ -599,7 +570,7 @@ class Interrupter(threading.Thread):
 
     def attempt(self) -> tuple:
         interrupt = self.interrupt
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, interrupt.id)
         refusal = core.interrupt_listing_refusal(interrupt, session, fresh)
         if refusal == core.NOTHING_TO_INTERRUPT:
@@ -620,7 +591,7 @@ class Interrupter(threading.Thread):
                     return False, ""
                 if not core.attach_allowed(session, core.INTERRUPT, fresh):
                     return False, core.refusal(interrupt.name, core.INTERRUPT, fresh, session)
-                pane = self.opened = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
+                pane = self.opened = self.tmux.new_hidden_window(core.viewer_command(self.engine.claude, interrupt.id))
                 self.tmux.set_pane_option(pane, SESSION_OPT, interrupt.id)
                 screen = self.wait_for_prompt(pane, session, sessions)
                 if self.cancel.is_set():
@@ -665,7 +636,7 @@ class Interrupter(threading.Thread):
         """True once a listing shows it stopped working, False if it still is at the deadline, None once a listing that worked no longer shows it."""
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         while not self.cancel.is_set():
-            sessions, _ = fetch_sessions(self.claude)
+            sessions, _ = fetch_sessions(self.engine)
             session, fresh = core.checked_row(sessions, self.interrupt.id)
             if fresh and session is None:
                 return None
@@ -680,17 +651,17 @@ class Interrupter(threading.Thread):
 class Starter(threading.Thread):
     """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
 
-    def __init__(self, claude: str, folder: str, message: str):
+    def __init__(self, engine: Engine, folder: str, message: str):
         super().__init__(daemon=True)
-        self.claude, self.folder, self.message = claude, folder, message
+        self.engine, self.folder, self.message = engine, folder, message
         self.result = None
 
     def run(self) -> None:
         try:
-            sid, error = start_session(self.claude, self.folder, self.message)
+            sid, error = start_session(self.engine.claude, self.folder, self.message)
             session = None
             if sid:
-                session, error = wait_until_running(self.claude, sid)
+                session, error = wait_until_running(self.engine, sid)
         except Exception as exc:
             session, error = None, f"starting a session failed: {core.error_line(exc)}"
         self.result = (session, error)
@@ -703,14 +674,14 @@ class Checker(threading.Thread):
     when emx caught the agent view in main (`auto`).
     """
 
-    def __init__(self, claude: str, asked: tuple, auto: bool = False):
+    def __init__(self, engine: Engine, asked: tuple, auto: bool = False):
         super().__init__(daemon=True)
-        self.claude, self.asked, self.auto = claude, asked, auto
+        self.engine, self.asked, self.auto = engine, asked, auto
         self.result = None
 
     def run(self) -> None:
         try:
-            self.result = fetch_sessions(self.claude)
+            self.result = fetch_sessions(self.engine)
         except Exception as exc:
             self.result = (None, f"listing sessions failed: {core.error_line(exc)}")
 
@@ -785,10 +756,6 @@ class Resolver(threading.Thread):
                 return None
             self.changed = False
             return dict(self.placements)
-
-
-def claude_home() -> str:
-    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
 def read_transcript(path: str, size: int) -> tuple:
@@ -1455,20 +1422,20 @@ class Notices(threading.Thread):
 class Poller(threading.Thread):
     """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either."""
 
-    def __init__(self, claude: str):
+    def __init__(self, engine: Engine):
         super().__init__(daemon=True)
-        self.claude = claude
+        self.engine = engine
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.result = None
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
         self.transcripts = Transcripts(claude_home())
-        self.summaries = Summaries(claude, self.transcripts)
+        self.summaries = Summaries(engine.claude, self.transcripts)
         self.voice = Voice()
-        self.notices = Notices(claude, self.transcripts, self.resolver, self.voice)
+        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice)
 
     def poll(self) -> tuple:
-        sessions, error = fetch_sessions(self.claude)
+        sessions, error = fetch_sessions(self.engine)
         if error:
             return None, error
         if sessions:
@@ -1505,6 +1472,8 @@ class App:
         self.scr = scr
         self.tmux = tmux
         self.claude = claude
+        self.state = core.state_path()
+        self.legacy_cleared = False
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
         self.prefs = core.load_prefs(self.prefs_file)
@@ -1530,7 +1499,7 @@ class App:
         self.row_map = {}
         self.scroll = 0
         self.last_housekeep = 0.0
-        self.poller = Poller(claude)
+        self.poller = Poller(Engine(tmux, claude, self.state))
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
@@ -1568,6 +1537,10 @@ class App:
         self.peek_wrapped = (None, [])
         self.whats_new = None
         self.note_new_version()
+
+    @property
+    def engine(self) -> Engine:
+        return Engine(self.tmux, self.claude, self.state)
 
     def note_new_version(self) -> None:
         """Record the version this panel runs, showing its changelog lines when it is newer than the one recorded."""
@@ -1675,6 +1648,8 @@ class App:
         try:
             panes = self.tmux.panes()
             sidebar, main = self.layout_panes(panes)
+            if not self.legacy_cleared:
+                panes, main = self.clear_legacy_viewers(panes, main)
             self.main_pane = main
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
@@ -1806,12 +1781,36 @@ class App:
         if sidebar:
             self.applied = (sidebar.window_width, sidebar.width)
 
+    def clear_legacy_viewers(self, panes: list, main: Pane | None) -> tuple:
+        """Once per panel start, kill the `claude attach` viewers an emx before 2.0.0 left: a pane with a session key and no agent tag. Returns the panes and main as they are after.
+
+        `close_stale` would never close them, since emx's listing does not
+        hold their sessions and an empty listing counts as no news. Killing a
+        viewer leaves its background session running in Claude Code. One in
+        main is swapped out for the placeholder first; with no placeholder it
+        stays, so the layout keeps its two columns.
+        """
+        legacy = [p for p in panes if p.session and not p.agent]
+        if legacy:
+            placeholder = next((p for p in panes if p.role == "placeholder"), None)
+            for pane in legacy:
+                if main is not None and pane.id == main.id:
+                    if placeholder is None:
+                        continue
+                    self.tmux.swap(placeholder.id, pane.id)
+                self.tmux.kill_pane(pane.id)
+            panes = self.tmux.panes()
+            _, main = self.layout_panes(panes)
+        self.legacy_cleared = True
+        return panes, main
+
     def close_stale(self, panes: list, main: Pane | None) -> None:
+        """A pane holding one of emx's own sessions (agent-tagged) is the session itself, so it is never closed here: only a double Ctrl+X ends a session."""
         now = time.monotonic()
         live = {s.id for s in self.sessions}
         self.fresh = {sid: t for sid, t in self.fresh.items() if sid not in live and now - t < FRESH_GRACE_SECONDS}
-        viewers = {p.session for p in panes if p.session and p.session not in self.fresh}
-        dead = {p.session for p in panes if p.session and p.dead}
+        viewers = {p.session for p in panes if p.session and not p.agent and p.session not in self.fresh}
+        dead = {p.session for p in panes if p.session and not p.agent and p.dead}
         self.misses, close = core.stale_viewers(viewers, live, self.misses, dead)
         self.close_viewers(panes, main, close)
 
@@ -1900,7 +1899,7 @@ class App:
         if self.list_error:
             self.confirm_attach(main.session, core.RESTART)
             return
-        self.checker = Checker(self.claude, (main.session, main.id), auto)
+        self.checker = Checker(self.engine, (main.session, main.id), auto)
         self.checker.start()
         shown = self.session(main.session)
         name = shown.name if shown else main.session
@@ -1991,7 +1990,7 @@ class App:
             interrupter.cancel.set()
         wait_for += tuple(i for sid in sorted(ids) for i in self.unended.get(sid, ()))
         self.closing.update((sid, None) for sid in ids)
-        self.closer = Closer(self.claude, targets, wait_for)
+        self.closer = Closer(self.engine, targets, wait_for)
         self.closer.start()
         self.say(core.closing_text(act))
 
@@ -2000,7 +1999,7 @@ class App:
         if session.id in self.interrupters:
             return
         interrupter = self.interrupters[session.id] = Interrupter(
-            self.claude, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
+            self.engine, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
             bool(self.list_error),
         )
         interrupter.start()
@@ -2143,7 +2142,7 @@ class App:
         if rename is None:
             return
         self.renaming = core.rename_started(self.renaming, rename)
-        self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
+        self.renamer = Renamer(self.engine, self.tmux, rename, self.me, self.flagged_viewers)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
 
@@ -2331,7 +2330,7 @@ class App:
             self.pick_folder()
             return
         self.prompt = None
-        self.starter = Starter(self.claude, p["folder"], p["text"])
+        self.starter = Starter(self.engine, p["folder"], p["text"])
         self.starter.start()
         self.say("Starting a session…")
 

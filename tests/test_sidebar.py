@@ -108,24 +108,41 @@ class RunGitNeverRaises(unittest.TestCase):
             self.assertEqual(sidebar.run_git("/nowhere", "status")[0], None)
 
 
-def listed(rows):
-    return subprocess.CompletedProcess([], 0, stdout=json.dumps(rows), stderr="")
+class FakeEngine:
+    """An engine whose listing is given: nothing reads a state folder, runs tmux or starts a claude."""
+
+    def __init__(self, listing=(None, "no engine in tests"), claude="claude", tmux=None):
+        self.listing, self.claude, self.tmux = listing, claude, tmux
+        self.calls = []
+
+    def list_sessions(self):
+        self.calls.append(("list",))
+        return self.listing
 
 
-class Listing(unittest.TestCase):
-    def test_lists_with_all_so_stopped_sessions_stay(self):
-        with mock.patch.object(sidebar.subprocess, "run", return_value=listed([])) as run:
-            self.assertEqual(sidebar.list_rows("claude"), ([], None))
-        self.assertEqual(run.call_args.args[0], ["claude", "agents", "--json", "--all"])
+class ListsFromEngine(unittest.TestCase):
+    def test_fetch_sessions_is_the_engines_listing_and_runs_nothing(self):
+        rows = [session("x", "/a")]
+        engine = FakeEngine((rows, None))
+        with mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("a command ran")):
+            self.assertEqual(sidebar.fetch_sessions(engine), (rows, None))
+        self.assertEqual(engine.calls, [("list",)])
 
-    def test_a_poll_hands_folders_to_the_resolver_without_running_git(self):
-        rows = [{"id": i, "kind": "background", "cwd": "/a", "pid": 1} for i in ("x", "y")]
-        poller = sidebar.Poller("claude")
-        with mock.patch.object(sidebar.subprocess, "run", return_value=listed(rows)), \
-                mock.patch.object(sidebar, "git_placement", side_effect=AssertionError("git in the poll")):
+    def test_a_poll_hands_both_sessions_to_every_worker_without_running_git(self):
+        x, y = (replace(session(k, cwd), session_id=f"{k * 8}-1111-4111-8111-111111111111") for k, cwd in (("a", "/a"), ("b", "/b")))
+        poller = sidebar.Poller(FakeEngine(([x, y], None)))
+        with mock.patch.object(sidebar, "git_placement", side_effect=AssertionError("git in the poll")), \
+                mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("a command ran")):
             sessions, error = poller.poll()
-        self.assertEqual((len(sessions), error), (2, None))
-        self.assertEqual(poller.resolver.wanted, {"/a"})
+        self.assertEqual((sessions, error), ([x, y], None))
+        self.assertEqual(poller.resolver.wanted, {"/a", "/b"})
+        self.assertEqual(set(poller.transcripts.wanted), {"a", "b"})
+        self.assertEqual(set(poller.summaries.wanted), {"a", "b"})
+        self.assertEqual(set(poller.notices.wanted), {"a", "b"})
+
+    def test_an_engine_error_is_the_polls_error(self):
+        poller = sidebar.Poller(FakeEngine((None, "Couldn't read emx's sessions folder: denied")))
+        self.assertEqual(poller.poll(), (None, "Couldn't read emx's sessions folder: denied"))
 
 
 class Resolving(unittest.TestCase):
@@ -229,11 +246,11 @@ class AppCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         patches = [
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "TMUX_PANE": "%1"}),
+            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "XDG_STATE_HOME": tmp.name, "TMUX_PANE": "%1"}),
             mock.patch.object(sidebar, "Palette", FakePalette),
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
             # A worker a test didn't mean to start must never run his real claude.
-            mock.patch.object(sidebar, "fetch_sessions", lambda claude: (None, "no claude in tests")),
+            mock.patch.object(sidebar, "fetch_sessions", lambda engine: (None, "no engine in tests")),
             # No test may speak, ask Haiku or write to the real terminal.
             mock.patch.object(sidebar, "announce", self.recorder("announced", method=False, result=(None, "no haiku in tests"))),
             mock.patch.object(sidebar, "list_voices", lambda say: []),
@@ -246,6 +263,8 @@ class AppCase(unittest.TestCase):
         self.scr = FakeScr()
         self.app = sidebar.App(self.scr, tmux=ClientTmux(), claude="claude")
         self.app.housekeep = lambda fresh_list: None
+        # The viewers these tests build carry no agent tag; LegacyViewers tests the one-time cleanup of such panes.
+        self.app.legacy_cleared = True
         self.opened = []
         self.app.switch_to = lambda sid, trigger, checked=None: self.opened.append(
             (sid, trigger) if checked is None else (sid, trigger, checked)
@@ -352,7 +371,7 @@ class RestartOffThread(AppCase):
         self.calls = []
         self.answer = ([session("s1", "/p/alpha")], None)
 
-        def fetch(claude):
+        def fetch(engine):
             self.calls.append(threading.current_thread() is not threading.main_thread())
             self.gate.wait(5)
             return self.answer
@@ -429,29 +448,31 @@ class RestartOffThread(AppCase):
 
 
 class StartWaitsUntilRunning(AppCase):
-    def rows(self, *pids):
-        return [([{"id": "new1", "kind": "background", "state": "working", **({"pid": p} if p else {})}], None)
-                for p in pids]
+    def listings(self, *running):
+        return [([session("new1", "/p/alpha", pid=1 if up else None, state="starting" if up else "stopped")], None)
+                for up in running]
 
-    def test_the_first_listing_without_a_pid_is_waited_out(self):
-        with mock.patch.object(sidebar, "list_rows", side_effect=self.rows(None, None, 4343)), \
+    def test_a_listing_before_its_pane_runs_is_waited_out(self):
+        engine = FakeEngine()
+        with mock.patch.object(sidebar, "fetch_sessions", side_effect=self.listings(False, False, True)), \
                 mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0):
-            found, error = sidebar.wait_until_running("claude", "new1")
+            found, error = sidebar.wait_until_running(engine, "new1")
         self.assertEqual((found.id, found.running, error), ("new1", True, None))
 
     def test_listed_but_never_running_gives_up_saying_so(self):
-        with mock.patch.object(sidebar, "list_rows", side_effect=self.rows(None) * 3), \
+        with mock.patch.object(sidebar, "fetch_sessions", side_effect=self.listings(False) * 3), \
                 mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
-            found, error = sidebar.wait_until_running("claude", "new1")
+            found, error = sidebar.wait_until_running(FakeEngine(), "new1")
         self.assertIsNone(found)
         self.assertIn("isn't running", error)
-        with mock.patch.object(sidebar, "list_rows", return_value=([], None)), \
-                mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
-            self.assertIn("doesn't list it", sidebar.wait_until_running("claude", "new1")[1])
+        for listing in (([], None), (None, "Couldn't read emx's sessions folder")):
+            with self.subTest(listing=listing), mock.patch.object(sidebar, "fetch_sessions", return_value=listing), \
+                    mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
+                self.assertIn("doesn't list it", sidebar.wait_until_running(FakeEngine(), "new1")[1])
 
     def test_the_starters_listing_is_the_fresh_one_the_viewer_opens_on(self):
         new = session("new1", "/p/alpha")
-        done = sidebar.Starter("claude", "/p/alpha", "")
+        done = sidebar.Starter(FakeEngine(), "/p/alpha", "")
         done.result = (new, None)
         self.app.starter = done
         self.app.finish_start()
@@ -658,7 +679,7 @@ class AutoRestore(AppCase):
         self.poll(session("s1", "/p/alpha"))
         self.app.refresh()
         self.answer = ([session("s1", "/p/alpha")], None)
-        p = mock.patch.object(sidebar, "fetch_sessions", lambda claude: self.answer)
+        p = mock.patch.object(sidebar, "fetch_sessions", lambda engine: self.answer)
         p.start()
         self.addCleanup(p.stop)
 
@@ -877,6 +898,116 @@ class CloseStaleOnListings(AppCase):
         self.assertNotIn(("kill", "%3"), self.tmux.calls)
 
 
+KEY_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+class LegacyTmux(ClientTmux):
+    """The panel (%1); main (%2) showing an old `claude attach` viewer of `old1`; a hidden old viewer (%3) of `old2`; the placeholder (%4); and a session emx holds itself (%5). Swaps and kills change what `panes` lists, as tmux would."""
+
+    socket = "emx-test-legacy"
+
+    def __init__(self, main_agent=""):
+        super().__init__()
+        self.list = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 121),
+            Pane("%2", "@1", False, "", "old1", 80, 121, agent=main_agent),
+            Pane("%3", "@2", False, "", "old2", 80, 80),
+            Pane("%4", "@3", False, "placeholder", "", 80, 80),
+            Pane("%5", "@4", False, "", KEY_A, 80, 80, agent="claude"),
+        ]
+        self.calls = []
+
+    def panes(self):
+        return list(self.list)
+
+    def swap(self, source, target):
+        self.calls.append(("swap", source, target))
+        a = next(p for p in self.list if p.id == source)
+        b = next(p for p in self.list if p.id == target)
+        self.list = [replace(b, window=a.window) if p is a else replace(a, window=b.window) if p is b else p for p in self.list]
+
+    def kill_pane(self, pane):
+        self.calls.append(("kill", pane))
+        self.list = [p for p in self.list if p.id != pane]
+
+    def capture(self, pane):
+        return ""
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+class LegacyViewers(AppCase):
+    """The first housekeep after the panel starts on 2.0.0 closes every `claude attach` viewer an older emx left, whatever the listing says."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = LegacyTmux()
+        self.app.me = "%1"
+        self.app.legacy_cleared = False
+        self.app.sessions = []
+
+    def housekeep(self):
+        sidebar.App.housekeep(self.app, False)
+
+    def test_with_an_empty_listing_the_placeholder_goes_into_main_then_every_old_viewer_is_killed(self):
+        self.housekeep()
+        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2"), ("kill", "%3")])
+        self.assertEqual(self.app.main_pane.id, "%4")
+        self.assertTrue(self.app.legacy_cleared)
+
+    def test_it_runs_once(self):
+        self.housekeep()
+        self.app.tmux.list.append(Pane("%6", "@5", False, "", "old3", 80, 80))
+        self.app.tmux.calls = []
+        self.housekeep()
+        self.assertNotIn(("kill", "%6"), self.app.tmux.calls)
+
+    def test_a_pane_with_an_agent_tag_is_never_killed_or_swapped(self):
+        self.app.tmux = LegacyTmux(main_agent="claude")
+        self.housekeep()
+        self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
+        self.assertIn("%5", [p.id for p in self.app.tmux.list])
+
+    def test_with_no_placeholder_main_stays_and_the_rest_go(self):
+        self.app.tmux.list = [p for p in self.app.tmux.list if p.role != "placeholder"]
+        self.housekeep()
+        self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
+
+    def test_a_tmux_failure_leaves_it_to_the_next_housekeep(self):
+        def broken(pane):
+            raise TmuxError("no server")
+        self.app.tmux.kill_pane = broken
+        self.housekeep()
+        self.assertFalse(self.app.legacy_cleared)
+        self.assertTrue(self.app.notice_error)
+
+
+class EngineErrorKeepsRows(AppCase):
+    def test_an_engine_error_sets_list_error_and_leaves_the_sessions(self):
+        rows = [session("a", "/p"), session("b", "/p")]
+        self.poll(*rows)
+        self.app.take_poll()
+        self.app.poller.result = (None, "Couldn't read emx's sessions folder: denied")
+        self.app.take_poll()
+        self.assertEqual(self.app.list_error, "Couldn't read emx's sessions folder: denied")
+        self.assertEqual(self.app.sessions, rows)
+        self.poll(*rows)
+        self.app.take_poll()
+        self.assertEqual(self.app.list_error, "")
+
+
+class StaleNeverEndsASession(AppCase):
+    def test_a_pane_emx_holds_a_session_in_is_never_closed_as_stale(self):
+        self.app.tmux = LegacyTmux()
+        self.app.sessions = [session("other", "/p")]
+        for _ in range(core.STALE_AFTER_MISSES + 1):
+            panes = self.app.tmux.panes()
+            self.app.close_stale(panes, panes[1])
+        self.assertNotIn(("kill", "%5"), self.app.tmux.calls)
+        self.assertIn(("kill", "%3"), self.app.tmux.calls)
+
+
 class EmptyListing(AppCase):
     def test_the_cursor_returns_to_its_row_after_an_empty_listing(self):
         rows = [session(x, "/tmp/x") for x in "abc"]
@@ -932,7 +1063,7 @@ class CloseSession(AppCase):
             self.ran.append((args, threading.current_thread() is not threading.main_thread()))
             return self.failing.get(args[1], self.done)
 
-        def fetch(claude):
+        def fetch(engine):
             self.assertIsNot(threading.current_thread(), threading.main_thread())
             return self.listing
 
@@ -2058,7 +2189,7 @@ class RenameSession(AppCase):
         self.fetched = []
         test = self
 
-        def fetch(claude):
+        def fetch(engine):
             test.fetched.append(threading.current_thread() is threading.main_thread())
             rows = test.listings.pop(0) if test.listings else [test.after]
             return rows, None
@@ -2502,7 +2633,7 @@ class RenameSuggest(AppCase):
             test.release.wait(5)
             return test.answers.pop(0) if test.answers else (None, "no more answers")
 
-        def fetch(claude):
+        def fetch(engine):
             return [test.named], None
 
         for p in (
@@ -2808,7 +2939,7 @@ class TranscriptReader(unittest.TestCase):
         self.assertEqual((self.reader.paths, self.reader.misses, self.reader.stamps), ({}, {}, {}))
 
     def test_the_poller_hands_its_sessions_to_the_reader(self):
-        poller = sidebar.Poller("claude")
+        poller = sidebar.Poller(FakeEngine())
         rows = [self.row("s1", "/tmp/a", U1)]
         with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
             poller.poll()
@@ -2816,7 +2947,7 @@ class TranscriptReader(unittest.TestCase):
         self.assertEqual(set(poller.summaries.wanted), {"s1"})
 
     def test_an_empty_listing_keeps_what_the_workers_want(self):
-        poller = sidebar.Poller("claude")
+        poller = sidebar.Poller(FakeEngine())
         rows = [self.row("s1", "/tmp/a", U1)]
         with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
             poller.poll()
@@ -3892,7 +4023,7 @@ class InterruptSession(AppCase):
         self.fetched = []
         test = self
 
-        def fetch(claude):
+        def fetch(engine):
             test.fetched.append(threading.current_thread() is threading.main_thread())
             if test.listings:
                 rows = test.listings.pop(0)
@@ -4210,7 +4341,7 @@ class InterruptSession(AppCase):
         held, release = threading.Event(), threading.Event()
         calls = []
 
-        def fetch(claude):
+        def fetch(engine):
             calls.append(threading.current_thread().name)
             if len(calls) == 1:
                 held.set()
@@ -4911,7 +5042,7 @@ class VoiceQueue(unittest.TestCase):
         with mock.patch.object(sidebar.subprocess, "Popen", side_effect=AssertionError("Popen")), \
                 mock.patch.object(sidebar.subprocess, "run", side_effect=AssertionError("run")), \
                 mock.patch.object(sidebar, "list_voices", side_effect=AssertionError("list_voices")):
-            poller = sidebar.Poller("claude")
+            poller = sidebar.Poller(FakeEngine())
         self.assertEqual(threading.active_count(), before)
         self.assertIsNone(poller.voice.voice)
         self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive())

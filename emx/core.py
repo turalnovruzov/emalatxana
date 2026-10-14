@@ -27,10 +27,6 @@ STALE_AFTER_MISSES = 2
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
-class AgentsError(ValueError):
-    pass
-
-
 @dataclass(frozen=True)
 class Session:
     id: str
@@ -44,16 +40,6 @@ class Session:
     session_id: str = ""
     transcript: str = ""
     turned: bool = True
-
-
-def parse_agents(text: str) -> list:
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise AgentsError(f"claude agents returned bad JSON ({exc.msg})") from None
-    if not isinstance(data, list):
-        raise AgentsError("claude agents returned JSON that is not a list")
-    return [row for row in data if isinstance(row, dict)]
 
 
 def _text(value) -> str:
@@ -97,48 +83,10 @@ def is_test_session(name: str, cwd: str, roots: set = None) -> bool:
     return name.startswith(TEST_SESSION_PREFIX) and in_temp_dir(cwd, roots)
 
 
-def background_sessions(rows: list) -> list:
-    """Background rows with an id, in the order the CLI gave them. Interactive rows have no id and are hidden.
-
-    Sessions named `emx-test-…` that run in a temporary directory (the
-    throwaway ones agents start for checks) are dropped here, the one place every consumer reads from, unless
-    `EMX_SHOW_TEST_SESSIONS=1` is set, as emx's own live checks do.
-    """
-    show_test = os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
-    roots = temp_roots()
-    sessions = []
-    for row in rows:
-        sid = row.get("id")
-        if row.get("kind") != "background" or not isinstance(sid, str) or not sid:
-            continue
-        if not show_test and is_test_session(_text(row.get("name")), _text(row.get("cwd")), roots):
-            continue
-        sessions.append(
-            Session(
-                id=sid,
-                name=_text(row.get("name")) or sid,
-                cwd=_text(row.get("cwd")),
-                state=_text(row.get("state")),
-                status=_text(row.get("status")),
-                waiting_for=_text(row.get("waitingFor")),
-                started_at=_number(row.get("startedAt")),
-                running=_is_running(row),
-                session_id=_text(row.get("sessionId")),
-            )
-        )
-    return sessions
-
-
 def _number(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
-
-
-def _is_running(row: dict) -> bool:
-    """Whether the session has a live process. A stopped row (and, under --all, a completed one whose process has exited) has no pid."""
-    pid = row.get("pid")
-    return isinstance(pid, int) and not isinstance(pid, bool) and row.get("state") != "stopped"
 
 
 NEEDS_INPUT, WORKING, DONE, STOPPED = "needs_input", "working", "done", "stopped"
@@ -823,7 +771,7 @@ def renamed_text(rename: Rename, name: str | None, prompt_empty: bool = True, qu
                 f" the line may not have been sent. Check it before you press Enter there.")
     if queued:
         return f"Typed /rename into {rename.old}; it's working, so Claude Code applies the name when this turn ends."
-    return f"Typed /rename into {rename.old}, but claude agents doesn't show a new name yet."
+    return f"Typed /rename into {rename.old}, but the panel doesn't show a new name yet."
 
 
 def rename_started(renaming: Mapping, rename: Rename) -> dict:
@@ -1801,8 +1749,11 @@ def relaunch_plan(panes, upgrade: bool) -> tuple:
 
 
 def prefs_path(env: Mapping | None = None) -> Path:
+    """`EMX_CONFIG_HOME` moves the prefs for a live check without setting `XDG_CONFIG_HOME`, which the claude in every session pane inherits from emx's tmux server and reads too (it then reports "Not logged in")."""
     env = os.environ if env is None else env
-    base = env.get("XDG_CONFIG_HOME", "")
+    base = env.get("EMX_CONFIG_HOME", "")
+    if not base or not os.path.isabs(base):
+        base = env.get("XDG_CONFIG_HOME", "")
     if not base or not os.path.isabs(base):
         base = os.path.join(os.path.expanduser("~"), ".config")
     return Path(base) / "emx" / "prefs.json"
@@ -2282,13 +2233,6 @@ def stale_viewers(viewer_ids, live_ids, misses: dict, dead=frozenset()) -> tuple
         else:
             updated[sid] = count
     return updated, close
-
-
-def listed_session(rows: list, session_id: str) -> Session | None:
-    """The background session whose `id` is exactly `session_id` in rows from `claude agents --json`, or None."""
-    if not session_id:
-        return None
-    return next((s for s in background_sessions(rows) if s.id == session_id), None)
 
 
 def error_line(exc: BaseException) -> str:
