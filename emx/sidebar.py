@@ -1313,7 +1313,7 @@ class Notices(threading.Thread):
     def send(self, notice: core.Notice, session: core.Session, transcript) -> None:
         placements = self.resolver.snapshot()
         project = core.notice_project(session, placements)
-        excerpt = core.notice_excerpt(project, session, transcript)
+        excerpt = core.notice_excerpt(project, session, transcript, notice.named)
         call, text = None, ""
         if excerpt:
             try:

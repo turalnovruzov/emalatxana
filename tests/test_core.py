@@ -3511,11 +3511,17 @@ class NoticeText(unittest.TestCase):
         self.assertIn("What happened: it needs him", core.notice_excerpt("app", session, t))
 
     def test_an_unnamed_session_has_no_session_line(self):
-        session = mk(id="i1", name="i1", state="done")
+        session = mk(id="1a2b3c4d", name="1a2b3c4d", state="done", named=False)
         t = core.Transcript(prompt="Go", reply="ok", answered=True, latest="reply")
-        text = core.notice_excerpt("app", session, t)
+        text = core.notice_excerpt("app", session, t, named=session.named)
         self.assertNotIn("Session:", text)
+        self.assertNotIn("1a2b3c4d", text)
         self.assertEqual(text.splitlines()[:2], ["Project: app", "What happened: it has finished"])
+
+    def test_a_named_session_has_a_session_line(self):
+        session = mk(id="1a2b3c4d", name="tax fix", state="done", named=True)
+        t = core.Transcript(prompt="Go", reply="ok", answered=True, latest="reply")
+        self.assertIn("Session: tax fix", core.notice_excerpt("app", session, t, named=session.named).splitlines())
 
     def test_no_transcript_gives_nothing(self):
         self.assertEqual(core.notice_excerpt("app", mk(state="done"), None), "")

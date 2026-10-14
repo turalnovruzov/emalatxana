@@ -2999,14 +2999,14 @@ def notice_project(session: Session, placements: Mapping) -> str:
     return "a project"
 
 
-def notice_excerpt(project: str, session: Session, transcript: Transcript | None) -> str:
+def notice_excerpt(project: str, session: Session, transcript: Transcript | None, named: bool = True) -> str:
     """What Haiku is shown for a notice, or "" when the transcript has nothing to say."""
     body = summary_excerpt(session, transcript)
     if not body:
         return ""
     happened = "it needs him" if category(session) == NOTICE_NEEDS else "it has finished"
     lines = [f"Project: {project}"]
-    if session.name != session.id:
+    if named:
         lines.append(f"Session: {session.name}")
     return "\n".join([*lines, f"What happened: {happened}", body])
 
