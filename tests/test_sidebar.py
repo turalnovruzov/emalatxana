@@ -5064,6 +5064,48 @@ class NotifierWorker(unittest.TestCase):
         self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize", "post"])
         self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
 
+    def switch_to_voice_and_back(self, notifier):
+        notifier.mode = core.VOICE_MODE
+        notifier.mode = core.NOTIFICATION_MODE
+        notifier.authorize()
+        notifier.step()
+
+    def test_an_unanswered_ask_is_asked_again_on_a_switch_back_and_reads_blocked_meanwhile(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        notifier.step()
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
+        self.switch_to_voice_and_back(notifier)
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize", "authorize"])
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
+
+    def test_a_denied_ask_is_not_asked_again_on_a_switch_back(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        notifier.step()
+        helper.set("denied")
+        notifier.check()
+        self.assertEqual(notifier.state, core.HELPER_BLOCKED)
+        notifier.mode = core.VOICE_MODE
+        notifier.mode = core.NOTIFICATION_MODE
+        notifier.authorize()
+        with mock.patch.object(notifier.wake, "wait"):
+            notifier.step()
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize", "status"])
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
+
+    def test_before_any_ask_the_tag_stays_empty(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.mode = core.VOICE_MODE
+        notifier.prepare()
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), "")
+
     def test_a_permission_not_yet_asked_for_still_reads_pending(self):
         helper = RecordingHelper(self, auth="notDetermined")
         self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)

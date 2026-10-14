@@ -1270,10 +1270,12 @@ class Notifier(threading.Thread):
         self.asked = False
         self.checked_at = None
         self.state = core.HELPER_PENDING
+        self.undecided = True
 
     def settle(self, report, error) -> None:
-        """Takes the helper's answer as `state`. A permission still undecided after it was asked for counts as blocked, so an unanswered prompt does not leave the mode silently dead."""
+        """Takes the helper's answer as `state`. A permission still undecided after it was asked for counts as blocked, so an unanswered prompt does not leave the mode silently dead; `undecided` keeps the helper's real answer, so a later switch into notification mode asks again."""
         state = notify.helper_state(report, error)
+        self.undecided = state == core.HELPER_PENDING
         self.state = core.HELPER_BLOCKED if state == core.HELPER_PENDING and self.asked else state
 
     def post(self, title: str, body: str, sid: str, at: float | None = None) -> None:
@@ -1323,7 +1325,7 @@ class Notifier(threading.Thread):
     def step(self) -> None:
         """Asks the permission when wanted, else posts the oldest queued notification, else refreshes `state` every NOTIFY_STATUS_SECONDS."""
         with self.lock:
-            asking, self.asking = self.asking and self.state == core.HELPER_PENDING, False
+            asking, self.asking = self.asking and self.undecided, False
             item = self.queue.pop(0) if self.queue and not asking else None
         if self.command is None:
             with self.lock:
