@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest import mock
 
@@ -4403,6 +4403,44 @@ class EngineSessions(unittest.TestCase):
         self.assertEqual(core.state_word(s), "Idle")
         (s,) = self.listing(events)
         self.assertEqual(core.state_word(s), "Working")
+
+    def verdict_listing(self, verdict=None, events=None, panes=None):
+        states = {KEY: core.fold_events(events or [event("UserPromptSubmit", at=150), event("Stop", at=200, reply="Which one?")])}
+        states[KEY] = replace(states[KEY], stop_key="k1") if states[KEY].stop_key else states[KEY]
+        verdicts = {} if verdict is None else {KEY: verdict}
+        panes = [pane(KEY)] if panes is None else panes
+        (s,) = core.engine_sessions([self.record()], states, panes, {}, roots=set(), verdicts=verdicts)
+        return s
+
+    def test_a_done_with_a_reply_and_no_verdict_yet_is_asking(self):
+        s = self.verdict_listing()
+        self.assertEqual((core.category(s), s.asking, s.reply, s.stop_key), (core.DONE, True, "Which one?", "k1"))
+
+    def test_a_needs_verdict_on_this_stop_reads_needs_input(self):
+        s = self.verdict_listing(("k1", "needs"))
+        self.assertEqual((core.category(s), core.state_word(s), s.asking), (core.NEEDS_INPUT, "Needs input", False))
+
+    def test_a_verdict_on_an_older_stop_does_not_count(self):
+        s = self.verdict_listing(("k0", "needs"))
+        self.assertEqual((core.category(s), s.asking), (core.DONE, True))
+
+    def test_a_done_or_unknown_verdict_reads_done(self):
+        for verdict in ("done", "unknown"):
+            s = self.verdict_listing(("k1", verdict))
+            self.assertEqual((core.category(s), s.asking), (core.DONE, False), verdict)
+
+    def test_an_old_stop_record_with_no_reply_is_never_asking(self):
+        s = self.verdict_listing(events=[event("UserPromptSubmit", at=150), event("Stop", at=200)])
+        self.assertEqual((core.category(s), s.asking), (core.DONE, False))
+
+    def test_a_queued_done_is_never_asking(self):
+        s = self.verdict_listing(events=[event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160),
+                                         event("Stop", at=200, reply="Which one?")])
+        self.assertEqual((s.queued, s.asking), (True, False))
+
+    def test_a_session_not_running_with_a_needs_verdict_is_stopped(self):
+        s = self.verdict_listing(("k1", "needs"), panes=[])
+        self.assertEqual(core.category(s), core.STOPPED)
 
     def test_a_done_with_a_queued_prompt_is_listed_queued_while_running(self):
         queued = [event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160), event("Stop", at=200)]

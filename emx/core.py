@@ -43,6 +43,9 @@ class Session:
     turned: bool = True
     named: bool = True
     queued: bool = False
+    reply: str = ""
+    stop_key: str = ""
+    asking: bool = False
 
 
 def unnamed(session: Session) -> bool:
@@ -3539,7 +3542,10 @@ def interrupted_after(lines, since_ms: float | None) -> bool:
     return latest is not None and latest[0] == "interrupted" and latest[1] is not None and latest[1] > since_ms
 
 
-def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupted: Mapping, roots: set = None) -> list:
+VERDICTS = (VERDICT_NEEDS, VERDICT_DONE, VERDICT_UNKNOWN) = ("needs", "done", "unknown")
+
+
+def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupted: Mapping, roots: set = None, verdicts: Mapping = None) -> list:
     """One Session per registry record, oldest start first, from emx's own record, its hook states, its tmux panes and the transcript rule.
 
     A session is running only while a live pane carries its key and an agent
@@ -3551,6 +3557,10 @@ def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupte
     title Claude gave it, else the key's first 8 characters. Test sessions are
     hidden unless `EMX_SHOW_TEST_SESSIONS=1`, by the name and folder in the
     record.
+
+    `verdicts` maps a key to Haiku's (stop_key, verdict) on a stop. A Done
+    with a reply reads Needs input when the verdict for that very stop is
+    `VERDICT_NEEDS`, and is `asking` while there is none for it yet.
     """
     show_test = os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
     roots = temp_roots() if roots is None else roots
@@ -3576,13 +3586,22 @@ def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupte
             state = hooked.state
         if running and state in ("working", "blocked") and interrupted.get(key):
             state, status, waiting = "working", "idle", ""
+        queued = running and state == "done" and hooked.queued
+        asking, reply, stop_key = False, "", ""
+        if state == "done" and not queued and hooked.reply and hooked.stop_key:
+            reply, stop_key = hooked.reply, hooked.stop_key
+            verdict = (verdicts or {}).get(key)
+            if verdict is None or verdict[0] != stop_key:
+                asking = True
+            elif verdict[1] == VERDICT_NEEDS:
+                state, status, waiting = "blocked", "", ""
         own = name or hooked.title
         sessions.append(
             Session(
                 id=key, name=own or _text(rec.get("title")) or key[:8], cwd=cwd, state=state, status=status,
                 waiting_for=waiting, started_at=_number(rec.get("started_at")), running=running,
                 session_id=hooked.claude_sid or _text(rec.get("session_id")), transcript=hooked.transcript, turned=turned,
-                named=bool(own), queued=running and state == "done" and hooked.queued,
+                named=bool(own), queued=queued, reply=reply, stop_key=stop_key, asking=asking,
             )
         )
     return sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0))

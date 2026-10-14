@@ -119,6 +119,33 @@ def _events(state, key: str) -> list:
     return records
 
 
+def _read_verdict(state, key: str) -> tuple | None:
+    """(stop_key, verdict) from the session's `verdict.json`, or None when it is missing or not one. Never raises."""
+    try:
+        with open(os.path.join(session_folder(state, key), "verdict.json"), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("stop_key"), str) or data.get("verdict") not in core.VERDICTS:
+        return None
+    return data["stop_key"], data["verdict"]
+
+
+def set_verdict(key: str, stop_key: str, verdict: str, state=None) -> tuple:
+    """Record Haiku's verdict on the stop `stop_key` of the session `key`. (True, None) or (False, error)."""
+    state = core.state_path() if state is None else state
+    if not core.is_session_id(key):
+        return False, "That is not a session of emx's."
+    if verdict not in core.VERDICTS or not isinstance(stop_key, str):
+        return False, f"Not a verdict emx knows: {verdict}"
+    try:
+        with _record_lock(state, key):
+            _write_atomic(os.path.join(session_folder(state, key), "verdict.json"), {"stop_key": stop_key, "verdict": verdict})
+    except OSError as exc:
+        return False, f"Couldn't record the verdict: {' '.join(str(exc).split())}"
+    return True, None
+
+
 def start(tmux: Tmux, claude: str, folder: str, message: str, state=None) -> tuple:
     """Start `claude` as a new session in `folder`: (Session, None), or (None, error) with nothing left behind."""
     state = core.state_path() if state is None else state
@@ -197,7 +224,7 @@ def list_sessions(tmux: Tmux, state=None) -> tuple:
         names = []
     except OSError as exc:
         return None, f"Couldn't read emx's sessions folder: {' '.join(str(exc).split())}"
-    records, hook_states, interrupted = [], {}, {}
+    records, hook_states, interrupted, verdicts = [], {}, {}, {}
     for key in sorted(n for n in names if core.is_session_id(n)):
         try:
             records.append(_read_record(state, key))
@@ -205,6 +232,9 @@ def list_sessions(tmux: Tmux, state=None) -> tuple:
         except (OSError, ValueError):
             continue
         hook_states[key] = folded
+        verdict = _read_verdict(state, key)
+        if verdict is not None:
+            verdicts[key] = verdict
     try:
         panes = tmux.panes()
     except TmuxError as exc:
@@ -213,7 +243,7 @@ def list_sessions(tmux: Tmux, state=None) -> tuple:
     for key, folded in hook_states.items():
         if key in live and folded.state in ("working", "blocked"):
             interrupted[key] = core.interrupted_after(_transcript_lines(folded.transcript), folded.work_at)
-    return core.engine_sessions(records, hook_states, panes, interrupted), None
+    return core.engine_sessions(records, hook_states, panes, interrupted, verdicts=verdicts), None
 
 
 def forget(key: str, state=None) -> tuple:
@@ -278,3 +308,6 @@ class Engine:
 
     def set_title(self, key: str, title: str) -> tuple:
         return set_title(key, title, self.state)
+
+    def set_verdict(self, key: str, stop_key: str, verdict: str) -> tuple:
+        return set_verdict(key, stop_key, verdict, self.state)

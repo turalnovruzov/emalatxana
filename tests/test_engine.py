@@ -402,6 +402,49 @@ class EngineStore(StoreCase):
         self.assertFalse(os.path.exists(self.key_dir()))
 
 
+class Verdicts(StoreCase):
+    def stopped_with_a_question(self):
+        self.write_record()
+        self.write_events(
+            {"event": "UserPromptSubmit", "at": 5, "session_id": CLAUDE_SID},
+            {"event": "Stop", "at": 6, "session_id": CLAUDE_SID, "reply": "Which one?", "prompt_id": "p"},
+        )
+        return f"{CLAUDE_SID}:p:6"
+
+    def test_a_needs_verdict_on_the_latest_stop_lists_needs_input(self):
+        stop_key = self.stopped_with_a_question()
+        self.assertEqual(engine.set_verdict(KEY, stop_key, "needs", state=self.state), (True, None))
+        session = self.only_session()
+        self.assertEqual((core.category(session), session.asking), (core.NEEDS_INPUT, False))
+
+    def test_a_bad_key_or_verdict_is_refused(self):
+        stop_key = self.stopped_with_a_question()
+        for key, verdict in (("../x", "needs"), (KEY, "maybe"), (KEY, "")):
+            ok, error = engine.set_verdict(key, stop_key, verdict, state=self.state)
+            self.assertFalse(ok, (key, verdict))
+            self.assertIsInstance(error, str)
+        self.assertFalse(os.path.exists(os.path.join(self.key_dir(), "verdict.json")))
+
+    def test_a_corrupt_verdict_file_lists_done_and_asking(self):
+        self.stopped_with_a_question()
+        for text in ("{not json", "[]", json.dumps({"stop_key": 3, "verdict": "needs"}), json.dumps({"stop_key": "x", "verdict": "maybe"})):
+            Path(self.key_dir(), "verdict.json").write_text(text)
+            session = self.only_session()
+            self.assertEqual((core.category(session), session.asking), (core.DONE, True), text)
+
+    def test_forget_removes_the_verdict_with_the_folder(self):
+        stop_key = self.stopped_with_a_question()
+        engine.set_verdict(KEY, stop_key, "done", state=self.state)
+        self.assertTrue(os.path.isfile(os.path.join(self.key_dir(), "verdict.json")))
+        self.assertEqual(engine.forget(KEY, state=self.state), (True, None))
+        self.assertFalse(os.path.exists(self.key_dir()))
+
+    def test_a_verdict_for_a_forgotten_session_never_brings_its_folder_back(self):
+        ok, error = engine.set_verdict(KEY, "k", "needs", state=self.state)
+        self.assertFalse(ok)
+        self.assertFalse(os.path.exists(self.key_dir()))
+
+
 class EngineHandle(StoreCase):
     """The object the panel's workers hold: every call goes to the same state folder, tmux server and claude command."""
 
@@ -414,6 +457,8 @@ class EngineHandle(StoreCase):
         (listed,), _ = handle.list_sessions()
         self.assertEqual((listed.id, listed.running), (session.id, True))
         self.assertEqual(handle.set_name(session.id, "renamed"), (True, None))
+        self.assertEqual(handle.set_verdict(session.id, "k", "done"), (True, None))
+        self.assertTrue(os.path.isfile(os.path.join(self.state, "sessions", session.id, "verdict.json")))
         command, _ = handle.resume_command(session.id)
         self.assertEqual(shlex.split(command)[:3], ["exec", "claude", "--resume"])
         self.assertEqual(handle.forget(session.id), (True, None))
