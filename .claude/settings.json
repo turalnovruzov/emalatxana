@@ -16,16 +16,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dependency-record-check.sh"
+            "command": "python3 \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/dependency-record-check.py"
           }
         ]
       }
     ]
   },
   "permissions": {
-    "deny": [
-      "Bash(pkill:*)",
-      "Bash(killall:*)"
-    ]
+    "deny": ["Bash(pkill:*)", "Bash(killall:*)"]
   }
 }

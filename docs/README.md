@@ -1,6 +1,6 @@
-<!-- Part of emalatxana's system. Set up by Codery 2026-10-07; maintained in place — CLAUDE.md is the contract. -->
+<!-- template: product-owner @ 0.1.0 — shared; change it through Codery -->
 
-# Emalatxana docs
+# emalatxana docs
 
 Three homes, and this index. It says **when to open which doc**: don't read everything, find the one that maps to what you're doing. All three start empty and fill as the work reaches them.
 
@@ -22,7 +22,7 @@ The project's two contracts sit outside this folder and outrank everything in it
 
 - **The idea**, what this project is for: [`README.md`](../README.md).
 - **How work runs**, stages, gates, the squad, verification: [`CLAUDE.md`](../CLAUDE.md).
-- **What to build**: nowhere, deliberately. There is no PRD; Tural decides in the session.
+- **What to build**: nowhere, deliberately. There is no PRD unless Tural wrote one and `CLAUDE.md` names it; he decides in the session.
 - **Open work**: GitHub Issues on this repo, written at outcome altitude.
 - **Anything the code already says**: see house rule 1.
 
