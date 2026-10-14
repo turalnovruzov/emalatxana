@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.7.1 — 2026-10-13
+
+- Nothing changes in how emx works yet. This version adds the parts emx will use to start and keep every session in its own tmux (issue #41): where it records each session, how it learns a session's state from Claude's hooks, and how it would continue a stopped one. Nothing uses them yet, and the panel, your sessions and your Claude settings are untouched.
+
 ## 1.7.0 — 2026-10-13
 
 - Ctrl+Q hides the panel so the session fills the whole window, from the panel or from inside a session. Press it again, or Ctrl+\, to bring the panel back.

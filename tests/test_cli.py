@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -250,6 +251,107 @@ class Version(unittest.TestCase):
         with mock.patch.object(cli, "CHANGELOG", "/nonexistent/CHANGELOG.md"):
             self.assertEqual(cli.read_changelog(), "")
         self.assertIn(f"## {__version__}", cli.read_changelog())
+
+
+class HookCommand(unittest.TestCase):
+    KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = os.path.realpath(tmp.name)
+        self.folder = os.path.join(self.root, "sessions", self.KEY)
+        os.makedirs(self.folder)
+        with open(os.path.join(self.folder, "session.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+
+    def run_hook(self, stdin, key=None, root=None, env=None):
+        done = subprocess.run(
+            [sys.executable, "-I", cli.BIN, "hook", root or self.root, self.KEY if key is None else key], input=stdin,
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        return done
+
+    def written(self):
+        found = []
+        for base, _, names in os.walk(self.root):
+            found += [os.path.relpath(os.path.join(base, n), self.root) for n in names]
+        return sorted(found)
+
+    def payload(self, **over):
+        base = {"hook_event_name": "Stop", "session_id": self.KEY, "transcript_path": "/c/p/x.jsonl", "cwd": "/w"}
+        base.update(over)
+        return json.dumps(base)
+
+    def test_a_valid_payload_appends_one_line_and_prints_nothing(self):
+        for env in (
+            {k: v for k, v in os.environ.items() if k != "XDG_STATE_HOME"},
+            {**os.environ, "XDG_STATE_HOME": os.path.join(self.root, "elsewhere")},
+        ):
+            done = self.run_hook(self.payload(), env=env)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        with open(os.path.join(self.folder, "events.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual(len(lines), 2)
+        record = json.loads(lines[0])
+        self.assertEqual((record["event"], record["session_id"]), ("Stop", self.KEY))
+        self.assertIsInstance(record["at"], int)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "elsewhere")))
+
+    def test_a_huge_payload_is_still_recorded(self):
+        big = "x" * (1024 * 1024 + 1)
+        done = self.run_hook(self.payload(hook_event_name="PostToolUse", tool_name="Read", tool_response={"content": big}))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        with open(os.path.join(self.folder, "events.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual([json.loads(line)["event"] for line in lines], ["PostToolUse"])
+
+    def test_bad_json_appends_nothing_and_prints_nothing(self):
+        for text in ("", "not json", "[1]", json.dumps({"session_id": self.KEY})):
+            done = self.run_hook(text)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""), text)
+        self.assertEqual(self.written(), [os.path.join("sessions", self.KEY, "session.json")])
+
+    def test_a_key_that_is_not_a_session_id_writes_nothing_anywhere(self):
+        before = self.written()
+        for key in ("../x", "x", "", "..", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/../.."):
+            done = self.run_hook(self.payload(), key=key)
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""), key)
+        self.assertEqual(self.written(), before)
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.root), "x")))
+
+    def test_a_key_with_no_record_writes_nothing(self):
+        other = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        done = self.run_hook(self.payload(), key=other)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        self.assertFalse(os.path.exists(os.path.join(self.root, "sessions", other)))
+
+    def test_a_relative_state_folder_writes_nothing(self):
+        done = self.run_hook(self.payload(), root="relative/dir")
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+
+    def test_wrong_argument_counts_still_exit_0_quietly(self):
+        for args in ([], ["only-one"], ["a", "b", "c"]):
+            done = subprocess.run(
+                [sys.executable, "-I", cli.BIN, "hook", *args], input="{}", capture_output=True, text=True, timeout=30
+            )
+            self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""), args)
+
+    def test_payload_fields_outside_the_allowlist_never_reach_the_file(self):
+        secret = "hunter2-do-not-keep"
+        done = self.run_hook(self.payload(tool_input={"command": f"echo {secret}"}, prompt=secret))
+        self.assertEqual(done.returncode, 0)
+        with open(os.path.join(self.folder, "events.jsonl"), encoding="utf-8") as fh:
+            self.assertNotIn(secret, fh.read())
+
+    def test_the_file_is_private(self):
+        self.run_hook(self.payload())
+        mode = os.stat(os.path.join(self.folder, "events.jsonl")).st_mode & 0o777
+        self.assertEqual(mode, 0o600)
+
+    def test_usage_names_it_as_internal(self):
+        self.assertIn("emx hook", cli.USAGE)
+        self.assertIn("internal", cli.USAGE)
 
 
 if __name__ == "__main__":

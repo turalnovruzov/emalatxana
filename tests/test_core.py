@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import __version__, core
+from emx.tmux import Pane
 
 ROWS = [
     {"id": "bg-1", "kind": "background", "name": "alpha", "cwd": "/tmp/x/proj", "state": "working", "status": "busy"},
@@ -4260,6 +4261,465 @@ class MissedList(unittest.TestCase):
         self.assertEqual(core.missed_room(11, 1), 2)
         self.assertEqual(core.missed_room(40, 1), core.MISSED_SHOWN + 2)
         self.assertEqual(core.missed_room(None, 1), core.MISSED_SHOWN + 2)
+
+
+HOOK_FIXTURE = Path(__file__).parent / "fixtures" / "hooks" / "claude-2.1.296.json"
+INTERACTIVE_TRANSCRIPTS = Path(__file__).parent / "fixtures" / "transcripts-interactive"
+KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+BASE_MS = 1_800_000_000_000
+
+
+def scenario(name, start=BASE_MS):
+    """The records `emx hook` would write for one recorded scenario of real payloads."""
+    with open(HOOK_FIXTURE, encoding="utf-8") as fh:
+        steps = json.load(fh)["scenarios"][name]
+    return [core.hook_record(json.dumps(s["payload"]), start + s["after_ms"]) for s in steps]
+
+
+def event(name, at=BASE_MS, sid="11111111-1111-4111-8111-111111111111", **extra):
+    return {"event": name, "at": at, "session_id": sid, **extra}
+
+
+class StatePath(unittest.TestCase):
+    def test_xdg_state_home_is_used(self):
+        self.assertEqual(core.state_path({"XDG_STATE_HOME": "/var/x"}), Path("/var/x/emx"))
+
+    def test_unset_empty_or_relative_falls_back_to_home(self):
+        home = Path(os.path.expanduser("~")) / ".local" / "state" / "emx"
+        for env in ({}, {"XDG_STATE_HOME": ""}, {"XDG_STATE_HOME": "rel/dir"}):
+            self.assertEqual(core.state_path(env), home)
+
+
+class ClaudeLaunchArgs(unittest.TestCase):
+    def test_new_session_list_is_exact(self):
+        self.assertEqual(
+            core.claude_launch_args("claude", KEY, "/s/settings.json", "fix the bug"),
+            ["claude", "--session-id", KEY, "--settings", "/s/settings.json", "--", "fix the bug"],
+        )
+
+    def test_blank_message_adds_nothing(self):
+        self.assertEqual(
+            core.claude_launch_args("claude", KEY, "/s.json", "  \n"), ["claude", "--session-id", KEY, "--settings", "/s.json"]
+        )
+
+    def test_a_message_starting_with_a_dash_goes_after_the_separator(self):
+        args = core.claude_launch_args("claude", KEY, "/s.json", "--help me")
+        self.assertEqual(args[-2:], ["--", "--help me"])
+
+    def test_name_flag_only_when_a_name_is_given(self):
+        self.assertNotIn("-n", core.claude_launch_args("claude", KEY, "/s.json", "hi"))
+        args = core.claude_launch_args("claude", KEY, "/s.json", "hi", "emx-test-ab12cd")
+        self.assertEqual(args[5:7], ["-n", "emx-test-ab12cd"])
+
+    def test_test_name_is_emx_test_plus_six_hex_only_under_the_env_flag(self):
+        self.assertEqual(core.test_session_name({}), "")
+        self.assertEqual(core.test_session_name({"EMX_SHOW_TEST_SESSIONS": "0"}), "")
+        name = core.test_session_name({"EMX_SHOW_TEST_SESSIONS": "1"})
+        self.assertRegex(name, r"^emx-test-[0-9a-f]{6}$")
+
+    def test_never_background_attach_or_skipped_permissions(self):
+        forbidden = {"--bg", "attach", "agents", "stop", "rm", "--dangerously-skip-permissions"}
+        for args in (
+            core.claude_launch_args("claude", KEY, "/s.json", "hi", "emx-test-ab12cd"),
+            core.claude_launch_args("claude", KEY, "/s.json", ""),
+            core.claude_resume_args("claude", KEY, "/s.json"),
+        ):
+            self.assertFalse(forbidden & set(args), args)
+
+    def test_resume_list_is_exact(self):
+        self.assertEqual(
+            core.claude_resume_args("claude", KEY, "/s.json"), ["claude", "--resume", KEY, "--settings", "/s.json"]
+        )
+
+    def test_pane_command_execs_the_quoted_args(self):
+        self.assertEqual(core.pane_command(["claude", "--", "it's here"]), "exec claude -- 'it'\"'\"'s here'")
+
+    def test_the_claude_rule_holds_the_functions(self):
+        rule = core.AGENTS["claude"]
+        self.assertEqual(
+            (rule.launch, rule.resume, rule.settings, rule.fold),
+            (core.claude_launch_args, core.claude_resume_args, core.hook_settings, core.fold_events),
+        )
+        self.assertEqual(list(core.AGENTS), ["claude"])
+
+
+class HookSettings(unittest.TestCase):
+    def test_every_event_carries_the_given_command_and_a_numeric_timeout(self):
+        settings = core.hook_settings("exec python3 -I /x/bin/emx hook /r k")
+        self.assertEqual(
+            set(settings["hooks"]),
+            {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure",
+             "Notification", "Stop", "SessionEnd"},
+        )
+        for event_name, groups in settings["hooks"].items():
+            (group,) = groups
+            (hook,) = group["hooks"]
+            self.assertEqual(hook["type"], "command", event_name)
+            self.assertEqual(hook["command"], "exec python3 -I /x/bin/emx hook /r k", event_name)
+            self.assertIsInstance(hook["timeout"], int)
+            self.assertGreater(hook["timeout"], 0)
+
+    def test_round_trips_through_json(self):
+        settings = core.hook_settings("cmd")
+        self.assertEqual(json.loads(json.dumps(settings)), settings)
+
+
+class HookRecord(unittest.TestCase):
+    def payload(self, **over):
+        base = {"hook_event_name": "Stop", "session_id": KEY, "transcript_path": "/c/p/x.jsonl", "cwd": "/w"}
+        base.update(over)
+        return json.dumps(base)
+
+    def test_keeps_the_allowlisted_fields(self):
+        text = self.payload(
+            hook_event_name="Notification", message="Claude needs\nyour permission", notification_type="permission_prompt",
+            tool_name="Bash", source="startup", reason="other", session_title="my name",
+        )
+        self.assertEqual(
+            core.hook_record(text, 1234.9),
+            {"event": "Notification", "at": 1234, "session_id": KEY, "transcript_path": "/c/p/x.jsonl", "cwd": "/w",
+             "message": "Claude needs your permission", "notification_type": "permission_prompt", "tool_name": "Bash",
+             "source": "startup", "reason": "other", "session_title": "my name"},
+        )
+
+    def test_drops_everything_else_a_payload_carries(self):
+        secret = "hunter2-do-not-keep"
+        text = self.payload(tool_input={"command": f"echo {secret}"}, prompt=secret, permission_mode="auto")
+        record = core.hook_record(text, 1)
+        self.assertNotIn(secret, json.dumps(record))
+        self.assertEqual(set(record), {"event", "at", "session_id", "transcript_path", "cwd"})
+
+    def test_unusable_payloads_give_none(self):
+        for text in ("", "not json", "[]", "7", "null", json.dumps({"session_id": KEY}),
+                     self.payload(session_id="../x"), self.payload(session_id=5), self.payload(hook_event_name=3),
+                     self.payload(hook_event_name="Bad Event!")):
+            self.assertIsNone(core.hook_record(text, 1), text)
+
+    def test_never_raises_on_odd_input(self):
+        self.assertIsNone(core.hook_record(None, 1))
+        self.assertIsNone(core.hook_record("[" * 100000, 1))
+        self.assertIsNone(core.hook_record(self.payload(), float("inf")))
+
+    def test_message_is_one_line_and_capped(self):
+        record = core.hook_record(self.payload(message="a\n\nb\t" + "x" * 1000), 1)
+        self.assertNotIn("\n", record["message"])
+        self.assertTrue(record["message"].startswith("a b x"))
+        self.assertEqual(len(record["message"]), core.HOOK_MESSAGE_CHARS)
+
+    def test_every_recorded_fixture_payload_is_usable(self):
+        with open(HOOK_FIXTURE, encoding="utf-8") as fh:
+            scenarios = json.load(fh)["scenarios"]
+        count = 0
+        for name in scenarios:
+            for rec in scenario(name):
+                count += 1
+                self.assertIsNotNone(rec, name)
+        self.assertGreater(count, 30)
+
+
+class FoldEvents(unittest.TestCase):
+    def fold(self, *events):
+        return core.fold_events(list(events))
+
+    def test_no_record_reads_starting(self):
+        state = core.fold_events([])
+        self.assertEqual((state.state, state.turned, state.last_at), ("starting", False, None))
+
+    def test_session_start_waits_with_no_turn_yet(self):
+        state = self.fold(event("SessionStart", source="startup"))
+        self.assertEqual((state.state, state.status, state.turned), ("blocked", "", False))
+
+    def test_session_start_on_resume_reads_idle(self):
+        state = self.fold(event("SessionStart", source="resume"))
+        self.assertEqual((state.state, state.status, state.turned), ("working", "idle", False))
+
+    def test_prompt_and_tool_results_mean_working_and_a_turn(self):
+        for name in ("UserPromptSubmit", "PostToolUse", "PostToolUseFailure"):
+            state = self.fold(event("SessionStart", source="startup"), event(name))
+            self.assertEqual((state.state, state.status, state.turned), ("working", "", True), name)
+
+    def test_pre_tool_use_means_working(self):
+        state = self.fold(event("SessionStart"), event("PreToolUse", tool_name="Bash"))
+        self.assertEqual((state.state, state.turned), ("working", True))
+
+    def test_permission_request_blocks_at_once_and_names_the_tool(self):
+        state = self.fold(event("UserPromptSubmit"), event("PermissionRequest", tool_name="Bash"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "approve Bash"))
+
+    def test_pre_tool_use_after_permission_request_stays_blocked(self):
+        state = self.fold(event("PermissionRequest", tool_name="Bash"), event("PreToolUse", tool_name="Read"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "approve Bash"))
+
+    def test_post_tool_use_after_permission_request_is_working(self):
+        state = self.fold(event("PermissionRequest", tool_name="Bash"), event("PostToolUse", tool_name="Bash"))
+        self.assertEqual((state.state, state.waiting_for), ("working", ""))
+
+    def test_permission_notification_keeps_the_waiting_text_of_a_blocked_session(self):
+        note = event("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        self.assertEqual(self.fold(event("PermissionRequest", tool_name="Bash"), note).waiting_for, "approve Bash")
+        state = self.fold(event("SessionStart"), note)
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "Claude needs your permission"))
+
+    def test_a_permission_notification_never_blocks_a_working_session(self):
+        note = event("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        state = self.fold(event("UserPromptSubmit"), note)
+        self.assertEqual((state.state, state.waiting_for), ("working", ""))
+
+    def test_session_start_after_compaction_keeps_state_and_turn_but_follows_the_new_ids(self):
+        new = "22222222-2222-4222-8222-222222222222"
+        state = self.fold(
+            event("UserPromptSubmit"), event("SessionStart", source="compact", sid=new, transcript_path="/c/p/new.jsonl")
+        )
+        self.assertEqual((state.state, state.turned, state.claude_sid, state.transcript), ("working", True, new, "/c/p/new.jsonl"))
+
+    def test_a_cut_off_payload_still_gives_its_leading_fields(self):
+        text = json.dumps({"session_id": KEY, "hook_event_name": "PostToolUse", "cwd": "/w", "tool_response": "y" * 500})[:300]
+        record = core.hook_record(text, 5)
+        self.assertEqual((record["event"], record["session_id"], record["cwd"]), ("PostToolUse", KEY, "/w"))
+
+    def test_other_notifications_change_nothing(self):
+        state = self.fold(event("Stop"), event("Notification", notification_type="idle_prompt", message="waiting"))
+        self.assertEqual(state.state, "done")
+        late = event("Notification", notification_type="permission_prompt")
+        self.assertEqual(self.fold(event("Stop"), late).state, "done")
+
+    def test_stop_means_done(self):
+        state = self.fold(event("UserPromptSubmit"), event("Stop"))
+        self.assertEqual((state.state, state.turned), ("done", True))
+
+    def test_subagent_stop_is_ignored(self):
+        before = self.fold(event("Stop", at=5))
+        self.assertEqual(self.fold(event("Stop", at=5), event("SubagentStop", at=9)), before)
+
+    def test_session_end_other_stops_it(self):
+        self.assertEqual(self.fold(event("Stop"), event("SessionEnd", reason="other")).state, "stopped")
+        self.assertEqual(self.fold(event("Stop"), event("SessionEnd")).state, "stopped")
+
+    def test_session_end_for_clear_or_resume_is_not_an_end(self):
+        for reason in ("clear", "resume"):
+            state = self.fold(event("Stop"), event("SessionEnd", reason=reason))
+            self.assertEqual(state.state, "done", reason)
+
+    def test_unknown_events_and_junk_records_change_nothing(self):
+        state = self.fold(event("Stop", at=5))
+        self.assertEqual(core.fold_events([event("Stop", at=5), event("Whatever"), "junk", None, 3]), state)
+
+    def test_latest_session_id_and_transcript_path_win(self):
+        a, b = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        state = self.fold(
+            event("SessionStart", sid=a, transcript_path="/p/a.jsonl", cwd="/w"),
+            event("SessionStart", sid=b, transcript_path="/p/b.jsonl", source="clear"),
+        )
+        self.assertEqual((state.claude_sid, state.transcript, state.cwd), (b, "/p/b.jsonl", "/w"))
+
+    def test_title_follows_the_latest_one(self):
+        state = self.fold(event("SessionStart", session_title="one"), event("UserPromptSubmit"), event("Stop", session_title="two"))
+        self.assertEqual(state.title, "two")
+
+    def test_work_at_ignores_notifications_and_stops(self):
+        state = self.fold(
+            event("UserPromptSubmit", at=10), event("PermissionRequest", at=20),
+            event("Notification", at=90, notification_type="permission_prompt"),
+        )
+        self.assertEqual((state.last_at, state.work_at), (90, 20))
+        self.assertEqual(self.fold(event("UserPromptSubmit", at=10), event("Stop", at=30)).work_at, 10)
+
+    def test_recorded_scenarios_end_where_they_were_observed(self):
+        cases = {
+            "plain-turn-with-one-tool": ("done", True),
+            "permission-approved": ("done", True),
+            "ask-user-question-answered": ("done", True),
+            "permission-denied-with-no": ("blocked", True),
+            "permission-denied-with-escape": ("blocked", True),
+            "interrupt-by-escape": ("working", True),
+            "launch-with-resume": ("stopped", False),
+        }
+        for name, (state, turned) in cases.items():
+            got = core.fold_events(scenario(name))
+            self.assertEqual((got.state, got.turned), (state, turned), name)
+
+    def test_clear_then_resume_follows_the_new_ids_and_the_kill_ends_it(self):
+        records = scenario("clear-then-resume-then-kill-pane")
+        mid = core.fold_events(records[:2])
+        self.assertEqual((mid.state, mid.claude_sid), ("blocked", "87a9cceb-f70f-4519-afb6-d784e1c8c94d"))
+        resumed = core.fold_events(records[:4])
+        self.assertEqual((resumed.state, resumed.status, resumed.claude_sid), ("working", "idle", "11111111-1111-4111-8111-111111111111"))
+        self.assertEqual(core.fold_events(records).state, "stopped")
+
+    def test_a_queued_message_reads_done_then_working(self):
+        after_stop = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2))
+        after_gap = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2), event("PreToolUse", at=4))
+        self.assertEqual(core.category(mk(state=after_stop.state)), core.DONE)
+        self.assertEqual(core.category(mk(state=after_gap.state)), core.WORKING)
+
+
+class InterruptedAfter(unittest.TestCase):
+    def lines(self, name):
+        return (INTERACTIVE_TRANSCRIPTS / f"interactive-{name}.jsonl").read_text(encoding="utf-8").splitlines()
+
+    def ms(self, stamp):
+        return core._iso_ms(stamp)
+
+    def test_an_escape_interrupt_after_the_last_work_record(self):
+        since = self.ms("2026-10-14T01:53:35.000Z")
+        self.assertTrue(core.interrupted_after(self.lines("interrupt"), since))
+
+    def test_a_denied_permission_counts_too(self):
+        since = self.ms("2026-10-14T01:55:12.000Z")
+        self.assertTrue(core.interrupted_after(self.lines("denied"), since))
+
+    def test_an_interrupt_older_than_the_last_work_record_does_not(self):
+        self.assertFalse(core.interrupted_after(self.lines("denied"), self.ms("2026-10-14T01:55:27.000Z")))
+        self.assertFalse(core.interrupted_after(self.lines("interrupt"), self.ms("2026-10-14T01:53:44.000Z")))
+
+    def test_a_request_after_the_interrupt_ends_it(self):
+        lines = self.lines("denied") + [
+            json.dumps({"type": "user", "timestamp": "2026-10-14T01:56:00.000Z", "message": {"role": "user", "content": "go on"}})
+        ]
+        self.assertFalse(core.interrupted_after(lines, self.ms("2026-10-14T01:55:12.000Z")))
+
+    def test_no_work_record_or_no_lines_is_false(self):
+        self.assertFalse(core.interrupted_after(self.lines("denied"), None))
+        self.assertFalse(core.interrupted_after([], 0))
+        self.assertFalse(core.interrupted_after(["{cut", "[]", "7"], 0))
+
+
+def pane(session="", agent="claude", dead=False):
+    return Pane("%1", "@1", dead, "", session, 80, 80, agent=agent)
+
+
+class EngineSessions(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def record(self, **over):
+        base = {"key": KEY, "agent": "claude", "name": "alpha", "cwd": "/work/alpha", "session_id": KEY, "started_at": 100.0,
+                "run_at": 100.0}
+        base.update(over)
+        return base
+
+    def listing(self, events=(), panes=None, interrupted=None, record=None):
+        states = {KEY: core.fold_events(list(events))}
+        panes = [pane(KEY)] if panes is None else panes
+        return core.engine_sessions([record or self.record()], states, panes, interrupted or {}, roots=set())
+
+    def test_no_pane_means_stopped(self):
+        (s,) = self.listing([event("Stop", at=200)], panes=[])
+        self.assertFalse(s.running)
+        self.assertEqual(core.category(s), core.STOPPED)
+
+    def test_a_dead_pane_means_stopped(self):
+        (s,) = self.listing([event("Stop", at=200)], panes=[pane(KEY, dead=True)])
+        self.assertEqual((s.running, core.category(s)), (False, core.STOPPED))
+
+    def test_a_live_pane_with_no_hook_yet_needs_input(self):
+        (s,) = self.listing([])
+        self.assertTrue(s.running)
+        self.assertEqual((core.category(s), core.state_word(s), s.turned), (core.NEEDS_INPUT, "Needs input", False))
+
+    def test_hooks_from_a_run_before_this_one_do_not_count(self):
+        (s,) = self.listing([event("Stop", at=50)], record=self.record(run_at=100.0))
+        self.assertEqual((s.state, s.turned), ("starting", False))
+        (s,) = self.listing([event("SessionEnd", at=200, reason="other")])
+        self.assertEqual((s.state, s.running), ("starting", True))
+
+    def test_a_live_pane_after_stop_is_done(self):
+        (s,) = self.listing([event("UserPromptSubmit", at=150), event("Stop", at=200)])
+        self.assertEqual((core.category(s), core.state_word(s), s.turned), (core.DONE, "Done", True))
+
+    def test_blocked_keeps_what_it_waits_for(self):
+        (s,) = self.listing([event("PermissionRequest", at=200, tool_name="Bash")])
+        self.assertEqual((core.category(s), s.waiting_for), (core.NEEDS_INPUT, "approve Bash"))
+
+    def test_interrupted_reads_idle_and_cannot_be_interrupted_again(self):
+        for events in ([event("UserPromptSubmit", at=150)], [event("PermissionRequest", at=150, tool_name="Bash")]):
+            (s,) = self.listing(events, interrupted={KEY: True})
+            self.assertTrue(core.idle(s))
+            self.assertFalse(core.interruptible(s))
+            self.assertEqual(core.state_word(s), "Idle")
+        (s,) = self.listing([event("UserPromptSubmit", at=150)])
+        self.assertTrue(core.interruptible(s))
+
+    def test_the_interrupt_rule_never_touches_a_done_or_stopped_session(self):
+        (s,) = self.listing([event("Stop", at=150)], interrupted={KEY: True})
+        self.assertEqual(s.state, "done")
+        (s,) = self.listing([event("Stop", at=150)], panes=[], interrupted={KEY: True})
+        self.assertEqual(s.state, "stopped")
+
+    def test_a_pane_with_a_key_but_no_agent_never_runs_a_session(self):
+        (s,) = self.listing([event("Stop", at=200)], panes=[pane(KEY, agent="")])
+        self.assertEqual((s.running, core.category(s)), (False, core.STOPPED))
+
+    def test_another_sessions_pane_does_not_count(self):
+        (s,) = self.listing([event("Stop", at=200)], panes=[pane("other-key")])
+        self.assertFalse(s.running)
+
+    def test_fields_come_from_the_record_and_the_folded_hooks(self):
+        later = "22222222-2222-4222-8222-222222222222"
+        (s,) = self.listing([event("SessionStart", at=150, sid=later, transcript_path="/p/b.jsonl", source="clear")])
+        self.assertEqual((s.id, s.name, s.cwd, s.started_at), (KEY, "alpha", "/work/alpha", 100.0))
+        self.assertEqual((s.session_id, s.transcript), (later, "/p/b.jsonl"))
+
+    def test_the_record_session_id_stands_until_a_hook_gives_one(self):
+        (s,) = self.listing([])
+        self.assertEqual((s.session_id, s.transcript), (KEY, ""))
+
+    def test_name_falls_back_to_the_hook_title_then_the_short_key(self):
+        (s,) = self.listing([event("SessionStart", at=150, session_title="from claude")], record=self.record(name=""))
+        self.assertEqual(s.name, "from claude")
+        (s,) = self.listing([], record=self.record(name=""))
+        self.assertEqual(s.name, KEY[:8])
+
+    def test_sessions_come_in_start_order_and_bad_records_are_skipped(self):
+        k2, k3 = "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"
+        records = [self.record(), self.record(key=k2, started_at=50.0), {"key": "../x"}, "junk", self.record(key=k3, started_at=None)]
+        got = core.engine_sessions(records, {}, [], {}, roots=set())
+        self.assertEqual([s.id for s in got], [k2, KEY, k3])
+
+    def test_test_sessions_in_a_temp_folder_are_hidden_unless_asked(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp)
+        rec = self.record(name="emx-test-ab12cd", cwd=tmp)
+        roots = core.temp_roots()
+        self.assertEqual(core.engine_sessions([rec], {}, [], {}, roots=roots), [])
+        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
+            self.assertEqual(len(core.engine_sessions([rec], {}, [], {}, roots=roots)), 1)
+        keep = self.record(name="emx-test-ab12cd", cwd="/work/real")
+        self.assertEqual(len(core.engine_sessions([keep], {}, [], {}, roots=roots)), 1)
+        keep = self.record(name="plain", cwd=tmp)
+        self.assertEqual(len(core.engine_sessions([keep], {}, [], {}, roots=roots)), 1)
+
+
+class StartingState(unittest.TestCase):
+    def test_starting_is_needs_input_in_word_and_glyph(self):
+        s = mk(state="starting")
+        self.assertEqual((core.category(s), core.state_word(s)), (core.NEEDS_INPUT, "Needs input"))
+        self.assertEqual(core.session_glyph(s, 0), core.GLYPHS[core.NEEDS_INPUT])
+
+
+class NoticesForNewSessions(unittest.TestCase):
+    def listing(self, state, turned):
+        return [mk(id="a", state=state, turned=turned)]
+
+    def seen_after_baseline(self):
+        seen = None
+        for listing in ([mk(id="x", state="done")], [mk(id="x", state="done")]):
+            seen, _ = core.notice_transitions(seen, listing, ())
+        return seen
+
+    def test_a_new_session_that_has_not_turned_gives_no_event(self):
+        seen, found = core.notice_transitions(self.seen_after_baseline(), self.listing("starting", False), ())
+        self.assertEqual(found, [])
+        self.assertEqual(seen["a"], core.NEEDS_INPUT)
+
+    def test_the_same_session_after_a_stop_gives_one_done_event(self):
+        seen, _ = core.notice_transitions(self.seen_after_baseline(), self.listing("starting", False), ())
+        seen, found = core.notice_transitions(seen, self.listing("working", True), ())
+        self.assertEqual(found, [])
+        seen, found = core.notice_transitions(seen, self.listing("done", True), ())
+        self.assertEqual([(s.id, core.category(s)) for s in found], [("a", core.DONE)])
 
 
 if __name__ == "__main__":

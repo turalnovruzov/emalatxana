@@ -42,6 +42,8 @@ class Session:
     started_at: float | None = None
     running: bool = True
     session_id: str = ""
+    transcript: str = ""
+    turned: bool = True
 
 
 def parse_agents(text: str) -> list:
@@ -144,7 +146,7 @@ CATEGORIES = (NEEDS_INPUT, WORKING, DONE, STOPPED)
 CATEGORY_LABELS = {NEEDS_INPUT: "Needs input", WORKING: "Working", DONE: "Done", STOPPED: "Stopped"}
 SUMMARY_WORDS = {NEEDS_INPUT: "waiting", WORKING: "working", DONE: "done", STOPPED: "stopped"}
 SUMMARY_SHORT = {NEEDS_INPUT: "wait", WORKING: "work", DONE: "done", STOPPED: "stop"}
-_STATE_CATEGORY = {"blocked": NEEDS_INPUT, "working": WORKING, "done": DONE}
+_STATE_CATEGORY = {"blocked": NEEDS_INPUT, "working": WORKING, "done": DONE, "starting": NEEDS_INPUT}
 WORKING_FRAMES = "·✢✳✶✻✶✳✢"
 GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
 
@@ -3275,7 +3277,9 @@ def notice_transitions(seen: dict | None, sessions: list, quiet) -> tuple:
     those listings joins the baseline silently. A session missing from a
     listing keeps its last category, and ids are never forgotten, so one that
     drops out of a partial listing and returns as it was gives no event. A
-    session first seen after that counts as coming from nowhere. `quiet` ids
+    session first seen after that counts as coming from nowhere. A session
+    with no turn yet since it started or resumed (`turned` False) gives no
+    event for appearing, though its category is still recorded. `quiet` ids
     (being closed, interrupted or renamed) have their state recorded and give
     no event.
     """
@@ -3294,7 +3298,7 @@ def notice_transitions(seen: dict | None, sessions: list, quiet) -> tuple:
         seen_now[s.id] = now
         if before is None and count <= STALE_AFTER_MISSES:
             continue
-        if now != before and now in (NOTICE_NEEDS, NOTICE_DONE) and s.id not in quiet:
+        if now != before and now in (NOTICE_NEEDS, NOTICE_DONE) and s.id not in quiet and s.turned:
             events.append(s)
     return seen_now, events
 
@@ -3506,3 +3510,306 @@ def pick_voice(names) -> str | None:
     """The first installed voice in `VOICES`, else None, which makes `say` use the system default."""
     installed = set(names)
     return next((v for v in VOICES if v in installed), None)
+
+
+def state_path(env: Mapping | None = None) -> Path:
+    """emx's own state folder, beside the prefs one: sessions' settings, hook records and registry live here, never under `~/.claude`."""
+    env = os.environ if env is None else env
+    base = env.get("XDG_STATE_HOME", "")
+    if not base or not os.path.isabs(base):
+        base = os.path.join(os.path.expanduser("~"), ".local", "state")
+    return Path(base) / "emx"
+
+
+def test_session_name(env: Mapping | None = None) -> str:
+    """`emx-test-<hex6>` under `EMX_SHOW_TEST_SESSIONS=1`, else "". emx writes it into its own record and hands it to `claude -n`, so hiding never depends on a flag of claude's."""
+    env = os.environ if env is None else env
+    return TEST_SESSION_PREFIX + uuid.uuid4().hex[:6] if env.get("EMX_SHOW_TEST_SESSIONS") == "1" else ""
+
+
+def claude_launch_args(claude: str, sid: str, settings: str, message: str, name: str = "") -> list:
+    """The interactive `claude` for a new session: `sid` is its session id, `settings` the file holding emx's hooks. A message that starts with `-` goes after `--`."""
+    args = [claude, "--session-id", sid, "--settings", settings]
+    if name:
+        args += ["-n", name]
+    if message.strip():
+        args += ["--", message]
+    return args
+
+
+def claude_resume_args(claude: str, claude_sid: str, settings: str) -> list:
+    return [claude, "--resume", claude_sid, "--settings", settings]
+
+
+def pane_command(args: list) -> str:
+    """What a pane runs: `exec`, so the pane's process is `claude` itself and the pane dies with it."""
+    return "exec " + " ".join(shlex.quote(a) for a in args)
+
+
+HOOK_EVENTS = (
+    "SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure",
+    "Notification", "Stop", "SessionEnd",
+)
+HOOK_TIMEOUT_SECONDS = 10
+
+
+def hook_settings(command: str) -> dict:
+    """The settings file given to one session with `--settings`: the same hook command on every event it needs."""
+    return {
+        "hooks": {
+            event: [{"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}]
+            for event in HOOK_EVENTS
+        }
+    }
+
+
+_HOOK_TEXT_KEYS = ("source", "reason", "notification_type", "tool_name")
+_EVENT_NAME = re.compile(r"[A-Za-z]{1,40}")
+HOOK_MESSAGE_CHARS = 200
+HOOK_PATH_CHARS = 1000
+
+
+def _leading_fields(text: str) -> dict:
+    """The top-level `"key": value` pairs at the start of a JSON object that is cut off or otherwise unparseable, up to the first pair that cannot be read. Claude Code puts its scalar fields before a tool's input and response, so a capped payload still gives them."""
+    decoder, found = json.JSONDecoder(), {}
+
+    def skip(i):
+        while i < len(text) and text[i] in " \t\r\n":
+            i += 1
+        return i
+
+    pos = skip(0)
+    if text[pos:pos + 1] != "{":
+        return found
+    pos += 1
+    try:
+        while True:
+            pos = skip(pos)
+            if text[pos:pos + 1] != '"':
+                break
+            name, pos = decoder.raw_decode(text, pos)
+            pos = skip(pos)
+            if text[pos:pos + 1] != ":":
+                break
+            value, pos = decoder.raw_decode(text, skip(pos + 1))
+            found[name] = value
+            pos = skip(pos)
+            if text[pos:pos + 1] != ",":
+                break
+            pos += 1
+    except (ValueError, RecursionError):
+        pass
+    return found
+
+
+def hook_record(payload_text: str, now_ms: float) -> dict | None:
+    """The one line a hook leaves behind, from the JSON Claude Code gave it on stdin, or None when the payload is not usable. Never raises.
+
+    Only these fields are kept: whatever else a payload carries (a tool's
+    input, a prompt) is dropped here, so the record file never holds it.
+    `at` is the time the hook ran, since the interrupt rule compares it with
+    the transcript's timestamps.
+    """
+    try:
+        try:
+            payload = json.loads(payload_text)
+        except ValueError:
+            payload = _leading_fields(payload_text)
+        if not isinstance(payload, dict):
+            return None
+        event, sid = payload.get("hook_event_name"), payload.get("session_id")
+        if not isinstance(event, str) or not _EVENT_NAME.fullmatch(event) or not isinstance(sid, str) or not is_session_id(sid):
+            return None
+        record = {"event": event, "at": int(now_ms), "session_id": sid}
+        for key in ("transcript_path", "cwd"):
+            if isinstance(payload.get(key), str):
+                record[key] = payload[key][:HOOK_PATH_CHARS]
+        for key in _HOOK_TEXT_KEYS:
+            if isinstance(payload.get(key), str):
+                record[key] = payload[key][:HOOK_MESSAGE_CHARS]
+        for key in ("message", "session_title"):
+            if isinstance(payload.get(key), str):
+                record[key] = _one_line(payload[key])[:HOOK_MESSAGE_CHARS]
+        return record
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return None
+
+
+@dataclass(frozen=True)
+class HookState:
+    """What a session's hook records add up to.
+
+    `last_at` is the time of the latest record that changed anything and
+    `work_at` of the latest one that started or continued work (never a
+    notification, which can arrive seconds after the prompt it announces);
+    both are epoch milliseconds. `turned` is False from a start or resume
+    until the first prompt or tool of a turn.
+    """
+
+    state: str = "starting"
+    status: str = ""
+    waiting_for: str = ""
+    claude_sid: str = ""
+    transcript: str = ""
+    cwd: str = ""
+    turned: bool = False
+    title: str = ""
+    last_at: float | None = None
+    work_at: float | None = None
+
+
+_WORK_EVENTS = ("UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure")
+_SESSION_CHANGES = ("clear", "resume")
+
+
+def _one_line(value) -> str:
+    return " ".join(value.split()) if isinstance(value, str) else ""
+
+
+def fold_events(records) -> HookState:
+    """The state after the hook records `records`, oldest first. A record that is not a dict, or an event not known here, changes nothing.
+
+    Claude Code fires no hook when Esc interrupts a turn or a permission is
+    denied, so those leave `working` or `blocked` here; the transcript rule
+    (`interrupted_after`) ends them. `SubagentStop` follows `Stop` and is
+    ignored. `SessionEnd` for `/clear` and `/resume` is followed at once by a
+    `SessionStart`, possibly with a new session id, which the last record
+    wins; only other reasons end the session.
+
+    A message queued while Claude works gives a `Stop` and, seconds later,
+    a `PreToolUse`. That reads Done and then Working here.
+    """
+    state = HookState()
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        event, at = rec.get("event"), _number(rec.get("at"))
+        if event == "SessionEnd" and rec.get("reason") in _SESSION_CHANGES:
+            continue
+        step = _fold_step(state, event, rec)
+        if step is None:
+            continue
+        sid, path = rec.get("session_id"), rec.get("transcript_path")
+        state = replace(
+            step, last_at=at, work_at=at if event in _WORK_EVENTS else state.work_at,
+            claude_sid=sid if isinstance(sid, str) and is_session_id(sid) else state.claude_sid,
+            transcript=path if isinstance(path, str) and path else state.transcript,
+            cwd=rec["cwd"] if isinstance(rec.get("cwd"), str) and rec["cwd"] else state.cwd,
+            title=_one_line(rec.get("session_title")) or state.title,
+        )
+    return state
+
+
+def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
+    tool = _one_line(rec.get("tool_name"))
+    if event == "SessionStart":
+        # A resumed session reads Idle, as a reopened background one did; a fresh one waits on him.
+        if rec.get("source") == "compact":
+            return replace(state)
+        if rec.get("source") == "resume":
+            return replace(state, state="working", status="idle", waiting_for="", turned=False)
+        return replace(state, state="blocked", status="", waiting_for="", turned=False)
+    if event in ("UserPromptSubmit", "PostToolUse", "PostToolUseFailure"):
+        return replace(state, state="working", status="", waiting_for="", turned=True)
+    if event == "PreToolUse":
+        # A parallel tool's PreToolUse must not hide a permission prompt that is open.
+        if state.state == "blocked" and state.waiting_for:
+            return replace(state, turned=True)
+        return replace(state, state="working", status="", waiting_for="", turned=True)
+    if event == "PermissionRequest":
+        return replace(state, state="blocked", status="", waiting_for=f"approve {tool}" if tool else "approve", turned=True)
+    if event == "Notification":
+        if rec.get("notification_type") != "permission_prompt" or state.state in ("done", "stopped"):
+            return None
+        # PermissionRequest already blocked at once; this notice lands seconds later, after he may have approved.
+        if state.state != "blocked":
+            return None
+        waiting = state.waiting_for or _one_line(rec.get("message")) or "approve"
+        return replace(state, waiting_for=waiting)
+    if event == "Stop":
+        return replace(state, state="done", status="", waiting_for="", turned=True)
+    if event == "SessionEnd":
+        return replace(state, state="stopped", status="", waiting_for="")
+    return None
+
+
+def interrupted_after(lines, since_ms: float | None) -> bool:
+    """Whether the latest marker or request on the user side of a transcript is an interrupt stamped after `since_ms`. Never raises.
+
+    `since_ms` is `HookState.work_at`: an interrupt entry older than the
+    session's latest work record belongs to an earlier turn. A cut first line
+    (a tail read mid-file) is skipped as any line that is not JSON is.
+    """
+    if since_ms is None:
+        return False
+    latest = None
+    for raw in lines:
+        try:
+            entry = json.loads(raw)
+        except (ValueError, TypeError, RecursionError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        for block in _blocks(entry):
+            said = _said_by_user(entry, block)
+            if said is not None:
+                latest = (said[0], _iso_ms(entry.get("timestamp")))
+    return latest is not None and latest[0] == "interrupted" and latest[1] is not None and latest[1] > since_ms
+
+
+def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupted: Mapping, roots: set = None) -> list:
+    """One Session per registry record, oldest start first, from emx's own record, its hook states, its tmux panes and the transcript rule.
+
+    A session is running only while a live pane carries its key and an agent
+    tag, so a leftover `claude attach` viewer (a key, no agent) never counts.
+    A running session no hook has reported on since this run began reads
+    `starting` (Needs input), as does one whose last record is a `SessionEnd`
+    from the run before. An interrupted one reads Idle. Test sessions are
+    hidden unless `EMX_SHOW_TEST_SESSIONS=1`, by the name and folder in the
+    record.
+    """
+    show_test = os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1"
+    roots = temp_roots() if roots is None else roots
+    live = {p.session for p in panes if not p.dead and p.session and p.agent}
+    sessions = []
+    for rec in records:
+        key = rec.get("key") if isinstance(rec, dict) else None
+        if not isinstance(key, str) or not is_session_id(key):
+            continue
+        name, cwd = _text(rec.get("name")), _text(rec.get("cwd"))
+        if not show_test and is_test_session(name, cwd, roots):
+            continue
+        hooked = hook_states.get(key) or HookState()
+        run_at = _number(rec.get("run_at"))
+        fresh = hooked.last_at is not None and (run_at is None or hooked.last_at >= run_at)
+        running = key in live
+        status, waiting, turned = hooked.status, hooked.waiting_for, hooked.turned
+        if not running:
+            state = "stopped"
+        elif not fresh or hooked.state == "stopped":
+            state, status, waiting, turned = "starting", "", "", False
+        else:
+            state = hooked.state
+        if running and state in ("working", "blocked") and interrupted.get(key):
+            state, status, waiting = "working", "idle", ""
+        sessions.append(
+            Session(
+                id=key, name=name or hooked.title or key[:8], cwd=cwd, state=state, status=status, waiting_for=waiting,
+                started_at=_number(rec.get("started_at")), running=running,
+                session_id=hooked.claude_sid or _text(rec.get("session_id")), transcript=hooked.transcript, turned=turned,
+            )
+        )
+    return sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0))
+
+
+@dataclass(frozen=True)
+class AgentRule:
+    """How one agent is launched, resumed and read. Only Claude has one; another agent is a new entry, not a new engine."""
+
+    launch: Callable
+    resume: Callable
+    settings: Callable
+    fold: Callable
+
+
+AGENTS = {"claude": AgentRule(claude_launch_args, claude_resume_args, hook_settings, fold_events)}
