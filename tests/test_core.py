@@ -4454,15 +4454,16 @@ class FoldEvents(unittest.TestCase):
         state = self.fold(event("PermissionRequest", tool_name="Bash"), event("PostToolUse", tool_name="Bash"))
         self.assertEqual((state.state, state.waiting_for), ("working", ""))
 
-    def test_permission_notification_blocks_and_keeps_the_waiting_text(self):
+    def test_permission_notification_keeps_the_waiting_text_of_a_blocked_session(self):
         note = event("Notification", notification_type="permission_prompt", message="Claude needs your permission")
-        self.assertEqual(self.fold(event("UserPromptSubmit"), note).waiting_for, "Claude needs your permission")
         self.assertEqual(self.fold(event("PermissionRequest", tool_name="Bash"), note).waiting_for, "approve Bash")
+        state = self.fold(event("SessionStart"), note)
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "Claude needs your permission"))
 
-    def test_a_permission_notification_blocks_a_working_session_with_its_message(self):
+    def test_a_permission_notification_never_blocks_a_working_session(self):
         note = event("Notification", notification_type="permission_prompt", message="Claude needs your permission")
         state = self.fold(event("UserPromptSubmit"), note)
-        self.assertEqual((state.state, state.waiting_for), ("blocked", "Claude needs your permission"))
+        self.assertEqual((state.state, state.waiting_for), ("working", ""))
 
     def test_session_start_after_compaction_keeps_state_and_turn_but_follows_the_new_ids(self):
         new = "22222222-2222-4222-8222-222222222222"
