@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# template: product-owner @ 0.1.0 — shared; change it through Codery
+# template: product-owner @ 0.2.0 — shared; change it through Codery
 """SessionStart check: the detection half of the technology gate.
 
 Reports every dependency named in package.json (dependencies, devDependencies,
@@ -35,6 +35,7 @@ from pathlib import Path
 
 NPM_SECTIONS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
 BACKTICKED = re.compile(r"`([^`\n]+)`")
+PACKAGE_NAME = re.compile(r"^(@[a-z0-9][a-z0-9._~-]*/)?[A-Za-z0-9][A-Za-z0-9._~-]{0,213}$")
 PY_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
@@ -183,16 +184,23 @@ def main() -> None:
         seen.add(key)
         missing.append((name, source))
 
-    if not missing and not notes:
+    # A manifest is repo content, not trusted text: only names shaped like package
+    # names are printed; anything else is counted, never echoed.
+    valid = [(n, src) for n, src in missing if PACKAGE_NAME.fullmatch(n)]
+    skipped = len(missing) - len(valid)
+    missing = valid
+    if not missing and not skipped and not notes:
         return
     lines: list[str] = []
     if missing:
         lines += [
             f"Dependency-record check: {len(missing)} dependency name(s) with no decision record:",
             *[f"  - {n} ({src})" for n, src in missing],
-            "Each needs an ADR under docs/adr/ or an entry in docs/stack.md (CLAUDE.md, Tural decides).",
+            "Each needs an ADR under docs/adr/ or an entry in docs/stack.md (technology gate in CLAUDE.md).",
             "A name counts only when it appears in backticks. This is a report, not a gate.",
         ]
+    if skipped:
+        lines.append(f"Dependency-record check: {skipped} {'entry' if skipped == 1 else 'entries'} skipped: not package names.")
     lines += [f"Dependency-record check note: {n}" for n in notes]
     report = "\n".join(lines) + "\n"
     sys.stdout.write(report)

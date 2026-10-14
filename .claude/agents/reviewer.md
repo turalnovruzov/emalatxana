@@ -4,7 +4,7 @@ description: Independent fresh-context reviewer, the blocking quality gate befor
 tools: Read, Grep, Glob, Bash
 model: opus
 ---
-<!-- template: product-owner @ 0.1.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.2.0 — shared; change it through Codery -->
 
 **Before starting:** read `CLAUDE.md`, including its `## This project` section, and `README.md` when the project has one. The README holds the idea; `CLAUDE.md` holds how the project runs. Judge the change against both.
 
