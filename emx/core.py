@@ -3130,64 +3130,84 @@ def hush_due(seen: str | None, value: str) -> tuple:
     return value, value != seen
 
 
-MISSED_SHOWN = 3
-MISSED_KEPT = 20
-MISSED_MIN_LIST_ROWS = 6
-MISSED_TITLE = "Notices"
+HISTORY_SHOWN = 3
+HISTORY_KEPT = 20
+HISTORY_MIN_LIST_ROWS = 6
+HISTORY_TITLE = "Notifications"
+HISTORY_MARKS = {NOTICE_NEEDS: "●", NOTICE_DONE: "✓"}
+HISTORY_BODY_LINES = 2
 
 
 @dataclass(frozen=True)
-class Missed:
-    """The sentence of a notice he may have missed. `at` is the transition's monotonic time, not the time the words landed."""
+class Entry:
+    """One notification in the history: `title` is "name · project", `at` the transition's monotonic time, not the time the words landed."""
     id: str
+    kind: str
+    title: str
     text: str
     at: float
+    read: bool = False
 
 
-def missed_add(missed: list, item: Missed, opened: dict) -> list:
-    """`missed` with `item` in, newest first. A session has one line, so a newer notice replaces its older one, and a notice whose transition came before he last opened that session never lands."""
-    last_open = opened.get(item.id)
-    if last_open is not None and last_open >= item.at:
-        return list(missed)
-    kept = [m for m in missed if m.id != item.id] + [item]
-    return sorted(kept, key=lambda m: m.at, reverse=True)[:MISSED_KEPT]
+def history_add(history: list, entry: Entry, opened: dict) -> list:
+    """`history` with `entry` in, newest first, cut to `HISTORY_KEPT`. A session keeps every entry; one whose transition came before he last opened that session lands already read."""
+    last_open = opened.get(entry.id)
+    if last_open is not None and last_open >= entry.at:
+        entry = replace(entry, read=True)
+    return sorted([*history, entry], key=lambda e: e.at, reverse=True)[:HISTORY_KEPT]
 
 
-def missed_clear(missed: list, sid: str) -> list:
-    return [m for m in missed if m.id != sid]
+def history_read(history: list, sid: str) -> list:
+    return [replace(e, read=True) if e.id == sid else e for e in history]
 
 
-def missed_prune(missed: list, live_ids, misses: dict) -> tuple:
-    """(missed, misses) with the lines of sessions gone from `STALE_AFTER_MISSES` listings in a row dropped, judged like a viewer's."""
-    misses, gone = stale_viewers([m.id for m in missed], live_ids, misses)
-    return [m for m in missed if m.id not in gone], misses
+def history_unread(history: list) -> int:
+    return sum(1 for e in history if not e.read)
 
 
-def missed_room(height: int | None, used: int) -> int:
-    """The rows the notices area may take on a pane of `height` that already has `used` other bottom rows (footer included), leaving the session list `MISSED_MIN_LIST_ROWS` rows and the panel's two top lines."""
-    room = MISSED_SHOWN + 2
+def history_prune(history: list, live_ids, misses: dict) -> tuple:
+    """(history, misses) with the entries of sessions gone from `STALE_AFTER_MISSES` listings in a row dropped, judged like a viewer's."""
+    misses, gone = stale_viewers([e.id for e in history], live_ids, misses)
+    return [e for e in history if e.id not in gone], misses
+
+
+def history_room(height: int | None, used: int) -> int:
+    """The rows the strip may take on a pane of `height` that already has `used` other bottom rows (footer included), leaving the session list `HISTORY_MIN_LIST_ROWS` rows and the panel's two top lines."""
+    room = HISTORY_SHOWN + 2
     if height is None:
         return room
-    return max(0, min(room, height - 2 - used - MISSED_MIN_LIST_ROWS))
+    return max(0, min(room, height - 2 - used - HISTORY_MIN_LIST_ROWS))
 
 
-def missed_lines(missed: list, now: float, width: int, room: int) -> list:
-    """The area's lines in at most `room` rows: the title, one row per notice cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest notice shows under `Notices (N)` instead."""
-    if not missed or room < 2:
+def history_strip(history: list, now: float, width: int, room: int) -> list:
+    """(text, read) rows of the strip in at most `room` rows: the title with the unread count, one row per entry cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest shows alone."""
+    if not history or room < 2:
         return []
-    cap = min(MISSED_SHOWN, room - 1)
-    title = MISSED_TITLE
-    if len(missed) <= cap:
-        shown = missed
+    unread = history_unread(history)
+    title = f"{HISTORY_TITLE} ({unread})" if unread else HISTORY_TITLE
+    cap = min(HISTORY_SHOWN, room - 1)
+    if len(history) <= cap:
+        shown = history
     elif room == 2:
-        shown = missed[:1]
-        title = f"{MISSED_TITLE} ({len(missed)})"
+        shown = history[:1]
     else:
-        shown = missed[:min(cap, room - 2)]
-    lines = [title] + [fit(f"{format_age(now - m.at)} {m.text}", width) for m in shown]
-    if room > 2 and len(shown) < len(missed):
-        lines.append(fit(f"… {len(missed) - len(shown)} more", width))
-    return lines
+        shown = history[:min(cap, room - 2)]
+    rows = [(title, False)] + [(fit(f"{format_age(now - e.at)} {e.text}", width), e.read) for e in shown]
+    if room > 2 and len(shown) < len(history):
+        rows.append((fit(f"… {len(history) - len(shown)} more", width), False))
+    return rows
+
+
+def history_rows(history: list, now: float, width: int) -> list:
+    """Each entry's rows in the full view: a header (the kind's mark, the age, the title), then its sentence wrapped under it, at most `HISTORY_BODY_LINES` lines, the last cut with "…" when there is more."""
+    rows = []
+    for e in history:
+        header = fit(f"{HISTORY_MARKS.get(e.kind, '·')} {format_age(now - e.at)} {e.title}", width)
+        body = wrap_words(e.text, width - 2) if e.text else []
+        if len(body) > HISTORY_BODY_LINES:
+            body = body[:HISTORY_BODY_LINES - 1] + [fit(" ".join(body[HISTORY_BODY_LINES - 1:]), width - 2)]
+        rows.append([header] + ["  " + line for line in body])
+    return rows
 
 
 def parse_voices(text: str) -> list:

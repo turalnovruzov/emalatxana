@@ -3790,83 +3790,119 @@ class HushDue(unittest.TestCase):
         self.assertEqual(core.hush_due("456", "456"), ("456", False))
 
 
-class MissedList(unittest.TestCase):
-    def item(self, sid, at, text=None):
-        return core.Missed(sid, text or f"{sid} at {at}", at)
+class History(unittest.TestCase):
+    def item(self, sid, at, text=None, kind=core.NOTICE_DONE, read=False):
+        return core.Entry(sid, kind, f"{sid} · proj", text or f"{sid} at {at}", at, read)
 
     def added(self, *items, opened=None):
-        missed = []
+        history = []
         for item in items:
-            missed = core.missed_add(missed, item, opened or {})
-        return missed
+            history = core.history_add(history, item, opened or {})
+        return history
 
-    def test_newest_first(self):
-        missed = self.added(self.item("a", 2), self.item("b", 9), self.item("c", 5))
-        self.assertEqual([m.id for m in missed], ["b", "c", "a"])
+    def test_history_keeps_several_entries_per_session_newest_first(self):
+        history = self.added(self.item("s1", 1, "first"), self.item("s2", 5), self.item("s1", 9, "second"))
+        self.assertEqual([(e.id, e.at) for e in history], [("s1", 9), ("s2", 5), ("s1", 1)])
+        self.assertEqual([e.text for e in history if e.id == "s1"], ["second", "first"])
 
-    def test_a_newer_notice_for_a_session_replaces_its_older_one(self):
-        missed = self.added(self.item("s1", 1, "first"), self.item("s1", 2, "second"))
-        self.assertEqual([(m.id, m.text) for m in missed], [("s1", "second")])
+    def test_history_keeps_twenty_and_drops_the_oldest(self):
+        history = self.added(*[self.item("s1" if i % 2 else "s2", i) for i in range(21)])
+        self.assertEqual(core.HISTORY_KEPT, 20)
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0].at, 20)
+        self.assertNotIn(0, [e.at for e in history])
 
-    def test_kept_is_capped(self):
-        missed = self.added(*[self.item(f"s{i}", i) for i in range(25)])
-        self.assertEqual(len(missed), core.MISSED_KEPT)
-        self.assertEqual(missed[0].id, "s24")
-        self.assertEqual(missed[-1].id, "s5")
-
-    def test_clear_removes_only_that_session(self):
-        missed = self.added(self.item("a", 1), self.item("b", 2))
-        self.assertEqual([m.id for m in core.missed_clear(missed, "a")], ["b"])
-
-    def test_a_notice_from_before_the_last_open_never_lands(self):
-        for at, lands in ((9, False), (10, False), (11, True)):
+    def test_an_entry_from_before_the_last_open_lands_read(self):
+        for at, read in ((9, True), (10, True), (11, False)):
             with self.subTest(at=at):
-                self.assertEqual(len(self.added(self.item("s1", at), opened={"s1": 10})), int(lands))
-        self.assertEqual(len(self.added(self.item("s2", 1), opened={"s1": 10})), 1)
+                (entry,) = self.added(self.item("s1", at), opened={"s1": 10})
+                self.assertIs(entry.read, read)
+        (other,) = self.added(self.item("s2", 1), opened={"s1": 10})
+        self.assertFalse(other.read)
 
-    def test_prune_drops_after_stale_after_misses_and_not_on_an_empty_listing(self):
-        missed = self.added(self.item("s1", 1), self.item("s2", 2))
-        missed, misses = core.missed_prune(missed, ["s2"], {})
-        self.assertEqual([m.id for m in missed], ["s2", "s1"])
+    def test_reading_a_session_dims_its_entries_and_removes_none(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        read = core.history_read(history, "s1")
+        self.assertEqual(len(read), 3)
+        self.assertEqual([(e.id, e.read) for e in read], [("s1", True), ("s2", False), ("s1", True)])
+        self.assertEqual(core.history_unread(read), 1)
+        self.assertEqual(core.history_unread(history), 3)
+
+    def test_history_prune_drops_a_session_gone_for_stale_after_misses_listings(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        history, misses = core.history_prune(history, ["s2"], {})
+        self.assertEqual([e.id for e in history], ["s1", "s2", "s1"])
         for _ in range(5):
-            missed, misses = core.missed_prune(missed, [], misses)
-        self.assertEqual([m.id for m in missed], ["s2", "s1"])
-        missed, misses = core.missed_prune(missed, ["s2"], misses)
-        self.assertEqual([m.id for m in missed], ["s2"])
+            history, misses = core.history_prune(history, [], misses)
+        self.assertEqual(len(history), 3)
+        for _ in range(core.STALE_AFTER_MISSES - 1):
+            history, misses = core.history_prune(history, ["s2"], misses)
+        self.assertEqual([e.id for e in history], ["s2"])
 
-    def test_lines_cap_and_more(self):
-        five = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(5)])
-        got = core.missed_lines(five, 10, 40, 5)
-        self.assertEqual(got, ["Notices", "6s t4", "7s t3", "8s t2", "… 2 more"])
-        two = core.missed_lines(five[:2], 10, 40, 5)
-        self.assertEqual(two, ["Notices", "6s t4", "7s t3"])
+    def test_the_strip_shows_the_newest_three_one_line_each_with_unread_count(self):
+        history = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(4)])
+        history = core.history_read(core.history_read(history, "s0"), "s1")
+        got = core.history_strip(history, 10, 40, 5)
+        self.assertEqual([t for t, _ in got], ["Notifications (2)", "7s t3", "8s t2", "9s t1", "… 1 more"])
 
-    def test_two_rows_show_the_newest_notice_with_the_count_in_the_title(self):
+    def test_the_strip_title_has_no_count_when_all_are_read(self):
+        history = core.history_read(self.added(self.item("s1", 1)), "s1")
+        self.assertEqual(core.history_strip(history, 10, 40, 5)[0][0], "Notifications")
+
+    def test_the_strip_marks_read_rows(self):
+        history = core.history_read(self.added(self.item("s1", 1, "a"), self.item("s2", 2, "b")), "s1")
+        self.assertEqual(core.history_strip(history, 10, 40, 5), [("Notifications (1)", False), ("8s b", False), ("9s a", True)])
+
+    def test_a_two_row_strip_shows_the_newest_under_the_title(self):
         three = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(3)])
-        self.assertEqual(core.missed_lines(three, 10, 40, 2), ["Notices (3)", "8s t2"])
-        self.assertEqual(core.missed_lines(three[:1], 10, 40, 2), ["Notices", "8s t2"])
+        self.assertEqual([t for t, _ in core.history_strip(three, 10, 40, 2)], ["Notifications (3)", "8s t2"])
+        self.assertEqual([t for t, _ in core.history_strip(three[:1], 10, 40, 2)], ["Notifications (1)", "8s t2"])
 
-    def test_lines_are_one_row_each_and_fit_the_width(self):
-        text = " ".join(["word"] * 28)
-        missed = [core.Missed("s1", text, 0.0)]
-        (title, line) = core.missed_lines(missed, 125, 30, 5)
-        self.assertEqual(title, "Notices")
+    def test_strip_rows_are_one_row_each_and_fit_the_width(self):
+        history = [core.Entry("s1", core.NOTICE_DONE, "s1 · p", " ".join(["word"] * 28), 0.0)]
+        (title, _), (line, _) = core.history_strip(history, 125, 30, 5)
+        self.assertEqual(title, "Notifications (1)")
         self.assertLessEqual(core.display_width(line), 30)
         self.assertTrue(line.endswith("…"))
         self.assertTrue(line.startswith("2m "))
 
     def test_room_below_two_or_empty_shows_nothing(self):
-        missed = [core.Missed("s1", "x", 0.0)]
-        self.assertEqual(core.missed_lines(missed, 1, 40, 1), [])
-        self.assertEqual(core.missed_lines(missed, 1, 40, 0), [])
-        self.assertEqual(core.missed_lines([], 1, 40, 5), [])
+        history = [self.item("s1", 0.0)]
+        self.assertEqual(core.history_strip(history, 1, 40, 1), [])
+        self.assertEqual(core.history_strip(history, 1, 40, 0), [])
+        self.assertEqual(core.history_strip([], 1, 40, 5), [])
 
     def test_room_leaves_the_list_its_minimum(self):
-        self.assertEqual(core.missed_room(12, 1), 3)
-        self.assertEqual(core.missed_room(9, 1), 0)
-        self.assertEqual(core.missed_room(11, 1), 2)
-        self.assertEqual(core.missed_room(40, 1), core.MISSED_SHOWN + 2)
-        self.assertEqual(core.missed_room(None, 1), core.MISSED_SHOWN + 2)
+        self.assertEqual(core.history_room(12, 1), 3)
+        self.assertEqual(core.history_room(9, 1), 0)
+        self.assertEqual(core.history_room(11, 1), 2)
+        self.assertEqual(core.history_room(40, 1), core.HISTORY_SHOWN + 2)
+        self.assertEqual(core.history_room(None, 1), core.HISTORY_SHOWN + 2)
+
+    def test_a_full_view_row_is_a_header_and_at_most_two_wrapped_lines(self):
+        long = " ".join(f"w{i}" for i in range(60))
+        history = self.added(self.item("s1", 0, long, core.NOTICE_NEEDS), self.item("s2", 50, "Short one.", core.NOTICE_DONE))
+        rows = core.history_rows(history, 125, 30)
+        self.assertEqual(rows[0], ["✓ 1m s2 · proj", "  Short one."])
+        header, *body = rows[1]
+        self.assertEqual(header, "● 2m s1 · proj")
+        self.assertEqual(len(rows[1]), 3)
+        for line in rows[1]:
+            self.assertLessEqual(core.display_width(line), 30)
+        self.assertTrue(all(line.startswith("  ") for line in body))
+        self.assertTrue(body[-1].endswith("…"))
+        self.assertTrue(body[0].strip().startswith("w0 w1"))
+
+    def test_a_long_title_is_cut_to_the_width(self):
+        history = [core.Entry("s1", core.NOTICE_DONE, "a very long session name · project", "x", 0.0)]
+        (header, _), = core.history_rows(history, 1, 16)
+        self.assertLessEqual(core.display_width(header), 16)
+        self.assertTrue(header.endswith("…"))
+
+    def test_the_word_notices_is_gone_from_the_title(self):
+        self.assertEqual(core.HISTORY_TITLE, "Notifications")
+        self.assertNotIn("Notices", core.HISTORY_TITLE)
+        self.assertFalse(hasattr(core, "MISSED_TITLE"))
 
 
 HOOK_FIXTURE = Path(__file__).parent / "fixtures" / "hooks" / "claude-2.1.296.json"
