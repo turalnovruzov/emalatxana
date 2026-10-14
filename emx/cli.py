@@ -27,6 +27,7 @@ PENDING_MAX_AGE = 60
 
 USAGE = """usage: emx [--version | hush]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
+emx follow is internal too: it streams the notices of this emx to stdout, for a laptop's `emx remote` to read.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
 of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
 terminal window with that session.)
@@ -198,6 +199,17 @@ def take_pending_open() -> str | None:
     except OSError:
         pass
     return core.open_request(text) if fresh else None
+
+
+def follow() -> int:
+    """The server half of `emx remote`: streams the panel's notices to stdout until the pipe closes."""
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    from emx import remote
+
+    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket))
 
 
 def open_command() -> str:
@@ -409,6 +421,8 @@ def main(argv: list) -> int:
         return hush()
     if argv[0] == "open" and len(argv) == 2:
         return open_session(argv[1])
+    if argv[0] == "follow" and len(argv) == 1:
+        return follow()
     if argv[0] == "left":
         return left_check(argv[1:])
     if argv[0] == "blank":

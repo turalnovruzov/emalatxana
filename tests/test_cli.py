@@ -427,6 +427,32 @@ class OpenSession(unittest.TestCase):
         self.assertIn("emx open <session id> is internal", cli.USAGE)
 
 
+class FollowCommand(unittest.TestCase):
+    def test_a_default_socket_is_refused_and_nothing_runs(self):
+        from emx import remote
+
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": "default"}), mock.patch.object(remote, "follow") as follow, \
+                redirect_stderr(err):
+            code = cli.main(["follow"])
+        self.assertEqual((code, err.getvalue()), (2, cli.SOCKET_REFUSAL + "\n"))
+        follow.assert_not_called()
+
+    def test_it_follows_the_state_folders_relay_file_without_a_config(self):
+        from emx import remote
+
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": "emx-test-x", "XDG_STATE_HOME": "/x/state"}), \
+                mock.patch.object(remote, "follow", return_value=0) as follow:
+            code = cli.main(["follow"])
+        self.assertEqual(code, 0)
+        path, out, tmux = follow.call_args.args
+        self.assertEqual(str(path), "/x/state/emx/relay.jsonl")
+        self.assertEqual((tmux.socket, tmux.config), ("emx-test-x", None))
+
+    def test_the_usage_names_it_as_internal(self):
+        self.assertIn("emx follow is internal", cli.USAGE)
+
+
 class RecordingWorkspace:
     """What `create_workspace` asks of tmux, recorded: no server is started."""
 
