@@ -4189,6 +4189,15 @@ class FoldEvents(unittest.TestCase):
         state = self.fold(event("SessionStart"), event("PreToolUse", tool_name="Bash"))
         self.assertEqual((state.state, state.turned), ("working", True))
 
+    def test_subagent_tool_event_keeps_background_time_but_the_main_agent_ends_it(self):
+        stopped = event("Stop", background=2)
+        for name in ("PreToolUse", "PostToolUse"):
+            state = self.fold(stopped, event(name, tool_name="Bash", agent="sub1"))
+            self.assertEqual((state.state, state.status), ("working", core.BACKGROUND), name)
+            self.assertFalse(core.interruptible(mk(state=state.state, status=state.status)), name)
+        state = self.fold(stopped, event("PreToolUse", tool_name="Bash", agent="sub1"), event("PreToolUse", tool_name="Bash"))
+        self.assertEqual((state.state, state.status), ("working", ""))
+
     def test_permission_request_blocks_at_once_and_names_the_tool(self):
         state = self.fold(event("UserPromptSubmit"), event("PermissionRequest", tool_name="Bash"))
         self.assertEqual((state.state, state.waiting_for), ("blocked", "approve Bash"))
