@@ -4415,12 +4415,12 @@ class NoticesWorker(unittest.TestCase):
         return notice
 
     def texts(self):
-        return [text for _, text, _ in self.worker.take()]
+        return [text for _, _, _, text, _ in self.worker.take()]
 
     def test_a_good_answer_reaches_the_outbox_the_voice_and_the_calls(self):
         notice = self.notice()
         self.assertTrue(self.worker.step())
-        self.assertEqual(self.worker.outbox, [("a", "Alpha, sir: all fixed.", notice.at)])
+        self.assertEqual(self.worker.outbox, [("a", core.NOTICE_DONE, "emx-test-a · alpha", "Alpha, sir: all fixed.", notice.at)])
         self.assertEqual(self.texts(), ["Alpha, sir: all fixed."])
         self.assertEqual(self.speaker.spoken, ["Alpha, sir: all fixed."])
         self.assertEqual([c.text for c in self.worker.calls], ["Alpha, sir: all fixed."])
@@ -4919,7 +4919,7 @@ class NoBanner(AppCase):
         for state in ((1, "0", "%1", 3.0), (0, "", "%1", None)):
             with self.subTest(state=state):
                 self.app.tmux = ClientTmux(state)
-                self.app.poller.notices.outbox = [("a", "Alpha is done.", time.monotonic())]
+                self.app.poller.notices.outbox = [("a", core.NOTICE_DONE, "Alpha · alpha", "Alpha is done.", time.monotonic())]
                 with mock.patch.object(sidebar.os, "write") as write, \
                         mock.patch.object(sidebar.subprocess, "run") as run, \
                         mock.patch.object(sidebar.subprocess, "Popen") as popen:
@@ -4959,7 +4959,30 @@ class SwitchTmux(ClientTmux):
         self.selected.append(pane)
 
 
-class MissedWiring(AppCase):
+def entry(sid, text, at, kind=core.NOTICE_DONE, title=None):
+    return (sid, kind, title or f"{sid} · alpha", text, at)
+
+
+class TallScr(FakeScr):
+    def __init__(self, keys=(), height=20, width=40):
+        super().__init__(keys)
+        self.size = (height, width)
+        self.drawn = {}
+
+    def getmaxyx(self):
+        return self.size
+
+    def addstr(self, y, x, text, attr=0):
+        self.drawn[(y, x)] = (text, attr)
+
+    def erase(self):
+        self.drawn = {}
+
+    def text(self):
+        return [t for (_, _), (t, _) in sorted(self.drawn.items())]
+
+
+class HistoryWiring(AppCase):
     def setUp(self):
         super().setUp()
         self.addCleanup(lambda: self.assertEqual(self.announced, [], "Haiku was asked on the curses thread"))
@@ -4978,51 +5001,64 @@ class MissedWiring(AppCase):
         self.app.refresh()
         sidebar.App.switch_to(self.app, "s1", core.OPEN)
 
+    def listed(self, *sids):
+        self.poll(*[session(sid, "/p/alpha") for sid in sids])
+        self.app.refresh()
+
     def test_a_taken_notice_shows_in_the_bottom_lines_above_the_footer(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
         lines = self.bottom()
-        self.assertEqual(lines[-3], "Notices")
+        self.assertEqual(lines[-3], "Notifications (1)")
         self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
         self.assertIn(lines[-1], sidebar.FOOTERS)
 
     def test_a_short_pane_shows_the_newest_notice_with_the_count_in_the_title(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5), ("s2", "Beta is done.", time.monotonic() - 9),
-                     ("s3", "Gamma is done.", time.monotonic() - 9))
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("s2", "Beta is done.", time.monotonic() - 9),
+                     entry("s3", "Gamma is done.", time.monotonic() - 9))
         lines = self.bottom(11)
-        self.assertEqual(lines[-3], "Notices (3)")
+        self.assertEqual(lines[-3], "Notifications (3)")
         self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
         self.assertFalse(any("more" in t for t in lines), lines)
 
-    def test_a_notice_is_listed_in_notification_mode(self):
-        self.assertFalse(self.app.poller.notices.voice)
-        self.deliver(("s1", "Alpha is done.", time.monotonic()))
-        self.assertEqual([m.text for m in self.app.missed], ["Alpha is done."])
+    def test_a_taken_notice_lands_in_the_history_in_both_modes(self):
+        for mode in core.MODES:
+            with self.subTest(mode=mode):
+                self.app.history = []
+                self.app.prefs = {**self.app.prefs, "mode": mode}
+                self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
+                self.assertEqual([(e.id, e.kind, e.title, e.text) for e in self.app.history],
+                                 [("s1", core.NOTICE_DONE, "s1 · alpha", "Alpha is done.")])
+
+    def test_two_notices_of_one_session_are_two_entries(self):
+        self.deliver(entry("s1", "First.", time.monotonic() - 5), entry("s1", "Second.", time.monotonic() - 1, core.NOTICE_NEEDS))
+        self.assertEqual([(e.text, e.kind) for e in self.app.history], [("Second.", core.NOTICE_NEEDS), ("First.", core.NOTICE_DONE)])
 
     def test_a_notice_is_listed_whether_attached_or_detached(self):
         for state in ((1, "0", "%1", 3.0), (0, "", "%1", None)):
             with self.subTest(state=state):
-                self.app.missed = []
+                self.app.history = []
                 self.app.tmux = ClientTmux(state)
-                self.deliver(("s1", "Alpha is done.", time.monotonic()))
-                self.assertEqual(len(self.app.missed), 1)
+                self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
+                self.assertEqual(len(self.app.history), 1)
 
-    def test_opening_the_session_clears_it(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5), ("other", "Beta is done.", time.monotonic() - 4))
+    def test_opening_a_session_from_the_list_dims_its_entries_and_keeps_them(self):
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("other", "Beta is done.", time.monotonic() - 4),
+                     entry("s1", "Alpha again.", time.monotonic() - 3))
         self.open_s1()
-        self.assertEqual([m.id for m in self.app.missed], ["other"])
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", True), ("other", False), ("s1", True)])
 
-    def test_a_refused_or_failed_open_keeps_it(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
+    def test_a_refused_or_failed_open_keeps_it_unread(self):
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
         self.open_s1(fail=True)
-        self.assertEqual([m.id for m in self.app.missed], ["s1"])
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", False)])
         self.assertNotIn("s1", self.app.opened)
 
-    def test_a_refused_attach_keeps_it(self):
+    def test_a_refused_attach_keeps_it_unread(self):
         class NoViewerTmux(SwitchTmux):
             def panes(self):
                 return [p for p in super().panes() if p.session != "s1"]
 
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
         self.app.tmux = NoViewerTmux()
         self.app.me = "%1"
         self.poll(session("s2", "/p/beta"))
@@ -5030,41 +5066,41 @@ class MissedWiring(AppCase):
         self.assertIsNone(self.app.session("s1"))
         self.assertFalse(core.attach_allowed(self.app.session("s1"), core.OPEN))
         sidebar.App.switch_to(self.app, "s1", core.OPEN)
-        self.assertEqual([m.id for m in self.app.missed], ["s1"])
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", False)])
         self.assertNotIn("s1", self.app.opened)
 
-    def test_only_an_open_clears_it(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic() - 5))
+    def test_only_an_open_marks_it_read(self):
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
         self.app.tmux = SwitchTmux()
         self.app.me = "%1"
         self.poll(session("s1", "/p/alpha"))
         self.app.refresh()
         sidebar.App.switch_to(self.app, "s1", core.NEW, (session("s1", "/p/alpha"), True))
-        self.assertEqual([m.id for m in self.app.missed], ["s1"])
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", False)])
 
-    def test_a_notice_landing_after_the_open_is_dropped(self):
+    def test_a_notice_landing_after_the_open_lands_read(self):
         before = time.monotonic() - 5
         self.open_s1()
-        self.deliver(("s1", "Alpha is done.", before))
-        self.assertEqual(self.app.missed, [])
+        self.deliver(entry("s1", "Alpha is done.", before))
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", True)])
 
     def test_the_area_hides_while_the_prompt_find_or_rename_is_open(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic()))
-        self.assertIn("Notices", self.bottom())
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
+        self.assertIn("Notifications (1)", self.bottom())
         self.app.handle_key("/")
-        self.assertNotIn("Notices", self.bottom())
+        self.assertNotIn("Notifications (1)", self.bottom())
         self.app.find = None
         self.app.rename_edit = {"id": "s1", "old": "x", "hint": "", "text": ""}
-        self.assertNotIn("Notices", self.bottom())
+        self.assertNotIn("Notifications (1)", self.bottom())
         self.app.rename_edit = None
         self.app.prompt = {"stage": "message", "folder": "/p", "text": "", "hint": ""}
-        self.assertNotIn("Notices", self.bottom())
+        self.assertNotIn("Notifications (1)", self.bottom())
 
     def test_the_area_gives_way_on_a_short_pane(self):
-        self.deliver(("s1", "Alpha is done.", time.monotonic()))
-        self.assertNotIn("Notices", self.bottom(height=9))
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
+        self.assertFalse(any(t.startswith("Notifications") for t in self.bottom(height=9)))
 
-    def test_an_in_front_session_never_reaches_the_list(self):
+    def test_an_in_front_skip_adds_nothing_to_the_history(self):
         self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
         self.app.tmux = ClientTmux((1, "1", "%2", 3.0))
         self.poll(session("a", "/p/alpha", "working"))
@@ -5072,7 +5108,137 @@ class MissedWiring(AppCase):
         self.poll(session("a", "/p/alpha", "done"))
         self.app.refresh()
         self.assertEqual(self.app.poller.notices.pending, [])
-        self.assertEqual(self.app.missed, [])
+        self.assertEqual(self.app.history, [])
+
+    def test_the_strip_dims_read_rows_and_counts_unread(self):
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("other", "Beta is done.", time.monotonic() - 4))
+        self.open_s1()
+        lines = self.app.bottom_lines(39, 20)
+        strip = lines[-4:-1]
+        self.assertEqual(strip[0], ("Notifications (1)", curses.A_BOLD))
+        self.assertTrue(strip[1][0].endswith("Beta is done.") and strip[1][1] == 0, strip)
+        self.assertTrue(strip[2][0].endswith("Alpha is done.") and strip[2][1] == curses.A_DIM, strip)
+
+    def test_the_history_is_empty_in_a_new_app(self):
+        self.assertEqual(self.app.history, [])
+        again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+        self.assertEqual(again.history, [])
+        self.assertIsNone(again.history_view)
+
+    def test_the_help_has_the_N_line(self):
+        self.assertIn(("N", "notifications: the last 20; ↵ opens one"), sidebar.HELP)
+
+
+class HistoryView(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = TallScr()
+        self.app.scr = self.scr
+        self.listed("s1", "s2")
+        now = time.monotonic()
+        self.deliver(entry("s1", "Alpha finished the tax fix.", now - 20, title="Alpha · alpha"),
+                     entry("s2", "Beta needs your yes on a library.", now - 10, core.NOTICE_NEEDS, title="Beta · beta"))
+        self.opened.clear()
+
+    deliver = HistoryWiring.deliver
+    listed = HistoryWiring.listed
+
+    def draw(self):
+        self.app.draw()
+        return self.scr.text()
+
+    def test_N_opens_the_view_and_marks_nothing_read(self):
+        self.app.handle_key("N")
+        self.assertEqual(self.app.history_view, 0)
+        self.assertEqual(core.history_unread(self.app.history), 2)
+        self.assertEqual(self.opened, [])
+
+    def test_the_view_draws_a_header_and_wrapped_sentence_per_entry(self):
+        self.app.handle_key("N")
+        drawn = self.draw()
+        self.assertIn("Notifications", drawn)
+        self.assertTrue(any(t.startswith("● ") and t.endswith("Beta · beta") for t in drawn), drawn)
+        self.assertTrue(any(t.startswith("✓ ") and t.endswith("Alpha · alpha") for t in drawn), drawn)
+        self.assertIn("  Beta needs your yes on a library.", drawn)
+        self.assertIn("  Alpha finished the tax fix.", drawn)
+        self.assertIn(sidebar.HISTORY_HINT, [t.strip() for t in drawn])
+        self.assertFalse(any(t.startswith("Notifications (") for t in drawn), drawn)
+
+    def test_down_and_enter_open_the_second_entrys_session_and_mark_it_read(self):
+        self.app.handle_key("N")
+        self.app.handle_key(curses.KEY_DOWN)
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [("s1", core.OPEN)])
+        self.assertIsNone(self.app.history_view)
+        self.assertEqual(self.app.cursor, ("session", "s1"))
+        self.app.switch_to = lambda sid, trigger, checked=None: sidebar.App.switch_to(self.app, sid, trigger, checked)
+        self.app.tmux = SwitchTmux()
+        self.app.me = "%1"
+        self.assertEqual(core.history_unread(self.app.history), 2)
+        self.app.handle_key("N")
+        self.app.handle_key("j")
+        self.app.handle_key("\n")
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s2", False), ("s1", True)])
+
+    def test_a_click_on_an_entry_opens_its_session(self):
+        self.app.handle_key("N")
+        self.draw()
+        (y,) = [y for y, item in self.app.row_map.items() if item == ("entry", 1)][:1]
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 0, y, 0, curses.BUTTON1_PRESSED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual(self.opened, [("s1", core.OPEN)])
+        self.assertIsNone(self.app.history_view)
+
+    def test_esc_closes_the_view_without_opening_anything(self):
+        self.app.handle_key("N")
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.history_view)
+        self.assertEqual(self.opened, [])
+        self.assertEqual(core.history_unread(self.app.history), 2)
+
+    def test_other_keys_do_nothing_in_the_view(self):
+        self.app.handle_key("N")
+        for key in ("n", "m", "q", "?", "s", "N"):
+            self.app.handle_key(key)
+        self.assertEqual(self.app.history_view, 0)
+        self.assertIsNone(self.app.prompt)
+        self.assertFalse(self.app.help)
+        self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
+
+    def test_N_in_the_find_box_is_text(self):
+        self.app.handle_key("/")
+        self.app.handle_key("N")
+        self.assertEqual(self.app.find, "N")
+        self.assertIsNone(self.app.history_view)
+
+    def test_an_entry_for_a_gone_session_says_so_and_switches_nothing(self):
+        self.listed("s2")
+        self.app.handle_key("N")
+        self.app.handle_key(curses.KEY_DOWN)
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.notice, sidebar.OPEN_GONE)
+
+    def test_an_empty_history_says_so(self):
+        self.app.history = []
+        self.app.handle_key("N")
+        self.assertIn(sidebar.HISTORY_EMPTY, self.draw())
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [])
+
+    def test_the_view_scrolls_to_keep_the_cursor_visible(self):
+        self.scr.size = (12, 40)
+        now = time.monotonic()
+        self.app.history = []
+        self.deliver(*[entry("s1", f"Entry number {i} is done.", now - 100 + i, title=f"Entry {i} · alpha") for i in range(20)])
+        self.assertEqual(len(self.app.history), 20)
+        self.app.handle_key("N")
+        for _ in range(25):
+            self.app.handle_key("j")
+        self.assertEqual(self.app.history_view, 19)
+        drawn = self.draw()
+        self.assertTrue(any(t.endswith("Entry 0 · alpha") for t in drawn), drawn)
+        self.assertFalse(any(t.endswith("Entry 19 · alpha") for t in drawn), drawn)
 
 
 class HushTmux(ClientTmux):

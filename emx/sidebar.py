@@ -70,6 +70,7 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
+    ("N", "notifications: the last 20; ↵ opens one"),
     ("m", "mute or unmute spoken notices"),
     ("h", "stop the voice now; later notices still speak"),
     ("s", "panel to the other side"),
@@ -94,6 +95,9 @@ RENAME_FOOTER = "tab suggest · enter save · esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
+HISTORY_HINT = "↑↓ move · ↵ open · Esc back"
+HISTORY_EMPTY = "No notifications yet."
+OPEN_GONE = "That session isn't listed any more."
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
@@ -1261,7 +1265,7 @@ class Notices(threading.Thread):
             self.pending.append(notice)
 
     def take(self) -> list:
-        """The (session id, text, transition time) of each notice worded since the last take, oldest first."""
+        """The (session id, kind, title, text, transition time) of each notice worded since the last take, oldest first."""
         with self.lock:
             out, self.outbox = self.outbox, []
         return out
@@ -1335,7 +1339,7 @@ class Notices(threading.Thread):
             self.pending.remove(notice)
             if call is not None:
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
-            self.outbox.append((notice.id, text, notice.at))
+            self.outbox.append((notice.id, notice.kind, core.notice_title(session.name, project), text, notice.at))
             speak = self.voice
         if speak and text:
             self.speaker.speak(text, notice.at)
@@ -1426,8 +1430,10 @@ class App:
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
         self.hush_seen = None
-        self.missed = []
-        self.missed_misses = {}
+        self.history = []
+        self.history_misses = {}
+        self.history_view = None
+        self.history_scroll = 0
         self.opened = {}
         self.listings = Listings()
         self.home = os.path.expanduser("~")
@@ -1728,7 +1734,7 @@ class App:
             self.tmux.select(pane_id)
             if trigger == core.OPEN:
                 self.opened[sid] = time.monotonic()
-                self.missed = core.missed_clear(self.missed, sid)
+                self.history = core.history_read(self.history, sid)
             self.say("")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -2225,6 +2231,11 @@ class App:
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
         item = self.row_map.get(y)
+        if self.history_view is not None:
+            if item and item[0] == "entry":
+                self.history_view = item[1]
+                self.open_entry()
+            return
         if self.find is not None:
             # A header click would fold a group he cannot see folded until find closes.
             if not item or item[0] == "group":
@@ -2255,6 +2266,8 @@ class App:
             self.rename_key(key)
         elif self.find is not None:
             self.find_key(key)
+        elif self.history_view is not None:
+            self.history_key(key)
         elif self.help or key == "?":
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
@@ -2284,6 +2297,8 @@ class App:
             self.start_rename()
         elif key == "n":
             self.open_prompt()
+        elif key == "N":
+            self.open_history()
         elif key == "m":
             self.toggle_voice()
         elif key == "h":
@@ -2296,6 +2311,37 @@ class App:
             self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
+
+    def open_history(self) -> None:
+        """Opening the view marks nothing read: only opening a session does."""
+        self.history_view, self.history_scroll = 0, 0
+        self.peeking = False
+
+    def history_key(self, key) -> None:
+        if key == "\x1b":
+            self.history_view = None
+        elif key in (curses.KEY_UP, "k"):
+            self.history_view = max(0, self.history_view - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            self.history_view = max(0, min(len(self.history) - 1, self.history_view + 1))
+        elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
+            self.open_entry()
+
+    def open_entry(self) -> None:
+        if not 0 <= self.history_view < len(self.history):
+            return
+        if self.open_listed(self.history[self.history_view].id):
+            self.history_view = None
+
+    def open_listed(self, sid: str) -> bool:
+        """Open a session from outside the list (the history, a notification click) as the list would; False, saying so, when it isn't listed."""
+        if self.session(sid) is None:
+            self.say(OPEN_GONE, seconds=RESTORED_NOTICE_SECONDS)
+            return False
+        if self.find is not None:
+            self.close_find()
+        self.activate(("session", sid))
+        return True
 
     def toggle_voice(self) -> None:
         self.prefs = core.toggle_mode(self.prefs)
@@ -2316,7 +2362,7 @@ class App:
                 pass
 
     def bottom_lines(self, width: int, height: int | None = None) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
+        """(text, attr) lines for the area under the list: notice, prompt, the notifications strip, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
@@ -2340,10 +2386,12 @@ class App:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
+        if self.history_view is not None:
+            return lines + [(t, curses.A_DIM) for t in core.wrap_words(HISTORY_HINT, width)[:2]]
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
-        shown = core.missed_lines(self.missed, time.monotonic(), width, core.missed_room(height, len(lines) + 1))
-        lines += [(t, curses.A_BOLD if i == 0 else 0) for i, t in enumerate(shown)]
+        shown = core.history_strip(self.history, time.monotonic(), width, core.history_room(height, len(lines) + 1))
+        lines += [(t, curses.A_BOLD if i == 0 else curses.A_DIM if read else 0) for i, (t, read) in enumerate(shown)]
         lines.append((footer, curses.A_DIM))
         return lines
 
@@ -2399,7 +2447,9 @@ class App:
         self.put(1, 0, "─" * w, self.palette.attr("muted"))
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 2, h - len(bottom)
-        if self.help:
+        if self.history_view is not None:
+            self.draw_history(list_top, list_bottom, w)
+        elif self.help:
             self.draw_help(list_top, list_bottom, w)
         elif not self.loaded:
             if not self.list_error:
@@ -2459,6 +2509,34 @@ class App:
             else:
                 attr = self.palette.attr("muted" if tag in (None, core.STOPPED) else CATEGORY_TONE[tag]) | style
             self.put(0, 1 + x, text, attr)
+
+    def draw_history(self, top: int, bottom: int, width: int) -> None:
+        self.put(top, 1, core.HISTORY_TITLE, curses.A_BOLD)
+        if not self.history:
+            self.put(top + 1, 1, HISTORY_EMPTY, curses.A_DIM)
+            return
+        self.history_view = max(0, min(self.history_view, len(self.history) - 1))
+        rows = core.history_rows(self.history, time.monotonic(), max(1, width - 2))
+        lines = [("entry", i) for i in range(len(rows))]
+        heights = [len(r) for r in rows]
+        top, height = top + 1, max(1, bottom - top - 1)
+        self.history_scroll = core.list_window(heights, self.history_view, self.history_scroll, height)
+        self.row_map = core.row_hits(lines, heights, self.history_scroll, top, height)
+        y = top - self.history_scroll
+        for i, entry in enumerate(self.history):
+            for j, text in enumerate(rows[i]):
+                if top <= y < top + height:
+                    selected = core.selection_bar(i == self.history_view, self.focused is not False)
+                    if selected:
+                        self.put(y, 0, " " * width, self.palette.attr("plain", selected))
+                    if entry.read:
+                        attr = self.palette.attr("muted", selected) | curses.A_DIM
+                    elif j == 0:
+                        attr = self.palette.attr(CATEGORY_TONE.get(entry.kind, "plain"), selected) | curses.A_BOLD
+                    else:
+                        attr = self.palette.attr("plain", selected)
+                    self.put(y, 1, text, attr)
+                y += 1
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, "Keys", curses.A_BOLD)
@@ -2598,7 +2676,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
-        self.missed, self.missed_misses = core.missed_prune(self.missed, [s.id for s in sessions], self.missed_misses)
+        self.history, self.history_misses = core.history_prune(self.history, [s.id for s in sessions], self.history_misses)
         self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
@@ -2639,8 +2717,8 @@ class App:
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:
-        for sid, text, at in self.poller.notices.take():
-            self.missed = core.missed_add(self.missed, core.Missed(sid, text, at), self.opened)
+        for sid, kind, title, text, at in self.poller.notices.take():
+            self.history = core.history_add(self.history, core.Entry(sid, kind, title, text, at), self.opened)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
