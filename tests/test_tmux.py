@@ -247,6 +247,15 @@ class CollapseBinding(PrivateServer):
         (panel,) = [p for p in self.tmux.panes() if p.id == self.sidebar]
         self.assertEqual(panel.width, 40)
 
+    def test_respawning_the_panel_and_re_sourcing_the_config_keep_it_hidden(self):
+        self.tmux.toggle_zoom(self.main)
+        self.tmux.respawn(self.sidebar, "sleep 60")
+        self.assertEqual(self.zoomed(), "1")
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+        config = os.path.join(os.path.dirname(os.path.abspath(cli.__file__)), "emx.tmux.conf")
+        self.tmux.run("source-file", config)
+        self.assertEqual(self.zoomed(), "1")
+
     def test_left_at_an_empty_prompt_brings_the_panel_back(self):
         self.tmux.toggle_zoom(self.main)
         self.tmux.bind_left(self.sidebar, "true", 2)

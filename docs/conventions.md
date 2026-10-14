@@ -244,6 +244,16 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the panel's first read is a baseline, so a write before it is ignored; a `-q` read cannot prove the option is unset, so an empty value is no change.
 
+### A pref that mirrors a state tmux holds is written from what tmux reports, never from the key that changed it
+
+1. **Rule**: a pref that mirrors a state tmux holds is written from what tmux reports on the housekeep tick, never from the key that changed it. Hidden/shown is `#{window_zoomed_flag}`, adopted through `core.follow_zoom`; only `create_workspace` reads the pref back, at a fresh start.
+2. **Why**: many paths change the state without his key (Ctrl+\, the left arrow, `swap-pane -d`, the auto-restore `select-pane`), and they all mean "shown".
+3. **Minimal example**:
+   ```python
+   followed = core.follow_zoom(self.prefs, sidebar.zoomed)   # then save if changed
+   ```
+4. **Gotcha**: the pref lags by up to `HOUSEKEEP_SECONDS`; `select-pane` of the panel, `resize-pane -x` and `swap-pane -d` all unzoom, so width and layout code must check `zoomed` and hold while hidden.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
