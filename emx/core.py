@@ -231,15 +231,6 @@ class GroupConfirm:
     at: float
 
 
-def close_args(claude: str, confirm: Confirm) -> list:
-    """The commands that close the session, in order: a running one is stopped first, then removed.
-
-    Never with `--discard-unpushed` or `--force-remove-worktree`: when `claude rm` refuses, the row stays and he decides.
-    """
-    remove = [claude, "rm", confirm.id]
-    return [[claude, "stop", confirm.id], remove] if confirm.running else [remove]
-
-
 def close_targets(confirm) -> tuple:
     return confirm.sessions if isinstance(confirm, GroupConfirm) else (confirm,)
 
@@ -365,16 +356,8 @@ def closing_text(confirm) -> str:
     return f"Closing {targets[0].name}…" if len(targets) == 1 else f"Closing {len(targets)} sessions…"
 
 
-def closed_text(confirm: Confirm, output: str = "") -> str:
-    """Whatever `claude rm` printed past its first line (a worktree directory it left behind) follows on the same line."""
-    lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
-    extra = one_line("\n".join(lines[1:]))
-    done = f"Closed {confirm.name}."
-    return f"{done} {extra}" if extra else done
-
-
-def stopped_not_removed_text(confirm: Confirm, error: str) -> str:
-    return f"Stopped {confirm.name}, but didn't remove it: {error}"
+def closed_text(confirm: Confirm) -> str:
+    return f"Closed {confirm.name}."
 
 
 def header_label(confirm, group, closing) -> str | None:
@@ -1661,11 +1644,6 @@ def first_message(text: str) -> str:
         if line.strip():
             return line.strip()
     return ""
-
-
-def one_line(text: str) -> str:
-    """All of a CLI message on one line, for a refusal whose reason may come after its first line."""
-    return " ".join(line.strip() for line in strip_ansi(text).splitlines() if line.strip())
 
 
 @dataclass(frozen=True)

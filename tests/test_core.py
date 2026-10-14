@@ -2167,28 +2167,12 @@ class RestartCheck(unittest.TestCase):
 
 
 class CloseConfirm(unittest.TestCase):
-    """Ctrl+X twice on one row closes that session: a running one is stopped, then removed; anything else in between cancels."""
+    """Ctrl+X twice on one row closes that session: it is ended and removed from emx; anything else in between cancels."""
 
     def setUp(self):
         self.running = mk(id="a", name="emx-test-a")
         self.stopped = mk(id="a", name="emx-test-a", state="stopped", running=False)
         self.on_a = ("session", "a")
-
-    def test_close_args_stop_then_remove_a_running_session(self):
-        armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        self.assertEqual(core.close_args("claude", armed), [["claude", "stop", "a"], ["claude", "rm", "a"]])
-        for args in core.close_args("claude", armed):
-            with self.subTest(args=args):
-                self.assertFalse(any(a.startswith("--") for a in args))
-                self.assertNotIn("--discard-unpushed", args)
-                self.assertNotIn("--force-remove-worktree", args)
-
-    def test_close_args_only_remove_a_stopped_or_exited_one(self):
-        exited = mk(id="a", state="done", running=False)
-        for row in (self.stopped, exited):
-            with self.subTest(state=row.state):
-                armed, _ = core.press_close(None, self.on_a, row, 0.0)
-                self.assertEqual(core.close_args("claude", armed), [["claude", "rm", "a"]])
 
     def test_the_second_press_within_the_window_acts_on_the_first_press(self):
         armed, act = core.press_close(None, self.on_a, self.running, 10.0)
@@ -2273,20 +2257,6 @@ class CloseConfirm(unittest.TestCase):
     def test_notices(self):
         stop, _ = core.press_close(None, self.on_a, self.running, 0.0)
         self.assertEqual((core.closing_text(stop), core.closed_text(stop)), ("Closing emx-test-a…", "Closed emx-test-a."))
-        self.assertEqual(core.stopped_not_removed_text(stop, "worktree has 2 unpushed commits"),
-                         "Stopped emx-test-a, but didn't remove it: worktree has 2 unpushed commits")
-
-    def test_a_closed_notice_carries_what_rm_printed_past_its_first_line(self):
-        remove, _ = core.press_close(None, self.on_a, self.stopped, 0.0)
-        output = "\n\x1b[1mremoved a\x1b[0m\n\n  worktree directory left at /x/wt\n  (git no longer recognized it)\n"
-        self.assertEqual(
-            core.closed_text(remove, output), "Closed emx-test-a. worktree directory left at /x/wt (git no longer recognized it)",
-        )
-        self.assertEqual(core.closed_text(remove, "removed a\n"), "Closed emx-test-a.")
-
-    def test_one_line_keeps_every_line_of_a_refusal(self):
-        self.assertEqual(core.one_line("\x1b[31mrefused:\x1b[0m\n\n  2 unpushed commits\n"), "refused: 2 unpushed commits")
-        self.assertEqual(core.one_line(""), "")
 
     def group(self, *sessions, key="/r/app"):
         return core.Group(key, tuple(sessions))

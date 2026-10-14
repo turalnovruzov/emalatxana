@@ -98,7 +98,7 @@ PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next",
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
 PEEK_NO_ROOM = "Too short to peek."
-CLOSE_SECONDS = 30
+FORGET_TRIES = 3
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 MAX_QUEUED_KEYS = 64
@@ -176,27 +176,6 @@ def wait_until_running(engine: Engine, sid: str) -> tuple:
         time.sleep(LISTED_CHECK_SECONDS)
 
 
-def close_session(args: list) -> tuple:
-    """Run one of `core.close_args`' commands: (its output, None), or (None, its whole message on one line). Never raises."""
-    claude = args[0]
-    try:
-        done = subprocess.run(
-            args, capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-            timeout=CLOSE_SECONDS,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, f"claude {args[1]} timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.one_line(done.stderr) or core.one_line(done.stdout) or (
-            f"claude {args[1]} exited with {done.returncode}"
-        )
-    return done.stdout, None
-
-
 def list_subdirs(folder: str) -> list | None:
     """Names of the folders in `folder`, at most MAX_LISTED_NAMES of them, or None when it can't be read as a folder. Never raises.
 
@@ -264,24 +243,21 @@ class Listings:
 class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
-    A running session is stopped, then removed. `wait_for` holds the
-    Interrupters of any of them still running, cancelled when the close
-    began, and those that ended earlier possibly leaving the hidden viewer
-    they meant to kill. The close waits for them to end and tries each
-    kill again; while such a pane is still listed, nothing is closed. Any
-    of these he swapped into main is swapped out for the placeholder
-    before its kill. Any other hidden viewer an interrupt opened is gone,
-    or, with no close started, took the Esc or was swapped into main by
-    him, which makes it his like a viewer he opens; so an interrupt's
-    `claude attach` still starting can't land after the stop and resume
-    the session. Not covered: a window tmux made for a `new_hidden_window`
-    that then failed, since no pane id came back. `current` is the session
-    being closed now. `result` is (all closed, message, {id: closed}).
+    Closing ends the session and removes it from emx: a running one's pane
+    is killed (one in main is first swapped out for the placeholder, so the
+    layout keeps its two columns), and once a listing shows it no longer
+    running its folder under emx's state folder goes. The conversation
+    stays in Claude Code's history. `wait_for` holds the Interrupters of any
+    of them still running, cancelled when the close began; the close waits
+    for them to end, so no Esc lands in a pane being killed. `current` is
+    the session being closed now. `result` is (all closed, message, {id:
+    closed}).
     """
 
-    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = ()):
+    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = ""):
         super().__init__(daemon=True)
         self.engine, self.targets, self.wait_for = engine, tuple(targets), tuple(wait_for)
+        self.panel = panel
         self.current = self.targets[0]
         self.result = None
 
@@ -298,15 +274,9 @@ class Closer(threading.Thread):
         what = "it" if len(self.targets) == 1 else "any of them"
         for interrupter in self.wait_for:
             interrupter.join(max(0.0, deadline - time.monotonic()))
-            name = interrupter.interrupt.name
             if interrupter.is_alive():
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx is still interrupting {name}, so it didn't close {what}.", finished
-            if not interrupter.ended:
-                interrupter.end_opened(closing=True)
-            if not interrupter.ended:
-                finished.update((t.id, False) for t in self.targets)
-                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close {what}.", finished
+                return False, f"emx is still interrupting {interrupter.interrupt.name}, so it didn't close {what}.", finished
         messages = []
         for confirm in self.targets:
             self.current = confirm
@@ -320,14 +290,52 @@ class Closer(threading.Thread):
         session, fresh = core.checked_row(sessions, confirm.id)
         if not core.close_still_applies(confirm, session, fresh):
             return False, core.close_refusal(confirm, session, fresh)
-        output = ""
-        for args in core.close_args(self.engine.claude, confirm):
-            output, error = close_session(args)
-            if error and args[1] == "rm" and confirm.running:
-                return False, core.stopped_not_removed_text(confirm, error)
-            if error:
-                return False, error
-        return True, core.closed_text(confirm, output)
+        if session.running:
+            try:
+                self.end(confirm.id)
+            except TmuxError as exc:
+                return False, f"tmux: {exc}"
+            if not self.wait_until_ended(confirm.id):
+                return False, f"{confirm.name} is still running, so emx didn't remove it."
+        error = self.forget(confirm.id)
+        if error:
+            return False, error
+        return True, core.closed_text(confirm)
+
+    def end(self, sid: str) -> None:
+        """Kill the session's own pane, swapping the placeholder into main first when the pane is there."""
+        panes = self.engine.tmux.panes()
+        windows = {p.id: p.window for p in panes}
+        for pane in panes:
+            if pane.session != sid or not pane.agent or pane.dead:
+                continue
+            if windows.get(pane.id) is not None and windows.get(pane.id) == windows.get(self.panel):
+                placeholder = next((p for p in panes if p.role == "placeholder"), None)
+                if placeholder is None:
+                    raise TmuxError("there is no placeholder to put in main")
+                self.engine.tmux.swap(placeholder.id, pane.id)
+            self.engine.tmux.kill_pane(pane.id)
+
+    def wait_until_ended(self, sid: str) -> bool:
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while True:
+            sessions, _ = fetch_sessions(self.engine)
+            session, fresh = core.checked_row(sessions, sid)
+            if fresh and (session is None or not session.running):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LISTED_CHECK_SECONDS)
+
+    def forget(self, sid: str) -> str | None:
+        """None once the session's folder is gone, else the error. A few tries: the killed claude's last hook can still be writing into the folder as it goes."""
+        error = None
+        for _ in range(FORGET_TRIES):
+            done, error = self.engine.forget(sid)
+            if done:
+                return None
+            time.sleep(LISTED_CHECK_SECONDS)
+        return error
 
 
 class Renamer(threading.Thread):
@@ -1993,7 +2001,7 @@ class App:
             interrupter.cancel.set()
         wait_for += tuple(i for sid in sorted(ids) for i in self.unended.get(sid, ()))
         self.closing.update((sid, None) for sid in ids)
-        self.closer = Closer(self.engine, targets, wait_for)
+        self.closer = Closer(self.engine, targets, wait_for, self.me)
         self.closer.start()
         self.say(core.closing_text(act))
 
