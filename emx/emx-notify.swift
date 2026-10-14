@@ -212,7 +212,8 @@ class Clicked: NSObject, UNUserNotificationCenterDelegate, NSApplicationDelegate
             _ = openSession(open)
         }
         completionHandler()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp.terminate(nil) }
+        // A click can also land while `post` waits; that run has no NSApplication and exits by itself.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { NSApp?.terminate(nil) }
     }
 
     func userNotificationCenter(
