@@ -960,10 +960,12 @@ HELPER_STATES = (HELPER_OK, HELPER_PENDING, HELPER_BLOCKED, HELPER_UNAVAILABLE) 
 TOP_GAP = 2
 
 
-def mode_tag(mode: str, helper: str) -> str:
-    """The top line's mark: none for notification mode working as it should, the default; "voice" in voice mode; why banners can't show when they can't."""
+def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
+    """The top line's mark: none for notification mode working as it should, the default; "voice" in voice mode; why banners can't show when they can't, unless a laptop is showing them."""
     if mode == VOICE_MODE:
         return VOICE_TAG
+    if relayed:
+        return ""
     return {HELPER_BLOCKED: BLOCKED_TAG, HELPER_UNAVAILABLE: UNAVAILABLE_TAG}.get(helper, "")
 
 
@@ -3165,6 +3167,118 @@ def terminal_bundle(env: Mapping) -> str:
     if _BUNDLE_ID.fullmatch(bundle):
         return bundle
     return TERM_PROGRAM_BUNDLES.get(env.get("TERM_PROGRAM", ""), "")
+
+
+_REMOTE_HOST = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._@-]{0,252}")
+CONTROL_PERSIST_SECONDS = 30
+CONTROL_PATH_MAX = 80
+RELAY_MAX_BYTES = 256 * 1024
+RELAY_LINE_MAX = 8192
+RELAY_BEAT_SECONDS = 5
+RELAY_LIVE_SECONDS = 15
+RELAY_BEAT = {"kind": "beat"}
+_REMOTE_VERSION = re.compile(r"emx (\d+\.\d+\.\d+)\s*")
+
+
+def remote_host(value: str) -> str | None:
+    """The host as given when it is safe to hand to ssh as a bare argument, else None; a leading `-` would be read as an ssh option."""
+    if not isinstance(value, str) or _REMOTE_HOST.fullmatch(value) is None:
+        return None
+    return value
+
+
+def control_path(uid: int, pid: int, root: str = "/tmp") -> str:
+    return f"{root}/emx-ssh-{uid}/{pid}"
+
+
+def remote_shell(base: str, *args: str) -> str:
+    """The one-argument command ssh runs on the server: emx through a login shell, so that shell's PATH finds it."""
+    return 'exec "$SHELL" -lc ' + shlex.quote(" ".join([base, *map(shlex.quote, args)]))
+
+
+def ssh_master_args(ssh: str, host: str, control: str) -> list:
+    return [
+        ssh, "-o", "ControlMaster=yes", "-o", f"ControlPath={control}", "-o", f"ControlPersist={CONTROL_PERSIST_SECONDS}",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=20", "-N", "-f", host,
+    ]
+
+
+def ssh_client_args(ssh: str, host: str, control: str | None, command: str, tty: bool = False, batch: bool = False) -> list:
+    args = [ssh, "-t"] if tty else [ssh, "-n", "-T"]
+    if control:
+        args += ["-o", "ControlMaster=no", "-o", f"ControlPath={control}"]
+    else:
+        args += ["-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+    if batch:
+        args += ["-o", "BatchMode=yes"]
+    return args + [host, command]
+
+
+def ssh_exit_args(ssh: str, host: str, control: str) -> list:
+    return [ssh, "-o", f"ControlPath={control}", "-O", "exit", host]
+
+
+def remote_version(text: str) -> str | None:
+    """The X.Y.Z of the last `emx X.Y.Z` line; a login shell may print other lines first."""
+    found = None
+    for line in (text or "").splitlines():
+        match = _REMOTE_VERSION.fullmatch(line)
+        if match:
+            found = match.group(1)
+    return found
+
+
+def version_note(host: str, local: str, remote: str) -> str | None:
+    if local == remote:
+        return None
+    return f"emx on {host} is {remote}; this laptop has {local}."
+
+
+def relay_path(state: Path) -> Path:
+    return state / "relay.jsonl"
+
+
+def relay_notice(title: str, text: str, plain: str, sid: str, mode: str, at: float) -> dict:
+    return {"kind": "notice", "title": title, "text": text, "plain": plain, "sid": sid, "mode": mode, "at": at}
+
+
+def relay_hush(at: float) -> dict:
+    return {"kind": "hush", "at": at}
+
+
+def parse_relay(line: str) -> dict | None:
+    """One relay line as a record, or None; never raises. The texts are cleaned and the id checked here because the line comes from another machine."""
+    try:
+        if not isinstance(line, str) or len(line) > RELAY_LINE_MAX:
+            return None
+        data = json.loads(line)
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("kind")
+        if kind in ("hush", "beat"):
+            return {"kind": kind}
+        if kind != "notice":
+            return None
+        title, text, plain = data.get("title"), data.get("text"), data.get("plain")
+        sid = data.get("sid")
+        if not all(isinstance(v, str) for v in (title, text, plain, sid)) or not is_session_id(sid):
+            return None
+        if data.get("mode") not in MODES:
+            return None
+        title, text, plain = clean_notice(title), clean_notice(text), clean_notice(plain)
+        if not text and not plain:
+            return None
+        return {"kind": "notice", "title": title, "text": text, "plain": plain, "sid": sid, "mode": data["mode"]}
+    except (ValueError, RecursionError):
+        return None
+
+
+def relay_live(value: str, now: float) -> bool:
+    """Whether the heartbeat the follower stamped is fresh, so a laptop is connected."""
+    try:
+        return -1 <= now - float(value) <= RELAY_LIVE_SECONDS
+    except (TypeError, ValueError):
+        return False
 
 
 def hush_due(seen: str | None, value: str) -> tuple:

@@ -3804,7 +3804,132 @@ class TopLineTag(unittest.TestCase):
         self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_UNAVAILABLE), core.UNAVAILABLE_TAG)
         self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_OK), "")
         self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_PENDING), "")
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_UNAVAILABLE, True), "")
+        self.assertEqual(core.mode_tag(core.VOICE_MODE, core.HELPER_OK, True), core.VOICE_TAG)
         self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
+
+
+class RemoteHost(unittest.TestCase):
+    def test_accepts_names_from_an_ssh_config(self):
+        for value in ("myserver", "me@box.example.com", "box-1_a"):
+            self.assertEqual(core.remote_host(value), value)
+
+    def test_refuses_anything_ssh_could_read_as_an_option_or_a_second_word(self):
+        for value in ("-oProxyCommand=x", "", "a b", "a/b", "a\nb", "x=y", "a" * 254):
+            with self.subTest(value=value):
+                self.assertIsNone(core.remote_host(value))
+
+
+class ControlPath(unittest.TestCase):
+    def test_path_is_per_user_and_process(self):
+        self.assertEqual(core.control_path(501, 12345), "/tmp/emx-ssh-501/12345")
+
+    def test_longest_path_fits_a_socket(self):
+        self.assertLessEqual(len(core.control_path(2**32, 2**22)), core.CONTROL_PATH_MAX)
+
+
+class RemoteShell(unittest.TestCase):
+    def test_wraps_in_a_login_shell(self):
+        self.assertEqual(core.remote_shell("emx", "follow"), 'exec "$SHELL" -lc \'emx follow\'')
+        self.assertTrue(core.remote_shell("emx").endswith("-lc emx"))
+
+    def test_an_argument_with_a_quote_round_trips(self):
+        import shlex
+
+        self.assertEqual(shlex.split(core.remote_shell("emx", "a'b"))[-1], "emx 'a'\"'\"'b'")
+
+
+class SshArgs(unittest.TestCase):
+    def test_master_args_exact(self):
+        self.assertEqual(
+            core.ssh_master_args("ssh", "srv", "/tmp/emx-ssh-1/2"),
+            ["ssh", "-o", "ControlMaster=yes", "-o", "ControlPath=/tmp/emx-ssh-1/2", "-o", "ControlPersist=30",
+             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "ConnectTimeout=20", "-N", "-f", "srv"],
+        )
+
+    def test_client_with_a_terminal(self):
+        args = core.ssh_client_args("ssh", "srv", "/c", "cmd", tty=True)
+        self.assertEqual(args[:2], ["ssh", "-t"])
+        self.assertNotIn("-n", args)
+
+    def test_client_without_a_terminal(self):
+        args = core.ssh_client_args("ssh", "srv", "/c", "cmd")
+        self.assertIn("-n", args)
+        self.assertIn("-T", args)
+
+    def test_batch_host_and_command_positions(self):
+        args = core.ssh_client_args("ssh", "srv", "/c", "a command", batch=True)
+        self.assertIn("BatchMode=yes", args)
+        self.assertNotIn("BatchMode=yes", core.ssh_client_args("ssh", "srv", "/c", "x"))
+        self.assertEqual(args[-2:], ["srv", "a command"])
+        self.assertIn("ControlPath=/c", args)
+
+    def test_without_a_control_path_it_keeps_the_connection_alive_itself(self):
+        args = core.ssh_client_args("ssh", "srv", None, "cmd")
+        self.assertFalse([a for a in args if a.startswith("ControlPath")])
+        self.assertIn("ServerAliveInterval=15", args)
+
+    def test_exit_args_exact(self):
+        self.assertEqual(core.ssh_exit_args("ssh", "srv", "/c"), ["ssh", "-o", "ControlPath=/c", "-O", "exit", "srv"])
+
+
+class RemoteVersion(unittest.TestCase):
+    def test_reads_the_last_matching_line(self):
+        self.assertEqual(core.remote_version("motd\nemx 2.1.0\n"), "2.1.0")
+        self.assertIsNone(core.remote_version("emx: command not found"))
+
+    def test_note_only_when_they_differ(self):
+        self.assertIsNone(core.version_note("srv", "2.2.0", "2.2.0"))
+        self.assertEqual(core.version_note("srv", "2.2.0", "2.1.0"), "emx on srv is 2.1.0; this laptop has 2.2.0.")
+
+
+class ParseRelay(unittest.TestCase):
+    SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
+
+    def notice(self, **over):
+        record = core.relay_notice("t · p", "Done.", "Done plain.", self.SID, core.VOICE_MODE, 1.0)
+        record.update(over)
+        return record
+
+    def test_a_notice_round_trips(self):
+        got = core.parse_relay(json.dumps(self.notice()))
+        self.assertEqual(
+            got, {"kind": "notice", "title": "t · p", "text": "Done.", "plain": "Done plain.", "sid": self.SID, "mode": "voice"}
+        )
+
+    def test_texts_are_cleaned(self):
+        got = core.parse_relay(json.dumps(self.notice(text="Done [[slnc 9000]]\x9c")))
+        self.assertNotIn("[[", got["text"])
+        self.assertNotIn("]]", got["text"])
+        self.assertNotIn("\x9c", got["text"])
+        self.assertEqual(got["text"], "Done slnc 9000")
+
+    def test_bad_lines_are_none(self):
+        bad = [
+            json.dumps(self.notice(sid="../x")), json.dumps(self.notice(mode="loud")), json.dumps(self.notice(title=3)),
+            json.dumps(self.notice(text="", plain="")), json.dumps(self.notice(text="x" * 9000)), "[1]", "{",
+            json.dumps({"kind": "other"}),
+        ]
+        for line in bad:
+            with self.subTest(line=line[:40]):
+                self.assertIsNone(core.parse_relay(line))
+
+    def test_extra_fields_are_dropped(self):
+        self.assertNotIn("open", core.parse_relay(json.dumps(self.notice(open="rm -rf"))))
+
+    def test_hush_and_beat_parse(self):
+        self.assertEqual(core.parse_relay(json.dumps(core.relay_hush(1.0))), {"kind": "hush"})
+        self.assertEqual(core.parse_relay(json.dumps(core.RELAY_BEAT)), {"kind": "beat"})
+
+
+class RelayLive(unittest.TestCase):
+    def test_fresh_stale_future_and_garbage(self):
+        now = 1000.0
+        self.assertTrue(core.relay_live(str(now - 3), now))
+        self.assertFalse(core.relay_live(str(now - 20), now))
+        self.assertFalse(core.relay_live(str(now + 5), now))
+        self.assertFalse(core.relay_live("", now))
+        self.assertFalse(core.relay_live("x", now))
 
 
 class NotificationWording(unittest.TestCase):
