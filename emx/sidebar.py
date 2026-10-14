@@ -37,6 +37,7 @@ NOTICE_TICK_SECONDS = 0.5
 SPEAK_TIMEOUT = 60
 VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
+COLLAPSE_KEY = "C-q"
 RESTORED_NOTICE_SECONDS = 4
 WHATS_NEW_SECONDS = 60
 FOOTERS = (
@@ -73,6 +74,7 @@ HELP = (
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
+    ("^q", "hide the panel; ^q again, ^\\ or ← brings it back"),
     ("q", "detach; sessions keep running"),
     ("?", "close this help"),
 )
@@ -1677,9 +1679,14 @@ class App:
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
                 self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
+                self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.take_focus(sidebar)
+                followed = core.follow_zoom(self.prefs, sidebar.zoomed)
+                if followed is not self.prefs:
+                    self.prefs = followed
+                    self.save_prefs()
             if sidebar and main:
                 self.reconcile_widths(sidebar)
             if fresh_list:
@@ -1782,7 +1789,10 @@ class App:
         return self.main_pane.id if self.main_pane is not None else None
 
     def reconcile_widths(self, sidebar: Pane) -> None:
-        action = core.width_action(self.applied, (sidebar.window_width, sidebar.width))
+        action = core.width_action(self.applied, (sidebar.window_width, sidebar.width), zoomed=sidebar.zoomed)
+        if action == "hold":
+            self.applied = None
+            return
         if action == "adopt-panel":
             self.prefs["panel_width"] = sidebar.width
             self.save_prefs()

@@ -1,14 +1,16 @@
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from emx import __version__, cli, core
-from emx.tmux import VERSION_OPT, Pane, TmuxError
+from emx.tmux import SESSION, VERSION_OPT, Pane, Tmux, TmuxError
 
 
 class Attached(Exception):
@@ -186,6 +188,42 @@ class Hush(unittest.TestCase):
 
     def test_the_usage_names_hush(self):
         self.assertIn("hush", cli.USAGE)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class CreateWorkspace(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = tmp.name
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "XDG_CONFIG_HOME": os.path.join(self.dir, "config")})
+        env.start()
+        self.addCleanup(env.stop)
+        # A harmless command, so no real panel starts, polls claude agents or speaks.
+        quiet = mock.patch.object(cli, "self_command", lambda *args: "exec sleep 60")
+        quiet.start()
+        self.addCleanup(quiet.stop)
+        self.tmux = Tmux(f"emx-test-{uuid.uuid4().hex[:8]}", os.devnull)
+        self.addCleanup(self.kill_server)
+
+    def kill_server(self):
+        try:
+            self.tmux.run("kill-server")
+        except TmuxError:
+            pass
+
+    def show(self, fmt):
+        return self.tmux.run("display-message", "-p", "-t", f"={SESSION}:", fmt).strip()
+
+    def test_starts_hidden_when_left_hidden(self):
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_collapsed": True})
+        cli.create_workspace(self.tmux)
+        self.assertEqual(self.show("#{window_zoomed_flag}"), "1")
+        self.assertEqual(self.show("#{@emx_role}"), "placeholder")
+
+    def test_starts_shown_by_default(self):
+        cli.create_workspace(self.tmux)
+        self.assertEqual(self.show("#{window_zoomed_flag}"), "0")
 
 
 class Version(unittest.TestCase):

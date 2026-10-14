@@ -36,6 +36,7 @@ class Pane:
     window_width: int
     active: bool = False
     back: bool = False
+    zoomed: bool = False
 
 
 _PANE_FORMAT = "\t".join(
@@ -49,6 +50,7 @@ _PANE_FORMAT = "\t".join(
         "#{window_width}",
         "#{pane_active}",
         "#{" + BACK_OPT + "}",
+        "#{window_zoomed_flag}",
     ]
 )
 
@@ -88,13 +90,13 @@ class Tmux:
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")
-            if len(parts) != 9:
+            if len(parts) != 10:
                 continue
-            pid, window, dead, role, session, width, window_width, active, back = parts
+            pid, window, dead, role, session, width, window_width, active, back, zoomed = parts
             panes.append(
                 Pane(
                     pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0), active == "1",
-                    back == "1",
+                    back == "1", zoomed == "1",
                 )
             )
         return panes
@@ -145,6 +147,20 @@ class Tmux:
 
     def resize_width(self, pane: str, width: int) -> None:
         self.run("resize-pane", "-t", pane, "-x", str(width))
+
+    def toggle_zoom(self, pane: str) -> None:
+        self.run("resize-pane", "-Z", "-t", pane)
+
+    def bind_collapse(self, key: str, main: str) -> None:
+        """Bind `key` (no prefix) to zoom the main pane, which hides the panel; while zoomed the same command unzooms.
+
+        The id is baked in like bind_toggle's, so the panel rebinds when
+        main's id changes. Zooming also makes main the active pane, so from
+        the panel the key lands in the session. If main is not in the window
+        the key goes through to the pane instead of being swallowed.
+        """
+        main_here = f"#{{P:#{{?#{{==:#{{pane_id}},{main}}},1,}}}}"
+        self.run("bind-key", "-n", key, "if-shell", "-F", main_here, f"resize-pane -Z -t {main}", f"send-keys {key}")
 
     def bind_toggle(self, key: str, sidebar: str, main: str) -> None:
         """Bind `key` (no prefix) to jump between the sidebar and the main pane.
