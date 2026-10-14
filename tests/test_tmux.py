@@ -623,6 +623,29 @@ class Focus(PrivateServer):
         self.assertTrue(tty.startswith("/dev/tty"), tty)
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class ClearSessionOptionIf(PrivateServer):
+    OPT = "@emx_test_opt"
+
+    def test_a_matching_value_clears(self):
+        self.tmux.set_session_option(self.OPT, "abc")
+        self.tmux.clear_session_option_if(self.OPT, "abc")
+        self.assertEqual(self.tmux.session_option(self.OPT), "")
+
+    def test_a_different_value_is_left_alone(self):
+        self.tmux.set_session_option(self.OPT, "abc")
+        self.tmux.clear_session_option_if(self.OPT, "xyz")
+        self.assertEqual(self.tmux.session_option(self.OPT), "abc")
+
+    def test_a_matching_value_clears_with_a_second_session_on_the_server(self):
+        self.tmux.run("new-session", "-d", "-s", "other-session", "-x", "80", "-y", "24")
+        self.tmux.run("set-option", "-t", "=other-session:", self.OPT, "other")
+        self.tmux.set_session_option(self.OPT, "abc")
+        self.tmux.clear_session_option_if(self.OPT, "abc")
+        self.assertEqual(self.tmux.session_option(self.OPT), "")
+        self.assertEqual(self.tmux.run("show-options", "-qv", "-t", "=other-session:", self.OPT).strip(), "other")
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class HushAcrossServers(unittest.TestCase):
     """The real launcher's `hush` against two private servers: only the one named by EMX_SOCKET is touched."""
 
