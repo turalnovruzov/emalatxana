@@ -1,4 +1,4 @@
-<!-- template: product-owner @ 0.1.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.2.0 — shared; change it through Codery -->
 
 # emalatxana docs
 

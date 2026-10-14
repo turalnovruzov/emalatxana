@@ -4,7 +4,7 @@ description: Executor. Works the plan's steps in order, writes the tests they na
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
 ---
-<!-- template: product-owner @ 0.1.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.2.0 — shared; change it through Codery -->
 
 **Before starting:** read `CLAUDE.md`, including its `## This project` section, and `README.md` when the project has one. The README holds the idea; `CLAUDE.md` holds how the project runs. **If your code and the README disagree, your code is wrong.**
 

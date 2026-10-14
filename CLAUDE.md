@@ -1,4 +1,4 @@
-<!-- BEGIN CODERY TEMPLATE product-owner @ 0.1.0 -->
+<!-- BEGIN CODERY TEMPLATE product-owner @ 0.2.0 -->
 # The emalatxana system
 
 **This block is shared by Tural's product-owner projects and Codery owns it: change it through Codery, never here.** Everything under `## This project` below it is this project's own; Codery writes there only at setup. **This file is the system.**
@@ -20,8 +20,8 @@
 Three separate pieces, each of which can run in its own session. The GitHub issue is the only memory between them.
 
 - **Capture** ([`capture`](.claude/skills/capture/SKILL.md)): he says an idea, and it becomes one GitHub issue labelled `idea`.
-- **Refinement** ([`refine`](.claude/skills/refine/SKILL.md)): the agent and he refine an `idea` one item at a time; he decides each. On his go the issue is relabelled `ready`.
-- **Development** (everything below): works `ready` issues only.
+- **Refinement** ([`refine`](.claude/skills/refine/SKILL.md)): the agent and he refine an `idea` one item at a time; he decides each. An item that involves what he will see on a screen is drawn on a Claude Design canvas, whose link and his chosen boards go under `## Decided`. On his go the issue is relabelled `ready`.
+- **Development** (everything below): works `ready` issues only. When he picks an issue that is neither `ready` nor tiny (labelled `tiny` or called tiny by him; an `idea`, or one with no label, such as an issue from before this system), it goes through `refine` first: do not plan it or ask its questions any other way.
 
 Development depends on refinement, with one exception: a tiny fix. **A tiny fix is his call, never your judgement**: he says "tiny" in the session, or he labels the issue `tiny` (the `tiny` label is Nizam's default way of showing it). A tiny fix skips refinement; review still runs.
 
@@ -36,7 +36,7 @@ When a decision is his, stop that one piece and ask it in-session, then keep wor
 pick (`ready` or `tiny` issue) → locate → plan → plan review → execute → review → verify → CI → merge → tell him. Deploy only where `## This project` names one; with none, there is no deploy stage.
 
 - **locate**: `locator` maps, up to three.
-- **plan**: `planner` writes `.codery/run/<issue>-<slug>/plan.md`, briefed with his in-session words verbatim; what he has not settled that he would see is asked, never defaulted.
+- **plan**: `planner` writes `.codery/run/<issue>-<slug>/plan.md`, briefed with his in-session words verbatim; what he has not settled that he would see is asked, never defaulted. When the issue's `## Decided` links a canvas, you read the chosen boards with Artifact `read` and pass their source in the planner's brief.
 - **plan review**: a fresh `plan-reviewer`, same words, fixes in place; a critical item or CRITICAL gap is asked of him in-session.
 - **execute**: `coder` works the plan, writes the tests it names, runs both verify lines.
 - **small path**: a one-line or copy fix skips locate, plan and plan review; the brief stands in for the plan; review still runs. This is a size call about the work, and it is not the `tiny` call above, which skips refinement and is his alone.
@@ -44,7 +44,7 @@ pick (`ready` or `tiny` issue) → locate → plan → plan review → execute �
 - **CI**: every PR runs CI, and a red CI blocks the merge. Never merge on red.
 - **merge**: you self-merge (squash) once review, [verification](#verification) evidence and a green CI are in; the project's versioning rule, if `## This project` names one, is part of that evidence. His merge is not a gate. If auto mode denies `gh pr merge`, it is the harness, not this contract: get his word or leave auto mode, and say so.
 - **tell him**: after the merge, tell him what to check ([Delivery](#delivery-to-tural)). Show him a preview only when he asks for one in the session.
-- **UI changes** go through `ui-verifier` when `.claude/agents/ui-verifier.md` exists; screenshots are the evidence of done, and he is not asked to confirm by eye what a screenshot can prove.
+- **UI changes** go through `ui-verifier` when `.claude/agents/ui-verifier.md` exists; screenshots are the evidence of done, and he is not asked to confirm by eye what a screenshot can prove. The plan's Design reference (the issue's chosen boards), alongside the project's own references, is what the ui-verifier checks against.
 
 ## The squad
 
@@ -65,7 +65,7 @@ No commit, PR body, issue comment, fixture, log or evidence holds secrets or pri
 
 ## Gates
 
-**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** (a dependency's or the project's own, e.g. 1.x to 2.0.0) ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, repo settings, and any deploy). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate. Everything else proceeds without him. A decision that is his stops only the piece it belongs to (see [They keep working](#they-keep-working)).
+**Tural's gates, the only ones:** product direction and scope; this contract and any change to it; **a new library, a new third-party service, or a major version bump** (a dependency's or the project's own, e.g. 1.x to 2.0.0) ([technology gate](#the-technology-gate)); **spending money**; **anything irreversible or outward-facing**, meaning beyond the repo (releases or packages, posting or messaging anywhere, repo settings, and any deploy other than the one `## This project` names). Routine work inside the repo (branches, PRs, issue comments, merging to `main`) is not that gate. Everything else proceeds without him. A decision that is his stops only the piece it belongs to (see [They keep working](#they-keep-working)).
 
 **Machine and process gates:**
 
