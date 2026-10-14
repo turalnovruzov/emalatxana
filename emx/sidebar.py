@@ -383,7 +383,7 @@ class Renamer(threading.Thread):
                 return False, refusal, False
             gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
             if gate is None:
-                return False, f"emx can't check {self.rename.old}'s viewer safely, so it didn't rename it.", False
+                return False, f"emx can't check {self.rename.old}'s session safely, so it didn't rename it.", False
             report = self.tmux.type_if(
                 viewer.id, gate, core.rename_line(self.rename.new), core.TYPED, core.gate_report(SESSION_OPT),
                 enter=False,
@@ -520,7 +520,7 @@ class Interrupter(threading.Thread):
                 return False, ""
             gate = core.type_gate(pane.id, self.panel, interrupt.id, screen.cursor_y, SESSION_OPT, cursor_x=screen.cursor_x)
             if gate is None:
-                return False, f"emx can't check {interrupt.name}'s viewer safely, so it didn't interrupt it."
+                return False, f"emx can't check {interrupt.name}'s session safely, so it didn't interrupt it."
             report = self.tmux.key_if(pane.id, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
             refusal = core.gate_refusal(interrupt, report, screen.cursor_y, cursor_x=screen.cursor_x)
             if refusal:
@@ -1324,7 +1324,7 @@ class Notices(threading.Thread):
                 call = None
             text = core.clean_notice(call.text) if call is not None else ""
         if not text:
-            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.id, notice.kind))
+            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.named, notice.kind))
         if self.stale(notice):
             self.drop(notice)
             return
@@ -1568,7 +1568,7 @@ class App:
             self.main_pane = main
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
-                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
+                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket))
                 self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
@@ -1740,9 +1740,15 @@ class App:
         this thread, as the prefs are; no file of Claude's is. A new pane is
         tagged before it can be swapped into main, since the ← binding and
         `cursor_on_focus` read the tag; one that can't be tagged is killed, or
-        a second open would resume the same conversation again.
+        a second open would resume the same conversation again. Only his
+        open resumes: any other trigger finding no live pane is refused, even
+        when the listing it took still showed the session running.
         """
         if not self.confirm_attach(sid, trigger, checked):
+            return None
+        if trigger != core.OPEN:
+            shown = self.session(sid) or (checked[0] if checked else None)
+            self.say(core.refusal(shown.name if shown else sid, trigger, True, shown), error=True)
             return None
         command, error = self.engine.resume_command(sid)
         if error:
@@ -1755,8 +1761,9 @@ class App:
             return dead.id
         pane_id = self.tmux.new_hidden_window(command, cwd=cwd)
         try:
-            self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+            # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
             self.tmux.set_pane_option(pane_id, AGENT_OPT, AGENT)
+            self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
         except TmuxError:
             try:
                 self.tmux.kill_pane(pane_id)
@@ -2628,7 +2635,7 @@ class App:
         now = time.monotonic()
         for session in events:
             if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
-                self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
+                self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:
         for sid, text, at in self.poller.notices.take():

@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -130,7 +131,7 @@ class EngineStore(StoreCase):
         self.assertEqual(words[:4], ["exec", "claude", "--session-id", session.id])
         self.assertEqual(words[4:6], ["--settings", os.path.join(self.key_dir(session.id), "settings.json")])
         self.assertEqual(words[-2:], ["--", "fix it"])
-        self.assertEqual(tmux.options, [("%7", SESSION_OPT, session.id), ("%7", AGENT_OPT, "claude")])
+        self.assertEqual(tmux.options, [("%7", AGENT_OPT, "claude"), ("%7", SESSION_OPT, session.id)])
 
     def test_the_returned_session_is_running_and_starting(self):
         _, (session, _) = self.start()
@@ -353,6 +354,52 @@ class EngineStore(StoreCase):
             record = json.load(fh)
         self.assertEqual((record["title"], record["cwd"]), ("Fixing the login bug", self.folder))
         self.assertFalse(engine.set_title("..", "x", state=self.state)[0])
+
+    def overlapping(self, first, second):
+        """Run `first` and, while it holds the record it read, `second` on another thread: (whether `second` was still waiting then, the record after both)."""
+        self.write_record()
+        real, waiting = engine._read_record, []
+        mine = threading.current_thread()
+
+        def read_then_let_the_other_in(state, key):
+            record = real(state, key)
+            if threading.current_thread() is mine and not waiting:
+                other = threading.Thread(target=second)
+                other.start()
+                other.join(0.3)
+                waiting.append((other, other.is_alive()))
+            return record
+
+        with mock.patch.object(engine, "_read_record", read_then_let_the_other_in):
+            first()
+        other, blocked = waiting[0]
+        other.join(5)
+        with open(os.path.join(self.key_dir(), "session.json"), encoding="utf-8") as fh:
+            return blocked, json.load(fh)
+
+    def test_a_resume_and_a_rename_at_once_keep_both_fields(self):
+        blocked, record = self.overlapping(
+            lambda: engine.resume_command(KEY, "claude", state=self.state),
+            lambda: engine.set_name(KEY, "renamed", state=self.state),
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(record["name"], "renamed")
+        self.assertNotEqual(record["run_at"], 0)
+
+    def test_a_title_and_a_resume_at_once_keep_both_fields(self):
+        blocked, record = self.overlapping(
+            lambda: engine.set_title(KEY, "Fixing the login bug", state=self.state),
+            lambda: engine.resume_command(KEY, "claude", state=self.state),
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(record["title"], "Fixing the login bug")
+        self.assertNotEqual(record["run_at"], 0)
+
+    def test_naming_a_forgotten_session_never_brings_its_folder_back(self):
+        self.write_record()
+        engine.forget(KEY, state=self.state)
+        self.assertFalse(engine.set_name(KEY, "x", state=self.state)[0])
+        self.assertFalse(os.path.exists(self.key_dir()))
 
 
 class EngineHandle(StoreCase):

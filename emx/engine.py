@@ -8,6 +8,7 @@ under `~/.claude`, whose transcripts are only read. Wrappers return
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shlex
@@ -15,6 +16,7 @@ import shutil
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from emx import BIN, core
@@ -69,6 +71,22 @@ def _read_record(state, key: str) -> dict:
     return record
 
 
+@contextmanager
+def _record_lock(state, key: str):
+    """Held across every read-modify-write of a session's `session.json`, so two writers never lose each other's field.
+
+    The lock is a file of its own: `_write_atomic` replaces `session.json`'s
+    inode, which would drop a lock taken on it. Opening it never creates the
+    session's folder, so a session forgotten meanwhile stays gone.
+    """
+    fd = os.open(os.path.join(session_folder(state, key), "session.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _write_settings(state, key: str) -> None:
     _write_atomic(os.path.join(session_folder(state, key), "settings.json"), core.hook_settings(hook_command(state, key)))
 
@@ -120,8 +138,9 @@ def start(tmux: Tmux, claude: str, folder: str, message: str, state=None) -> tup
         _write_atomic(os.path.join(where, "session.json"), record)
         args = core.AGENTS[AGENT].launch(claude, key, os.path.join(where, "settings.json"), message, name)
         pane = tmux.new_hidden_window(core.pane_command(args), cwd=record["cwd"])
-        tmux.set_pane_option(pane, SESSION_OPT, key)
+        # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
         tmux.set_pane_option(pane, AGENT_OPT, AGENT)
+        tmux.set_pane_option(pane, SESSION_OPT, key)
     except (OSError, TmuxError) as exc:
         if pane:
             try:
@@ -143,10 +162,11 @@ def resume_command(key: str, claude: str, state=None) -> tuple:
     if not core.is_session_id(key):
         return None, "That is not a session of emx's."
     try:
-        record = _read_record(state, key)
-        folded = core.fold_events(_events(state, key))
-        _write_settings(state, key)
-        _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, "run_at": _now_ms()})
+        with _record_lock(state, key):
+            record = _read_record(state, key)
+            folded = core.fold_events(_events(state, key))
+            _write_settings(state, key)
+            _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, "run_at": _now_ms()})
     except (OSError, ValueError) as exc:
         return None, f"Couldn't read the session's record: {' '.join(str(exc).split())}"
     settings = os.path.join(session_folder(state, key), "settings.json")
@@ -215,8 +235,9 @@ def _set_field(key: str, field: str, value: str, state) -> tuple:
     if not core.is_session_id(key):
         return False, "That is not a session of emx's."
     try:
-        record = _read_record(state, key)
-        _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, field: value})
+        with _record_lock(state, key):
+            record = _read_record(state, key)
+            _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, field: value})
     except (OSError, ValueError) as exc:
         return False, f"Couldn't record the name: {' '.join(str(exc).split())}"
     return True, None

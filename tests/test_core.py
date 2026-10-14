@@ -1745,6 +1745,9 @@ class EmptyPromptOnRealScreens(unittest.TestCase):
         self.assertFalse(core.empty_prompt(line, below, x, shown, width + 1))
         self.assertFalse(core.empty_prompt(line, "  second line", x, shown, width))
         self.assertFalse(core.empty_prompt(" " + line, below, x, shown, width))
+        self.assertTrue(core.empty_prompt(" " + line, below, x + 1, shown, width))
+        self.assertFalse(core.empty_prompt(" " + line, below, x + 2, shown, width))
+        self.assertFalse(core.empty_prompt("  1. " + line, below, x + 5, shown, width))
 
 
 class PromptHoldsOnly(unittest.TestCase):
@@ -2395,14 +2398,14 @@ class RenameChecks(unittest.TestCase):
         self.assertIsNone(core.gate_refusal(r, core.TYPED, 26))
         cases = {
             "1 0 1 2 26 abc": "scrolled back",
-            "0 1 1 2 26 abc": "viewer changed",
-            "0 0 1 2 26 other": "viewer changed",
-            "0 0 1 2 26": "viewer changed",
+            "0 1 1 2 26 abc": "session changed",
+            "0 0 1 2 26 other": "session changed",
+            "0 0 1 2 26": "session changed",
             "0 0 0 2 26 abc": "prompt changed",
             "0 0 1 7 26 abc": "prompt changed",
             "0 0 1 2 25 abc": "prompt changed",
             "0 0 1 2 26 abc": "Focus left the panel",
-            "": "viewer changed",
+            "": "session changed",
         }
         for report, want in cases.items():
             with self.subTest(report=report):
@@ -2431,7 +2434,7 @@ class RenameChecks(unittest.TestCase):
         rename = core.Rename("named", "emx-test-named", "fresh")
         self.assertEqual(
             core.rename_screen_refusal(rename, rename_screen("interactive-prompt-permission")),
-            "emx-test-named's viewer isn't showing its prompt, so emx didn't rename it.",
+            "emx-test-named's session isn't showing its prompt, so emx didn't rename it.",
         )
         self.assertEqual(
             core.rename_screen_refusal(rename, rename_screen("prompt-permission")),
@@ -2494,8 +2497,8 @@ class InterruptChecks(unittest.TestCase):
         i = core.Interrupt("abc", "alpha")
         self.assertIsNone(core.gate_refusal(i, core.TYPED, 26, cursor_x=17))
         cases = {
-            "1 0 1 17 26 abc": "alpha's viewer was scrolled back just before emx sent Esc, so it didn't. Press q in it, then try again.",
-            "0 0 1 17 26 other": "alpha's viewer changed just before emx sent Esc, so emx didn't interrupt it.",
+            "1 0 1 17 26 abc": "alpha's session was scrolled back just before emx sent Esc, so it didn't. Press q in it, then try again.",
+            "0 0 1 17 26 other": "alpha's session changed just before emx sent Esc, so emx didn't interrupt it.",
             "0 0 1 2 26 abc": "alpha's prompt changed just before emx sent Esc, so emx didn't interrupt it.",
             "0 0 1 17 26 abc": "Focus left the panel, so emx didn't interrupt alpha.",
         }
@@ -3534,19 +3537,26 @@ class NoticeText(unittest.TestCase):
         self.assertTrue(core.notice_ready(core.NOTICE_NEEDS, mk(state="blocked"), pending, 0))
         self.assertFalse(core.notice_ready(core.NOTICE_NEEDS, mk(state="blocked"), unanswered, 1))
 
-    def test_a_done_waits_out_the_settle_window_even_with_its_words_in_the_transcript(self):
-        done = mk(state="done")
+    def test_a_done_with_its_words_is_ready_at_once(self):
+        answered = core.Transcript(prompt="Go", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, mk(state="done"), answered, 0))
+
+    def test_a_done_with_a_queued_prompt_waits_out_the_settle_window_even_with_its_words(self):
+        queued = mk(state="done", queued=True)
         answered = core.Transcript(prompt="Go", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")
         for waited in (0, 2, core.NOTICE_SETTLE_SECONDS - 0.1):
             with self.subTest(waited=waited):
-                self.assertFalse(core.notice_ready(core.NOTICE_DONE, done, answered, waited))
-        self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, answered, core.NOTICE_SETTLE_SECONDS))
+                self.assertFalse(core.notice_ready(core.NOTICE_DONE, queued, answered, waited))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, queued, answered, core.NOTICE_SETTLE_SECONDS))
 
     def test_the_fallback_lines(self):
-        self.assertEqual(core.fallback_notice("app", "tax fix", "i1", core.NOTICE_NEEDS), "tax fix, in app, needs you.")
-        self.assertEqual(core.fallback_notice("app", "tax fix", "i1", core.NOTICE_DONE), "tax fix, in app, is done.")
-        self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_NEEDS), "A session in app needs you.")
-        self.assertEqual(core.fallback_notice("app", "i1", "i1", core.NOTICE_DONE), "A session in app is done.")
+        self.assertEqual(core.fallback_notice("app", "tax fix", True, core.NOTICE_NEEDS), "tax fix, in app, needs you.")
+        self.assertEqual(core.fallback_notice("app", "tax fix", True, core.NOTICE_DONE), "tax fix, in app, is done.")
+        self.assertEqual(core.fallback_notice("app", "1a2b3c4d", False, core.NOTICE_NEEDS), "A session in app needs you.")
+        self.assertEqual(core.fallback_notice("app", "1a2b3c4d", False, core.NOTICE_DONE), "A session in app is done.")
+
+    def test_an_unnamed_session_showing_claudes_title_is_still_a_session_in_its_project(self):
+        self.assertEqual(core.fallback_notice("app", "Fix the tax rounding", False, core.NOTICE_DONE), "A session in app is done.")
 
     def test_no_control_character_survives(self):
         got = core.clean_notice("a\x1b]9;x\x07b\x9c")
@@ -3616,8 +3626,8 @@ class NoticeText(unittest.TestCase):
         self.assertEqual(self.check_body(self.HOSTILE), "x\\yz]9;w")
 
     def test_a_fallback_line_built_from_a_hostile_name_is_safe_too(self):
-        self.check_body(core.fallback_notice("app", self.HOSTILE, "i1", core.NOTICE_DONE))
-        self.check_body(core.fallback_notice(self.HOSTILE, "n", "i1", core.NOTICE_NEEDS))
+        self.check_body(core.fallback_notice("app", self.HOSTILE, True, core.NOTICE_DONE))
+        self.check_body(core.fallback_notice(self.HOSTILE, "n", True, core.NOTICE_NEEDS))
 
 
 SAY_VOICES = """\
@@ -3999,6 +4009,28 @@ class FoldEvents(unittest.TestCase):
         record = core.hook_record(text, 5)
         self.assertEqual((record["event"], record["session_id"], record["cwd"]), ("PostToolUse", KEY, "/w"))
 
+    def test_a_prompt_queued_before_the_turns_stop_marks_that_stop_queued(self):
+        state = self.fold(event("SessionStart"), event("UserPromptSubmit"), event("UserPromptSubmit"), event("Stop"))
+        self.assertEqual((state.state, state.queued), ("done", True))
+
+    def test_a_turn_with_one_prompt_ends_unqueued(self):
+        state = self.fold(event("SessionStart"), event("UserPromptSubmit"), event("PreToolUse"), event("Stop"))
+        self.assertEqual((state.state, state.queued), ("done", False))
+
+    def test_the_queued_prompts_own_stop_is_unqueued(self):
+        state = self.fold(event("UserPromptSubmit"), event("UserPromptSubmit"), event("Stop"), event("Stop"))
+        self.assertEqual((state.state, state.queued), ("done", False))
+        state = self.fold(event("UserPromptSubmit"), event("UserPromptSubmit"), event("Stop"), event("PreToolUse"), event("Stop"))
+        self.assertEqual((state.state, state.queued), ("done", False))
+
+    def test_queued_clears_once_the_next_turn_starts(self):
+        state = self.fold(event("UserPromptSubmit"), event("UserPromptSubmit"), event("Stop"), event("PreToolUse"))
+        self.assertEqual((state.state, state.queued), ("working", False))
+
+    def test_a_prompt_before_a_session_start_does_not_count_towards_queued(self):
+        state = self.fold(event("UserPromptSubmit"), event("SessionStart", source="resume"), event("UserPromptSubmit"), event("Stop"))
+        self.assertFalse(state.queued)
+
     def test_other_notifications_change_nothing(self):
         state = self.fold(event("Stop"), event("Notification", notification_type="idle_prompt", message="waiting"))
         self.assertEqual(state.state, "done")
@@ -4163,6 +4195,15 @@ class EngineSessions(unittest.TestCase):
             self.assertEqual(core.state_word(s), "Idle")
         (s,) = self.listing([event("UserPromptSubmit", at=150)])
         self.assertTrue(core.interruptible(s))
+
+    def test_a_done_with_a_queued_prompt_is_listed_queued_while_running(self):
+        queued = [event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160), event("Stop", at=200)]
+        (s,) = self.listing(queued)
+        self.assertEqual((s.state, s.queued), ("done", True))
+        (s,) = self.listing(queued, panes=[])
+        self.assertEqual((s.state, s.queued), ("stopped", False))
+        (s,) = self.listing([event("UserPromptSubmit", at=150), event("Stop", at=200)])
+        self.assertEqual((s.state, s.queued), ("done", False))
 
     def test_the_interrupt_rule_never_touches_a_done_or_stopped_session(self):
         (s,) = self.listing([event("Stop", at=150)], interrupted={KEY: True})

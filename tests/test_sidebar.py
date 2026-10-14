@@ -464,7 +464,7 @@ class SwitchTo(AppCase):
         _, command, cwd = calls[0]
         self.assertEqual(cwd, self.cwd)
         self.assertIn(f"--resume {CLAUDE_SID}", command)
-        self.assertEqual(calls[1:3], [("set_pane_option", "%9", SESSION_OPT, KEY_A), ("set_pane_option", "%9", AGENT_OPT, "claude")])
+        self.assertEqual(calls[1:3], [("set_pane_option", "%9", AGENT_OPT, "claude"), ("set_pane_option", "%9", SESSION_OPT, KEY_A)])
         self.assertEqual(calls[3], ("swap", "%9", "%2"))
 
     def test_a_stopped_session_is_never_resumed_by_any_other_trigger(self):
@@ -477,6 +477,16 @@ class SwitchTo(AppCase):
                     self.assertEqual(calls, [])
                     self.assertIn("isn't running", self.app.notice)
                     self.assertTrue(self.app.notice_error)
+
+    def test_a_session_listed_running_whose_pane_has_gone_is_never_resumed_but_by_his_open(self):
+        running = core.Session(KEY_A, "alpha", self.cwd, "done", "", "", 1.0, True)
+        for held in (None, Pane("%5", "@2", True, "", KEY_A, 100, 100, agent="claude")):
+            with self.subTest(held=held):
+                self.app.say("")
+                calls = self.open(held, "done", core.NEW, (running, True))
+                self.assertEqual(calls, [])
+                self.assertIn("isn't running", self.app.notice)
+                self.assertTrue(self.app.notice_error)
 
     def test_an_old_viewer_with_no_agent_tag_is_never_taken_for_the_session(self):
         calls = self.open(Pane("%5", "@2", False, "", KEY_A, 100, 100), "stopped")
@@ -1325,6 +1335,25 @@ class CloseSession(AppCase):
         shown = "\n".join(scr.cells.values())
         self.assertIn("interrupt a working session; twice closes it", shown)
         self.assertIn("on a project header, twice closes the group", shown)
+
+    def test_the_help_and_footers_name_no_viewer_and_no_r_key(self):
+        self.assertNotIn("r", [key for key, _ in sidebar.HELP])
+        for text in [*sidebar.FOOTERS, *(f"{key} {what}" for key, what in sidebar.HELP)]:
+            with self.subTest(text=text):
+                self.assertNotIn("viewer", text)
+                self.assertNotIn("stop, then remove", text)
+
+    def test_r_in_the_panel_makes_no_tmux_call_and_starts_no_worker(self):
+        tmux = mock.Mock(spec=sidebar.Tmux)
+        self.app.tmux = tmux
+        with mock.patch.object(threading.Thread, "start", side_effect=AssertionError("a worker started")):
+            self.press("r")
+        self.assertEqual(tmux.method_calls, [])
+        self.assertEqual(self.log, [])
+        self.assertEqual(
+            (self.app.starter, self.app.closer, self.app.interrupters, self.app.renamer, self.app.namer),
+            (None, None, {}, None, None),
+        )
 
 
 class FakeListings:
@@ -2201,7 +2230,7 @@ class RenameSession(AppCase):
             "0 0 1 2 26 named": "Focus left the panel",
             "1 0 1 2 26 named": "scrolled back",
             "0 0 1 9 26 named": "prompt changed",
-            "0 0 1 2 26 b": "viewer changed",
+            "0 0 1 2 26 b": "session changed",
         }
         for report, want in cases.items():
             with self.subTest(report=report):
@@ -2235,7 +2264,7 @@ class RenameSession(AppCase):
         tmux.list = [replace(p, agent="") if p.session == "named" else p for p in tmux.list]
         self.rename_to("fresh name")
         self.settle()
-        self.refused("viewer has closed")
+        self.refused("session has closed")
         self.assertEqual(tmux.gates, [])
 
     def test_an_unnamed_sessions_own_empty_prompt_is_typed_into(self):
@@ -2471,7 +2500,7 @@ class RenameSession(AppCase):
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
-        self.assertEqual(self.app.notice, "emx-test-c's viewer has closed, so emx didn't rename it.")
+        self.assertEqual(self.app.notice, "emx-test-c's session has closed, so emx didn't rename it.")
 
     def test_a_name_the_listing_never_shows_is_reported(self):
         stopped_turn = session("named", "/p/alpha", state="done")
@@ -4369,8 +4398,8 @@ class NoticesWorker(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def notice(self, kind=core.NOTICE_DONE, age=core.NOTICE_SETTLE_SECONDS, sid="a"):
-        notice = core.Notice(sid, kind, f"emx-test-{sid}", "/p/alpha", time.monotonic() - age)
+    def notice(self, kind=core.NOTICE_DONE, age=0.0, sid="a", named=True):
+        notice = core.Notice(sid, kind, f"emx-test-{sid}", "/p/alpha", time.monotonic() - age, named)
         self.worker.add(notice)
         return notice
 
@@ -4431,6 +4460,7 @@ class NoticesWorker(unittest.TestCase):
         self.assertEqual((self.texts(), self.worker.pending, self.asked, self.speaker.spoken), ([], [], [], []))
 
     def test_a_done_from_a_queued_message_is_never_spoken_when_the_next_turn_starts_inside_the_window(self):
+        self.worker.want([replace(self.alpha, queued=True)])
         self.notice(age=2)
         self.assertFalse(self.worker.step())
         self.assertEqual(len(self.worker.pending), 1)
@@ -4438,10 +4468,26 @@ class NoticesWorker(unittest.TestCase):
         self.assertTrue(self.worker.step())
         self.assertEqual((self.texts(), self.worker.pending, self.asked, self.speaker.spoken), ([], [], [], []))
 
-    def test_a_done_with_its_words_ready_still_waits_for_the_window(self):
+    def test_a_done_with_a_queued_message_and_its_words_ready_still_waits_for_the_window(self):
+        self.worker.want([replace(self.alpha, queued=True)])
         self.notice(age=2)
         self.assertFalse(self.worker.step())
         self.assertEqual((self.texts(), self.asked), ([], []))
+        self.worker.pending.clear()
+        self.notice(age=core.NOTICE_SETTLE_SECONDS)
+        self.assertTrue(self.worker.step())
+        self.assertEqual(self.texts(), ["Alpha, sir: all fixed."])
+
+    def test_a_done_with_nothing_queued_and_its_words_ready_goes_at_once(self):
+        self.notice(age=0)
+        self.assertTrue(self.worker.step())
+        self.assertEqual(self.texts(), ["Alpha, sir: all fixed."])
+
+    def test_an_unnamed_sessions_plain_line_says_a_session_in_its_project(self):
+        self.answer = (None, "boom")
+        self.notice(named=False)
+        self.worker.step()
+        self.assertEqual(self.texts(), ["A session in alpha is done."])
 
     def test_a_session_that_changed_state_during_the_call_is_dropped_too(self):
         def slow(claude, excerpt, cwd):
@@ -4489,8 +4535,8 @@ class NoticesWorker(unittest.TestCase):
     def test_notices_go_out_oldest_first(self):
         self.worker.want([self.alpha, session("b", "/p/beta", "done")])
         self.transcripts.found["b"] = self.transcripts.found["a"]
-        self.notice(sid="a", age=core.NOTICE_SETTLE_SECONDS + 3)
-        self.notice(sid="b", age=core.NOTICE_SETTLE_SECONDS + 2)
+        self.notice(sid="a", age=3)
+        self.notice(sid="b", age=2)
         self.worker.step()
         self.worker.step()
         self.assertEqual(len(self.asked), 2)
@@ -4740,6 +4786,12 @@ class NoticeWiring(AppCase):
         self.assertEqual((notice.id, notice.kind, notice.name, notice.cwd), ("a", core.DONE, "emx-test-a", "/p/alpha"))
         self.step(session("a", "/p/alpha", "done"))
         self.assertEqual(len(self.pending()), 1)
+
+    def test_a_notice_remembers_whether_the_session_has_a_name_of_its_own(self):
+        unnamed = replace(session("a", "/p/alpha", "working"), name="1a2b3c4d", named=False)
+        self.step(unnamed, session("b", "/p/alpha", "working"))
+        self.step(replace(unnamed, state="done"), session("b", "/p/alpha", "done"))
+        self.assertEqual([(n.id, n.named) for n in self.pending()], [("a", False), ("b", True)])
 
     def test_needing_input_is_a_notice_of_its_own_kind(self):
         self.step(session("a", "/p/alpha", "working"))

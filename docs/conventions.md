@@ -73,7 +73,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
        return None
    command, error = self.engine.resume_command(sid)
    ```
-4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means a live pane carrying both the session's key and the agent tag, never `state` alone. A new pane is tagged before it can be swapped into main, and one that can't be tagged is killed, or a second open would resume the same conversation again. Respawning a live session's pane ends that session, so nothing respawns a pane that is not dead.
+4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means a live pane carrying both the session's key and the agent tag, never `state` alone. A new pane is tagged before it can be swapped into main, and one that can't be tagged is killed, or a second open would resume the same conversation again. The agent tag goes on before the session's key: a pane with a key and no agent tag is an old `claude attach` viewer, which the panel kills, and a listing can land between the two `set-option`s. Respawning a live session's pane ends that session, so nothing respawns a pane that is not dead, and a trigger other than `OPEN` that finds the session's pane dead or gone is refused even when its listing showed it running.
 
 ### `claude` calls, git calls and filesystem scans never run on the curses thread
 
@@ -90,17 +90,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; interrupts are one per session, so a second working row is interrupted while the first still is; folder listings are the other exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
-### A tmux key binding that intercepts a key fails open
+### A tmux key binding that intercepts a key fails open, except ← in a session's pane
 
-1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding.
-2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths.
+1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding. The one exception is ← in a pane tagged with a session and an agent: there `bin/emx left` exits 0 only to let ← reach Claude Code, and every other outcome, a crash or a check that can't run included, selects the panel. Its format condition (both tags, cursor shown, panel in the window) never guesses the prompt's column; the check reads it from where the `❯` is drawn.
+2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths. For ← the costs run the other way: Claude Code turns a ← it gets on an empty prompt into a fork of the conversation into its background service, so a broken check costs him ← in typed text instead.
 3. **Minimal example** (the ← binding as `list-keys` shows it, abridged):
    ```
-   bind-key -n Left if-shell -F "#{&&:<at an empty prompt>,#{P:#{?#{==:#{pane_id},%1},1,}}}" \
-       "if-shell \"#{@emx_left} #{pane_id} …\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\" \"send-keys Left\"" \
+   bind-key -n Left if-shell -F "#{&&:#{@emx_session},#{&&:#{@emx_agent},#{&&:#{cursor_flag},#{P:#{?#{==:#{pane_id},%1},1,}}}}}" \
+       "if-shell \"#{@emx_left} #{pane_id} …\" \"send-keys Left\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\"" \
        "send-keys Left"
    ```
-4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms). And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
+4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms); in a session's pane every ← with the cursor shown pays it. And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
 
 ### Style-aware detectors are tested on styled captures
 
@@ -153,7 +153,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```python
    misses, gone = core.edit_session_gone(sid, live_ids, misses)
    ```
-4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's.
+4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. The cleanup a panel does once when it starts (`App.clear_legacy_viewers`) does not wait for listings: it kills every old `claude attach` viewer (a key, no agent tag) at once, since emx's own registry is empty on upgrade day and an empty listing would never count against them.
 
 ### emx types into a session only through `Tmux.type_if`, `submit_if`, `clear_if` or `key_if`, after the listing and screen checks
 

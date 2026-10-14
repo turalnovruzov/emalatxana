@@ -54,6 +54,7 @@ class PrivateServer(unittest.TestCase):
             "split-window", "-h", "-t", self.main, "-P", "-F", "#{pane_id}",
             f"{sys.executable} -I {recorder} {self.keys('sidebar')}",
         ).strip()
+        self.tmux.set_pane_option(self.main, AGENT_OPT, engine.AGENT)
         self.tmux.set_pane_option(self.main, SESSION_OPT, "s1")
         self.client = self.attach()
         self.tmux.select(self.main)
@@ -115,26 +116,39 @@ class LeftBinding(PrivateServer):
     """The ← binding as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
 
     def press_left(self, check):
-        self.tmux.bind_left(self.sidebar, check, 2)
+        self.tmux.bind_left(self.sidebar, check)
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
 
     def test_the_binding_parses(self):
-        self.tmux.bind_left(self.sidebar, "true", 2)
+        self.tmux.bind_left(self.sidebar, "true")
         (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " Left " in line]
         listed = os.path.join(self.dir, "listed.conf")
         with open(listed, "w", encoding="utf-8") as fh:
             fh.write(line + "\n")
         self.tmux.run("source-file", "-n", listed)
 
-    def test_a_check_exiting_0_selects_the_panel_and_marks_it(self):
-        self.press_left("true")
+    def test_a_check_exiting_1_selects_the_panel_and_marks_it(self):
+        self.press_left("false")
         self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
         self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "1")
         time.sleep(0.3)
         self.assertEqual(self.typed("main"), b"")
 
-    def test_a_check_exiting_1_lets_the_key_reach_the_pane(self):
+    def test_a_check_that_cannot_run_selects_the_panel(self):
+        self.press_left(os.path.join(self.dir, "no-such-check"))
+        self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_a_pane_without_the_agent_tag_never_runs_the_check(self):
+        self.tmux.run("set-option", "-p", "-u", "-t", self.main, AGENT_OPT)
         self.press_left("false")
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        self.assertEqual(self.typed("main"), LEFT)
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+
+    def test_a_check_exiting_0_lets_the_key_reach_the_pane(self):
+        self.press_left("true")
         self.wait_for(lambda: self.typed("main"), "the key in main")
         self.assertEqual(self.typed("main"), LEFT)
         self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
@@ -162,7 +176,7 @@ class LeftBinding(PrivateServer):
         self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "")
 
     def test_with_the_panel_gone_the_key_reaches_the_pane(self):
-        self.tmux.bind_left(self.sidebar, "true", 2)
+        self.tmux.bind_left(self.sidebar, "false")
         self.tmux.kill_pane(self.sidebar)
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
         self.wait_for(lambda: self.typed("main"), "the key in main")
@@ -209,11 +223,17 @@ class LeftInASessionPane(PrivateServer):
         (path,) = SCREENS.glob(f"{name}.w*.txt")
         return path.read_text("utf-8").split("\n")[cursor["y"]], cursor["x"]
 
-    def press_left(self):
-        self.tmux.bind_left(self.sidebar, cli.self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
+    def press_left(self, check=None):
+        self.tmux.bind_left(self.sidebar, check or cli.self_command("left", self.tmux.socket))
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
 
-    def test_the_binding_waits_where_claudes_empty_prompt_puts_the_cursor(self):
+    def assert_on_the_panel(self):
+        self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
+        self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_claudes_empty_prompt_puts_the_cursor_two_columns_after_its_mark(self):
         for name in ("interactive-prompt-empty-named", "interactive-prompt-empty-unnamed", "interactive-prompt-working"):
             with self.subTest(name=name):
                 self.assertEqual(self.captured_empty_prompt(name)[1], core.PROMPT_TEXT_X)
@@ -230,11 +250,36 @@ class LeftInASessionPane(PrivateServer):
                 self.tmux.run("set-option", "-p", "-u", "-t", self.sidebar, BACK_OPT)
 
     def test_left_with_text_typed_moves_the_text_cursor_in_claude(self):
-        self.show_prompt("❯\xa0abc", 5)
+        for x in (5, 2):
+            with self.subTest(x=x):
+                self.show_prompt("❯\xa0abc", x)
+                self.press_left()
+                self.wait_for(lambda: self.typed("main"), "the key in the session")
+                self.assertEqual(self.typed("main"), LEFT)
+                self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+                os.unlink(self.keys("main"))
+
+    def test_left_on_an_empty_prompt_drawn_a_column_over_still_lands_on_the_panel(self):
+        line, x = self.captured_empty_prompt("interactive-prompt-empty-named")
+        self.show_prompt(" " + line, x + 1)
+        self.press_left()
+        self.assert_on_the_panel()
+
+    def test_left_lands_on_the_panel_when_the_check_errors(self):
+        # The check reads the screen from a server that isn't there, so it errors even where text is typed.
+        broken = f"env TMUX_TMPDIR={os.path.join(self.dir, 'no-server-here')} {cli.self_command('left', self.tmux.socket)}"
+        for prompt in (self.captured_empty_prompt("interactive-prompt-empty-named"), ("❯\xa0abc", 5)):
+            with self.subTest(prompt=prompt):
+                self.show_prompt(*prompt)
+                self.press_left(broken)
+                self.assert_on_the_panel()
+                self.tmux.run("set-option", "-p", "-u", "-t", self.sidebar, BACK_OPT)
+
+    def test_left_with_text_typed_reaches_claude_when_the_prompt_is_a_column_over(self):
+        self.show_prompt(" ❯\xa0abc", 6)
         self.press_left()
         self.wait_for(lambda: self.typed("main"), "the key in the session")
         self.assertEqual(self.typed("main"), LEFT)
-        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -328,7 +373,7 @@ class CollapseBinding(PrivateServer):
 
     def test_left_at_an_empty_prompt_brings_the_panel_back(self):
         self.tmux.toggle_zoom(self.main)
-        self.tmux.bind_left(self.sidebar, "true", 2)
+        self.tmux.bind_left(self.sidebar, "false")
         self.press("Left")
         self.wait_for(lambda: self.zoomed() == "0", "the panel to show")
         self.assertEqual(self.show(self.sidebar, "#{pane_active}"), "1")
@@ -415,7 +460,7 @@ class TypeIf(PrivateServer):
 
     def test_a_pane_holding_another_session_gets_nothing(self):
         self.tmux.set_pane_option(self.main, SESSION_OPT, "s2")
-        self.refused(self.type(), "viewer changed")
+        self.refused(self.type(), "session changed")
 
     def test_a_cursor_that_moved_types_nothing(self):
         self.refused(self.type(y=5), "prompt changed", y=5)
@@ -429,7 +474,7 @@ class TypeIf(PrivateServer):
             report = None
         self.assertNotEqual(report, core.TYPED)
         if report is not None:
-            self.assertIn("viewer changed", core.gate_refusal(core.Rename("s1", "old", "new"), report, 0))
+            self.assertIn("session changed", core.gate_refusal(core.Rename("s1", "old", "new"), report, 0))
         time.sleep(0.3)
         self.assertEqual(self.typed("sidebar"), b"")
 
@@ -651,7 +696,7 @@ class WindowParams(PrivateServer):
         self.tmux.set_pane_option(pane, SESSION_OPT, "k1")
         found = {p.id: p for p in self.tmux.panes()}[pane]
         self.assertEqual((found.agent, found.session), ("claude", "k1"))
-        self.assertEqual({p.agent for p in self.tmux.panes() if p.id != pane}, {""})
+        self.assertEqual({p.agent for p in self.tmux.panes() if p.id not in (pane, self.main)}, {""})
 
 
 FAKE_CLAUDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_claude.py")

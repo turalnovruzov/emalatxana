@@ -11,8 +11,8 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - Ctrl+X twice ends the session and removes it from emx. The conversation stays in Claude Code's history. Ctrl+X once still interrupts a working session.
 - If a session's `claude` exits, crashes, or your Mac restarts, its row reads Stopped. It continues only when you open it (Enter, → or a click), and then reads Idle until you send it something.
 - The r key (restart the main viewer) is gone: there is no viewer left to restart.
-- A "done" notice now waits about six seconds, so a message you queued while Claude was working, which starts its next turn a moment later, no longer gets a "done" for the pause in between.
-- Known gaps: Esc pressed before Claude has written anything leaves the row reading Working until the session reports again. Sessions emx starts also appear in `claude agents` as interactive sessions; emx no longer reads that list. For checks, `EMX_CONFIG_HOME` keeps emx's own settings elsewhere.
+- A message you queue while Claude is working no longer gets a "done" for the moment between Claude finishing one turn and starting on your message.
+- Known gaps: Esc pressed before Claude has written anything leaves the row reading Working until the session reports again. Sessions emx starts also appear in `claude agents` as interactive sessions; emx no longer reads that list.
 
 ## 1.7.1 — 2026-10-13
 

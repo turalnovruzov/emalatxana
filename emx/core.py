@@ -41,6 +41,7 @@ class Session:
     transcript: str = ""
     turned: bool = True
     named: bool = True
+    queued: bool = False
 
 
 def unnamed(session: Session) -> bool:
@@ -106,9 +107,9 @@ GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
 
 
 def category(session: Session) -> str:
-    """What the row shows, from `state` alone as `claude agents` does: a finished session whose process has exited is still Done.
+    """What the row shows, from `state` alone.
 
-    Whether emx may reattach is `running`'s business, never this. A state this
+    Whether emx may resume the session is `running`'s business, never this. A state this
     version doesn't know counts as working, so the row keeps plain colours.
     """
     if session.state == "stopped":
@@ -481,7 +482,7 @@ def rename_listing_refusal(rename: Rename, session: Session | None, fresh: bool)
 
 
 def viewer_closed_text(rename: Rename) -> str:
-    return f"{rename.old}'s viewer has closed, so emx didn't rename it."
+    return f"{rename.old}'s session has closed, so emx didn't rename it."
 
 
 @dataclass(frozen=True)
@@ -511,10 +512,10 @@ def rename_screen_refusal(rename: Rename, screen: RenameScreen) -> str | None:
     touched and no dialog or menu takes the keys.
     """
     if screen.in_mode:
-        return f"{rename.old}'s viewer is scrolled back, so emx didn't type into it. Press q in it, then rename again."
+        return f"{rename.old}'s session is scrolled back, so emx didn't type into it. Press q in it, then rename again."
     if not empty_prompt(screen.line, screen.below, screen.cursor_x, screen.cursor_shown, screen.width):
         if not screen.cursor_shown:
-            return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
+            return f"{rename.old}'s session isn't showing its prompt, so emx didn't rename it."
         return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
     return None
 
@@ -577,9 +578,9 @@ def interrupt_screen_refusal(interrupt: Interrupt, screen: RenameScreen) -> str 
     at the prompt; a dialog hides it.
     """
     if screen.in_mode:
-        return f"{interrupt.name}'s viewer is scrolled back, so emx didn't interrupt it. Press q in it, then try again."
+        return f"{interrupt.name}'s session is scrolled back, so emx didn't interrupt it. Press q in it, then try again."
     if not screen.cursor_shown:
-        return f"{interrupt.name}'s viewer isn't showing its prompt, so emx didn't interrupt it."
+        return f"{interrupt.name}'s session isn't showing its prompt, so emx didn't interrupt it."
     return None
 
 
@@ -646,13 +647,13 @@ def gate_refusal(subject, report: str, cursor_y: int, cursor_x: int | None = Non
     fields = report.split()
     # tmux reports on some other pane, or prints nothing, once the viewer is gone.
     if len(fields) < 5:
-        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
+        return f"{name}'s session changed just before emx {act}, so emx didn't {did}."
     in_mode, dead, shown, x, y = fields[:5]
     sid = fields[5] if len(fields) > 5 else ""
     if in_mode != "0":
-        return f"{name}'s viewer was scrolled back just before emx {act}, so it didn't. Press q in it, then {again}."
+        return f"{name}'s session was scrolled back just before emx {act}, so it didn't. Press q in it, then {again}."
     if dead != "0" or sid != subject.id:
-        return f"{name}'s viewer changed just before emx {act}, so emx didn't {did}."
+        return f"{name}'s session changed just before emx {act}, so emx didn't {did}."
     if shown != "1" or x != str(PROMPT_TEXT_X if cursor_x is None else cursor_x) or y != str(cursor_y):
         return f"{name}'s prompt changed just before emx {act}, so emx didn't {prompt_did}."
     return f"Focus left the panel, so emx didn't {into}."
@@ -2085,23 +2086,30 @@ PROMPT_TEXT_X = 2
 
 
 def empty_prompt(line: str, below: str, cursor_x: int, cursor_shown: bool, pane_width: int) -> bool:
-    """Whether the cursor sits in Claude Code's empty input box, where ← would open its agent view.
+    """Whether the cursor sits in Claude Code's empty input box, where ← would fork the conversation.
 
     `line` is the cursor's line and `below` the line under it, both captured
-    with their styling (`capture-pane -e`). The box is empty when its `❯`
-    starts the line, the cursor is right after it, nothing after it is typed
-    text, and the box's pane-wide bottom rule follows at once. The example
-    Claude Code shows in an empty box (`Try "…"`) is drawn dim, which is the
-    only thing that tells it from the same words typed and the cursor moved
-    back to the start. A dialog or menu indents its `❯`, and a second line of
-    input sits between the first and the rule.
+    with their styling (`capture-pane -e`). The box is empty when the line's
+    first mark is `❯` with only blanks before it and one after, the cursor is
+    right after that, nothing after it is typed text, and the box's
+    pane-wide bottom rule follows at once. The prompt's column is read from
+    where the `❯` is drawn, not assumed, so a box drawn a column over is
+    still caught. The example Claude Code shows in an empty box (`Try "…"`)
+    is drawn dim, which is the only thing that tells it from the same words
+    typed and the cursor moved back to the start. A menu's `❯` has its
+    item's words after it, and a second line of input sits between the
+    first and the rule.
     """
-    if not cursor_shown or cursor_x != PROMPT_TEXT_X:
+    if not cursor_shown:
         return False
     cells = _styled_cells(line)
-    if not cells or cells[0][0] != "❯" or (len(cells) > 1 and not cells[1][0].isspace()):
+    mark = next((i for i, (ch, _) in enumerate(cells) if not ch.isspace()), None)
+    if mark is None or cells[mark][0] != "❯" or (len(cells) > mark + 1 and not cells[mark + 1][0].isspace()):
         return False
-    if any(not ch.isspace() and not dim for ch, dim in cells[PROMPT_TEXT_X:]):
+    text_x = mark + PROMPT_TEXT_X
+    if cursor_x != text_x:
+        return False
+    if any(not ch.isspace() and not dim for ch, dim in cells[text_x:]):
         return False
     return _rule_below(below, pane_width)
 
@@ -2494,8 +2502,8 @@ def first_line(text: str) -> str:
 def session_summary(session: Session, transcript: Transcript | None) -> str:
     """The short line a row shows after its state word, or "" when the transcript says nothing that fits the state.
 
-    The state comes from `claude agents`, never from the transcript, which
-    only supplies the words: a waiting session's open question or the tool
+    The state comes from the listing (`engine_sessions`), never from this
+    transcript, which only supplies the words: a waiting session's open question or the tool
     call waiting for approval, a working one's latest tool call or words, a
     done one's first line of its reply to the latest prompt. A stopped
     session shows none.
@@ -2895,6 +2903,7 @@ class Notice:
     name: str
     cwd: str
     at: float
+    named: bool = True
 
 
 class NoticeSeen(dict):
@@ -3003,14 +3012,14 @@ def notice_excerpt(project: str, session: Session, transcript: Transcript | None
 
 
 def notice_ready(kind: str, session: Session, transcript: Transcript | None, waited: float) -> bool:
-    """Whether a notice may be worded and sent now: a Needs input once the transcript holds the words for it or `NOTICE_SETTLE_SECONDS` have passed, a Done only once they have passed.
+    """Whether a notice may be worded and sent now: once the transcript holds the words for the state, or `NOTICE_SETTLE_SECONDS` have passed.
 
-    A message he queues while Claude works ends the turn with a Stop and
-    starts the next one about two seconds later, so a Done is held through
-    the window; a session working again by then makes it stale, and it is
-    dropped unspoken.
+    A Done with a prompt he queued while Claude worked (`Session.queued`)
+    waits the whole window: Claude starts on the queued prompt about two
+    seconds after the Stop, which makes the notice stale, and it is dropped
+    unspoken.
     """
-    if kind == NOTICE_DONE:
+    if kind == NOTICE_DONE and session.queued:
         return waited >= NOTICE_SETTLE_SECONDS
     return bool(session_summary(session, transcript)) or waited >= NOTICE_SETTLE_SECONDS
 
@@ -3051,10 +3060,10 @@ def clean_notice(text: str) -> str:
     return text
 
 
-def fallback_notice(project: str, name: str, sid: str, kind: str) -> str:
-    """The plain line used when Haiku gives nothing: the project and the session name, and whether it needs him or is done."""
+def fallback_notice(project: str, name: str, named: bool, kind: str) -> str:
+    """The plain line used when Haiku gives nothing: the project and, when the session has a name of its own, that name, and whether it needs him or is done."""
     words = "needs you" if kind == NOTICE_NEEDS else "is done"
-    if name == sid:
+    if not named:
         return f"A session in {project} {words}."
     return f"{name}, in {project}, {words}."
 
@@ -3285,7 +3294,9 @@ class HookState:
     `work_at` of the latest one that started or continued work (never a
     notification, which can arrive seconds after the prompt it announces);
     both are epoch milliseconds. `turned` is False from a start or resume
-    until the first prompt or tool of a turn.
+    until the first prompt or tool of a turn. `prompts` counts the prompts
+    since the last `Stop`; `queued` is set by a `Stop` that came after two or
+    more, so a prompt he queued while Claude worked is still to be answered.
     """
 
     state: str = "starting"
@@ -3298,6 +3309,8 @@ class HookState:
     title: str = ""
     last_at: float | None = None
     work_at: float | None = None
+    prompts: int = 0
+    queued: bool = False
 
 
 _WORK_EVENTS = ("UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure")
@@ -3318,8 +3331,9 @@ def fold_events(records) -> HookState:
     `SessionStart`, possibly with a new session id, which the last record
     wins; only other reasons end the session.
 
-    A message queued while Claude works gives a `Stop` and, seconds later,
-    a `PreToolUse`. That reads Done and then Working here.
+    A message queued while Claude works gives its `UserPromptSubmit` before
+    the turn's `Stop` and, seconds later, a `PreToolUse`. That reads Done,
+    with `queued` set, and then Working here.
     """
     state = HookState()
     for rec in records:
@@ -3334,6 +3348,7 @@ def fold_events(records) -> HookState:
         sid, path = rec.get("session_id"), rec.get("transcript_path")
         state = replace(
             step, last_at=at, work_at=at if event in _WORK_EVENTS else state.work_at,
+            queued=step.queued if event == "Stop" else False,
             claude_sid=sid if isinstance(sid, str) and is_session_id(sid) else state.claude_sid,
             transcript=path if isinstance(path, str) and path else state.transcript,
             cwd=rec["cwd"] if isinstance(rec.get("cwd"), str) and rec["cwd"] else state.cwd,
@@ -3349,9 +3364,11 @@ def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
         if rec.get("source") == "compact":
             return replace(state)
         if rec.get("source") == "resume":
-            return replace(state, state="working", status="idle", waiting_for="", turned=False)
-        return replace(state, state="blocked", status="", waiting_for="", turned=False)
-    if event in ("UserPromptSubmit", "PostToolUse", "PostToolUseFailure"):
+            return replace(state, state="working", status="idle", waiting_for="", turned=False, prompts=0)
+        return replace(state, state="blocked", status="", waiting_for="", turned=False, prompts=0)
+    if event == "UserPromptSubmit":
+        return replace(state, state="working", status="", waiting_for="", turned=True, prompts=state.prompts + 1)
+    if event in ("PostToolUse", "PostToolUseFailure"):
         return replace(state, state="working", status="", waiting_for="", turned=True)
     if event == "PreToolUse":
         # A parallel tool's PreToolUse must not hide a permission prompt that is open.
@@ -3369,7 +3386,7 @@ def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
         waiting = state.waiting_for or _one_line(rec.get("message")) or "approve"
         return replace(state, waiting_for=waiting)
     if event == "Stop":
-        return replace(state, state="done", status="", waiting_for="", turned=True)
+        return replace(state, state="done", status="", waiting_for="", turned=True, prompts=0, queued=state.prompts >= 2)
     if event == "SessionEnd":
         return replace(state, state="stopped", status="", waiting_for="")
     return None
@@ -3442,7 +3459,7 @@ def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupte
                 id=key, name=own or _text(rec.get("title")) or key[:8], cwd=cwd, state=state, status=status,
                 waiting_for=waiting, started_at=_number(rec.get("started_at")), running=running,
                 session_id=hooked.claude_sid or _text(rec.get("session_id")), transcript=hooked.transcript, turned=turned,
-                named=bool(own),
+                named=bool(own), queued=running and state == "done" and hooked.queued,
             )
         )
     return sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0))
