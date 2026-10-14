@@ -4993,8 +4993,7 @@ class MissedWiring(AppCase):
         self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
         self.assertFalse(any("more" in t for t in lines), lines)
 
-    def test_a_muted_notice_is_listed(self):
-        self.app.handle_key("m")
+    def test_a_notice_is_listed_in_notification_mode(self):
         self.assertFalse(self.app.poller.notices.voice)
         self.deliver(("s1", "Alpha is done.", time.monotonic()))
         self.assertEqual([m.text for m in self.app.missed], ["Alpha is done."])
@@ -5184,11 +5183,11 @@ class HushWiring(AppCase):
         sidebar.App.housekeep(self.app, False)
 
     def test_h_hushes_without_muting(self):
+        self.app.handle_key("m")
         before = dict(self.app.prefs)
         self.app.handle_key("h")
         self.assertEqual(len(self.silenced), 1)
         self.assertEqual(self.app.prefs, before)
-        self.assertTrue(core.voice_on(self.app.prefs))
         self.assertFalse(self.app.poller.voice.muted)
         self.assertEqual(self.app.notice, "Stopped speaking.")
 
@@ -5216,59 +5215,64 @@ class HushWiring(AppCase):
         self.assertIn("mute", keys["m"])
 
 
-class MuteKey(AppCase):
+class ModeKey(AppCase):
     def prefs_on_disk(self):
         return json.loads(self.app.prefs_file.read_text(encoding="utf-8"))
 
-    def test_m_mutes_and_saves_and_a_new_panel_starts_muted(self):
-        self.assertTrue(self.app.poller.notices.voice)
-        self.app.handle_key("m")
-        self.assertIs(self.prefs_on_disk()["voice"], False)
+    def test_a_new_panel_starts_in_notification_mode(self):
+        self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
         self.assertFalse(self.app.poller.notices.voice)
-        self.assertEqual(self.app.notice, "Spoken notices off")
+        self.assertTrue(self.app.poller.voice.muted)
+
+    def test_m_switches_to_voice_saves_it_and_a_new_panel_keeps_it(self):
+        self.app.handle_key("m")
+        self.assertEqual(self.prefs_on_disk()["mode"], "voice")
+        self.assertNotIn("voice", self.prefs_on_disk())
+        self.assertTrue(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Voice mode")
         again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
-        self.assertFalse(again.poller.notices.voice)
+        self.assertTrue(again.poller.notices.voice)
+        self.assertFalse(again.poller.voice.muted)
+
+    def test_m_again_returns_to_notification_mode(self):
+        self.app.handle_key("m")
+        self.app.handle_key("m")
+        self.assertEqual(self.prefs_on_disk()["mode"], "notification")
+        self.assertFalse(self.app.poller.notices.voice)
+        self.assertEqual(self.app.notice, "Notification mode")
 
     def test_m_sets_the_voice_muted_flag_both_ways(self):
         self.app.poller.voice = sidebar.Voice()
-        self.app.handle_key("m")
-        self.assertTrue(self.app.poller.voice.muted)
+        self.app.poller.voice.muted = True
         self.app.handle_key("m")
         self.assertFalse(self.app.poller.voice.muted)
+        self.app.handle_key("m")
+        self.assertTrue(self.app.poller.voice.muted)
 
-    def test_m_again_unmutes(self):
+    def test_entering_notification_mode_silences_the_voice_and_leaving_it_does_not(self):
         self.app.handle_key("m")
-        self.app.handle_key("m")
-        self.assertIs(self.prefs_on_disk()["voice"], True)
-        self.assertTrue(self.app.poller.notices.voice)
-        self.assertEqual(self.app.notice, "Spoken notices on")
-
-    def test_muting_silences_the_voice_and_unmuting_does_not(self):
-        self.app.handle_key("m")
-        self.assertEqual(len(self.silenced), 1)
+        self.assertEqual(self.silenced, [])
         self.app.handle_key("m")
         self.assertEqual(len(self.silenced), 1)
 
     def test_m_while_typing_in_the_find_box_is_text(self):
         self.app.handle_key("/")
         self.app.handle_key("m")
-        self.assertTrue(core.voice_on(self.app.prefs))
+        self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
 
-    def test_the_help_has_the_m_line(self):
-        self.assertIn(("m", "mute or unmute spoken notices"), sidebar.HELP)
-
-    def test_the_top_line_shows_muted_only_while_muted(self):
+    def test_the_top_line_shows_voice_only_in_voice_mode(self):
         def top_line():
             drawn = []
             self.app.put = lambda y, x, text, attr=0: drawn.append(text)
             self.app.draw_top_line(60)
             return drawn
 
-        self.assertNotIn("muted", top_line())
+        self.assertNotIn("voice", top_line())
         self.app.handle_key("m")
-        self.assertIn("muted", top_line())
+        self.assertIn("voice", top_line())
         self.app.handle_key("m")
-        self.assertNotIn("muted", top_line())
+        self.assertNotIn("voice", top_line())
+
 
 if __name__ == "__main__":
     unittest.main()

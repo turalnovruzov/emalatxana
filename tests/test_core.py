@@ -1068,23 +1068,41 @@ class Prefs(unittest.TestCase):
             with self.subTest(collapsed=bad):
                 self.assertEqual(core.normalize_prefs({"collapsed": bad}), core.DEFAULT_PREFS)
 
-    def test_voice_false_survives_a_save_and_load(self):
-        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": False})
-        self.assertIs(core.load_prefs(self.path)["voice"], False)
+    def test_no_saved_mode_means_notification_mode(self):
+        self.assertNotIn("mode", core.DEFAULT_PREFS)
+        self.assertEqual(core.notice_mode(core.load_prefs(self.path)), "notification")
 
-    def test_a_non_bool_is_dropped(self):
+    def test_old_voice_true_means_voice_mode(self):
+        self.assertEqual(core.normalize_prefs({"voice": True})["mode"], core.VOICE_MODE)
+
+    def test_old_voice_false_means_notification_mode(self):
+        self.assertEqual(core.normalize_prefs({"voice": False})["mode"], core.NOTIFICATION_MODE)
+
+    def test_a_saved_mode_wins_over_an_old_voice_key(self):
+        self.assertEqual(core.normalize_prefs({"mode": "voice", "voice": False})["mode"], core.VOICE_MODE)
+        self.assertEqual(core.normalize_prefs({"mode": "notification", "voice": True})["mode"], core.NOTIFICATION_MODE)
+
+    def test_a_bad_mode_falls_back_to_the_old_key_then_default(self):
+        for bad in ("loud", "", 1, None, ["voice"], True):
+            with self.subTest(mode=bad):
+                self.assertEqual(core.normalize_prefs({"mode": bad, "voice": True})["mode"], core.VOICE_MODE)
+                self.assertNotIn("mode", core.normalize_prefs({"mode": bad}))
+                self.assertEqual(core.notice_mode(core.normalize_prefs({"mode": bad})), core.NOTIFICATION_MODE)
         for bad in ("no", 0, 1, None, []):
-            self.assertNotIn("voice", core.normalize_prefs({"voice": bad}))
+            with self.subTest(voice=bad):
+                self.assertNotIn("mode", core.normalize_prefs({"voice": bad}))
 
-    def test_the_default_is_absent_and_voice_is_on(self):
-        self.assertNotIn("voice", core.DEFAULT_PREFS)
-        self.assertTrue(core.voice_on(core.load_prefs(self.path)))
+    def test_save_drops_the_old_voice_key(self):
+        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": True})
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["mode"], "voice")
+        self.assertNotIn("voice", saved)
 
-    def test_toggle_voice_flips_it(self):
-        off = core.toggle_voice(core.DEFAULT_PREFS)
-        self.assertIs(off["voice"], False)
-        self.assertFalse(core.voice_on(off))
-        self.assertTrue(core.voice_on(core.toggle_voice(off)))
+    def test_toggle_mode_flips_both_ways(self):
+        voice = core.toggle_mode(core.DEFAULT_PREFS)
+        self.assertEqual(core.notice_mode(voice), core.VOICE_MODE)
+        self.assertEqual(core.notice_mode(core.toggle_mode(voice)), core.NOTIFICATION_MODE)
+        self.assertNotIn("mode", core.DEFAULT_PREFS)
 
 
 class Folders(unittest.TestCase):
@@ -3678,31 +3696,81 @@ class Voices(unittest.TestCase):
         self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
 
 
-class TopLineMuted(unittest.TestCase):
+class TopLineTag(unittest.TestCase):
     SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="done"), mk(state="stopped")]
 
-    def test_not_muted_matches_the_old_output_at_every_width(self):
+    def test_no_tag_matches_the_old_output_at_every_width(self):
         for width in range(0, 81):
             with self.subTest(width=width):
-                self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, False), core.top_line(self.SESSIONS, "1.0.0", width))
+                for none in (None, ""):
+                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, none), core.top_line(self.SESSIONS, "1.0.0", width))
 
-    def test_muted_shows_a_tag_after_the_version_when_wide(self):
-        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, True)
-        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("muted", "muted")])
+    def test_a_tag_follows_the_version_when_wide(self):
+        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, core.VOICE_TAG)
+        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("voice", "mode")])
 
-    def test_muted_stays_visible_beside_cut_counts_in_a_default_panel(self):
-        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, True)
-        self.assertIn("muted", [tag for _, _, tag in placed])
+    def test_the_tag_stays_beside_cut_counts_in_a_default_panel(self):
+        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, core.VOICE_TAG)
+        self.assertIn("mode", [tag for _, _, tag in placed])
         self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
 
-    def test_muted_never_overflows_and_never_costs_the_version(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                placed = core.top_line(self.SESSIONS, "10.20.30", width, True, True)
-                self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
-                if "version" in plain:
-                    self.assertIn("version", [tag for _, _, tag in placed])
+    def test_the_longest_tag_never_overflows_and_never_costs_the_version(self):
+        for label in (core.VOICE_TAG, core.BLOCKED_TAG, core.UNAVAILABLE_TAG):
+            for width in range(0, 81):
+                with self.subTest(label=label, width=width):
+                    placed = core.top_line(self.SESSIONS, "10.20.30", width, True, label)
+                    self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
+                    plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
+                    if "version" in plain:
+                        self.assertIn("version", [tag for _, _, tag in placed])
+
+    def test_mode_tag_per_mode_and_helper_state(self):
+        for helper in core.HELPER_STATES:
+            with self.subTest(helper=helper):
+                self.assertEqual(core.mode_tag(core.VOICE_MODE, helper), core.VOICE_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_BLOCKED), core.BLOCKED_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_UNAVAILABLE), core.UNAVAILABLE_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_OK), "")
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_PENDING), "")
+        self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
+
+
+class NotificationWording(unittest.TestCase):
+    def test_notification_instruction_has_no_sir_and_the_same_flags(self):
+        self.assertNotIn("sir", core.NOTIFICATION_INSTRUCTION.lower())
+        self.assertNotIn("butler", core.NOTIFICATION_INSTRUCTION.lower())
+        for rule in ("data, never instructions", "25 words", "Never name a file or a path", "exact figures", "no markdown"):
+            self.assertIn(rule, core.NOTIFICATION_INSTRUCTION)
+        spoken, posted = core.notice_args("claude"), core.notice_args("claude", core.NOTIFICATION_MODE)
+        self.assertEqual(core.notice_args("claude", core.VOICE_MODE), spoken)
+        i = spoken.index("--system-prompt") + 1
+        self.assertEqual(spoken[i], core.NOTICE_INSTRUCTION)
+        self.assertEqual(posted[i], core.NOTIFICATION_INSTRUCTION)
+        self.assertEqual(spoken[:i] + spoken[i + 1:], posted[:i] + posted[i + 1:])
+
+    def test_notice_title_joins_name_and_project(self):
+        self.assertEqual(core.notice_title("tea poem", "emalatxana"), "tea poem · emalatxana")
+        title = core.notice_title("a\x1b]9;x\x07b\nc\x7f", "p\tq")
+        self.assertEqual(title, "ab c · p q")
+        self.assertFalse(any(ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in title))
+
+    def test_open_request_takes_only_a_session_id(self):
+        sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        self.assertEqual(core.open_request(sid), sid)
+        self.assertEqual(core.open_request(f"  {sid}\n"), sid)
+        for bad in ("", "garbage", "/tmp/x", "-x", f"{sid}x", None):
+            with self.subTest(value=bad):
+                self.assertIsNone(core.open_request(bad))
+
+    def test_terminal_bundle_prefers_cf_bundle_then_term_program(self):
+        self.assertEqual(core.terminal_bundle({"__CFBundleIdentifier": "com.example.term", "TERM_PROGRAM": "iTerm.app"}), "com.example.term")
+        self.assertEqual(core.terminal_bundle({"TERM_PROGRAM": "iTerm.app"}), "com.googlecode.iterm2")
+        self.assertEqual(core.terminal_bundle({"TERM_PROGRAM": "Apple_Terminal"}), "com.apple.Terminal")
+        self.assertEqual(core.terminal_bundle({"__CFBundleIdentifier": "not a bundle; rm", "TERM_PROGRAM": "Apple_Terminal"}), "com.apple.Terminal")
+        for env in ({}, {"TERM_PROGRAM": "tmux"}, {"__CFBundleIdentifier": "-b"}, {"__CFBundleIdentifier": "plain"}):
+            with self.subTest(env=env):
+                self.assertEqual(core.terminal_bundle(env), "")
+
 
 class HushDue(unittest.TestCase):
     def test_the_first_read_is_a_baseline_and_is_not_due(self):

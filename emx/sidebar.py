@@ -40,6 +40,7 @@ VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
 COLLAPSE_KEY = "C-q"
 RESTORED_NOTICE_SECONDS = 4
+MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notification mode"}
 WHATS_NEW_SECONDS = 60
 FOOTERS = (
     "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
@@ -1421,7 +1422,7 @@ class App:
         self.scroll = 0
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state))
-        self.poller.notices.voice = core.voice_on(self.prefs)
+        self.poller.notices.voice = core.notice_mode(self.prefs) == core.VOICE_MODE
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
         self.hush_seen = None
@@ -2297,14 +2298,14 @@ class App:
             self.detach()
 
     def toggle_voice(self) -> None:
-        self.prefs = core.toggle_voice(self.prefs)
+        self.prefs = core.toggle_mode(self.prefs)
         self.save_prefs()
-        on = core.voice_on(self.prefs)
+        on = core.notice_mode(self.prefs) == core.VOICE_MODE
         self.poller.notices.voice = on
         self.poller.voice.muted = not on
         if not on:
             self.poller.voice.silence()
-        self.say("Spoken notices on" if on else "Spoken notices off", seconds=RESTORED_NOTICE_SECONDS)
+        self.say(MODE_MESSAGES[core.notice_mode(self.prefs)], seconds=RESTORED_NOTICE_SECONDS)
 
     def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
@@ -2450,9 +2451,9 @@ class App:
 
     def draw_top_line(self, width: int) -> None:
         style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM, "muted": curses.A_DIM}
-        muted = not core.voice_on(self.prefs)
-        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, muted):
+        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM, "mode": curses.A_DIM}
+        tag = core.mode_tag(core.notice_mode(self.prefs), core.HELPER_OK)
+        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, tag):
             if tag in logo:
                 attr = logo[tag]
             else:
