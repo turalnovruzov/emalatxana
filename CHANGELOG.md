@@ -2,6 +2,17 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.2.0 — 2026-10-15
+
+- `emx remote myserver` opens the emx running on a server in this terminal, over ssh. myserver is a name from your own SSH config, and the server needs emx, tmux, Python 3 and claude installed.
+- Closing the window, closing the laptop or losing the connection leaves the server's emx and its sessions running; `emx remote myserver` again brings you back to them. q there leaves them running too.
+- While connected, the server's notifications reach the laptop, spoken or as emx's notification, in the mode set with m on the server's panel; clicking one opens that session on the server's panel. While not connected nothing arrives; the server's Notifications list keeps them.
+- h on the server's panel also stops the laptop speaking.
+- If emx on the server is a different version, emx remote says so before it connects and again when you leave.
+- If the server's login shell can't find emx, set EMX_REMOTE_COMMAND to its path there.
+- On a server that can't show notifications itself, the top line no longer says "notifications unavailable" while a laptop is connected.
+- Plain `emx` still shows only this laptop's sessions.
+
 ## 2.1.2 — 2026-10-14
 
 - Nothing changes in how emx works. The project's working rules were updated again for how its changes get checked, including how a live check of emx is kept apart from your own sessions and settings; this version only records that.
