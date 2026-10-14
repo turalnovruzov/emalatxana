@@ -90,6 +90,10 @@ class StateWords(unittest.TestCase):
             with self.subTest(state=s.state, running=s.running):
                 self.assertEqual((core.category(s), core.state_word(s)), (cat, word))
 
+    def test_a_session_with_only_background_work_is_not_interruptible(self):
+        self.assertFalse(core.interruptible(mk(state="working", status="background")))
+        self.assertTrue(core.interruptible(mk(state="working", status="")))
+
     def test_glyphs(self):
         self.assertEqual(core.glyph(core.NEEDS_INPUT, 3), "✻")
         self.assertEqual(core.glyph(core.DONE, 3), "✻")
@@ -4248,6 +4252,55 @@ class FoldEvents(unittest.TestCase):
         self.assertEqual((resumed.state, resumed.status, resumed.claude_sid), ("working", "idle", "11111111-1111-4111-8111-111111111111"))
         self.assertEqual(core.fold_events(records).state, "stopped")
 
+    def test_a_stop_with_background_work_running_reads_working(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2, background=2))
+        self.assertEqual((state.state, state.status), ("working", "background"))
+        self.assertEqual(core.state_word(mk(state=state.state, status=state.status)), "Working")
+
+    def test_the_final_stop_after_background_work_reads_done_with_its_reply(self):
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1),
+            event("UserPromptSubmit", at=3, synthetic=True), event("Stop", at=4, background=0, reply="Done."),
+        )
+        self.assertEqual((state.state, state.queued, state.reply), ("done", False, "Done."))
+        self.assertNotEqual(state.stop_key, "")
+
+    def test_synthetic_prompts_never_count_as_queued(self):
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1), event("UserPromptSubmit", at=3),
+            event("UserPromptSubmit", at=4, synthetic=True), event("Stop", at=5, background=0),
+        )
+        self.assertIs(state.queued, False)
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1), event("UserPromptSubmit", at=3),
+            event("UserPromptSubmit", at=4), event("Stop", at=5, background=0),
+        )
+        self.assertIs(state.queued, True)
+
+    def test_an_old_stop_record_reads_done_with_no_reply(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2))
+        self.assertEqual((state.state, state.reply), ("done", ""))
+
+    def test_an_ask_user_question_box_blocks_until_its_result(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("PreToolUse", at=2, tool_name="AskUserQuestion"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "answer a question"))
+        state = self.fold(event("UserPromptSubmit", at=1), event("PreToolUse", at=2, tool_name="AskUserQuestion"),
+                          event("PostToolUse", at=3, tool_name="AskUserQuestion"))
+        self.assertEqual(state.state, "working")
+        state = self.fold(event("UserPromptSubmit", at=1), event("PermissionRequest", at=2, tool_name="AskUserQuestion"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "answer a question"))
+
+    def test_another_agents_tool_result_leaves_the_block_standing(self):
+        blocked = [event("UserPromptSubmit", at=1), event("PermissionRequest", at=2, tool_name="Bash")]
+        state = self.fold(*blocked, event("PostToolUse", at=3, agent="a1"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "approve Bash"))
+        state = self.fold(*blocked, event("PostToolUse", at=3, agent="a1"), event("PostToolUse", at=4))
+        self.assertEqual(state.state, "working")
+
+    def test_the_blocking_agents_own_tool_result_clears_the_block(self):
+        state = self.fold(event("PermissionRequest", at=2, tool_name="Bash", agent="a1"), event("PostToolUse", at=3, agent="a1"))
+        self.assertEqual(state.state, "working")
+
     def test_a_queued_message_reads_done_then_working(self):
         after_stop = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2))
         after_gap = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2), event("PreToolUse", at=4))
@@ -4343,6 +4396,13 @@ class EngineSessions(unittest.TestCase):
             self.assertEqual(core.state_word(s), "Idle")
         (s,) = self.listing([event("UserPromptSubmit", at=150)])
         self.assertTrue(core.interruptible(s))
+
+    def test_escape_during_background_only_time_reads_idle(self):
+        events = [event("UserPromptSubmit", at=150), event("PostToolUse", at=160), event("Stop", at=170, background=1)]
+        (s,) = self.listing(events, interrupted={KEY: True})
+        self.assertEqual(core.state_word(s), "Idle")
+        (s,) = self.listing(events)
+        self.assertEqual(core.state_word(s), "Working")
 
     def test_a_done_with_a_queued_prompt_is_listed_queued_while_running(self):
         queued = [event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160), event("Stop", at=200)]

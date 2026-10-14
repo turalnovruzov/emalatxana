@@ -124,7 +124,8 @@ def idle(session: Session) -> bool:
 
 
 def interruptible(session: Session) -> bool:
-    return session.running and session.state == "working" and not idle(session)
+    """Whether Esc would stop something: not while only background work runs, since Claude itself is at its prompt."""
+    return session.running and session.state == "working" and not idle(session) and session.status != BACKGROUND
 
 
 def state_word(session: Session) -> str:
@@ -3391,6 +3392,10 @@ class HookState:
     until the first prompt or tool of a turn. `prompts` counts the prompts
     since the last `Stop`; `queued` is set by a `Stop` that came after two or
     more, so a prompt he queued while Claude worked is still to be answered.
+    `reply` is the end of Claude's last reply and `stop_key` names that
+    `Stop`, both set only by a `Stop` that reads Done. `blocked_by` is the
+    subagent whose question or permission blocked the session, "" for the
+    main agent.
     """
 
     state: str = "starting"
@@ -3405,8 +3410,13 @@ class HookState:
     work_at: float | None = None
     prompts: int = 0
     queued: bool = False
+    reply: str = ""
+    stop_key: str = ""
+    blocked_by: str = ""
 
 
+BACKGROUND = "background"
+ASK_WAITING = "answer a question"
 _WORK_EVENTS = ("UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure")
 _SESSION_CHANGES = ("clear", "resume")
 
@@ -3420,8 +3430,12 @@ def fold_events(records) -> HookState:
 
     Claude Code fires no hook when Esc interrupts a turn or a permission is
     denied, so those leave `working` or `blocked` here; the transcript rule
-    (`interrupted_after`) ends them. `SubagentStop` follows `Stop` and is
-    ignored. `SessionEnd` for `/clear` and `/resume` is followed at once by a
+    (`interrupted_after`) ends them. A `Stop` while background subagents or
+    commands still run reads working (status `BACKGROUND`); when one finishes,
+    Claude Code submits its result as a `synthetic` prompt, which starts a
+    turn but is not one he queued. An AskUserQuestion box blocks like a
+    permission prompt, and while either is open a tool result from another
+    agent (a background subagent) leaves the block standing. `SessionEnd` for `/clear` and `/resume` is followed at once by a
     `SessionStart`, possibly with a new session id, which the last record
     wins; only other reasons end the session.
 
@@ -3453,24 +3467,32 @@ def fold_events(records) -> HookState:
 
 def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
     tool = _one_line(rec.get("tool_name"))
+    agent = rec.get("agent") if isinstance(rec.get("agent"), str) else ""
+    fresh = {"reply": "", "stop_key": "", "blocked_by": ""}
     if event == "SessionStart":
         # A resumed session reads Idle, as a reopened background one did; a fresh one waits on him.
         if rec.get("source") == "compact":
             return replace(state)
         if rec.get("source") == "resume":
-            return replace(state, state="working", status="idle", waiting_for="", turned=False, prompts=0)
-        return replace(state, state="blocked", status="", waiting_for="", turned=False, prompts=0)
+            return replace(state, state="working", status="idle", waiting_for="", turned=False, prompts=0, **fresh)
+        return replace(state, state="blocked", status="", waiting_for="", turned=False, prompts=0, **fresh)
     if event == "UserPromptSubmit":
-        return replace(state, state="working", status="", waiting_for="", turned=True, prompts=state.prompts + 1)
+        prompts = state.prompts if rec.get("synthetic") is True else state.prompts + 1
+        return replace(state, state="working", status="", waiting_for="", turned=True, prompts=prompts)
     if event in ("PostToolUse", "PostToolUseFailure"):
+        if state.state == "blocked" and state.waiting_for and agent != state.blocked_by:
+            return replace(state, turned=True)
         return replace(state, state="working", status="", waiting_for="", turned=True)
     if event == "PreToolUse":
         # A parallel tool's PreToolUse must not hide a permission prompt that is open.
         if state.state == "blocked" and state.waiting_for:
             return replace(state, turned=True)
+        if tool == "AskUserQuestion":
+            return replace(state, state="blocked", status="", waiting_for=ASK_WAITING, turned=True, blocked_by=agent)
         return replace(state, state="working", status="", waiting_for="", turned=True)
     if event == "PermissionRequest":
-        return replace(state, state="blocked", status="", waiting_for=f"approve {tool}" if tool else "approve", turned=True)
+        waiting = ASK_WAITING if tool == "AskUserQuestion" else f"approve {tool}" if tool else "approve"
+        return replace(state, state="blocked", status="", waiting_for=waiting, turned=True, blocked_by=agent)
     if event == "Notification":
         if rec.get("notification_type") != "permission_prompt" or state.state in ("done", "stopped"):
             return None
@@ -3480,7 +3502,14 @@ def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
         waiting = state.waiting_for or _one_line(rec.get("message")) or "approve"
         return replace(state, waiting_for=waiting)
     if event == "Stop":
-        return replace(state, state="done", status="", waiting_for="", turned=True, prompts=0, queued=state.prompts >= 2)
+        background = rec.get("background")
+        if isinstance(background, int) and not isinstance(background, bool) and background > 0:
+            return replace(state, state="working", status=BACKGROUND, waiting_for="", turned=True, prompts=0, queued=False, **fresh)
+        key = ":".join(_text(rec.get(k)) for k in ("session_id", "prompt_id", "at"))
+        return replace(
+            state, state="done", status="", waiting_for="", turned=True, prompts=0, queued=state.prompts >= 2,
+            reply=_one_line(rec.get("reply")), stop_key=key, blocked_by="",
+        )
     if event == "SessionEnd":
         return replace(state, state="stopped", status="", waiting_for="")
     return None
