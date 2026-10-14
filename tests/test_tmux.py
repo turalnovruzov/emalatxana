@@ -121,7 +121,7 @@ class LeftBinding(PrivateServer):
 
     def test_the_binding_parses(self):
         self.tmux.bind_left(self.sidebar, "true")
-        (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " Left " in line]
+        (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if line.split()[:4] == ["bind-key", "-T", "root", "Left"]]
         listed = os.path.join(self.dir, "listed.conf")
         with open(listed, "w", encoding="utf-8") as fh:
             fh.write(line + "\n")
