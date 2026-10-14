@@ -16,6 +16,10 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - h and `emx hush` still stop the voice in voice mode; in notification mode they do nothing.
 - The Notices list at the bottom of the panel is now Notifications: a history of the last 20, several per session, newest first. The count in its title is how many you have not read; opening a session dims its entries instead of removing them. N opens the whole history in place of the session list: ↑↓ to move, Enter or a click opens that session, Esc goes back. The history is cleared when emx restarts.
 
+## 2.0.1 — 2026-10-14
+
+- Nothing changes in how emx works. The project's working rules were updated for how its changes get checked; this version only records that.
+
 ## 2.0.0 — 2026-10-14
 
 - emx now starts and keeps every session itself, each as the ordinary `claude` in its own window of emx's tmux. What you see in the main pane is that session, not a viewer of it.
