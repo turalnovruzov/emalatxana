@@ -9,12 +9,13 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, sidebar
-from emx.tmux import AGENT_OPT, OPEN_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -119,6 +120,7 @@ class FakeEngine:
 
     def __init__(self, listing=(None, "no engine in tests"), claude="claude", tmux=None):
         self.listing, self.claude, self.tmux = listing, claude, tmux
+        self.state = Path("/nonexistent-state")
         self.calls = []
 
     def list_sessions(self):
@@ -4572,6 +4574,46 @@ class NoticesWorker(unittest.TestCase):
         self.assertTrue(self.asked[0].startswith("Project: alpha\nSession: emx-test-a\nWhat happened: it has finished"))
         self.assertEqual(self.texts(), [])
 
+    def relay_records(self, path):
+        return [core.parse_relay(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_a_worded_notice_is_appended_to_the_relay_file(self):
+        sid = str(uuid.uuid4())
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.worker.relay = folder / "relay.jsonl"
+        self.worker.want([session(sid, "/p/alpha", "done")])
+        self.transcripts.found = {sid: core.Transcript(prompt="Fix it", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")}
+        self.notice(sid=sid)
+        self.assertTrue(self.worker.step())
+        (record,) = self.relay_records(self.worker.relay)
+        self.assertEqual(
+            {k: record[k] for k in ("kind", "title", "text", "sid", "mode")},
+            {"kind": "notice", "title": f"emx-test-{sid} · alpha", "text": "Alpha, sir: all fixed.", "sid": sid, "mode": "voice"},
+        )
+        self.assertTrue(record["plain"])
+
+    def test_the_relay_records_the_mode_the_notice_went_out_in(self):
+        sid = str(uuid.uuid4())
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.worker.relay = folder / "relay.jsonl"
+        self.worker.mode = core.NOTIFICATION_MODE
+        self.worker.want([session(sid, "/p/alpha", "done")])
+        self.transcripts.found = {sid: core.Transcript(prompt="Fix it", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")}
+        self.notice(sid=sid)
+        self.assertTrue(self.worker.step())
+        (record,) = self.relay_records(self.worker.relay)
+        self.assertEqual(record["mode"], "notification")
+
+    def test_with_no_relay_nothing_is_written_anywhere(self):
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(folder), "HOME": str(folder)}):
+            self.notice()
+            self.assertTrue(self.worker.step())
+        self.assertEqual(list(folder.iterdir()), [])
+
     def test_a_mode_switch_during_the_wording_decides_where_the_notice_goes(self):
         for before, after in ((core.VOICE_MODE, core.NOTIFICATION_MODE), (core.NOTIFICATION_MODE, core.VOICE_MODE)):
             with self.subTest(before=before):
@@ -5933,6 +5975,57 @@ class HushWiring(AppCase):
         self.housekeep("200")
         self.assertEqual(self.silenced, [])
         self.assertEqual(self.app.notice, "before")
+
+
+class RelayTmux(HushTmux):
+    def __init__(self):
+        super().__init__()
+        self.options = {}
+
+    def session_option(self, name):
+        return self.options.get(name, "")
+
+
+class AppRelay(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = RelayTmux()
+
+    def lines(self):
+        if not self.app.relay_file.exists():
+            return []
+        return self.app.relay_file.read_text(encoding="utf-8").splitlines()
+
+    def test_h_in_voice_mode_appends_one_hush_line(self):
+        self.app.prefs = {**self.app.prefs, "mode": core.VOICE_MODE}
+        self.app.apply_mode()
+        self.app.handle_key("h")
+        self.assertEqual([core.parse_relay(l) for l in self.lines()], [{"kind": "hush"}])
+
+    def test_h_in_notification_mode_appends_nothing(self):
+        self.app.handle_key("h")
+        self.assertEqual(self.lines(), [])
+
+    def test_switching_to_notification_mode_appends_one_hush_line_and_to_voice_none(self):
+        self.app.handle_key("m")
+        self.assertEqual(self.lines(), [])
+        self.app.handle_key("m")
+        self.assertEqual([core.parse_relay(l) for l in self.lines()], [{"kind": "hush"}])
+
+    def top_line(self):
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+        self.app.draw_top_line(60)
+        return drawn
+
+    def test_a_connected_laptop_takes_the_unavailable_tag_off_the_top_line(self):
+        self.app.poller.notifier.state = core.HELPER_UNAVAILABLE
+        self.app.tmux.options[RELAY_OPT] = str(time.time())
+        sidebar.App.housekeep(self.app, False)
+        self.assertFalse(any("notifications unavailable" in t for t in self.top_line()))
+        self.app.tmux.options[RELAY_OPT] = str(time.time() - 60)
+        sidebar.App.housekeep(self.app, False)
+        self.assertTrue(any("notifications unavailable" in t for t in self.top_line()))
 
 
 class ModeKey(AppCase):

@@ -11,11 +11,12 @@ import tempfile
 import textwrap
 import threading
 import time
+from pathlib import Path
 
-from emx import __version__, core, notify
+from emx import __version__, core, notify, remote
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -1443,13 +1444,14 @@ class Notices(threading.Thread):
     never loses it: a plain line takes the place of Haiku's.
     """
 
-    def __init__(self, claude: str, transcripts: Transcripts, resolver: Resolver, speaker: Voice, notifier=None):
+    def __init__(self, claude: str, transcripts: Transcripts, resolver: Resolver, speaker: Voice, notifier=None, relay: Path | None = None):
         super().__init__(daemon=True)
         self.claude = claude
         self.transcripts = transcripts
         self.resolver = resolver
         self.speaker = speaker
         self.notifier = notifier
+        self.relay = relay
         self.mode = core.NOTIFICATION_MODE
         self.lock = threading.Lock()
         self.wanted = {}
@@ -1547,6 +1549,8 @@ class Notices(threading.Thread):
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
             self.outbox.append((notice.id, notice.kind, title, text, notice.at))
             mode = self.mode
+        if self.relay is not None:
+            remote.append_relay(self.relay, core.relay_notice(title, text, plain, notice.id, mode, time.time()))
         if not text:
             return
         if mode == core.VOICE_MODE:
@@ -1571,7 +1575,7 @@ class Poller(threading.Thread):
         self.notifier = Notifier(getattr(getattr(engine, "tmux", None), "socket", None) or "emx")
         self.voice = Voice()
         self.voice.fallback_post = self.notifier.post
-        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice, self.notifier)
+        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice, self.notifier, core.relay_path(engine.state))
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.engine)
@@ -1615,6 +1619,8 @@ class App:
         self.tmux = tmux
         self.claude = claude
         self.state = core.state_path()
+        self.relay_file = core.relay_path(self.state)
+        self.relayed = False
         self.legacy_cleared = False
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
@@ -1806,6 +1812,7 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
         self.check_hush()
+        self.check_relay()
         self.check_open()
 
     def check_hush(self) -> None:
@@ -1817,6 +1824,14 @@ class App:
         self.hush_seen, due = core.hush_due(self.hush_seen, value)
         if due:
             self.hush()
+
+    def check_relay(self) -> None:
+        """The server's `emx follow` stamps a session option while a laptop is connected; fresh means banners are showing there. A failed read changes nothing."""
+        try:
+            value = self.tmux.session_option(RELAY_OPT)
+        except TmuxError:
+            return
+        self.relayed = core.relay_live(value, time.time())
 
     def check_open(self) -> None:
         """`emx open` from outside (a notification click) writes a session id to a session option; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
@@ -1866,6 +1881,7 @@ class App:
         if self.mode() == core.NOTIFICATION_MODE:
             return
         self.poller.voice.silence()
+        remote.append_relay(self.relay_file, core.relay_hush(time.time()))
         self.say("Stopped speaking.", seconds=RESTORED_NOTICE_SECONDS)
 
     def set_focus(self, focused: bool, back: bool = False) -> None:
@@ -2620,6 +2636,7 @@ class App:
         self.apply_mode()
         if self.mode() == core.NOTIFICATION_MODE:
             self.poller.voice.silence()
+            remote.append_relay(self.relay_file, core.relay_hush(time.time()))
             self.poller.notifier.authorize()
         self.say(MODE_MESSAGES[self.mode()], seconds=RESTORED_NOTICE_SECONDS)
 
@@ -2771,7 +2788,7 @@ class App:
 
     def draw_top_line(self, width: int) -> None:
         style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        label = core.mode_tag(self.mode(), self.poller.notifier.state)
+        label = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         warn = label in (core.BLOCKED_TAG, core.UNAVAILABLE_TAG)
         logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM,
                 "mode": self.palette.attr("error") if warn else curses.A_DIM}
