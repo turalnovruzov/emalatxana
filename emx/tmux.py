@@ -10,6 +10,7 @@ from dataclasses import dataclass
 SESSION = "emx"
 ROLE = "@emx_role"
 SESSION_OPT = "@emx_session"
+AGENT_OPT = "@emx_agent"
 VERSION_OPT = "@emx_version"
 LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
@@ -37,6 +38,7 @@ class Pane:
     active: bool = False
     back: bool = False
     zoomed: bool = False
+    agent: str = ""
 
 
 _PANE_FORMAT = "\t".join(
@@ -51,6 +53,7 @@ _PANE_FORMAT = "\t".join(
         "#{pane_active}",
         "#{" + BACK_OPT + "}",
         "#{window_zoomed_flag}",
+        "#{" + AGENT_OPT + "}",
     ]
 )
 
@@ -90,13 +93,13 @@ class Tmux:
         panes = []
         for line in out.splitlines():
             parts = line.split("\t")
-            if len(parts) != 10:
+            if len(parts) != 11:
                 continue
-            pid, window, dead, role, session, width, window_width, active, back, zoomed = parts
+            pid, window, dead, role, session, width, window_width, active, back, zoomed, agent = parts
             panes.append(
                 Pane(
                     pid, window, dead == "1", role, session, int(width or 0), int(window_width or 0), active == "1",
-                    back == "1", zoomed == "1",
+                    back == "1", zoomed == "1", agent,
                 )
             )
         return panes
@@ -130,11 +133,13 @@ class Tmux:
             idle = None
         return count, focus, active, idle
 
-    def new_hidden_window(self, command: str) -> str:
-        return self.run("new-window", "-d", "-t", f"={SESSION}:", "-P", "-F", "#{pane_id}", command).strip()
+    def new_hidden_window(self, command: str, cwd: str | None = None) -> str:
+        where = ["-c", cwd] if cwd else []
+        return self.run("new-window", "-d", "-t", f"={SESSION}:", *where, "-P", "-F", "#{pane_id}", command).strip()
 
-    def respawn(self, pane: str, command: str) -> None:
-        self.run("respawn-pane", "-k", "-t", pane, command)
+    def respawn(self, pane: str, command: str, cwd: str | None = None) -> None:
+        where = ["-c", cwd] if cwd else []
+        self.run("respawn-pane", "-k", "-t", pane, *where, command)
 
     def swap(self, source: str, target: str) -> None:
         self.run("swap-pane", "-d", "-s", source, "-t", target)

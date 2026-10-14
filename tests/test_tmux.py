@@ -1,3 +1,4 @@
+import json
 import os
 import pty
 import shutil
@@ -7,10 +8,11 @@ import tempfile
 import time
 import unittest
 import uuid
+from pathlib import Path
 from unittest import mock
 
-from emx import cli, core
-from emx.tmux import BACK_OPT, HUSH_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
+from emx import cli, core, engine
+from emx.tmux import AGENT_OPT, BACK_OPT, HUSH_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
@@ -541,6 +543,138 @@ class HushAcrossServers(unittest.TestCase):
         self.hush("a")
         self.assertNotEqual(self.token("a"), first)
         self.assertEqual(self.token("b"), "")
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class WindowParams(PrivateServer):
+    """The working folder and agent tag a session's pane is given."""
+
+    def pwd_command(self, out):
+        return f"{sys.executable} -c \"import os; open({out!r}, 'w').write(os.getcwd()); import time; time.sleep(30)\""
+
+    def read(self, path):
+        self.wait_for(lambda: os.path.exists(path) and os.path.getsize(path), "the pane to report its folder")
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_a_new_window_starts_in_the_folder_it_is_given(self):
+        work = os.path.realpath(tempfile.mkdtemp(dir=self.dir))
+        out = os.path.join(self.dir, "pwd-new.txt")
+        pane = self.tmux.new_hidden_window(self.pwd_command(out), cwd=work)
+        self.assertRegex(pane, r"^%\d+$")
+        self.assertEqual(os.path.realpath(self.read(out)), work)
+
+    def test_a_new_window_without_a_folder_still_works(self):
+        out = os.path.join(self.dir, "pwd-default.txt")
+        self.tmux.new_hidden_window(self.pwd_command(out))
+        self.assertTrue(self.read(out))
+
+    def test_respawn_starts_in_the_folder_it_is_given(self):
+        work = os.path.realpath(tempfile.mkdtemp(dir=self.dir))
+        out = os.path.join(self.dir, "pwd-respawn.txt")
+        pane = self.tmux.new_hidden_window("sleep 30")
+        self.tmux.respawn(pane, self.pwd_command(out), cwd=work)
+        self.assertEqual(os.path.realpath(self.read(out)), work)
+
+    def test_panes_report_the_agent_tag(self):
+        pane = self.tmux.new_hidden_window("sleep 30")
+        self.assertEqual({p.id: p.agent for p in self.tmux.panes()}[pane], "")
+        self.tmux.set_pane_option(pane, AGENT_OPT, "claude")
+        self.tmux.set_pane_option(pane, SESSION_OPT, "k1")
+        found = {p.id: p for p in self.tmux.panes()}[pane]
+        self.assertEqual((found.agent, found.session), ("claude", "k1"))
+        self.assertEqual({p.agent for p in self.tmux.panes() if p.id != pane}, {""})
+
+
+FAKE_CLAUDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_claude.py")
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class EngineLive(unittest.TestCase):
+    """engine.start against a private tmux server, with a stand-in for claude that runs the hook commands emx wrote."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "EMX_SHOW_TEST_SESSIONS": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        self.state = os.path.join(self.dir, "state", "emx")
+        self.folder = os.path.join(self.dir, "work")
+        os.mkdir(self.folder)
+        self.tmux = Tmux(f"emx-test-{uuid.uuid4().hex[:8]}", os.devnull)
+        self.addCleanup(self.kill_server)
+        self.tmux.run("new-session", "-d", "-s", SESSION, "-x", "100", "-y", "30", "sleep 120")
+
+    def kill_server(self):
+        try:
+            self.tmux.run("kill-server")
+        except TmuxError:
+            pass
+
+    def listed(self, key):
+        sessions, error = engine.list_sessions(self.tmux, self.state)
+        self.assertIsNone(error)
+        return [s for s in sessions if s.id == key]
+
+    def wait_for_state(self, key, state, running=True):
+        deadline = time.monotonic() + 10
+        while True:
+            found = self.listed(key)
+            if found and (found[0].state, found[0].running) == (state, running):
+                return found[0]
+            if time.monotonic() > deadline:
+                self.fail(f"timed out waiting for {state}; last saw {found}")
+            time.sleep(0.05)
+
+    def pane_of(self, key):
+        (pane,) = [p.id for p in self.tmux.panes() if p.session == key]
+        return pane
+
+    def send(self, key, event):
+        self.tmux.run("send-keys", "-t", self.pane_of(key), "-l", event)
+        self.tmux.run("send-keys", "-t", self.pane_of(key), "Enter")
+
+    def test_a_session_goes_starting_then_working_then_done_and_stopped_when_its_pane_is_killed(self):
+        Path(self.folder, "hold").write_text("")
+        session, error = engine.start(self.tmux, FAKE_CLAUDE, self.folder, "hello", state=self.state)
+        self.assertIsNone(error)
+        starting = self.wait_for_state(session.id, "starting")
+        self.assertEqual((core.category(starting), starting.turned), (core.NEEDS_INPUT, False))
+        os.unlink(os.path.join(self.folder, "hold"))
+        self.assertEqual(self.wait_for_state(session.id, "blocked").turned, False)
+        self.send(session.id, "UserPromptSubmit")
+        self.assertEqual(self.wait_for_state(session.id, "working").turned, True)
+        self.send(session.id, "Stop")
+        done = self.wait_for_state(session.id, "done")
+        self.assertEqual((core.category(done), done.session_id, done.cwd), (core.DONE, session.id, self.folder))
+        self.tmux.kill_pane(self.pane_of(session.id))
+        stopped = self.wait_for_state(session.id, "stopped", running=False)
+        self.assertEqual(core.category(stopped), core.STOPPED)
+
+    def test_the_pane_runs_in_the_folder_and_carries_the_tags(self):
+        session, _ = engine.start(self.tmux, FAKE_CLAUDE, self.folder, "", state=self.state)
+        (pane,) = [p for p in self.tmux.panes() if p.session == session.id]
+        self.assertEqual(pane.agent, "claude")
+        self.wait_for_state(session.id, "blocked")
+        with open(os.path.join(self.state, "sessions", session.id, "events.jsonl"), encoding="utf-8") as fh:
+            first = json.loads(fh.readline())
+        self.assertEqual((first["event"], first["source"], os.path.realpath(first["cwd"])), ("SessionStart", "startup", self.folder))
+
+    def test_a_resumed_session_reads_idle_and_keeps_its_conversation(self):
+        session, _ = engine.start(self.tmux, FAKE_CLAUDE, self.folder, "", state=self.state)
+        self.wait_for_state(session.id, "blocked")
+        self.send(session.id, "SessionEnd")
+        self.wait_for_state(session.id, "stopped", running=False)
+        command, error = engine.resume_command(session.id, FAKE_CLAUDE, state=self.state)
+        self.assertIsNone(error)
+        pane = self.tmux.new_hidden_window(command, cwd=self.folder)
+        self.tmux.set_pane_option(pane, SESSION_OPT, session.id)
+        self.tmux.set_pane_option(pane, AGENT_OPT, "claude")
+        resumed = self.wait_for_state(session.id, "working")
+        self.assertEqual((resumed.status, resumed.turned, resumed.session_id), ("idle", False, session.id))
+        self.assertTrue(core.idle(resumed))
 
 
 if __name__ == "__main__":

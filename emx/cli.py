@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
@@ -20,6 +21,7 @@ CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 
 USAGE = """usage: emx [--version | hush]
+(emx hook <state folder> <session key> is internal: the command a session's hooks run.)
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
@@ -194,9 +196,40 @@ def left_check(args: list) -> int:
         return 1
 
 
+HOOK_STDIN_BYTES = 256 * 1024
+
+
+def hook(args: list) -> int:
+    """Append what a session's hook was told to `<state>/sessions/<key>/events.jsonl`. Always returns 0 and prints nothing.
+
+    Claude Code reads a hook's stdout as context or as a decision and exit 2
+    as a block, so this must never print, fail or hang, whatever it is given.
+    Only a key that is a session id and already has a record is written to.
+    """
+    try:
+        root, key = args
+        folder = os.path.join(root, "sessions", key)
+        if not os.path.isabs(root) or not core.is_session_id(key) or not os.path.isfile(os.path.join(folder, "session.json")):
+            return 0
+        text = sys.stdin.buffer.read(HOOK_STDIN_BYTES).decode("utf-8", errors="replace")
+        record = core.hook_record(text, time.time() * 1000)
+        if record is None:
+            return 0
+        fd = os.open(os.path.join(folder, "events.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, (json.dumps(record, separators=(",", ":")) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except BaseException:
+        pass
+    return 0
+
+
 def main(argv: list) -> int:
     if not argv:
         return launch()
+    if argv[0] == "hook":
+        return hook(argv[1:])
     if argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0
