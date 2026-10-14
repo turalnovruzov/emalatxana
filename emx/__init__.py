@@ -1,4 +1,4 @@
 import os
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "bin", "emx")
