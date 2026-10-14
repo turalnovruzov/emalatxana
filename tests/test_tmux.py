@@ -582,6 +582,14 @@ class ClientStateParse(unittest.TestCase):
         self.assertEqual(self.state("1\t0\t%1\t1005\n")[0], (1, "0", "%1", 0.0))
 
 
+class ClientTtys(unittest.TestCase):
+    def test_it_lists_the_emx_sessions_clients_by_tty(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run", return_value="/dev/ttys004\n\n/dev/ttys009\n") as run:
+            self.assertEqual(tmux.client_ttys(), ["/dev/ttys004", "/dev/ttys009"])
+        self.assertEqual(run.call_args.args, ("list-clients", "-t", "=emx:", "-F", "#{client_tty}"))
+
+
 class ShippedConf(unittest.TestCase):
     def test_both_focus_hooks_are_there_and_passthrough_is_not_set_globally(self):
         self.assertIn("set-hook -g client-focus-in 'set-option -t \"=emx:\" @emx_focus 1'", SHELL_CONF)
@@ -609,6 +617,10 @@ class Focus(PrivateServer):
         self.assertLess(idle, 5)
         os.write(self.client_fd, b"\x1b[O")
         self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
+
+    def test_the_attached_client_is_listed_by_its_tty(self):
+        (tty,) = self.tmux.client_ttys()
+        self.assertTrue(tty.startswith("/dev/tty"), tty)
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class HushAcrossServers(unittest.TestCase):

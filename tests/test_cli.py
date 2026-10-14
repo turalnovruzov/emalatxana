@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -354,6 +355,16 @@ class OpenSession(unittest.TestCase):
                 self.pending_file().parent.mkdir(parents=True, exist_ok=True)
                 self.pending_file().write_text(bad, encoding="utf-8")
                 self.assertNotIn(OPEN_OPT, self.create_workspace().options)
+                self.assertFalse(self.pending_file().exists())
+
+    def test_create_workspace_ignores_and_removes_a_stale_pending_file_and_honours_a_fresh_one(self):
+        for age, honoured in ((cli.PENDING_MAX_AGE + 1, False), (3 * 86400, False), (cli.PENDING_MAX_AGE - 10, True)):
+            with self.subTest(age=age):
+                self.pending_file().parent.mkdir(parents=True, exist_ok=True)
+                self.pending_file().write_text(SID + "\n", encoding="utf-8")
+                then = time.time() - age
+                os.utime(self.pending_file(), (then, then))
+                self.assertEqual(self.create_workspace().options.get(OPEN_OPT), SID if honoured else None)
                 self.assertFalse(self.pending_file().exists())
 
     def test_create_workspace_without_a_pending_file_requests_nothing(self):

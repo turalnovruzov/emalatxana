@@ -135,6 +135,11 @@ class Tmux:
             idle = None
         return count, focus, active, idle
 
+    def client_ttys(self) -> list:
+        """The tty of each client attached to the emx session."""
+        out = self.run("list-clients", "-t", f"={SESSION}:", "-F", "#{client_tty}")
+        return [line.strip() for line in out.splitlines() if line.strip()]
+
     def new_hidden_window(self, command: str, cwd: str | None = None) -> str:
         where = ["-c", cwd] if cwd else []
         return self.run("new-window", "-d", "-t", f"={SESSION}:", *where, "-P", "-F", "#{pane_id}", command).strip()

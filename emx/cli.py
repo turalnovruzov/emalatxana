@@ -23,6 +23,7 @@ PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 FALLBACK_TERMINAL = "com.apple.Terminal"
 LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
+PENDING_MAX_AGE = 60
 
 USAGE = """usage: emx [--version | hush]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
@@ -180,18 +181,23 @@ def open_folder():
 
 
 def take_pending_open() -> str | None:
-    """The session id a notification click left for an emx it had to start, read once: the file is removed whatever it holds."""
+    """The session id a notification click left for an emx it had to start, read once: the file is removed whatever it holds.
+
+    One older than `PENDING_MAX_AGE` seconds is ignored: its launch never ran
+    (he cancelled iTerm2's "OK to run"), and must not open that session days later.
+    """
     path = open_folder() / PENDING_FILE
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read(256)
+            fresh = time.time() - os.fstat(fh.fileno()).st_mtime < PENDING_MAX_AGE
     except OSError:
         return None
     try:
         path.unlink()
     except OSError:
         pass
-    return core.open_request(text)
+    return core.open_request(text) if fresh else None
 
 
 def open_command() -> str:
@@ -249,7 +255,8 @@ def open_window(bundle: str, sid: str | None = None) -> int:
     warning, once suppressed, stays suppressed. It holds only emx's command and
     the environment `OPEN_ENV` allows, never a session id: when emx is not
     running, `sid` goes in the `pending` file beside it, which
-    `create_workspace` takes. Launch files of earlier builds are removed.
+    `create_workspace` takes within `PENDING_MAX_AGE` seconds. Launch files of
+    earlier builds are removed.
     """
     folder = open_folder()
     try:

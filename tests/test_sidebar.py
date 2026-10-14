@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, sidebar
-from emx.tmux import AGENT_OPT, OPEN_OPT, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, OPEN_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -5849,12 +5849,18 @@ class ModeKey(AppCase):
 
 
 class OpenTmux(HushTmux):
-    """Session options by name; `fail` makes every read raise."""
+    """Session options by name; `fail` makes every read raise. `ttys` are the attached clients' ttys."""
 
     def __init__(self):
         super().__init__()
         self.options = {}
         self.fail = False
+        self.ttys = []
+        self.tty_reads = 0
+
+    def client_ttys(self):
+        self.tty_reads += 1
+        return list(self.ttys)
 
     def session_option(self, name):
         if self.fail:
@@ -5966,6 +5972,60 @@ class OpenRequests(AppCase):
         self.app.tmux.options[OPEN_OPT] = self.SID
         self.housekeep()
         self.assertEqual([e.read for e in self.app.history], [True])
+
+
+class OpenBringsTheItermTabForward(AppCase):
+    """On a click, an iTerm2 client gets StealFocus written straight to its tty; nothing else does."""
+
+    SID = OpenRequests.SID
+
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = OpenTmux()
+        self.app.me = "%1"
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tty = os.path.join(tmp.name, "ttys-fake")
+        Path(self.tty).write_bytes(b"")
+        self.app.tmux.ttys = [self.tty]
+        self.poll(session(self.SID, "/p/alpha"))
+        self.app.refresh()
+
+    def click(self, terminal):
+        if terminal is not None:
+            self.app.tmux.options[TERMINAL_OPT] = terminal
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        sidebar.App.housekeep(self.app, False)
+
+    def test_iterm2_gets_exactly_the_steal_focus_sequence_on_the_client_tty(self):
+        self.click("com.googlecode.iterm2")
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
+        self.assertEqual(Path(self.tty).read_bytes(), b"\x1b]1337;StealFocus\x07")
+
+    def test_terminal_app_or_no_recorded_terminal_gets_nothing(self):
+        for terminal in ("com.apple.Terminal", None):
+            with self.subTest(terminal=terminal):
+                self.app.tmux.options.pop(TERMINAL_OPT, None)
+                self.click(terminal)
+                self.assertEqual(Path(self.tty).read_bytes(), b"")
+                self.assertEqual(self.app.tmux.tty_reads, 0)
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)] * 2)
+
+    def test_a_tty_that_cannot_be_written_does_not_break_the_open(self):
+        self.app.tmux.ttys = [os.path.join(self.tty, "missing"), self.tty]
+        with mock.patch.object(sidebar.os, "write", side_effect=OSError("EAGAIN")):
+            self.click("com.googlecode.iterm2")
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
+
+    def test_a_failed_client_lookup_does_not_break_the_open(self):
+        def gone():
+            raise TmuxError("gone")
+
+        self.app.tmux.client_ttys = gone
+        self.click("com.googlecode.iterm2")
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
 
 
 class ModeDelivery(AppCase):

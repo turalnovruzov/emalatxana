@@ -15,7 +15,7 @@ import time
 from emx import __version__, core, notify
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -45,6 +45,8 @@ COLLAPSE_KEY = "C-q"
 RESTORED_NOTICE_SECONDS = 4
 MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notification mode"}
 WHATS_NEW_SECONDS = 60
+ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
+ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
 FOOTERS = (
     "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
     "→ open ← back ␣ peek n new ^f find ^t pin ^r rename ^x close ^s view ? keys",
@@ -1749,6 +1751,31 @@ class App:
         sid = core.open_request(value)
         if sid:
             self.open_listed(sid)
+            self.bring_tab_forward()
+
+    def bring_tab_forward(self) -> None:
+        """In iTerm2, bring forward the tab emx runs in: the helper can only activate the app, which lands on whichever tab was last active.
+
+        The escape goes straight to the client's tty, so it bypasses tmux and
+        needs no tmux passthrough. Best effort: nothing here fails the open.
+        """
+        try:
+            if self.tmux.session_option(TERMINAL_OPT) != ITERM_BUNDLE:
+                return
+            ttys = self.tmux.client_ttys()
+        except TmuxError:
+            return
+        for tty in ttys:
+            try:
+                fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            try:
+                os.write(fd, ITERM_STEAL_FOCUS)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
 
     def hush(self) -> None:
         """`h` and `emx hush` only stop speech, so in notification mode they do nothing at all."""
