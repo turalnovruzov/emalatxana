@@ -4954,7 +4954,7 @@ class SayFallback(unittest.TestCase):
 
 
 class RecordingHelper:
-    """A fake emx-notify script in a temp folder: logs each verb and its stdin, answers with the `auth` in a file the test sets."""
+    """A fake emx-notify script in a temp folder: logs each verb and its stdin, answers with the `auth` in a file the test sets (into the result file for `authorize`)."""
 
     def __init__(self, test, auth="notDetermined"):
         tmp = tempfile.mkdtemp()
@@ -4968,7 +4968,8 @@ class RecordingHelper:
                 "#!/bin/sh\n"
                 f'input=$(cat); printf "%s %s\\n" "$1" "$input" >> {shlex.quote(self.log)}\n'
                 f"auth=$(cat {shlex.quote(self.auth)})\n"
-                'echo "{\\"auth\\": \\"$auth\\", \\"alerts\\": \\"enabled\\", \\"posted\\": true, \\"shown\\": true, \\"delivered\\": 1}"\n'
+                'line="{\\"auth\\": \\"$auth\\", \\"alerts\\": \\"enabled\\", \\"posted\\": true, \\"shown\\": true, \\"delivered\\": 1}"\n'
+                'if [ "$1" = authorize ]; then echo "$line" > "$2"; else echo "$line"; fi\n'
             )
         os.chmod(self.path, 0o700)
 
@@ -5124,6 +5125,23 @@ class NotifierWorker(unittest.TestCase):
             notifier.step()
         wait.assert_called_once()
         self.assertEqual([verb for verb, _ in helper.calls()], ["status"])
+
+    def test_a_refused_ask_reads_blocked_and_is_not_asked_again_on_a_switch_back(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        refused = sidebar.notify.HelperReport("notDetermined", "notSupported", False, False, 0, "UNErrorDomain Code=1")
+        with mock.patch.object(sidebar.notify, "authorize", return_value=(refused, None)) as asked:
+            notifier.step()
+            self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
+            notifier.mode = core.VOICE_MODE
+            notifier.mode = core.NOTIFICATION_MODE
+            notifier.authorize()
+            with mock.patch.object(notifier.wake, "wait"):
+                notifier.step()
+        asked.assert_called_once()
+        self.assertEqual(notifier.state, core.HELPER_BLOCKED)
 
 
 class NoticeWiring(AppCase):

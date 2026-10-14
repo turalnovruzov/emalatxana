@@ -1,15 +1,19 @@
 // emx-notify: the small app that shows emx's notifications as emx's own (ADR 0006).
 //
-// emx/notify.py builds it with swiftc into an app bundle and runs its
-// executable with one verb:
-//   post            stdin: one JSON object {title, body, id, open}; shows it, no sound
-//   status          reports the notification permission
-//   authorize       asks for the permission once (the normal prompt, not provisional)
-//   icon <dir>      writes the app's .iconset into <dir>; never touches Notification Center
-//   click <file>    runs what a click on a banner runs, for the `open` object in <file>
-// Every verb but icon prints one JSON line:
-//   {"auth", "alerts", "posted", "shown", "delivered"}
-// and exits 0 when it did its job, 3 when not authorized, 1 on an error.
+// emx/notify.py builds it with swiftc into an app bundle and runs it with one verb:
+//   post              stdin: one JSON object {title, body, id, open}; shows it, no sound
+//   status            reports the notification permission
+//   authorize <file>  asks for the permission once (the normal prompt, not provisional)
+//                     and writes its report into <file>
+//   icon <dir>        writes the app's .iconset into <dir>; never touches Notification Center
+//   click <file>      runs what a click on a banner runs, for the `open` object in <file>
+// post and status run as the executable directly. authorize must be launched through
+// LaunchServices (`open -W -a <app> --args authorize <file>`): macOS refuses the request
+// from anything but a running NSApplication, and stdout does not survive `open`.
+// post, status and authorize report one JSON object:
+//   {"auth", "alerts", "posted", "shown", "delivered"}, plus "error" when the system refused
+// and exit 0 when they did their job, 3 when not authorized, 4 when the system refused the
+// request, 1 on an error.
 // With no verb it is the app macOS launches when he clicks a banner.
 
 import AppKit
@@ -59,22 +63,35 @@ func delivered() -> [UNNotification] {
     return found ?? []
 }
 
-func report(posted: Bool = false, shown: Bool = false) -> Int32 {
-    guard let s = settings() else {
-        FileHandle.standardError.write("emx-notify: no notification settings\n".data(using: .utf8)!)
-        return 1
-    }
-    let line: [String: Any] = [
+let refusedCode: Int32 = 4
+
+func reportLine(_ s: UNNotificationSettings, posted: Bool = false, shown: Bool = false, error: Error? = nil) -> (Data, Int32) {
+    var line: [String: Any] = [
         "auth": authName(s.authorizationStatus),
         "alerts": alertsName(s.alertSetting),
         "posted": posted,
         "shown": shown,
         "delivered": delivered().count,
     ]
+    if let error = error {
+        line["error"] = "\(error)"
+    }
     let data = try! JSONSerialization.data(withJSONObject: line, options: [.sortedKeys])
-    print(String(data: data, encoding: .utf8)!)
+    if error != nil {
+        return (data, refusedCode)
+    }
     let allowed: Set<UNAuthorizationStatus> = [.authorized, .provisional]
-    return allowed.contains(s.authorizationStatus) && s.alertSetting != .disabled ? 0 : 3
+    return (data, allowed.contains(s.authorizationStatus) && s.alertSetting != .disabled ? 0 : 3)
+}
+
+func report(posted: Bool = false, shown: Bool = false) -> Int32 {
+    guard let s = settings() else {
+        FileHandle.standardError.write("emx-notify: no notification settings\n".data(using: .utf8)!)
+        return 1
+    }
+    let (data, code) = reportLine(s, posted: posted, shown: shown)
+    print(String(data: data, encoding: .utf8)!)
+    return code
 }
 
 func post() -> Int32 {
@@ -103,11 +120,48 @@ func post() -> Int32 {
     return code == 0 && !posted ? 1 : code
 }
 
-func authorize() -> Int32 {
-    var answered = false
-    center.requestAuthorization(options: [.alert]) { _, _ in answered = true }
-    _ = wait(seconds: 300) { answered }
-    return report()
+class Authorizing: NSObject, NSApplicationDelegate {
+    let path: String
+    var finished = false
+
+    init(path: String) {
+        self.path = path
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        center.requestAuthorization(options: [.alert]) { _, error in
+            center.getNotificationSettings { s in
+                DispatchQueue.main.async { self.finish(s, error: error) }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 300) {
+            center.getNotificationSettings { s in
+                DispatchQueue.main.async { self.finish(s, error: nil) }
+            }
+        }
+    }
+
+    func finish(_ s: UNNotificationSettings, error: Error?) {
+        guard !finished else { return }
+        finished = true
+        let (data, code) = reportLine(s, error: error)
+        // Written in place, never replaced, so the 0600 file emx made keeps its mode.
+        guard let handle = FileHandle(forWritingAtPath: path) else { exit(1) }
+        handle.truncateFile(atOffset: 0)
+        handle.write(data)
+        handle.closeFile()
+        // exit, not NSApp.terminate, which would always exit 0.
+        exit(code)
+    }
+}
+
+func authorize(_ path: String) -> Never {
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let asking = Authorizing(path: path)
+    app.delegate = asking
+    app.run()
+    exit(1)
 }
 
 func openSession(_ open: [String: Any]) -> Process? {
@@ -233,8 +287,8 @@ case "post":
     exit(post())
 case "status":
     exit(report())
-case "authorize":
-    exit(authorize())
+case "authorize" where args.count == 3:
+    authorize(args[2])
 case "icon" where args.count == 3:
     exit(icon(args[2]))
 case "click" where args.count == 3:
@@ -245,6 +299,6 @@ case "":
     app.delegate = clicked
     app.run()
 default:
-    FileHandle.standardError.write("usage: emx-notify post|status|authorize|icon <dir>|click <file>\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: emx-notify post|status|authorize <file>|icon <dir>|click <file>\n".data(using: .utf8)!)
     exit(1)
 }

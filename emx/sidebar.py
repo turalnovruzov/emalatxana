@@ -1266,6 +1266,7 @@ class Notifier(threading.Thread):
         self.queue = []
         self.mode = core.NOTIFICATION_MODE
         self.command = None
+        self.app = None
         self.asking = False
         self.asked = False
         self.checked_at = None
@@ -1309,6 +1310,7 @@ class Notifier(threading.Thread):
             home = notify.helper_home(env)
             app, _ = notify.ensure_built(home, notify.bundle_id(env)) if home is not None else (None, None)
             self.command = notify.helper_command(env, home) if app is not None else None
+            self.app = app
         if self.command is None:
             self.state = core.HELPER_UNAVAILABLE
             return
@@ -1333,7 +1335,7 @@ class Notifier(threading.Thread):
             self.wake.wait()
             self.wake.clear()
         elif asking:
-            report, error = notify.run(self.command, "authorize", timeout=AUTHORIZE_TIMEOUT)
+            report, error = notify.authorize(self.command, self.app, AUTHORIZE_TIMEOUT)
             self.asked = True
             self.settle(report, error)
         elif item is not None:

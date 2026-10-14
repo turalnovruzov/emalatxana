@@ -44,14 +44,20 @@ OPEN_ENV = (
 )
 
 
+OPEN = "/usr/bin/open"
+# The helper's exit codes; through `open -W` they are lost, so a refusal is read from the report's `error`.
+EXIT_OK, EXIT_FAILED, EXIT_NOT_AUTHORIZED, EXIT_REFUSED = 0, 1, 3, 4
+
+
 @dataclass(frozen=True)
 class HelperReport:
-    """What a verb printed. `posted` is only `add`'s completion; `shown` is the request found among the delivered ones."""
+    """What a verb reported. `posted` is only `add`'s completion; `shown` is the request found among the delivered ones; `error` is the system's refusal of `authorize`."""
     auth: str
     alerts: str
     posted: bool
     shown: bool
     delivered: int
+    error: str | None = None
 
 
 def real_home() -> Path:
@@ -204,7 +210,11 @@ def parse_report(text: str) -> HelperReport | None:
         auth, alerts, delivered = raw.get("auth"), raw.get("alerts"), raw.get("delivered")
         if not isinstance(auth, str) or not isinstance(alerts, str) or not isinstance(delivered, int):
             continue
-        return HelperReport(auth, alerts, raw.get("posted") is True, raw.get("shown") is True, delivered)
+        error = raw.get("error")
+        return HelperReport(
+            auth, alerts, raw.get("posted") is True, raw.get("shown") is True, delivered,
+            error if isinstance(error, str) and error else None,
+        )
     return None
 
 
@@ -222,6 +232,54 @@ def run(command: str, verb: str, payload: dict | None = None, timeout: float = R
         last = (done.stderr.strip().splitlines() or [""])[-1]
         return None, f"emx-notify {verb} exited {done.returncode}: {last}".rstrip(": ")
     return found, None
+
+
+def open_command(env: Mapping | None = None) -> str:
+    env = os.environ if env is None else env
+    return env.get("EMX_OPEN") or OPEN
+
+
+def authorize_argv(command: str, app: Path | None, result: str, env: Mapping | None = None) -> list:
+    """How `authorize` is launched: through LaunchServices for a built app, since macOS refuses the request from a directly run executable; a fake `EMX_NOTIFY` is run directly and never through `open`."""
+    env = os.environ if env is None else env
+    if env.get("EMX_NOTIFY") or app is None:
+        return [command, "authorize", result]
+    return [open_command(env), "-W", "-a", str(app), "--args", "authorize", result]
+
+
+def authorize(command: str, app: Path | None, timeout: float, env: Mapping | None = None) -> tuple:
+    """(HelperReport, None) once the permission was asked for, or (None, one-line error). Never raises.
+
+    The helper writes its report into a 0600 file in the helper's folder
+    (the temp folder when there is none), which is removed afterwards.
+    """
+    try:
+        fd, result = tempfile.mkstemp(prefix=".authorize-", suffix=".json", dir=str(app.parent) if app else None)
+    except OSError as exc:
+        return None, f"emx-notify authorize failed: {exc}"
+    os.close(fd)
+    try:
+        try:
+            done = subprocess.run(
+                authorize_argv(command, app, result, env), capture_output=True, encoding="utf-8", errors="replace",
+                stdin=subprocess.DEVNULL, timeout=timeout,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            return None, f"emx-notify authorize failed: {exc}"
+        try:
+            with open(result, encoding="utf-8", errors="replace") as fh:
+                found = parse_report(fh.read())
+        except OSError:
+            found = None
+        if found is None:
+            last = (done.stderr.strip().splitlines() or [""])[-1]
+            return None, f"emx-notify authorize wrote no report, exited {done.returncode}: {last}".rstrip(": ")
+        return found, None
+    finally:
+        try:
+            os.unlink(result)
+        except OSError:
+            pass
 
 
 def payload(title: str, body: str, ident: str, sid: str, socket: str, env: Mapping | None = None) -> dict:
@@ -249,7 +307,7 @@ def payload(title: str, body: str, ident: str, sid: str, socket: str, env: Mappi
 def helper_state(report: HelperReport | None, error: str | None = None) -> str:
     if report is None:
         return core.HELPER_UNAVAILABLE
-    if report.auth == "denied" or report.alerts == "disabled":
+    if report.error or report.auth == "denied" or report.alerts == "disabled":
         return core.HELPER_BLOCKED
     if report.auth == "notDetermined":
         return core.HELPER_PENDING

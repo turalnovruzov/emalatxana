@@ -1,6 +1,7 @@
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import stat
 import subprocess
@@ -141,6 +142,101 @@ class Running(unittest.TestCase):
         self.assertEqual(notify.helper_state(r("notDetermined")), core.HELPER_PENDING)
         self.assertEqual(notify.helper_state(r("authorized")), core.HELPER_OK)
         self.assertEqual(notify.helper_state(r("provisional")), core.HELPER_OK)
+
+
+class Authorizing(unittest.TestCase):
+    REFUSED = (
+        '{"alerts": "notSupported", "auth": "notDetermined", "delivered": 0, "posted": false, "shown": false, '
+        '"error": "Error Domain=UNErrorDomain Code=1 \\"Notifications are not allowed for this application\\""}'
+    )
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.home = Path(self.tmp) / "home"
+        self.app = self.home / notify.APP
+        (self.app / "Contents" / "MacOS").mkdir(parents=True)
+        self.command = str(self.app / "Contents" / "MacOS" / notify.EXECUTABLE)
+
+    def fake_open(self, report, code=0):
+        """A stand-in for /usr/bin/open: records its argv and the result file's mode, then writes `report` into the last argument."""
+        self.argv_log = os.path.join(self.tmp, "argv")
+        path = os.path.join(self.tmp, "fake-open")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                'for a in "$@"; do printf "%s\\n" "$a"; done > ' + shlex.quote(self.argv_log) + "\n"
+                'for last in "$@"; do :; done\n'
+                'stat -f %Lp "$last" >> ' + shlex.quote(self.argv_log) + "\n"
+                "printf '%s' " + shlex.quote(report) + ' > "$last"\n'
+                f"exit {code}\n"
+            )
+        os.chmod(path, stat.S_IRWXU)
+        return {"EMX_OPEN": path}
+
+    def recorded(self):
+        with open(self.argv_log, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        return lines[:-1], lines[-1]
+
+    def test_authorize_goes_through_open_and_reads_the_result_file(self):
+        env = self.fake_open(Running.GOOD)
+        report, error = notify.authorize(self.command, self.app, 5, env)
+        self.assertIsNone(error)
+        self.assertEqual(report, notify.HelperReport("authorized", "enabled", True, True, 2))
+        argv, mode = self.recorded()
+        self.assertEqual(argv[:5], ["-W", "-a", str(self.app), "--args", "authorize"])
+        self.assertEqual(len(argv), 6)
+        result = argv[5]
+        self.assertEqual(os.path.dirname(result), str(self.home))
+        self.assertEqual(mode, "600")
+        self.assertFalse(os.path.exists(result))
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), [notify.APP])
+
+    def test_the_argv_is_open_wait_app_for_a_built_helper_and_direct_for_a_fake(self):
+        argv = notify.authorize_argv(self.command, self.app, "/r/f.json", {})
+        self.assertEqual(argv, [notify.OPEN, "-W", "-a", str(self.app), "--args", "authorize", "/r/f.json"])
+        argv = notify.authorize_argv(self.command, self.app, "/r/f.json", {"EMX_OPEN": "/x/open"})
+        self.assertEqual(argv[0], "/x/open")
+        self.assertEqual(notify.authorize_argv("/x/fake", None, "/r/f.json", {"EMX_NOTIFY": "/x/fake"}),
+                         ["/x/fake", "authorize", "/r/f.json"])
+        self.assertEqual(notify.authorize_argv("/x/fake", self.app, "/r/f.json", {"EMX_NOTIFY": "/x/fake", "EMX_OPEN": "/x/open"}),
+                         ["/x/fake", "authorize", "/r/f.json"])
+
+    def test_a_refusal_is_reported_with_its_error_and_reads_blocked(self):
+        report, error = notify.authorize(self.command, self.app, 5, self.fake_open(self.REFUSED))
+        self.assertIsNone(error)
+        self.assertEqual(report.auth, "notDetermined")
+        self.assertIn("UNErrorDomain Code=1", report.error)
+        self.assertEqual(notify.helper_state(report), core.HELPER_BLOCKED)
+        self.assertIsNone(notify.parse_report(Running.GOOD).error)
+        self.assertEqual(notify.helper_state(notify.parse_report(self.REFUSED.replace("notDetermined", "authorized").replace("notSupported", "enabled"))),
+                         core.HELPER_BLOCKED)
+
+    def test_no_report_in_the_file_is_an_error_and_the_file_is_still_removed(self):
+        cases = {"empty": ("", 0), "garbage": ("not json", 1)}
+        for name, (body, code) in cases.items():
+            with self.subTest(name):
+                report, error = notify.authorize(self.command, self.app, 5, self.fake_open(body, code))
+                self.assertIsNone(report)
+                self.assertIn(f"exited {code}", error)
+                self.assertFalse(os.path.exists(self.recorded()[0][5]))
+        timeout = os.path.join(self.tmp, "slow-open")
+        with open(timeout, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nsleep 5\n")
+        os.chmod(timeout, stat.S_IRWXU)
+        report, error = notify.authorize(self.command, self.app, 0.5, {"EMX_OPEN": timeout})
+        self.assertIsNone(report)
+        self.assertTrue(error)
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), [notify.APP])
+
+    def test_the_helper_exit_codes_keep_refused_apart_from_not_authorized(self):
+        self.assertEqual(len({notify.EXIT_OK, notify.EXIT_FAILED, notify.EXIT_NOT_AUTHORIZED, notify.EXIT_REFUSED}), 4)
+        with open(notify.SOURCE, encoding="utf-8") as fh:
+            source = fh.read()
+        self.assertIn(f"let refusedCode: Int32 = {notify.EXIT_REFUSED}", source)
+        self.assertIn(f"? {notify.EXIT_OK} : {notify.EXIT_NOT_AUTHORIZED})", source)
+        self.assertIn('line["error"]', source)
 
 
 class Building(unittest.TestCase):
