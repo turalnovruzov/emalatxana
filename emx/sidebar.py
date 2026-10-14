@@ -14,8 +14,8 @@ import time
 
 from emx import __version__, core
 from emx.cli import read_changelog, self_command
-from emx.engine import Engine, claude_home
-from emx.tmux import HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.engine import AGENT, Engine, claude_home
+from emx.tmux import AGENT_OPT, HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -157,32 +157,6 @@ def git_placement(cwd: str, home: str = "") -> tuple:
         return None, error
     branch, _ = run_git(cwd, "symbolic-ref", "--short", "-q", "HEAD")
     return core.placement_from_git(cwd, rev_parse, branch, home, os.path.realpath), None
-
-
-def start_session(claude: str, folder: str, message: str) -> tuple:
-    """Run `claude --bg` in `folder`. Returns (session_id, None) or (None, error)."""
-    if not os.path.isdir(folder):
-        return None, f"folder not found: {folder}"
-    try:
-        done = subprocess.run(
-            core.new_session_args(claude, message),
-            cwd=folder, capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=60,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, "claude --bg timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.first_message(done.stderr) or core.first_message(done.stdout) or (
-            f"claude --bg exited with {done.returncode}"
-        )
-    sid = core.parse_new_session_id(done.stdout)
-    if not sid:
-        return None, "claude --bg started, but its output had no session id"
-    return sid, None
 
 
 def wait_until_running(engine: Engine, sid: str) -> tuple:
@@ -649,7 +623,11 @@ class Interrupter(threading.Thread):
 
 
 class Starter(threading.Thread):
-    """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
+    """Starts a session off the main thread, so the panel keeps drawing while its window opens.
+
+    It waits for a listing that shows the session's pane running, not for a
+    hook: Claude reports nothing until its folder-trust question is answered.
+    """
 
     def __init__(self, engine: Engine, folder: str, message: str):
         super().__init__(daemon=True)
@@ -658,10 +636,10 @@ class Starter(threading.Thread):
 
     def run(self) -> None:
         try:
-            sid, error = start_session(self.engine.claude, self.folder, self.message)
+            started, error = self.engine.start(self.folder, self.message)
             session = None
-            if sid:
-                session, error = wait_until_running(self.engine, sid)
+            if started is not None:
+                session, error = wait_until_running(self.engine, started.id)
         except Exception as exc:
             session, error = None, f"starting a session failed: {core.error_line(exc)}"
         self.result = (session, error)
@@ -1833,21 +1811,13 @@ class App:
             if main is None:
                 self.say("The main pane is missing; restart emx.", error=True)
                 return
-            viewer = next((p for p in panes if p.session == sid), None)
-            command = core.viewer_command(self.claude, sid)
-            if viewer is None:
-                if not self.confirm_attach(sid, trigger, checked):
-                    return
-                pane_id = self.tmux.new_hidden_window(command)
-                self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+            held = next((p for p in panes if p.session == sid and p.agent), None)
+            if held is not None and not held.dead:
+                pane_id = held.id
             else:
-                pane_id = viewer.id
-                self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
-                if viewer.dead or respawn:
-                    if not self.confirm_attach(sid, trigger, checked):
-                        return
-                    self.tmux.respawn(pane_id, command)
-                    self.flagged_viewers -= {pane_id}
+                pane_id = self.resume(sid, trigger, checked, held)
+                if pane_id is None:
+                    return
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
@@ -1859,12 +1829,45 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
+    def resume(self, sid: str, trigger: str, checked: tuple | None, dead: Pane | None) -> str | None:
+        """Continue a session whose process has ended, in its dead pane or else a new hidden window, and return that pane; None when it may not or could not.
+
+        Its own small files under emx's state folder are read and rewritten on
+        this thread, as the prefs are; no file of Claude's is. A new pane is
+        tagged before it can be swapped into main, since the ← binding and
+        `cursor_on_focus` read the tag; one that can't be tagged is killed, or
+        a second open would resume the same conversation again.
+        """
+        if not self.confirm_attach(sid, trigger, checked):
+            return None
+        command, error = self.engine.resume_command(sid)
+        if error:
+            self.say(error, error=True)
+            return None
+        shown = self.session(sid) or (checked[0] if checked else None)
+        cwd = shown.cwd if shown is not None and shown.cwd else None
+        if dead is not None:
+            self.tmux.respawn(dead.id, command, cwd=cwd)
+            self.flagged_viewers -= {dead.id}
+            return dead.id
+        pane_id = self.tmux.new_hidden_window(command, cwd=cwd)
+        try:
+            self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+            self.tmux.set_pane_option(pane_id, AGENT_OPT, AGENT)
+        except TmuxError:
+            try:
+                self.tmux.kill_pane(pane_id)
+            except TmuxError:
+                pass
+            raise
+        return pane_id
+
     def confirm_attach(self, sid: str, trigger: str, checked: tuple | None = None) -> bool:
-        """Ask core whether `claude attach` may run, and say why not when it may not.
+        """Ask core whether emx may start or resume the session's process, and say why not when it may not.
 
         `checked` is (session, fresh) from a listing a worker thread took just
-        now (`core.checked_row`); this thread never lists, so a slow `claude
-        agents` can't freeze the panel. A trigger other than OPEN without one
+        now (`core.checked_row`); this thread never lists, so a slow listing
+        can't freeze the panel. A trigger other than OPEN without one
         is refused, and so is a RESTART of a session being closed: its
         attach could land after the stop and resume it.
         """

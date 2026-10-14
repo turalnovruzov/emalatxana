@@ -1516,43 +1516,6 @@ class OpenWhileStarting(unittest.TestCase):
 
 
 class ClaudeCommands(unittest.TestCase):
-    def test_empty_message_gives_no_prompt(self):
-        for m in ("", "   ", "\n\t"):
-            self.assertEqual(core.new_session_args("claude", m), ["claude", "--bg"])
-
-    def test_message_passed_after_double_dash(self):
-        self.assertEqual(core.new_session_args("claude", "hi there"), ["claude", "--bg", "--", "hi there"])
-
-    def test_dash_message_still_a_prompt(self):
-        self.assertEqual(core.new_session_args("claude", "-n oops"), ["claude", "--bg", "--", "-n oops"])
-        self.assertEqual(core.new_session_args("claude", "--help"), ["claude", "--bg", "--", "--help"])
-
-    def test_no_name_flag_normally(self):
-        with mock.patch.dict(os.environ):
-            os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
-            self.assertNotIn("-n", core.new_session_args("claude", "x"))
-
-    def test_under_test_a_new_session_is_named_with_a_unique_test_prefix(self):
-        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
-            a = core.new_session_args("claude", "hi")
-            b = core.new_session_args("claude", "")
-        self.assertEqual(a[:3], ["claude", "--bg", "-n"])
-        self.assertTrue(a[3].startswith("emx-test-") and len(a[3]) > len("emx-test-"))
-        self.assertEqual(a[4:], ["--", "hi"])
-        self.assertEqual(b[:3], ["claude", "--bg", "-n"])
-        self.assertNotEqual(a[3], b[3])
-
-    def test_parse_session_id(self):
-        self.assertEqual(core.parse_new_session_id("started\n  claude attach abc123\n"), "abc123")
-        self.assertEqual(core.parse_new_session_id("\x1b[1mclaude attach\x1b[0m \x1b[36mabc123\x1b[0m"), "abc123")
-        self.assertEqual(core.parse_new_session_id("backgrounded · deadbeef"), "deadbeef")
-        self.assertEqual(core.parse_new_session_id("backgrounded  ·  deadbeef extra"), "deadbeef")
-
-    def test_parse_session_id_none(self):
-        for out in ("", "nothing here", "claude attach", "claude attach "):
-            with self.subTest(out=out):
-                self.assertIsNone(core.parse_new_session_id(out))
-
     def test_viewer_command_quotes(self):
         self.assertEqual(core.viewer_command("claude", "abc"), "exec claude attach abc")
         cmd = core.viewer_command("/p with space/claude", "a;b")

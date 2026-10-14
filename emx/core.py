@@ -160,9 +160,9 @@ OPEN, RESTART, NEW, INTERRUPT = "open", "restart", "new", "interrupt"
 
 
 def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
-    """Whether emx may run `claude attach` on `session` for `trigger`.
+    """Whether emx may start `claude` for `session` for `trigger`.
 
-    Attaching to a session with no live process resumes it, so only his
+    Starting it for a session with no live process resumes it, so only his
     explicit open (Enter, or a click on its row) may do that, judged on the
     row he can see. Every other trigger, including any added later, needs
     `session` to come from a listing taken just before the attach, while the
@@ -2183,25 +2183,6 @@ def session_folders(sessions, groups, view: str) -> list:
         if s.cwd and s.cwd not in folders:
             folders.append(s.cwd)
     return folders
-
-
-def new_session_args(claude: str, message: str) -> list:
-    """`--` stops a first message that starts with `-` being read as a flag.
-
-    An emx under test (`EMX_SHOW_TEST_SESSIONS=1`) names every session it starts `emx-test-…`, so one started with `n` there is a throwaway too.
-    """
-    args = [claude, "--bg"]
-    if os.environ.get("EMX_SHOW_TEST_SESSIONS") == "1":
-        args += ["-n", f"{TEST_SESSION_PREFIX}{uuid.uuid4().hex[:6]}"]
-    if message.strip():
-        args += ["--", message]
-    return args
-
-
-def parse_new_session_id(output: str) -> str | None:
-    clean = strip_ansi(output)
-    match = re.search(r"claude attach (\S+)", clean) or re.search(r"backgrounded\s*·\s*(\S+)", clean)
-    return match.group(1) if match else None
 
 
 def viewer_command(claude: str, session_id: str) -> str:

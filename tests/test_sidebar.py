@@ -2,6 +2,7 @@ import curses
 import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, sidebar
-from emx.tmux import Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, SESSION_OPT, Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -106,6 +107,9 @@ class RunGitNeverRaises(unittest.TestCase):
         with mock.patch.object(sidebar.os.path, "isdir", side_effect=AssertionError("stat outside git")), \
                 mock.patch.object(sidebar.subprocess, "run", side_effect=FileNotFoundError("git")):
             self.assertEqual(sidebar.run_git("/nowhere", "status")[0], None)
+
+
+REAL_FETCH_SESSIONS = sidebar.fetch_sessions
 
 
 class FakeEngine:
@@ -477,6 +481,176 @@ class StartWaitsUntilRunning(AppCase):
         self.app.starter = done
         self.app.finish_start()
         self.assertEqual(self.opened, [("new1", core.NEW, (new, True))])
+
+
+CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
+
+
+class SwitchToTmux(ClientTmux):
+    """The panel (%1) and main (%2, the placeholder) in one window, and `held` as the pane of session KEY_A, or none. Records every call that changes something, in order."""
+
+    def __init__(self, held=None):
+        super().__init__()
+        self.held = held
+        self.calls = []
+
+    def panes(self):
+        listed = [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "placeholder", "", 100, 141)]
+        return listed + ([self.held] if self.held is not None else [])
+
+    def respawn(self, pane, command, cwd=None):
+        self.calls.append(("respawn", pane, command, cwd))
+
+    def new_hidden_window(self, command, cwd=None):
+        self.calls.append(("new_hidden_window", command, cwd))
+        return "%9"
+
+    def set_pane_option(self, pane, name, value):
+        self.calls.append(("set_pane_option", pane, name, value))
+
+    def swap(self, a, b):
+        self.calls.append(("swap", a, b))
+
+    def select(self, pane):
+        self.calls.append(("select", pane))
+
+    def kill_pane(self, pane):
+        self.calls.append(("kill", pane))
+
+    def capture(self, pane):
+        return ""
+
+
+class SwitchTo(AppCase):
+    """Enter, → or a click: a running session's own pane comes into main; a stopped one is resumed, on his open only."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.me = "%1"
+        self.cwd = os.path.join(os.environ["XDG_STATE_HOME"], "work")
+        os.makedirs(self.cwd)
+        where = os.path.join(self.app.state, "sessions", KEY_A)
+        os.makedirs(where)
+        record = {"key": KEY_A, "agent": "claude", "name": "alpha", "cwd": self.cwd, "session_id": KEY_A,
+                  "started_at": 1, "run_at": 1}
+        with open(os.path.join(where, "session.json"), "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        with open(os.path.join(where, "events.jsonl"), "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"event": "SessionStart", "at": 2, "session_id": CLAUDE_SID, "source": "startup"}) + "\n")
+
+    def open(self, held, row_state, trigger=core.OPEN, checked=None):
+        self.app.tmux = SwitchToTmux(held)
+        running = row_state != "stopped"
+        self.poll(core.Session(KEY_A, "alpha", self.cwd, row_state, "", "", 1.0, running))
+        self.app.refresh()
+        sidebar.App.switch_to(self.app, KEY_A, trigger, checked)
+        return self.app.tmux.calls
+
+    def test_a_running_session_is_swapped_into_main_and_selected(self):
+        calls = self.open(Pane("%5", "@2", False, "", KEY_A, 100, 100, agent="claude"), "done")
+        self.assertEqual(calls, [("swap", "%5", "%2"), ("select", "%5")])
+
+    def test_a_stopped_session_with_a_dead_pane_is_resumed_there_on_open(self):
+        calls = self.open(Pane("%5", "@2", True, "", KEY_A, 100, 100, agent="claude"), "stopped")
+        respawns = [c for c in calls if c[0] == "respawn"]
+        self.assertEqual(len(respawns), 1)
+        _, pane, command, cwd = respawns[0]
+        words = shlex.split(command)
+        self.assertEqual((pane, cwd), ("%5", self.cwd))
+        self.assertEqual(words[words.index("--resume") + 1], CLAUDE_SID)
+        self.assertIn("--settings", words)
+        self.assertNotIn("new_hidden_window", [c[0] for c in calls])
+        self.assertEqual(calls[-2:], [("swap", "%5", "%2"), ("select", "%5")])
+
+    def test_a_stopped_session_with_no_pane_gets_a_tagged_window_before_the_swap(self):
+        calls = self.open(None, "stopped")
+        self.assertEqual([c[0] for c in calls], ["new_hidden_window", "set_pane_option", "set_pane_option", "swap", "select"])
+        _, command, cwd = calls[0]
+        self.assertEqual(cwd, self.cwd)
+        self.assertIn(f"--resume {CLAUDE_SID}", command)
+        self.assertEqual(calls[1:3], [("set_pane_option", "%9", SESSION_OPT, KEY_A), ("set_pane_option", "%9", AGENT_OPT, "claude")])
+        self.assertEqual(calls[3], ("swap", "%9", "%2"))
+
+    def test_a_stopped_session_is_never_resumed_by_any_other_trigger(self):
+        stopped = core.Session(KEY_A, "alpha", self.cwd, "stopped", "", "", 1.0, False)
+        for trigger in (core.NEW, core.RESTART, core.INTERRUPT):
+            for held in (None, Pane("%5", "@2", True, "", KEY_A, 100, 100, agent="claude")):
+                with self.subTest(trigger=trigger, held=held):
+                    self.app.say("")
+                    calls = self.open(held, "stopped", trigger, (stopped, True))
+                    self.assertEqual(calls, [])
+                    self.assertIn("isn't running", self.app.notice)
+                    self.assertTrue(self.app.notice_error)
+
+    def test_an_old_viewer_with_no_agent_tag_is_never_taken_for_the_session(self):
+        calls = self.open(Pane("%5", "@2", False, "", KEY_A, 100, 100), "stopped")
+        self.assertEqual(calls[0][0], "new_hidden_window")
+        self.assertNotIn(("swap", "%5", "%2"), calls)
+
+    def test_a_window_that_cannot_be_tagged_is_killed(self):
+        class Untaggable(SwitchToTmux):
+            def set_pane_option(self, pane, name, value):
+                raise TmuxError("gone")
+
+        self.app.tmux = Untaggable()
+        self.poll(core.Session(KEY_A, "alpha", self.cwd, "stopped", "", "", 1.0, False))
+        self.app.refresh()
+        sidebar.App.switch_to(self.app, KEY_A, core.OPEN)
+        self.assertIn(("kill", "%9"), self.app.tmux.calls)
+        self.assertNotIn("swap", [c[0] for c in self.app.tmux.calls])
+        self.assertTrue(self.app.notice_error)
+
+
+class StartsWithTheEngine(AppCase):
+    def setUp(self):
+        super().setUp()
+        real = mock.patch.object(sidebar, "fetch_sessions", REAL_FETCH_SESSIONS)
+        real.start()
+        self.addCleanup(real.stop)
+
+    def test_a_pane_never_seen_running_is_an_error_after_the_wait_and_nothing_opens(self):
+        started = core.Session(KEY_A, "alpha", "/p", "starting", "", "", 1.0, True)
+
+        class Engine(FakeEngine):
+            def start(self, folder, message):
+                self.calls.append(("start", folder, message))
+                return started, None
+
+        engine = Engine(([replace(started, state="stopped", running=False)], None))
+        with mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0), mock.patch.object(sidebar, "LISTED_CHECK_SECONDS", 0):
+            starter = sidebar.Starter(engine, "/p", "hello")
+            starter.run()
+        self.assertEqual(engine.calls[0], ("start", "/p", "hello"))
+        self.assertIsNone(starter.result[0])
+        self.assertIn("isn't running", starter.result[1])
+        self.app.starter = starter
+        self.app.finish_start()
+        self.assertEqual(self.opened, [])
+        self.assertTrue(self.app.notice_error)
+
+    def test_a_start_error_is_said_and_nothing_is_listed_for(self):
+        class Engine(FakeEngine):
+            def start(self, folder, message):
+                return None, "The folder /gone doesn't exist."
+
+        engine = Engine()
+        starter = sidebar.Starter(engine, "/gone", "")
+        starter.run()
+        self.assertEqual(starter.result, (None, "The folder /gone doesn't exist."))
+        self.assertEqual(engine.calls, [])
+
+    def test_once_the_pane_runs_the_new_session_opens_with_new(self):
+        started = core.Session(KEY_A, "alpha", "/p", "starting", "", "", 1.0, True)
+
+        class Engine(FakeEngine):
+            def start(self, folder, message):
+                return started, None
+
+        starter = sidebar.Starter(Engine(([started], None)), "/p", "")
+        starter.run()
+        self.app.starter = starter
+        self.app.finish_start()
+        self.assertEqual(self.opened, [(KEY_A, core.NEW, (started, True))])
 
 
 class CursorAfterStart(AppCase):
@@ -5200,7 +5374,7 @@ class SwitchTmux(ClientTmux):
         return [
             Pane("%1", "@1", False, "sidebar", "", 40, 141),
             Pane("%2", "@1", False, "", "other", 100, 141),
-            Pane("%3", "@2", False, "", "s1", 100, 141),
+            Pane("%3", "@2", False, "", "s1", 100, 141, agent="claude"),
         ]
 
     def capture(self, pane):

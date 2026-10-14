@@ -365,7 +365,7 @@ class EngineHandle(StoreCase):
         self.assertEqual(os.listdir(os.path.join(self.state, "sessions")), [])
 
 
-SCANNED_WORDS = {"agents"}
+SCANNED_WORDS = {"agents", "--bg"}
 
 
 class NoBackgroundServiceCalls(unittest.TestCase):
