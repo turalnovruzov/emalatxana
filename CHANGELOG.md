@@ -2,6 +2,19 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.1.0 — 2026-10-14
+
+- emx now notifies you in one of two modes, and m switches between them. Notification mode shows a normal macOS notification from emx and never speaks. Voice mode speaks the notice, as before, and shows no notification.
+- Notification mode is the default. If you had muted the voice before, you start in notification mode; if the voice was on, you stay in voice mode. Your choice is saved.
+- A notification's title is the session's name and its project, for example "tea poem · emalatxana". Its text is Haiku's sentence written to be read, without the butler's "sir"; if Haiku has nothing, the plain line ("… is done." or "… needs you.").
+- The first time emx starts in notification mode, or you switch into it, macOS asks once whether emx may show notifications.
+- To show them emx builds a small app of its own, emx-notify, into `~/Library/Application Support/emx/` the first time it starts, and again whenever that part of emx changes. It needs Apple's command line tools (`xcode-select --install`).
+- The top line no longer says "muted". In notification mode it shows nothing while notifications work, "notifications blocked" when macOS is not allowing them, and "notifications unavailable" when emx could not build its app. In voice mode it shows "voice".
+- Notification mode never falls back to speaking. In voice mode, if the voice fails, the notice comes as a notification instead.
+- Clicking a notification brings your terminal forward with that session open in emx.
+- h and `emx hush` still stop the voice in voice mode; in notification mode they do nothing.
+- The Notices list at the bottom of the panel is now Notifications: a history of the last 20, several per session, newest first. The count in its title is how many you have not read; opening a session dims its entries instead of removing them. N opens the whole history in place of the session list: ↑↓ to move, Enter or a click opens that session, Esc goes back. The history is cleared when emx restarts.
+
 ## 2.0.0 — 2026-10-14
 
 - emx now starts and keeps every session itself, each as the ordinary `claude` in its own window of emx's tmux. What you see in the main pane is that session, not a viewer of it.

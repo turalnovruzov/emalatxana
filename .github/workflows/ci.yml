@@ -16,5 +16,6 @@ jobs:
         run: |
           python3 --version
           tmux -V
+          swiftc --version
       - name: Run the suite
         run: python3 -m unittest discover -s tests -v

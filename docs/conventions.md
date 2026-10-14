@@ -200,11 +200,11 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: `subprocess.run(core.summary_args(claude), input=excerpt, cwd=scratch, ...)` in `sidebar.summarise`.
 4. **Gotcha**: `--bare` fails on OAuth ("Not logged in"), so it is never the isolation. Pin the flag set in a test (`SummaryArgs`, `NameArgs`). Output length is not capped by the other flags, and `--max-budget-usd` is checked only after an answer, so it does not cap one call either: what bounds a call is the input caps, the instruction and the 30 s timeout (ADR 0002).
 
-### Text emx speaks goes through `core.clean_notice`, and reaches `say` only on stdin
+### Text emx speaks or posts goes through `core.clean_notice`, and reaches `say` or the helper only on stdin
 
-1. **Rule**: every text emx speaks (Haiku's words and the plain fallback line alike) goes through `core.clean_notice` first. `say` gets it on stdin, never in its command line. Control characters are judged on code points (C0, DEL and C1), not bytes.
-2. **Why**: `say` runs `[[ ]]` commands embedded in its text, and a leading `-` in its command line would be read as an option.
-3. **Minimal example**: `proc.communicate(text)` in `Voice.speak_aloud`.
+1. **Rule**: every text emx speaks or shows in a notification (Haiku's words, the plain fallback line and the notification's title alike) goes through `core.clean_notice` first. `say` gets it on stdin, and `emx-notify` gets it as JSON on stdin, never in a command line or in generated code. Control characters are judged on code points (C0, DEL and C1), not bytes.
+2. **Why**: `say` runs `[[ ]]` commands embedded in its text, and a leading `-` in a command line would be read as an option.
+3. **Minimal example**: `proc.communicate(text)` in `Voice.speak_aloud`; `notify.run(command, "post", payload)` in `Notifier.step`.
 4. **Gotcha**: a C1 control such as U+009C (ST) is two bytes in UTF-8 and slips past a byte check; the cleaning must run on the decoded string. A name or project taken from a session is untrusted too, so the fallback line is cleaned like Haiku's.
 
 ### The version lives in `emx/__init__.py`; `CHANGELOG.md` follows it
@@ -233,7 +233,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    tmux.set_session_option(HUSH_OPT, str(time.time_ns()))              # cli.hush
    self.hush_seen, due = core.hush_due(self.hush_seen, value)          # App.check_hush
    ```
-4. **Gotcha**: the panel's first read is a baseline, so a write before it is ignored; a `-q` read cannot prove the option is unset, so an empty value is no change.
+4. **Gotcha**: the panel's first read is a baseline, so a write before it is ignored; a `-q` read cannot prove the option is unset, so an empty value is no change. `emx open <id>` (`@emx_open`, what a notification click runs) is the exception: it is a request, not a token, so the panel reads it once its first listing is in, clears it and acts on it; a request written before the panel started still counts.
 
 ### A pref that mirrors a state tmux holds is written from what tmux reports, never from the key that changed it
 
