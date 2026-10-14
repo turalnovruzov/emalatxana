@@ -712,6 +712,18 @@ def announce(claude: str, excerpt: str, cwd: str, mode: str = core.VOICE_MODE) -
     return _run_haiku(core.notice_args(claude, mode), excerpt, cwd, NOTICE_TIMEOUT, core.clean_notice)
 
 
+ASK_UNREADABLE = "Haiku's answer was not NEEDS or DONE"
+
+
+def classify(claude: str, excerpt: str, cwd: str) -> tuple:
+    """(core.VERDICT_NEEDS or core.VERDICT_DONE, None) from one `claude -p` call that has Haiku read the end of a reply, or (None, one-line error). Never raises."""
+    call, error = _run_haiku(core.ask_args(claude), excerpt, cwd, core.ASK_TIMEOUT, str.strip)
+    if error:
+        return None, error
+    verdict = core.parse_verdict(call.text)
+    return (verdict, None) if verdict else (None, ASK_UNREADABLE)
+
+
 def say_command() -> str:
     return os.environ.get("EMX_SAY") or "say"
 
@@ -1135,6 +1147,75 @@ class Summaries(threading.Thread):
             return dict(self.found)
 
 
+class Asks(threading.Thread):
+    """Has Haiku say whether a session that stopped with a reply needs him, one call at a time on its own thread, and records the verdict.
+
+    A stop is asked about once. A failed call backs off as summaries do, and
+    after `core.ASK_MAX_TRIES` failures the stop is recorded
+    `VERDICT_UNKNOWN`, which reads Done and lets its Done notice go out.
+    """
+
+    def __init__(self, engine: Engine, wake: threading.Event):
+        super().__init__(daemon=True)
+        self.engine = engine
+        self.wake = wake
+        self.lock = threading.Lock()
+        self.wanted = {}
+        self.failures = {}
+        self.tried = {}
+        self.settled = set()
+        self.scratch = None
+
+    def want(self, sessions) -> None:
+        with self.lock:
+            self.wanted = {(s.id, s.stop_key): s for s in sessions if s.asking}
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.step()
+            except Exception:
+                pass
+            time.sleep(SUMMARY_TICK_SECONDS)
+
+    def step(self) -> None:
+        """Asks about the stop tried longest ago whose backoff has passed, if any."""
+        now = time.monotonic()
+        with self.lock:
+            wanted = dict(self.wanted)
+        for table in (self.failures, self.tried):
+            for stop in set(table) - set(wanted):
+                del table[stop]
+        self.settled &= set(wanted)
+        due = []
+        for stop, session in wanted.items():
+            count, failed_at = self.failures.get(stop, (0, None))
+            if stop in self.settled or (failed_at is not None and now - failed_at < core.retry_after(count)):
+                continue
+            due.append((self.tried.get(stop, 0.0), stop, session))
+        if not due:
+            return
+        _, stop, session = min(due, key=lambda d: d[0])
+        self.tried[stop] = now
+        try:
+            if self.scratch is None:
+                self.scratch = summary_scratch()
+            verdict, _ = classify(self.engine.claude, core.ask_excerpt(session), self.scratch)
+        except OSError:
+            verdict = None
+        if verdict is None:
+            count = self.failures.get(stop, (0, None))[0] + 1
+            if count < core.ASK_MAX_TRIES:
+                self.failures[stop] = (count, time.monotonic())
+                return
+            verdict = core.VERDICT_UNKNOWN
+        # Settled even when the write fails: the session's folder is gone or unwritable, and asking again won't mend it.
+        self.engine.set_verdict(session.id, session.stop_key, verdict)
+        self.settled.add(stop)
+        self.failures.pop(stop, None)
+        self.wake.set()
+
+
 class Voice(threading.Thread):
     """Speaks notices with `say`, one at a time on its own thread, so two voices never overlap and a slow `say` never holds up drawing."""
 
@@ -1486,6 +1567,7 @@ class Poller(threading.Thread):
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
         self.transcripts = Transcripts(claude_home(), engine)
         self.summaries = Summaries(engine.claude, self.transcripts)
+        self.asks = Asks(engine, self.wake)
         self.notifier = Notifier(getattr(getattr(engine, "tmux", None), "socket", None) or "emx")
         self.voice = Voice()
         self.voice.fallback_post = self.notifier.post
@@ -1499,6 +1581,7 @@ class Poller(threading.Thread):
             self.resolver.want(s.cwd for s in sessions)
             self.transcripts.want(sessions)
             self.summaries.want(sessions)
+            self.asks.want(sessions)
             self.notices.want(sessions)
         return sessions, None
 
@@ -1506,6 +1589,7 @@ class Poller(threading.Thread):
         self.resolver.start()
         self.transcripts.start()
         self.summaries.start()
+        self.asks.start()
         self.notifier.start()
         self.voice.start()
         self.notices.start()

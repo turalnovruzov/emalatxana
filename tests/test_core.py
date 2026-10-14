@@ -1,9 +1,10 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from unittest import mock
 
@@ -89,6 +90,10 @@ class StateWords(unittest.TestCase):
         for s, cat, word in cases:
             with self.subTest(state=s.state, running=s.running):
                 self.assertEqual((core.category(s), core.state_word(s)), (cat, word))
+
+    def test_a_session_with_only_background_work_is_not_interruptible(self):
+        self.assertFalse(core.interruptible(mk(state="working", status="background")))
+        self.assertTrue(core.interruptible(mk(state="working", status="")))
 
     def test_glyphs(self):
         self.assertEqual(core.glyph(core.NEEDS_INPUT, 3), "✻")
@@ -2954,6 +2959,11 @@ class UserRequests(unittest.TestCase):
         ]
         self.assertEqual(core.user_requests(lines), ["first", "second"])
 
+    def test_a_subagents_hand_back_is_not_his_request(self):
+        lines = [entry("user", "fix it"), entry("user", "<agent-message from=a1>result")]
+        self.assertEqual(core.parse_transcript("\n".join(lines)).prompt, "fix it")
+        self.assertEqual(core.user_requests(lines), ["fix it"])
+
 
 class NameReadRanges(unittest.TestCase):
     def test_whole_up_to_the_cap_then_head_and_tail(self):
@@ -3033,6 +3043,32 @@ class NameArgs(unittest.TestCase):
         args = core.name_args("claude")
         self.assertEqual(args[args.index("--model") + 1], "haiku")
         self.assertNotIn("--bare", args)
+
+
+class AskVerdict(unittest.TestCase):
+    def test_only_the_exact_word_is_a_verdict(self):
+        self.assertEqual(core.parse_verdict("NEEDS"), core.VERDICT_NEEDS)
+        self.assertEqual(core.parse_verdict(" DONE\n"), core.VERDICT_DONE)
+        for text in ("needs", "NEEDS.", "NEEDS DONE", "", None):
+            self.assertIsNone(core.parse_verdict(text), text)
+
+    def test_the_call_is_isolated_and_carries_the_instruction(self):
+        args = core.ask_args("claude")
+        for flag in ("--no-session-persistence", "--strict-mcp-config"):
+            self.assertIn(flag, args)
+        for flag, value in (("--model", "haiku"), ("--setting-sources", ""), ("--tools", ""),
+                            ("--system-prompt", core.ASK_INSTRUCTION)):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+
+    def test_the_instruction_names_both_answers_and_no_scanned_word(self):
+        self.assertIn("NEEDS", core.ASK_INSTRUCTION)
+        self.assertIn("DONE", core.ASK_INSTRUCTION)
+        words = set(re.findall(r"[A-Za-z0-9_-]+", core.ASK_INSTRUCTION))
+        self.assertFalse(words & {"agents", "attach", "--bg"})
+
+    def test_the_excerpt_is_the_reply(self):
+        self.assertEqual(core.ask_excerpt(mk(state="done", reply="Which one?")), "Which one?")
+        self.assertEqual(core.ask_excerpt(mk(state="done")), "")
 
 
 class CleanName(unittest.TestCase):
@@ -3137,6 +3173,42 @@ class SummaryOutput(unittest.TestCase):
         out = core.clean_summary("x" * 500)
         self.assertEqual(len(out), core.SUMMARY_MAX_CHARS)
         self.assertTrue(out.endswith("…"))
+
+
+class AskingHolds(unittest.TestCase):
+    answered = core.Transcript(prompt="Pick one", reply="Which database?", reply_line="Which database?", answered=True, latest="reply")
+
+    def asking(self, sid="i"):
+        return mk(id=sid, state="done", reply="Which database?", stop_key="k1", asking=True)
+
+    def test_a_done_notice_waits_while_the_verdict_is_awaited(self):
+        self.assertFalse(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, 0))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, core.NOTICE_ASK_SECONDS))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, replace(self.asking(), asking=False), self.answered, 0))
+
+    def test_the_hold_outlasts_three_slow_tries_by_far(self):
+        tries = core.ASK_MAX_TRIES * core.ASK_TIMEOUT + sum(core.retry_after(n) for n in range(1, core.ASK_MAX_TRIES))
+        self.assertGreater(core.NOTICE_ASK_SECONDS, tries)
+        self.assertFalse(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, 75))
+
+    def test_done_while_asking_then_needs_input_gives_one_event_each(self):
+        seen, _ = core.notice_transitions(None, [mk(id="i", state="working")], ())
+        seen, _ = core.notice_transitions(seen, [mk(id="i", state="working")], ())
+        seen, found = core.notice_transitions(seen, [self.asking()], ())
+        self.assertEqual([core.category(s) for s in found], [core.DONE])
+        needs = replace(self.asking(), state="blocked", asking=False)
+        seen, found = core.notice_transitions(seen, [needs], ())
+        self.assertEqual([core.category(s) for s in found], [core.NEEDS_INPUT])
+
+    def test_no_summary_is_asked_for_while_the_verdict_is_awaited(self):
+        self.assertFalse(core.summary_due(self.asking(), "a changed excerpt", None, 0, None, 1000.0))
+        self.assertTrue(core.summary_due(replace(self.asking(), asking=False), "a changed excerpt", None, 0, None, 1000.0))
+
+    def test_a_row_haiku_read_as_needing_him_shows_the_replys_line(self):
+        needs = mk(state="blocked", reply="Which database?", stop_key="k1")
+        self.assertEqual(core.session_summary(needs, self.answered), "Which database?")
+        question = core.parse_transcript(real_transcript("question"))
+        self.assertEqual(core.session_summary(needs, question), "Which colour do you prefer?")
 
 
 class SummaryDue(unittest.TestCase):
@@ -4048,6 +4120,39 @@ class HookRecord(unittest.TestCase):
         self.assertTrue(record["message"].startswith("a b x"))
         self.assertEqual(len(record["message"]), core.HOOK_MESSAGE_CHARS)
 
+    def test_a_stop_counts_the_background_tasks_still_running(self):
+        tasks = [{"status": "running"}, {"status": "running"}, {"status": "completed"}]
+        self.assertEqual(core.hook_record(self.payload(background_tasks=tasks), 1)["background"], 2)
+        self.assertEqual(core.hook_record(self.payload(background_tasks=[]), 1)["background"], 0)
+        self.assertNotIn("background", core.hook_record(self.payload(), 1))
+
+    def test_a_stop_keeps_the_end_of_the_last_reply(self):
+        message = ("word\n" * 1000)[:5000]
+        record = core.hook_record(self.payload(last_assistant_message=message), 1)
+        self.assertEqual(len(record["reply"]), core.STOP_REPLY_CHARS)
+        self.assertEqual(core.STOP_REPLY_CHARS, 2000)
+        self.assertEqual(record["reply"], " ".join(message.split())[-2000:])
+
+    def test_a_prompt_claude_code_submitted_itself_is_marked_and_no_prompt_is_kept(self):
+        for prompt in ("<task-notification>x", "<agent-message from=a>x"):
+            record = core.hook_record(self.payload(hook_event_name="UserPromptSubmit", prompt=prompt), 1)
+            self.assertIs(record["synthetic"], True, prompt)
+            self.assertNotIn("prompt", record)
+        record = core.hook_record(self.payload(hook_event_name="UserPromptSubmit", prompt="hello"), 1)
+        self.assertNotIn("synthetic", record)
+        self.assertNotIn("prompt", record)
+
+    def test_a_subagents_tool_event_names_its_agent(self):
+        record = core.hook_record(self.payload(hook_event_name="PreToolUse", tool_name="Bash", agent_id="a1"), 1)
+        self.assertEqual(record["agent"], "a1")
+        self.assertNotIn("agent", core.hook_record(self.payload(hook_event_name="PreToolUse", tool_name="Bash"), 1))
+
+    def test_ill_typed_new_fields_are_dropped_without_error(self):
+        record = core.hook_record(self.payload(background_tasks={"status": "running"}, last_assistant_message=7, agent_id=3), 1)
+        self.assertIsNotNone(record)
+        for key in ("background", "reply", "agent"):
+            self.assertNotIn(key, record)
+
     def test_every_recorded_fixture_payload_is_usable(self):
         with open(HOOK_FIXTURE, encoding="utf-8") as fh:
             scenarios = json.load(fh)["scenarios"]
@@ -4083,6 +4188,15 @@ class FoldEvents(unittest.TestCase):
     def test_pre_tool_use_means_working(self):
         state = self.fold(event("SessionStart"), event("PreToolUse", tool_name="Bash"))
         self.assertEqual((state.state, state.turned), ("working", True))
+
+    def test_subagent_tool_event_keeps_background_time_but_the_main_agent_ends_it(self):
+        stopped = event("Stop", background=2)
+        for name in ("PreToolUse", "PostToolUse"):
+            state = self.fold(stopped, event(name, tool_name="Bash", agent="sub1"))
+            self.assertEqual((state.state, state.status), ("working", core.BACKGROUND), name)
+            self.assertFalse(core.interruptible(mk(state=state.state, status=state.status)), name)
+        state = self.fold(stopped, event("PreToolUse", tool_name="Bash", agent="sub1"), event("PreToolUse", tool_name="Bash"))
+        self.assertEqual((state.state, state.status), ("working", ""))
 
     def test_permission_request_blocks_at_once_and_names_the_tool(self):
         state = self.fold(event("UserPromptSubmit"), event("PermissionRequest", tool_name="Bash"))
@@ -4210,6 +4324,55 @@ class FoldEvents(unittest.TestCase):
         self.assertEqual((resumed.state, resumed.status, resumed.claude_sid), ("working", "idle", "11111111-1111-4111-8111-111111111111"))
         self.assertEqual(core.fold_events(records).state, "stopped")
 
+    def test_a_stop_with_background_work_running_reads_working(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2, background=2))
+        self.assertEqual((state.state, state.status), ("working", "background"))
+        self.assertEqual(core.state_word(mk(state=state.state, status=state.status)), "Working")
+
+    def test_the_final_stop_after_background_work_reads_done_with_its_reply(self):
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1),
+            event("UserPromptSubmit", at=3, synthetic=True), event("Stop", at=4, background=0, reply="Done."),
+        )
+        self.assertEqual((state.state, state.queued, state.reply), ("done", False, "Done."))
+        self.assertNotEqual(state.stop_key, "")
+
+    def test_synthetic_prompts_never_count_as_queued(self):
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1), event("UserPromptSubmit", at=3),
+            event("UserPromptSubmit", at=4, synthetic=True), event("Stop", at=5, background=0),
+        )
+        self.assertIs(state.queued, False)
+        state = self.fold(
+            event("UserPromptSubmit", at=1), event("Stop", at=2, background=1), event("UserPromptSubmit", at=3),
+            event("UserPromptSubmit", at=4), event("Stop", at=5, background=0),
+        )
+        self.assertIs(state.queued, True)
+
+    def test_an_old_stop_record_reads_done_with_no_reply(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2))
+        self.assertEqual((state.state, state.reply), ("done", ""))
+
+    def test_an_ask_user_question_box_blocks_until_its_result(self):
+        state = self.fold(event("UserPromptSubmit", at=1), event("PreToolUse", at=2, tool_name="AskUserQuestion"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "answer a question"))
+        state = self.fold(event("UserPromptSubmit", at=1), event("PreToolUse", at=2, tool_name="AskUserQuestion"),
+                          event("PostToolUse", at=3, tool_name="AskUserQuestion"))
+        self.assertEqual(state.state, "working")
+        state = self.fold(event("UserPromptSubmit", at=1), event("PermissionRequest", at=2, tool_name="AskUserQuestion"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "answer a question"))
+
+    def test_another_agents_tool_result_leaves_the_block_standing(self):
+        blocked = [event("UserPromptSubmit", at=1), event("PermissionRequest", at=2, tool_name="Bash")]
+        state = self.fold(*blocked, event("PostToolUse", at=3, agent="a1"))
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "approve Bash"))
+        state = self.fold(*blocked, event("PostToolUse", at=3, agent="a1"), event("PostToolUse", at=4))
+        self.assertEqual(state.state, "working")
+
+    def test_the_blocking_agents_own_tool_result_clears_the_block(self):
+        state = self.fold(event("PermissionRequest", at=2, tool_name="Bash", agent="a1"), event("PostToolUse", at=3, agent="a1"))
+        self.assertEqual(state.state, "working")
+
     def test_a_queued_message_reads_done_then_working(self):
         after_stop = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2))
         after_gap = self.fold(event("UserPromptSubmit", at=1), event("Stop", at=2), event("PreToolUse", at=4))
@@ -4305,6 +4468,51 @@ class EngineSessions(unittest.TestCase):
             self.assertEqual(core.state_word(s), "Idle")
         (s,) = self.listing([event("UserPromptSubmit", at=150)])
         self.assertTrue(core.interruptible(s))
+
+    def test_escape_during_background_only_time_reads_idle(self):
+        events = [event("UserPromptSubmit", at=150), event("PostToolUse", at=160), event("Stop", at=170, background=1)]
+        (s,) = self.listing(events, interrupted={KEY: True})
+        self.assertEqual(core.state_word(s), "Idle")
+        (s,) = self.listing(events)
+        self.assertEqual(core.state_word(s), "Working")
+
+    def verdict_listing(self, verdict=None, events=None, panes=None):
+        states = {KEY: core.fold_events(events or [event("UserPromptSubmit", at=150), event("Stop", at=200, reply="Which one?")])}
+        states[KEY] = replace(states[KEY], stop_key="k1") if states[KEY].stop_key else states[KEY]
+        verdicts = {} if verdict is None else {KEY: verdict}
+        panes = [pane(KEY)] if panes is None else panes
+        (s,) = core.engine_sessions([self.record()], states, panes, {}, roots=set(), verdicts=verdicts)
+        return s
+
+    def test_a_done_with_a_reply_and_no_verdict_yet_is_asking(self):
+        s = self.verdict_listing()
+        self.assertEqual((core.category(s), s.asking, s.reply, s.stop_key), (core.DONE, True, "Which one?", "k1"))
+
+    def test_a_needs_verdict_on_this_stop_reads_needs_input(self):
+        s = self.verdict_listing(("k1", "needs"))
+        self.assertEqual((core.category(s), core.state_word(s), s.asking), (core.NEEDS_INPUT, "Needs input", False))
+
+    def test_a_verdict_on_an_older_stop_does_not_count(self):
+        s = self.verdict_listing(("k0", "needs"))
+        self.assertEqual((core.category(s), s.asking), (core.DONE, True))
+
+    def test_a_done_or_unknown_verdict_reads_done(self):
+        for verdict in ("done", "unknown"):
+            s = self.verdict_listing(("k1", verdict))
+            self.assertEqual((core.category(s), s.asking), (core.DONE, False), verdict)
+
+    def test_an_old_stop_record_with_no_reply_is_never_asking(self):
+        s = self.verdict_listing(events=[event("UserPromptSubmit", at=150), event("Stop", at=200)])
+        self.assertEqual((core.category(s), s.asking), (core.DONE, False))
+
+    def test_a_queued_done_is_never_asking(self):
+        s = self.verdict_listing(events=[event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160),
+                                         event("Stop", at=200, reply="Which one?")])
+        self.assertEqual((s.queued, s.asking), (True, False))
+
+    def test_a_session_not_running_with_a_needs_verdict_is_stopped(self):
+        s = self.verdict_listing(("k1", "needs"), panes=[])
+        self.assertEqual(core.category(s), core.STOPPED)
 
     def test_a_done_with_a_queued_prompt_is_listed_queued_while_running(self):
         queued = [event("UserPromptSubmit", at=150), event("UserPromptSubmit", at=160), event("Stop", at=200)]

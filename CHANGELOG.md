@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.1.1 — 2026-10-14
+
+- A session whose background subagents or commands are still running reads Working until they finish, instead of Done.
+- A session that stopped to ask you something, or to have you do something, reads Needs input instead of Done. Haiku reads Claude's last message to tell the two apart, so the row can read Done for a few seconds first, and its notification waits for that answer: a session that needs you is never announced as done.
+- A session showing a question box (Claude's multiple-choice questions) reads Needs input while the box is open.
+
 ## 2.1.0 — 2026-10-14
 
 - emx now notifies you in one of two modes, and m switches between them. Notification mode shows a normal macOS notification from emx and never speaks. Voice mode speaks the notice, as before, and shows no notification.
