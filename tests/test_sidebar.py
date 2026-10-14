@@ -4465,6 +4465,27 @@ class NoticesWorker(unittest.TestCase):
         self.assertTrue(self.asked[0].startswith("Project: alpha\nSession: emx-test-a\nWhat happened: it has finished"))
         self.assertEqual(self.texts(), [])
 
+    def test_a_mode_switch_during_the_wording_decides_where_the_notice_goes(self):
+        for before, after in ((core.VOICE_MODE, core.NOTIFICATION_MODE), (core.NOTIFICATION_MODE, core.VOICE_MODE)):
+            with self.subTest(before=before):
+                self.speaker.spoken.clear()
+                self.notifier.posts.clear()
+                self.worker.mode = before
+                answer = self.answer
+
+                def switching(claude, excerpt, cwd, mode=core.VOICE_MODE, after=after):
+                    self.worker.mode = after
+                    return answer
+
+                with mock.patch.object(sidebar, "announce", switching):
+                    self.notice()
+                    self.assertTrue(self.worker.step())
+                self.assertEqual(len(self.worker.take()), 1)
+                if after == core.VOICE_MODE:
+                    self.assertEqual((len(self.speaker.spoken), len(self.notifier.posts)), (1, 0))
+                else:
+                    self.assertEqual((len(self.speaker.spoken), len(self.notifier.posts)), (0, 1))
+
     def test_an_unnamed_session_is_asked_about_without_a_session_line(self):
         self.notice(named=False)
         self.worker.step()
@@ -4594,7 +4615,7 @@ class NoticesWorker(unittest.TestCase):
         self.assertEqual(self.speaker.fallbacks, [("Alpha · alpha", "Alpha, in alpha, is done.", "a")])
         self.assertEqual(self.notifier.posts, [])
 
-    def test_the_mode_is_read_before_the_haiku_call_and_delivery_follows_it(self):
+    def test_the_wording_follows_the_mode_before_the_call_and_delivery_the_mode_after_it(self):
         def switching(claude, excerpt, cwd, mode=core.VOICE_MODE):
             self.modes.append(mode)
             self.worker.mode = core.NOTIFICATION_MODE
@@ -4604,8 +4625,8 @@ class NoticesWorker(unittest.TestCase):
             self.named_alpha()
             self.worker.step()
         self.assertEqual(self.modes, [core.VOICE_MODE])
-        self.assertEqual(self.speaker.spoken, ["Alpha, sir: all fixed."])
-        self.assertEqual(self.notifier.posts, [])
+        self.assertEqual(self.speaker.spoken, [])
+        self.assertEqual(self.notifier.posts, [("Alpha · alpha", "Alpha, sir: all fixed.", "a")])
 
     def test_notification_mode_uses_the_notification_instruction_and_voice_the_butler_one(self):
         seen = []
@@ -5030,6 +5051,26 @@ class NotifierWorker(unittest.TestCase):
         notifier.authorize()
         notifier.step()
         self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize"])
+
+    def test_a_permission_still_undecided_after_the_ask_reads_blocked(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), "")
+        notifier.step()
+        notifier.post("t", "b", "sid-1")
+        notifier.step()
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize", "post"])
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, notifier.state), core.BLOCKED_TAG)
+
+    def test_a_permission_not_yet_asked_for_still_reads_pending(self):
+        helper = RecordingHelper(self, auth="notDetermined")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.mode = core.VOICE_MODE
+        notifier.prepare()
+        self.assertEqual(notifier.state, core.HELPER_PENDING)
 
     def test_a_denied_report_reads_blocked(self):
         helper = RecordingHelper(self, auth="denied")
@@ -5788,6 +5829,26 @@ class OpenRequests(AppCase):
         self.assertEqual(self.app.cursor, ("session", self.SID))
         self.housekeep()
         self.assertEqual(len(self.opened), 1)
+
+    def test_an_open_request_that_changes_before_the_clear_is_kept_for_the_next_read(self):
+        self.listed(self.SID, "other")
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        real = self.app.tmux.session_option
+        reads = []
+
+        def reading(name):
+            value = real(name)
+            if name != OPEN_OPT:
+                return value
+            reads.append(value)
+            if len(reads) == 1:
+                self.app.tmux.options[OPEN_OPT] = "second"
+            return value
+
+        with mock.patch.object(self.app.tmux, "session_option", reading):
+            self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "second")
 
     def test_an_open_request_written_before_the_first_read_is_honoured(self):
         self.app.tmux.options[OPEN_OPT] = self.SID

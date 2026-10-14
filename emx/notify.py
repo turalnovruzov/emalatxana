@@ -138,6 +138,8 @@ def ensure_built(home: Path, bundle: str, register: bool = True) -> tuple:
             return None, f"unknown bundle id {bundle}"
         if bundle == BUNDLE_ID and home != real_home():
             return None, "the real helper is built only in its own folder"
+        if bundle == TEST_BUNDLE_ID and home == real_home():
+            return None, "the test helper is never built in the real folder"
         home.mkdir(parents=True, exist_ok=True)
         with open(home / LOCK_FILE, "w") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

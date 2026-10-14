@@ -75,7 +75,7 @@ HELP = (
     ("^s", "by project / by state"),
     ("N", "notifications: the last 20; ↵ opens one"),
     ("m", "voice mode or notification mode"),
-    ("h", "stop the voice now; later notices still speak"),
+    ("h", "stop the voice now (voice mode)"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
@@ -1267,8 +1267,14 @@ class Notifier(threading.Thread):
         self.mode = core.NOTIFICATION_MODE
         self.command = None
         self.asking = False
+        self.asked = False
         self.checked_at = None
         self.state = core.HELPER_PENDING
+
+    def settle(self, report, error) -> None:
+        """Takes the helper's answer as `state`. A permission still undecided after it was asked for counts as blocked, so an unanswered prompt does not leave the mode silently dead."""
+        state = notify.helper_state(report, error)
+        self.state = core.HELPER_BLOCKED if state == core.HELPER_PENDING and self.asked else state
 
     def post(self, title: str, body: str, sid: str, at: float | None = None) -> None:
         with self.lock:
@@ -1312,7 +1318,7 @@ class Notifier(threading.Thread):
     def check(self) -> None:
         self.checked_at = time.monotonic()
         report, error = notify.run(self.command, "status")
-        self.state = notify.helper_state(report, error)
+        self.settle(report, error)
 
     def step(self) -> None:
         """Asks the permission when wanted, else posts the oldest queued notification, else refreshes `state` every NOTIFY_STATUS_SECONDS."""
@@ -1326,12 +1332,13 @@ class Notifier(threading.Thread):
             self.wake.clear()
         elif asking:
             report, error = notify.run(self.command, "authorize", timeout=AUTHORIZE_TIMEOUT)
-            self.state = notify.helper_state(report, error)
+            self.asked = True
+            self.settle(report, error)
         elif item is not None:
             title, body, sid = item
             ident = f"emx-{sid}-{time.time_ns()}"
             report, error = notify.run(self.command, "post", notify.payload(title, body, ident, sid, self.socket))
-            self.state = notify.helper_state(report, error)
+            self.settle(report, error)
             self.checked_at = time.monotonic()
         elif self.checked_at is None or time.monotonic() - self.checked_at >= NOTIFY_STATUS_SECONDS:
             self.check()
@@ -1452,6 +1459,7 @@ class Notices(threading.Thread):
             if call is not None:
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
             self.outbox.append((notice.id, notice.kind, title, text, notice.at))
+            mode = self.mode
         if not text:
             return
         if mode == core.VOICE_MODE:
@@ -1727,6 +1735,9 @@ class App:
         try:
             value = self.tmux.session_option(OPEN_OPT)
             if not value:
+                return
+            # tmux has no compare-and-clear; re-reading narrows the window in which a second click is lost.
+            if self.tmux.session_option(OPEN_OPT) != value:
                 return
             self.tmux.set_session_option(OPEN_OPT, "")
         except TmuxError:

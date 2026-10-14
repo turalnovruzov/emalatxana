@@ -297,6 +297,41 @@ class OpenSession(unittest.TestCase):
         self.assertIn("emx-2.command", names)
         self.assertEqual(len(names), 2)
 
+    def test_a_terminal_that_is_not_a_known_runner_gets_its_new_window_in_terminal_app(self):
+        code, _, _ = self.run_open(attached=0, terminal="com.microsoft.VSCode")
+        self.assertEqual(code, 0)
+        (path,) = self.command_files()
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(path)]])
+
+    def test_an_attached_open_brings_any_recorded_terminal_forward(self):
+        self.run_open(attached=1, terminal="com.microsoft.VSCode")
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.microsoft.VSCode"]])
+
+    def test_an_existing_open_folder_is_tightened_to_0700(self):
+        folder = Path(self.state, "emx", "open")
+        folder.mkdir(parents=True)
+        os.chmod(folder, 0o755)
+        self.run_open(attached=0)
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+
+    def test_a_command_file_that_vanishes_while_pruning_does_not_stop_the_window(self):
+        folder = Path(self.state, "emx", "open")
+        folder.mkdir(parents=True)
+        old = folder / "emx-1.command"
+        old.write_text("#!/bin/sh\n", encoding="utf-8")
+        hour_ago = time.time() - cli.OPEN_FILES_KEPT_SECONDS - 5
+        os.utime(old, (hour_ago, hour_ago))
+        real_unlink = Path.unlink
+
+        def racing(path, *args, **kwargs):
+            real_unlink(path)
+            raise FileNotFoundError(str(path))
+
+        with mock.patch.object(Path, "unlink", racing):
+            code, _, err = self.run_open(attached=0)
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(len(self.opened()), 1)
+
     def test_with_no_server_the_window_carries_the_session_and_create_workspace_writes_the_option(self):
         code, out, err = self.run_open(server=False)
         self.assertEqual((code, out, err), (0, "", ""))

@@ -169,6 +169,15 @@ class Building(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(list(self.home.iterdir()), [])
 
+    def test_ensure_built_refuses_the_test_bundle_id_in_the_real_home(self):
+        with mock.patch.object(notify.subprocess, "run", side_effect=AssertionError("ran a tool")) as run, \
+                mock.patch.object(notify.Path, "mkdir", side_effect=AssertionError("mkdir")) as mkdir:
+            app, error = notify.ensure_built(notify.real_home(), notify.TEST_BUNDLE_ID)
+        self.assertIsNone(app)
+        self.assertTrue(error)
+        run.assert_not_called()
+        mkdir.assert_not_called()
+
     def test_no_test_touches_the_real_home(self):
         calls = []
 

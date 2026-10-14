@@ -270,6 +270,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `start` writes without the lock because it creates the record; hold the lock only around these small reads and writes, never around a tmux or `claude` call.
 
+### Anything emx builds or registers outside the real Application Support folder gets the test identity
+
+1. **Rule**: the helper app emx builds anywhere but its own folder under Application Support gets the test identity ("emx test", `com.emalatxana.emx-notify-test`), and the real id is built nowhere else. The test id is never built in the real folder.
+2. **Why**: macOS keeps one notification permission and one registration per bundle id; a throwaway build under the real id would take over his registration, and a test build in his folder would replace the app he uses.
+3. **Minimal example**:
+   ```python
+   bundle = notify.bundle_id(env)
+   app, error = notify.ensure_built(home, bundle)
+   ```
+4. **Gotcha**: `bundle_id` picks the test id for any absolute `EMX_NOTIFY_HOME`, including one that names the real folder, so `ensure_built` is the guard that refuses that pairing; a new place that builds or registers must go through both.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

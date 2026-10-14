@@ -217,6 +217,9 @@ def _run_open(argv: list) -> bool:
 def open_window(bundle: str, sid: str | None = None) -> int:
     """Open emx in a new window of the terminal `bundle` names (Terminal.app when none is known), through a `.command` file under emx's state folder.
 
+    Only Terminal and iTerm2 are known to run a `.command` file, so any other
+    terminal's window is opened in Terminal.app.
+
     The file holds only emx's command and the environment `OPEN_ENV` allows;
     the session id goes in it only when emx is not running, as
     `EMX_OPEN_SESSION`, which `create_workspace` turns into an open request.
@@ -225,10 +228,14 @@ def open_window(bundle: str, sid: str | None = None) -> int:
     folder = core.state_path() / "open"
     try:
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        folder.chmod(0o700)
         now = time.time()
         for old in folder.glob("emx-*.command"):
-            if now - old.stat().st_mtime > OPEN_FILES_KEPT_SECONDS:
-                old.unlink()
+            try:
+                if now - old.stat().st_mtime > OPEN_FILES_KEPT_SECONDS:
+                    old.unlink()
+            except FileNotFoundError:
+                pass
         env = {k: os.environ[k] for k in OPEN_ENV if os.environ.get(k)}
         if sid:
             env["EMX_OPEN_SESSION"] = sid
@@ -241,7 +248,8 @@ def open_window(bundle: str, sid: str | None = None) -> int:
     except OSError as exc:
         print(f"emx: couldn't open a new window: {exc}", file=sys.stderr)
         return 1
-    if not _run_open([open_command(), "-b", bundle or FALLBACK_TERMINAL, str(path)]):
+    runner = bundle if bundle in core.TERM_PROGRAM_BUNDLES.values() else FALLBACK_TERMINAL
+    if not _run_open([open_command(), "-b", runner, str(path)]):
         print("emx: couldn't open a new window.", file=sys.stderr)
         return 1
     return 0
