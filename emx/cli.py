@@ -21,12 +21,14 @@ CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 FALLBACK_TERMINAL = "com.apple.Terminal"
-OPEN_FILES_KEPT_SECONDS = 3600
+LAUNCH_FILE = "emx.command"
+PENDING_FILE = "pending"
 
 USAGE = """usage: emx [--version | hush]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
-emx open <session id> is internal too: what a click on one of emx's notifications runs; with no emx window open
-it opens emx in a new terminal window with that session.)
+emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
+of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
+terminal window with that session.)
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
@@ -79,9 +81,8 @@ def create_workspace(tmux: Tmux) -> None:
     if core.panel_collapsed(prefs):
         tmux.toggle_zoom(main)
     tmux.set_session_option(VERSION_OPT, code_version())
-    # Set by the window a notification click opens when emx was not running.
-    wanted = os.environ.get("EMX_OPEN_SESSION", "")
-    if core.is_session_id(wanted):
+    wanted = take_pending_open()
+    if wanted:
         tmux.set_session_option(OPEN_OPT, wanted)
 
 
@@ -174,12 +175,36 @@ def record_terminal(tmux: Tmux) -> None:
         pass
 
 
+def open_folder():
+    return core.state_path() / "open"
+
+
+def take_pending_open() -> str | None:
+    """The session id a notification click left for an emx it had to start, read once: the file is removed whatever it holds."""
+    path = open_folder() / PENDING_FILE
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read(256)
+    except OSError:
+        return None
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return core.open_request(text)
+
+
 def open_command() -> str:
     return os.environ.get("EMX_OPEN") or "/usr/bin/open"
 
 
 def open_session(sid: str) -> int:
-    """What a click on a notification runs: asks the running panel to open `sid` through an option on emx's own tmux server, then brings the terminal emx runs in forward. Starts nothing, and never touches another server."""
+    """What a click on a notification runs: asks the running panel to open `sid` through an option on emx's own tmux server, then prints the bundle id of the terminal emx runs in. Starts nothing, and never touches another server.
+
+    It never brings that terminal forward itself: macOS does not let a
+    background process activate another app, so the helper, which the click
+    made active, reads the printed id and hands activation on.
+    """
     if not core.is_session_id(sid):
         print("emx: open needs a session id.", file=sys.stderr)
         return 2
@@ -203,7 +228,7 @@ def open_session(sid: str) -> int:
     if not attached:
         return open_window(bundle)
     if bundle:
-        _run_open([open_command(), "-b", bundle])
+        print(bundle)
     return 0
 
 
@@ -215,44 +240,67 @@ def _run_open(argv: list) -> bool:
 
 
 def open_window(bundle: str, sid: str | None = None) -> int:
-    """Open emx in a new window of the terminal `bundle` names (Terminal.app when none is known), through a `.command` file under emx's state folder.
+    """Open emx in a new window of the terminal `bundle` names (Terminal.app when none is known), through `<state>/open/emx.command`.
 
     Only Terminal and iTerm2 are known to run a `.command` file, so any other
     terminal's window is opened in Terminal.app.
 
-    The file holds only emx's command and the environment `OPEN_ENV` allows;
-    the session id goes in it only when emx is not running, as
-    `EMX_OPEN_SESSION`, which `create_workspace` turns into an open request.
-    Files older than `OPEN_FILES_KEPT_SECONDS` are removed first.
+    The file is one fixed path rewritten in place, so iTerm2's "OK to run"
+    warning, once suppressed, stays suppressed. It holds only emx's command and
+    the environment `OPEN_ENV` allows, never a session id: when emx is not
+    running, `sid` goes in the `pending` file beside it, which
+    `create_workspace` takes. Launch files of earlier builds are removed.
     """
-    folder = core.state_path() / "open"
+    folder = open_folder()
     try:
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         folder.chmod(0o700)
-        now = time.time()
         for old in folder.glob("emx-*.command"):
             try:
-                if now - old.stat().st_mtime > OPEN_FILES_KEPT_SECONDS:
-                    old.unlink()
+                old.unlink()
             except FileNotFoundError:
                 pass
         env = {k: os.environ[k] for k in OPEN_ENV if os.environ.get(k)}
-        if sid:
-            env["EMX_OPEN_SESSION"] = sid
         lines = ["#!/bin/sh"] + [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
         lines.append(f"exec {shlex.quote(sys.executable)} {shlex.quote(BIN)}")
-        path = folder / f"emx-{time.time_ns()}.command"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        path = folder / LAUNCH_FILE
+        _replace_file(path, "\n".join(lines) + "\n", 0o700)
+        if sid:
+            _replace_file(folder / PENDING_FILE, sid + "\n", 0o600)
     except OSError as exc:
         print(f"emx: couldn't open a new window: {exc}", file=sys.stderr)
         return 1
     runner = bundle if bundle in core.TERM_PROGRAM_BUNDLES.values() else FALLBACK_TERMINAL
     if not _run_open([open_command(), "-b", runner, str(path)]):
+        if sid:
+            try:
+                (folder / PENDING_FILE).unlink()
+            except OSError:
+                pass
         print("emx: couldn't open a new window.", file=sys.stderr)
         return 1
     return 0
+
+
+def _replace_file(path, text: str, mode: int) -> None:
+    """Write `text` to `path` atomically with `mode`, so a terminal never runs a half-written file."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def blank(message: str) -> int:

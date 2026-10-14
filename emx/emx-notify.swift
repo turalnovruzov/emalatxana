@@ -6,7 +6,8 @@
 //   authorize <file>  asks for the permission once (the normal prompt, not provisional)
 //                     and writes its report into <file>
 //   icon <dir>        writes the app's .iconset into <dir>; never touches Notification Center
-//   click <file>      runs what a click on a banner runs, for the `open` object in <file>
+//   click <file>      runs what a click on a banner runs, for the `open` object in <file>:
+//                     `emx open <sid>`, then brings forward the terminal whose bundle id it printed
 // post and status run as the executable directly. authorize must be launched through
 // LaunchServices (`open -W -a <app> --args authorize <file>`): macOS refuses the request
 // from anything but a running NSApplication, and stdout does not survive `open`.
@@ -164,30 +165,62 @@ func authorize(_ path: String) -> Never {
     exit(1)
 }
 
-func openSession(_ open: [String: Any]) -> Process? {
+// The same pattern as core._BUNDLE_ID.
+let bundlePattern = "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$"
+let openSeconds: Double = 5
+
+// Runs `emx open <sid>` and waits for it, bounded; returns its exit status and the bundle id it printed, if valid.
+func openSession(_ open: [String: Any]) -> (Int32, String?) {
     guard let python = open["python"] as? String, let emx = open["emx"] as? String,
-          let sid = open["sid"] as? String else { return nil }
+          let sid = open["sid"] as? String else { return (1, nil) }
     let process = Process()
+    let out = Pipe()
     process.executableURL = URL(fileURLWithPath: python)
     process.arguments = [emx, "open", sid]
     process.environment = (open["env"] as? [String: String]) ?? [:]
     process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
+    process.standardOutput = out
     process.standardError = FileHandle.nullDevice
     do {
         try process.run()
-        return process
     } catch {
-        return nil
+        return (1, nil)
     }
+    if !wait(seconds: openSeconds, until: { !process.isRunning }) {
+        process.terminate()
+        return (1, nil)
+    }
+    let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    let line = text.split(separator: "\n", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    let valid = line.count <= 255 && line.range(of: bundlePattern, options: .regularExpression) != nil
+    return (process.terminationStatus, valid ? line : nil)
+}
+
+// A background app may not activate another one; the click made this helper active, so it yields to the terminal.
+func bringForward(_ bundle: String) {
+    if #available(macOS 14, *) {
+        NSApp?.yieldActivation(toApplicationWithBundleIdentifier: bundle)
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) else { return }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    } else {
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first?.activate(options: [.activateIgnoringOtherApps])
+    }
+}
+
+func clickOpen(_ open: [String: Any]) -> Int32 {
+    let (status, bundle) = openSession(open)
+    if let bundle = bundle {
+        bringForward(bundle)
+    }
+    return status == 0 ? 0 : 1
 }
 
 func click(_ path: String) -> Int32 {
     guard let data = FileManager.default.contents(atPath: path),
-          let open = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-          let process = openSession(open) else { return 1 }
-    process.waitUntilExit()
-    return process.terminationStatus == 0 ? 0 : 1
+          let open = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return 1 }
+    return clickOpen(open)
 }
 
 let inkShare: CGFloat = 0.6
@@ -263,7 +296,7 @@ class Clicked: NSObject, UNUserNotificationCenterDelegate, NSApplicationDelegate
     ) {
         handled = true
         if let open = response.notification.request.content.userInfo["open"] as? [String: Any] {
-            _ = openSession(open)
+            _ = clickOpen(open)
         }
         completionHandler()
         // A click can also land while `post` waits; that run has no NSApplication and exits by itself.
