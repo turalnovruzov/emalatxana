@@ -875,7 +875,7 @@ class Transcripts(threading.Thread):
 
     def want(self, sessions) -> None:
         with self.lock:
-            self.wanted = {s.id: (s.cwd, s.session_id) for s in sessions if s.session_id}
+            self.wanted = {s.id: (s.cwd, s.session_id, s.transcript) for s in sessions if s.session_id}
             self.names = {s.id: (s.name, s.named) for s in sessions}
 
     def run(self) -> None:
@@ -891,14 +891,14 @@ class Transcripts(threading.Thread):
         with self.lock:
             wanted, names = dict(self.wanted), dict(self.names)
         self.reached, self.touched = set(), set()
-        for sid, (cwd, uuid) in wanted.items():
+        for sid, (cwd, uuid, hinted) in wanted.items():
             try:
-                self.read_one(sid, cwd, uuid, names.get(sid))
+                self.read_one(sid, cwd, uuid, names.get(sid), hinted)
             except Exception:
                 continue
         for sid in set(self.recorded) - set(wanted):
             del self.recorded[sid]
-        uuids = {uuid for _, uuid in wanted.values()}
+        uuids = {uuid for _, uuid, _ in wanted.values()}
         for uuid in set(self.paths) - uuids:
             del self.paths[uuid]
         for uuid in set(self.misses) - uuids:
@@ -915,8 +915,8 @@ class Transcripts(threading.Thread):
                 if self.found.pop(sid, None) is not None:
                     self.changed = True
 
-    def read_one(self, sid: str, cwd: str, uuid: str, shown: tuple | None = None) -> None:
-        path = self.locate(cwd, uuid)
+    def read_one(self, sid: str, cwd: str, uuid: str, shown: tuple | None = None, hinted: str = "") -> None:
+        path = self.locate(cwd, uuid, hinted)
         if path is None:
             return
         kept = self.read_file(path)
@@ -1011,10 +1011,15 @@ class Transcripts(threading.Thread):
                 return path
         return None
 
-    def locate(self, cwd: str, uuid: str) -> str | None:
+    def locate(self, cwd: str, uuid: str, hinted: str = "") -> str | None:
+        """The session's transcript: first the path its hooks reported, only when it lies under Claude's projects folder and is named for this session; then where Claude Code keeps it for the folder; then by its file name in any project folder."""
         if not core.is_session_id(uuid):
             return None
         name = uuid + ".jsonl"
+        if hinted and os.path.basename(hinted) == name:
+            real = os.path.realpath(hinted)
+            if real.startswith(os.path.realpath(os.path.join(self.root, "projects")) + os.sep) and os.path.isfile(real):
+                return real
         direct = os.path.join(self.root, "projects", core.transcript_dir(cwd), name)
         if os.path.isfile(direct):
             return direct

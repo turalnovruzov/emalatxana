@@ -3787,9 +3787,17 @@ class NoticeText(unittest.TestCase):
         answered = core.Transcript(prompt="Go", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")
         self.assertFalse(core.notice_ready(core.NOTICE_DONE, done, unanswered, 1))
         self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, unanswered, core.NOTICE_SETTLE_SECONDS))
-        self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, answered, 0))
         pending = core.Transcript(prompt="Go", tool="Bash: ls", pending=True, latest="tool")
         self.assertTrue(core.notice_ready(core.NOTICE_NEEDS, mk(state="blocked"), pending, 0))
+        self.assertFalse(core.notice_ready(core.NOTICE_NEEDS, mk(state="blocked"), unanswered, 1))
+
+    def test_a_done_waits_out_the_settle_window_even_with_its_words_in_the_transcript(self):
+        done = mk(state="done")
+        answered = core.Transcript(prompt="Go", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")
+        for waited in (0, 2, core.NOTICE_SETTLE_SECONDS - 0.1):
+            with self.subTest(waited=waited):
+                self.assertFalse(core.notice_ready(core.NOTICE_DONE, done, answered, waited))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, done, answered, core.NOTICE_SETTLE_SECONDS))
 
     def test_the_fallback_lines(self):
         self.assertEqual(core.fallback_notice("app", "tax fix", "i1", core.NOTICE_NEEDS), "tax fix, in app, needs you.")

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -3133,6 +3134,28 @@ class TranscriptReader(unittest.TestCase):
         self.assertEqual({sid: t.reply for sid, t in self.reader.take().items()}, {"s1": "Hi."})
         self.assertIsNone(self.reader.take())
 
+    def test_the_path_the_hooks_reported_is_read_without_a_search(self):
+        path = self.write("-somewhere-else", U1, transcript_line("assistant", [{"type": "text", "text": "From the hook."}]))
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched")):
+            self.assertEqual(self.reader.locate("/tmp/a", U1, path), os.path.realpath(path))
+        self.reader.want([replace(self.row("s1", "/tmp/a", U1), transcript=path)])
+        with mock.patch.object(sidebar.os, "scandir", side_effect=AssertionError("searched")):
+            self.reader.read_all()
+        self.assertEqual(self.reader.take()["s1"].reply, "From the hook.")
+
+    def test_a_hook_path_outside_the_projects_folder_or_for_another_session_is_ignored(self):
+        outside = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outside, True)
+        stray = os.path.join(outside, f"{U1}.jsonl")
+        with open(stray, "w") as fh:
+            fh.write(transcript_line("assistant", [{"type": "text", "text": "Not Claude's."}]) + "\n")
+        other = self.write("-tmp-a", U2, transcript_line("assistant", [{"type": "text", "text": "Another session."}]))
+        sneaky = os.path.join(self.root, "projects", "..", os.path.relpath(stray, self.root))
+        own = self.write("-tmp-a", U1, transcript_line("assistant", [{"type": "text", "text": "Its own."}]))
+        for hinted in (stray, other, sneaky):
+            with self.subTest(hinted=hinted):
+                self.assertEqual(self.reader.locate("/tmp/a", U1, hinted), own)
+
     def test_a_transcript_elsewhere_is_found_by_its_file_name_and_a_miss_backs_off(self):
         self.write("-some-shortened-name-1234", U1, transcript_line("user", "go"))
         self.write("-other", U9, transcript_line("user", "not this one"))
@@ -3204,7 +3227,11 @@ class TranscriptReader(unittest.TestCase):
         rows = [self.row("s1", "/tmp/a", U1)]
         with mock.patch.object(sidebar, "fetch_sessions", return_value=(rows, None)):
             poller.poll()
-        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1)})
+        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1, "")})
+        hooked = replace(rows[0], transcript="/c/projects/-tmp-a/" + U1 + ".jsonl")
+        with mock.patch.object(sidebar, "fetch_sessions", return_value=([hooked], None)):
+            poller.poll()
+        self.assertEqual(poller.transcripts.wanted, {"s1": ("/tmp/a", U1, hooked.transcript)})
         self.assertEqual(set(poller.summaries.wanted), {"s1"})
 
     def test_an_empty_listing_keeps_what_the_workers_want(self):
@@ -4664,7 +4691,7 @@ class NoticesWorker(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def notice(self, kind=core.NOTICE_DONE, age=0.0, sid="a"):
+    def notice(self, kind=core.NOTICE_DONE, age=core.NOTICE_SETTLE_SECONDS, sid="a"):
         notice = core.Notice(sid, kind, f"emx-test-{sid}", "/p/alpha", time.monotonic() - age)
         self.worker.add(notice)
         return notice
@@ -4725,6 +4752,19 @@ class NoticesWorker(unittest.TestCase):
         self.worker.step()
         self.assertEqual((self.texts(), self.worker.pending, self.asked, self.speaker.spoken), ([], [], [], []))
 
+    def test_a_done_from_a_queued_message_is_never_spoken_when_the_next_turn_starts_inside_the_window(self):
+        self.notice(age=2)
+        self.assertFalse(self.worker.step())
+        self.assertEqual(len(self.worker.pending), 1)
+        self.worker.want([session("a", "/p/alpha", "working")])
+        self.assertTrue(self.worker.step())
+        self.assertEqual((self.texts(), self.worker.pending, self.asked, self.speaker.spoken), ([], [], [], []))
+
+    def test_a_done_with_its_words_ready_still_waits_for_the_window(self):
+        self.notice(age=2)
+        self.assertFalse(self.worker.step())
+        self.assertEqual((self.texts(), self.asked), ([], []))
+
     def test_a_session_that_changed_state_during_the_call_is_dropped_too(self):
         def slow(claude, excerpt, cwd):
             self.worker.want([session("a", "/p/alpha", "working")])
@@ -4771,8 +4811,8 @@ class NoticesWorker(unittest.TestCase):
     def test_notices_go_out_oldest_first(self):
         self.worker.want([self.alpha, session("b", "/p/beta", "done")])
         self.transcripts.found["b"] = self.transcripts.found["a"]
-        self.notice(sid="a", age=3)
-        self.notice(sid="b", age=2)
+        self.notice(sid="a", age=core.NOTICE_SETTLE_SECONDS + 3)
+        self.notice(sid="b", age=core.NOTICE_SETTLE_SECONDS + 2)
         self.worker.step()
         self.worker.step()
         self.assertEqual(len(self.asked), 2)

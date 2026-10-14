@@ -3208,7 +3208,15 @@ def notice_excerpt(project: str, session: Session, transcript: Transcript | None
 
 
 def notice_ready(kind: str, session: Session, transcript: Transcript | None, waited: float) -> bool:
-    """Whether the transcript has caught up with the state: it holds the words for the state, or `NOTICE_SETTLE_SECONDS` have passed."""
+    """Whether a notice may be worded and sent now: a Needs input once the transcript holds the words for it or `NOTICE_SETTLE_SECONDS` have passed, a Done only once they have passed.
+
+    A message he queues while Claude works ends the turn with a Stop and
+    starts the next one about two seconds later, so a Done is held through
+    the window; a session working again by then makes it stale, and it is
+    dropped unspoken.
+    """
+    if kind == NOTICE_DONE:
+        return waited >= NOTICE_SETTLE_SECONDS
     return bool(session_summary(session, transcript)) or waited >= NOTICE_SETTLE_SECONDS
 
 
