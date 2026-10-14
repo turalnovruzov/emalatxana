@@ -1742,13 +1742,13 @@ class App:
             value = self.tmux.session_option(OPEN_OPT)
             if not value:
                 return
-            # tmux has no compare-and-clear; re-reading narrows the window in which a second click is lost.
-            if self.tmux.session_option(OPEN_OPT) != value:
-                return
-            self.tmux.set_session_option(OPEN_OPT, "")
+            sid = core.open_request(value)
+            if sid:
+                self.tmux.clear_session_option_if(OPEN_OPT, sid)
+            else:
+                self.tmux.set_session_option(OPEN_OPT, "")
         except TmuxError:
             return
-        sid = core.open_request(value)
         if sid:
             self.open_listed(sid)
             self.bring_tab_forward()

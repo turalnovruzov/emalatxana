@@ -5126,7 +5126,7 @@ class NotifierWorker(unittest.TestCase):
         wait.assert_called_once()
         self.assertEqual([verb for verb, _ in helper.calls()], ["status"])
 
-    def test_a_refused_ask_reads_blocked_and_is_not_asked_again_on_a_switch_back(self):
+    def test_a_refused_ask_is_not_asked_again_on_a_switch_back_when_no_check_ran_between(self):
         helper = RecordingHelper(self, auth="notDetermined")
         self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
         notifier = sidebar.Notifier("emx-test-x")
@@ -5870,6 +5870,10 @@ class OpenTmux(HushTmux):
     def set_session_option(self, name, value):
         self.options[name] = value
 
+    def clear_session_option_if(self, name, value):
+        if self.options.get(name) == value:
+            self.options[name] = ""
+
 
 class OpenRequests(AppCase):
     SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -5896,24 +5900,18 @@ class OpenRequests(AppCase):
         self.housekeep()
         self.assertEqual(len(self.opened), 1)
 
-    def test_an_open_request_that_changes_before_the_clear_is_kept_for_the_next_read(self):
+    def test_a_second_click_landing_before_the_clear_survives_for_the_next_read(self):
         self.listed(self.SID, "other")
         self.app.tmux.options[OPEN_OPT] = self.SID
-        real = self.app.tmux.session_option
-        reads = []
+        real = self.app.tmux.clear_session_option_if
 
-        def reading(name):
-            value = real(name)
-            if name != OPEN_OPT:
-                return value
-            reads.append(value)
-            if len(reads) == 1:
-                self.app.tmux.options[OPEN_OPT] = "second"
-            return value
+        def clearing(name, value):
+            self.app.tmux.options[OPEN_OPT] = "second"
+            real(name, value)
 
-        with mock.patch.object(self.app.tmux, "session_option", reading):
+        with mock.patch.object(self.app.tmux, "clear_session_option_if", clearing):
             self.housekeep()
-        self.assertEqual(self.opened, [])
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
         self.assertEqual(self.app.tmux.options[OPEN_OPT], "second")
 
     def test_an_open_request_written_before_the_first_read_is_honoured(self):

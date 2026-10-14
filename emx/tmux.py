@@ -112,6 +112,10 @@ class Tmux:
     def set_session_option(self, name: str, value: str) -> None:
         self.run("set-option", "-t", f"={SESSION}:", name, value)
 
+    def clear_session_option_if(self, name: str, value: str) -> None:
+        """Empty the option only while it still holds `value`, decided on the tmux server so a write in between survives. `value` must not hold quotes or format characters (a session id does not)."""
+        self.run("if-shell", "-F", "#{==:#{" + name + "}," + value + "}", f'set-option -t ={SESSION}: {name} ""')
+
     def source_config(self) -> None:
         self.run("source-file", self.config)
 

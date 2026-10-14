@@ -9,7 +9,7 @@
 //   click <file>      runs what a click on a banner runs, for the `open` object in <file>:
 //                     `emx open <sid>`, then brings forward the terminal whose bundle id it printed
 // post and status run as the executable directly. authorize must be launched through
-// LaunchServices (`open -W -a <app> --args authorize <file>`): macOS refuses the request
+// LaunchServices (`open -W -n -a <app> --args authorize <file>`): macOS refuses the request
 // from anything but a running NSApplication, and stdout does not survive `open`.
 // post, status and authorize report one JSON object:
 //   {"auth", "alerts", "posted", "shown", "delivered"}, plus "error" when the system refused

@@ -244,7 +244,7 @@ def authorize_argv(command: str, app: Path | None, result: str, env: Mapping | N
     env = os.environ if env is None else env
     if env.get("EMX_NOTIFY") or app is None:
         return [command, "authorize", result]
-    return [open_command(env), "-W", "-a", str(app), "--args", "authorize", result]
+    return [open_command(env), "-W", "-n", "-a", str(app), "--args", "authorize", result]
 
 
 def authorize(command: str, app: Path | None, timeout: float, env: Mapping | None = None) -> tuple:

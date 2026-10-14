@@ -185,9 +185,9 @@ class Authorizing(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(report, notify.HelperReport("authorized", "enabled", True, True, 2))
         argv, mode = self.recorded()
-        self.assertEqual(argv[:5], ["-W", "-a", str(self.app), "--args", "authorize"])
-        self.assertEqual(len(argv), 6)
-        result = argv[5]
+        self.assertEqual(argv[:6], ["-W", "-n", "-a", str(self.app), "--args", "authorize"])
+        self.assertEqual(len(argv), 7)
+        result = argv[6]
         self.assertEqual(os.path.dirname(result), str(self.home))
         self.assertEqual(mode, "600")
         self.assertFalse(os.path.exists(result))
@@ -195,7 +195,7 @@ class Authorizing(unittest.TestCase):
 
     def test_the_argv_is_open_wait_app_for_a_built_helper_and_direct_for_a_fake(self):
         argv = notify.authorize_argv(self.command, self.app, "/r/f.json", {})
-        self.assertEqual(argv, [notify.OPEN, "-W", "-a", str(self.app), "--args", "authorize", "/r/f.json"])
+        self.assertEqual(argv, [notify.OPEN, "-W", "-n", "-a", str(self.app), "--args", "authorize", "/r/f.json"])
         argv = notify.authorize_argv(self.command, self.app, "/r/f.json", {"EMX_OPEN": "/x/open"})
         self.assertEqual(argv[0], "/x/open")
         self.assertEqual(notify.authorize_argv("/x/fake", None, "/r/f.json", {"EMX_NOTIFY": "/x/fake"}),
