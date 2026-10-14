@@ -2954,6 +2954,11 @@ class UserRequests(unittest.TestCase):
         ]
         self.assertEqual(core.user_requests(lines), ["first", "second"])
 
+    def test_a_subagents_hand_back_is_not_his_request(self):
+        lines = [entry("user", "fix it"), entry("user", "<agent-message from=a1>result")]
+        self.assertEqual(core.parse_transcript("\n".join(lines)).prompt, "fix it")
+        self.assertEqual(core.user_requests(lines), ["fix it"])
+
 
 class NameReadRanges(unittest.TestCase):
     def test_whole_up_to_the_cap_then_head_and_tail(self):
@@ -4047,6 +4052,39 @@ class HookRecord(unittest.TestCase):
         self.assertNotIn("\n", record["message"])
         self.assertTrue(record["message"].startswith("a b x"))
         self.assertEqual(len(record["message"]), core.HOOK_MESSAGE_CHARS)
+
+    def test_a_stop_counts_the_background_tasks_still_running(self):
+        tasks = [{"status": "running"}, {"status": "running"}, {"status": "completed"}]
+        self.assertEqual(core.hook_record(self.payload(background_tasks=tasks), 1)["background"], 2)
+        self.assertEqual(core.hook_record(self.payload(background_tasks=[]), 1)["background"], 0)
+        self.assertNotIn("background", core.hook_record(self.payload(), 1))
+
+    def test_a_stop_keeps_the_end_of_the_last_reply(self):
+        message = ("word\n" * 1000)[:5000]
+        record = core.hook_record(self.payload(last_assistant_message=message), 1)
+        self.assertEqual(len(record["reply"]), core.STOP_REPLY_CHARS)
+        self.assertEqual(core.STOP_REPLY_CHARS, 2000)
+        self.assertEqual(record["reply"], " ".join(message.split())[-2000:])
+
+    def test_a_prompt_claude_code_submitted_itself_is_marked_and_no_prompt_is_kept(self):
+        for prompt in ("<task-notification>x", "<agent-message from=a>x"):
+            record = core.hook_record(self.payload(hook_event_name="UserPromptSubmit", prompt=prompt), 1)
+            self.assertIs(record["synthetic"], True, prompt)
+            self.assertNotIn("prompt", record)
+        record = core.hook_record(self.payload(hook_event_name="UserPromptSubmit", prompt="hello"), 1)
+        self.assertNotIn("synthetic", record)
+        self.assertNotIn("prompt", record)
+
+    def test_a_subagents_tool_event_names_its_agent(self):
+        record = core.hook_record(self.payload(hook_event_name="PreToolUse", tool_name="Bash", agent_id="a1"), 1)
+        self.assertEqual(record["agent"], "a1")
+        self.assertNotIn("agent", core.hook_record(self.payload(hook_event_name="PreToolUse", tool_name="Bash"), 1))
+
+    def test_ill_typed_new_fields_are_dropped_without_error(self):
+        record = core.hook_record(self.payload(background_tasks={"status": "running"}, last_assistant_message=7, agent_id=3), 1)
+        self.assertIsNotNone(record)
+        for key in ("background", "reply", "agent"):
+            self.assertNotIn(key, record)
 
     def test_every_recorded_fixture_payload_is_usable(self):
         with open(HOOK_FIXTURE, encoding="utf-8") as fh:

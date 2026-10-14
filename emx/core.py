@@ -2238,7 +2238,9 @@ PEEK_MIN_LIST_ROWS = 3
 _FILE_TOOLS = ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit")
 _TOOL_ARGS = ("command", "pattern", "url", "query", "description", "prompt", "skill")
 _INTERRUPTED = "[Request interrupted"
-_WRAPPER_TAGS = ("<command-", "<local-command-", "<bash-", "<task-notification>", "<system-reminder>", "<ide_")
+# Text Claude Code submits as a prompt on its own: a background task's result or a subagent's hand-back.
+SYNTHETIC_PROMPTS = ("<task-notification>", "<agent-message")
+_WRAPPER_TAGS = ("<command-", "<local-command-", "<bash-", *SYNTHETIC_PROMPTS, "<system-reminder>", "<ide_")
 _SESSION_ID = re.compile(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
 
@@ -3291,6 +3293,9 @@ _HOOK_TEXT_KEYS = ("source", "reason", "notification_type", "tool_name")
 _EVENT_NAME = re.compile(r"[A-Za-z]{1,40}")
 HOOK_MESSAGE_CHARS = 200
 HOOK_PATH_CHARS = 1000
+HOOK_AGENT_CHARS = 100
+# The end of Claude's last reply is kept, since a question to him comes at its end.
+STOP_REPLY_CHARS = 2000
 
 
 def _leading_fields(text: str) -> dict:
@@ -3330,9 +3335,12 @@ def hook_record(payload_text: str, now_ms: float) -> dict | None:
     """The one line a hook leaves behind, from the JSON Claude Code gave it on stdin, or None when the payload is not usable. Never raises.
 
     Only these fields are kept: whatever else a payload carries (a tool's
-    input, a prompt) is dropped here, so the record file never holds it.
-    `at` is the time the hook ran, since the interrupt rule compares it with
-    the transcript's timestamps.
+    input, a prompt) is dropped here, so the record file never holds it. A
+    `Stop` also keeps how many background tasks still run (`background`) and
+    the end of Claude's last reply (`reply`), which stays in emx's own state
+    folder; a prompt Claude Code submitted itself is marked `synthetic`, its
+    text still dropped. `at` is the time the hook ran, since the interrupt
+    rule compares it with the transcript's timestamps.
     """
     try:
         try:
@@ -3354,6 +3362,19 @@ def hook_record(payload_text: str, now_ms: float) -> dict | None:
         for key in ("message", "session_title"):
             if isinstance(payload.get(key), str):
                 record[key] = _one_line(payload[key])[:HOOK_MESSAGE_CHARS]
+        if isinstance(payload.get("prompt_id"), str):
+            record["prompt_id"] = payload["prompt_id"][:HOOK_MESSAGE_CHARS]
+        if isinstance(payload.get("agent_id"), str):
+            record["agent"] = payload["agent_id"][:HOOK_AGENT_CHARS]
+        if event == "Stop":
+            tasks = payload.get("background_tasks")
+            if isinstance(tasks, list):
+                record["background"] = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "running")
+            if isinstance(payload.get("last_assistant_message"), str):
+                record["reply"] = _one_line(payload["last_assistant_message"])[-STOP_REPLY_CHARS:]
+        if event == "UserPromptSubmit" and isinstance(payload.get("prompt"), str):
+            if payload["prompt"].lstrip().startswith(SYNTHETIC_PROMPTS):
+                record["synthetic"] = True
         return record
     except (ValueError, TypeError, RecursionError, OverflowError):
         return None
