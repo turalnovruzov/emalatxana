@@ -163,25 +163,15 @@ class ReopenRule(unittest.TestCase):
 
 
 class AttachAllowed(unittest.TestCase):
-    def test_interrupt_attaches_only_a_running_session_on_a_fresh_listing(self):
+    def test_only_open_resumes_and_the_other_triggers_need_a_running_session_on_a_fresh_listing(self):
         running, stopped = mk(state="working"), mk(state="stopped", running=False)
-        self.assertTrue(core.attach_allowed(running, core.INTERRUPT, True))
-        self.assertFalse(core.attach_allowed(running, core.INTERRUPT, False))
-        self.assertFalse(core.attach_allowed(stopped, core.INTERRUPT, True))
-        self.assertFalse(core.attach_allowed(None, core.INTERRUPT, True))
         self.assertTrue(core.attach_allowed(stopped, core.OPEN))
+        self.assertFalse(hasattr(core, "INTERRUPT"))
         for trigger in (core.RESTART, core.NEW):
             with self.subTest(trigger=trigger):
                 self.assertTrue(core.attach_allowed(running, trigger, True))
                 self.assertFalse(core.attach_allowed(running, trigger, False))
                 self.assertFalse(core.attach_allowed(stopped, trigger, True))
-
-    def test_an_interrupt_refusal_says_no_viewer_was_opened(self):
-        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.INTERRUPT, False, None))
-        self.assertIn("isn't listed", core.refusal("emx-test-a", core.INTERRUPT, True, None))
-        stopped = mk(state="stopped", running=False)
-        self.assertEqual(core.refusal("emx-test-a", core.INTERRUPT, True, stopped),
-                         "emx-test-a isn't running, so emx didn't open a viewer to interrupt it.")
 
 
 class PlacementFromGit(unittest.TestCase):
@@ -2590,10 +2580,11 @@ class RenameChecks(unittest.TestCase):
             id: str
             session: str
             dead: bool = False
+            agent: str = "claude"
 
-        panes = [P("%1", ""), P("%2", "a", dead=True), P("%3", "b"), P("%4", "a")]
+        panes = [P("%1", ""), P("%2", "a", dead=True), P("%3", "b"), P("%5", "a", agent=""), P("%4", "a")]
         self.assertEqual(core.live_viewer(panes, "a").id, "%4")
-        self.assertIsNone(core.live_viewer(panes[:3], "a"))
+        self.assertIsNone(core.live_viewer(panes[:4], "a"))
 
     def test_ctrl_r_needs_a_running_session_with_an_open_viewer_and_a_healthy_listing(self):
         running = named("a", "alpha")
@@ -2821,32 +2812,18 @@ class InterruptChecks(unittest.TestCase):
         self.assertIn("nothing to interrupt", core.nothing_to_interrupt_text(self.interrupt))
 
     def test_screen_checks_on_real_captures(self):
-        perm = named("p", "emx-test-perm", state="working")
-        others = [named("b", "bee")]
-        ok = {"working-streaming": (self.working, self.interrupt), "working-spinner": (perm, core.Interrupt("p", "emx-test-perm"))}
-        for screen, (session, interrupt) in ok.items():
+        for screen in ("working-streaming", "working-spinner", "interactive-named-working", "interactive-unnamed-empty",
+                       "named-viewer"):
             with self.subTest(screen=screen):
-                self.assertIsNone(core.interrupt_screen_refusal(interrupt, session, [session] + others, interrupt_screen(screen)))
-        sessions = [self.working] + others
-
-        def refusal(screen):
-            return core.interrupt_screen_refusal(self.interrupt, self.working, sessions, screen)
-
-        self.assertIn("scrolled back", refusal(interrupt_screen("working-streaming", in_mode=True)))
-        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", flagged=True)))
-        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("agent-view")))
-        self.assertIn("isn't showing its prompt", refusal(interrupt_screen("working-streaming", shown=False)))
-        twin = core.interrupt_screen_refusal(
-            self.interrupt, self.working, sessions + [named("d", "emx-test-working", state="working")],
-            interrupt_screen("working-streaming"),
-        )
-        self.assertIn("looks the same as another session's", twin)
+                self.assertIsNone(core.interrupt_screen_refusal(self.interrupt, interrupt_screen(screen)))
+        self.assertIn("scrolled back", core.interrupt_screen_refusal(self.interrupt, interrupt_screen("working-streaming", in_mode=True)))
+        hidden = core.interrupt_screen_refusal(self.interrupt, interrupt_screen("interactive-named-permission", shown=False))
+        self.assertIn("isn't showing its prompt", hidden)
 
     def test_a_draft_does_not_refuse(self):
-        focus = named("f", "emx-test-focus", state="working")
         line, below, x, shown, width = at_cursor("prompt-text")
         screen = interrupt_screen("prompt-text", x=x, y=PROMPT_CURSORS["cursors"]["prompt-text"]["y"], shown=shown)
-        self.assertIsNone(core.interrupt_screen_refusal(core.Interrupt("f", "emx-test-focus"), focus, [focus], screen))
+        self.assertIsNone(core.interrupt_screen_refusal(core.Interrupt("f", "emx-test-focus"), screen))
         self.assertFalse(core.empty_prompt(line, below, x, shown, width))
 
     def test_what_tmux_printed_names_the_interrupt_and_the_pinned_x(self):

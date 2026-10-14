@@ -156,7 +156,7 @@ def session_age(session: Session, now_ms: float) -> str:
     return format_age((now_ms - session.started_at) / 1000)
 
 
-OPEN, RESTART, NEW, INTERRUPT = "open", "restart", "new", "interrupt"
+OPEN, RESTART, NEW = "open", "restart", "new"
 
 
 def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
@@ -174,7 +174,7 @@ def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -
         return False
     if trigger == OPEN:
         return True
-    return trigger in (RESTART, NEW, INTERRUPT) and fresh and session.running
+    return trigger in (RESTART, NEW) and fresh and session.running
 
 
 def checked_row(sessions: list | None, sid: str) -> tuple:
@@ -198,9 +198,6 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
     """Why `attach_allowed` said no, for the notice line."""
     if trigger != OPEN and not fresh:
         return f"Couldn't list sessions to check {name} is still running, so emx left it alone."
-    if trigger == INTERRUPT:
-        why = "isn't listed any more" if session is None else "isn't running"
-        return f"{name} {why}, so emx didn't open a viewer to interrupt it."
     if session is None:
         return f"{name} isn't listed any more, so emx won't open it."
     return f"{name} isn't running. Press Enter on it to reopen it."
@@ -451,8 +448,8 @@ def rename_line(name: str) -> str:
 
 
 def live_viewer(panes, sid: str):
-    """The pane emx opened on session `sid` and whose viewer still runs, or None."""
-    return next((p for p in panes if p.session == sid and not p.dead), None)
+    """The live pane holding session `sid`, or None. Only a pane carrying both the session and the agent tag is the session's own; a key alone is an old `claude attach` viewer's."""
+    return next((p for p in panes if p.session == sid and p.agent and not p.dead), None)
 
 
 def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None, has_viewer: bool) -> str | None:
@@ -640,19 +637,18 @@ def nothing_to_interrupt_text(interrupt: Interrupt) -> str:
     return f"{interrupt.name} isn't working any more, so there was nothing to interrupt."
 
 
-def interrupt_screen_refusal(interrupt: Interrupt, session: Session, sessions, screen: RenameScreen) -> str | None:
-    """Why emx may not send Esc into the session's viewer as it is on screen now, or None.
+def interrupt_screen_refusal(interrupt: Interrupt, screen: RenameScreen) -> str | None:
+    """Why emx may not send Esc into the session's pane as it is on screen now, or None.
 
-    The checks `rename_screen_refusal` makes, but a draft in the prompt does
-    not refuse: Esc while Claude Code works interrupts the turn and leaves
-    the draft where it is. The cursor must be shown, as it is at the prompt.
+    Which session the pane holds is proven by its tags, never by its
+    screen. In a mode the key would drive tmux, not Claude Code. A draft in
+    the prompt does not refuse: Esc while Claude Code works interrupts the
+    turn and leaves the draft where it is. The cursor must be shown, as it is
+    at the prompt; a dialog hides it.
     """
     if screen.in_mode:
         return f"{interrupt.name}'s viewer is scrolled back, so emx didn't interrupt it. Press q in it, then try again."
-    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
-    if identity == "ambiguous":
-        return f"{interrupt.name}'s viewer looks the same as another session's, so emx didn't interrupt it."
-    if identity != "ok" or not screen.cursor_shown:
+    if not screen.cursor_shown:
         return f"{interrupt.name}'s viewer isn't showing its prompt, so emx didn't interrupt it."
     return None
 
