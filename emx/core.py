@@ -162,7 +162,7 @@ def session_age(session: Session, now_ms: float) -> str:
     return format_age((now_ms - session.started_at) / 1000)
 
 
-OPEN, RESTART, NEW = "open", "restart", "new"
+OPEN, NEW = "open", "new"
 
 
 def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -> bool:
@@ -180,7 +180,7 @@ def attach_allowed(session: Session | None, trigger: str, fresh: bool = False) -
         return False
     if trigger == OPEN:
         return True
-    return trigger in (RESTART, NEW) and fresh and session.running
+    return trigger == NEW and fresh and session.running
 
 
 def checked_row(sessions: list | None, sid: str) -> tuple:
@@ -188,16 +188,6 @@ def checked_row(sessions: list | None, sid: str) -> tuple:
     if sessions is None:
         return None, False
     return next((s for s in sessions if s.id == sid), None), True
-
-
-def check_still_applies(asked: tuple, main_id: str | None, main_session: str | None) -> bool:
-    """Whether a restart check's answer may act: `asked` is (session id, main pane id) from when `r` was pressed.
-
-    The listing runs on another thread, so by the time it answers he may have
-    opened another session in the main pane; the answer is then about a
-    session that is no longer the one to restart.
-    """
-    return bool(asked[0]) and (main_session, main_id) == tuple(asked)
 
 
 def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> str:
@@ -395,8 +385,6 @@ def closing_after(closing: Mapping, finished: Mapping, listed_ids) -> dict:
 # (an emoji is two): the Enter doesn't submit, and the text stays in the prompt. Lines of 62 submitted, in ASCII,
 # CJK and emoji alike; names stop a little short of that.
 RENAME_MAX = 50
-# How long after `/rename` is typed the viewer may show the new name while the listing still shows the old one.
-RENAME_PENDING_SECONDS = 30.0
 TYPED = "emx-typed"
 _PANE_ID = re.compile(r"%\d+")
 _PLAIN_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -693,48 +681,6 @@ def renamed_text(rename: Rename, name: str | None, prompt_empty: bool = True, qu
     if queued:
         return f"Typed /rename into {rename.old}; it's working, so Claude Code applies the name when this turn ends."
     return f"Typed /rename into {rename.old}, but the panel doesn't show a new name yet."
-
-
-def rename_started(renaming: Mapping, rename: Rename) -> dict:
-    """`renaming` maps a session id to (old name, new name, until): the new name the viewer may show before the listing does. A rename in flight has no `until` yet."""
-    return {**renaming, rename.id: (rename.old, rename.new, None)}
-
-
-def rename_finished(renaming: Mapping, rename: Rename, typed: bool, now: float) -> dict:
-    """After the worker: a rename that typed nothing is dropped; one that typed is kept RENAME_PENDING_SECONDS, so one that never lands doesn't stay forever."""
-    rest = {sid: entry for sid, entry in renaming.items() if sid != rename.id}
-    if not typed:
-        return rest
-    return {**rest, rename.id: (rename.old, rename.new, now + RENAME_PENDING_SECONDS)}
-
-
-def pending_renames(renaming: Mapping, sessions, in_flight: str | None, now: float) -> dict:
-    """The entries of `renaming` still pending: the one being typed and checked, and any whose listing still shows the old name and whose time is not up.
-
-    A session still in its turn (working, or stopped for you) keeps its
-    entry with the time renewed, because Claude Code may run a queued
-    `/rename` only when the turn ends.
-    """
-    by_id = {s.id: s for s in sessions}
-    kept = {}
-    for sid, (old, new, until) in renaming.items():
-        session = by_id.get(sid)
-        if sid == in_flight:
-            kept[sid] = (old, new, until)
-        elif session is not None and session.name == old and until is not None:
-            if category(session) in (WORKING, NEEDS_INPUT) and not idle(session):
-                kept[sid] = (old, new, now + RENAME_PENDING_SECONDS)
-            elif now < until:
-                kept[sid] = (old, new, until)
-    return kept
-
-
-def viewer_names(session: Session, renaming: Mapping) -> list:
-    """The names a viewer's rule may show for `session`: its own ("" when unnamed), then the new name of a rename still pending."""
-    names = ["" if unnamed(session) else session.name]
-    if session.id in renaming:
-        names.append(renaming[session.id][1])
-    return names
 
 
 @dataclass(frozen=True)
@@ -2101,10 +2047,6 @@ def session_folders(sessions, groups, view: str) -> list:
     return folders
 
 
-def viewer_command(claude: str, session_id: str) -> str:
-    return f"exec {shlex.quote(claude)} attach {shlex.quote(session_id)}"
-
-
 def stale_viewers(viewer_ids, live_ids, misses: dict, dead=frozenset()) -> tuple:
     """Viewers whose session is missing from STALE_AFTER_MISSES polls in a row.
 
@@ -2137,71 +2079,6 @@ def error_line(exc: BaseException) -> str:
 
 
 _FULL_RULE = re.compile(r"^─+$")
-_NAME_RULE = re.compile(r"^─*\s+(\S.*?)\s+─$")
-_PROMPT = re.compile(r"^❯(\s|$)")
-_AGENT_FOOTER = re.compile(r"^\s*enter to return\b|\bctrl\+x to delete\b")
-_AGENT_COUNT = r"\d+ (?:awaiting input|working|completed)"
-_AGENT_HEADER = re.compile(rf"^[\s▐▛▜▌▝▘█]*{_AGENT_COUNT}(?: · {_AGENT_COUNT})+$")
-_PROMPT_REACH = 12
-
-
-def main_view_state(captured: str, expected_name: str, pane_width: int) -> str:
-    """What a `claude attach` pane is showing, judged from its captured text.
-
-    "agent_view" when ← has turned it into the all-sessions view, "mismatch"
-    when its prompt's top rule names a session other than `expected_name`,
-    "ok" when the rule names it, and "unknown" otherwise. Only positive
-    evidence raises an alarm: dialogs, startup, transcript text and an empty
-    `expected_name` (an unnamed session) all come back "unknown".
-    `pane_width` is the width tmux reports for the pane the text came from.
-    """
-    lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
-    if not lines:
-        return "unknown"
-    for i in range(max(1, len(lines) - 2), len(lines)):
-        if _AGENT_FOOTER.search(lines[i]) and _FULL_RULE.match(lines[i - 1]):
-            return "agent_view"
-    above = _line_above_prompt(lines, pane_width)
-    if above is None:
-        return "unknown"
-    if _FULL_RULE.match(above):
-        if any(_AGENT_HEADER.match(line) for line in lines[:4]):
-            return "agent_view"
-        return "unknown"
-    match = _NAME_RULE.match(above)
-    if not match or not expected_name.strip():
-        return "unknown"
-    return "ok" if _names_match(match.group(1), expected_name) else "mismatch"
-
-
-def view_state_for(captured: str, names, pane_width: int) -> str:
-    """`main_view_state` against any of `names`: "ok" when the rule names one of them. While a rename lands, the viewer's rule already shows the new name and the listing still the old one, so either is his session."""
-    states = [main_view_state(captured, name, pane_width) for name in names]
-    return "ok" if "ok" in states else states[0]
-
-
-def _line_above_prompt(lines: list, pane_width: int) -> str | None:
-    """The line over the input box: the last `❯` line near the bottom with a pane-wide rule under it.
-
-    Both rules of the real input box span the whole pane, so requiring that
-    width keeps a rule-and-prompt look-alike quoted in the transcript from counting.
-    """
-    start = max(1, len(lines) - _PROMPT_REACH)
-    for i in range(len(lines) - 2, start - 1, -1):
-        if not _PROMPT.match(lines[i]):
-            continue
-        if any(_FULL_RULE.match(line) and display_width(line) == pane_width for line in lines[i + 1:]):
-            above = lines[i - 1]
-            return above if display_width(above) == pane_width else None
-    return None
-
-
-def _names_match(shown: str, expected: str) -> bool:
-    """Claude Code cuts a long name to fit and ends it with an ellipsis, so a cut name matches by prefix."""
-    shown, expected = " ".join(shown.split()), " ".join(expected.split())
-    if shown.endswith("…"):
-        return expected.startswith(shown[:-1].rstrip())
-    return shown == expected
 
 
 PROMPT_TEXT_X = 2
@@ -2327,91 +2204,9 @@ def title_style(focused: bool) -> str:
     return "bold" if focused else "dim"
 
 
-RESTORE, GIVE_UP = "restore", "give_up"
-RESTORE_BACKOFF_SECONDS = 5.0
-RESTORES_BEFORE_GIVING_UP = 2
-
-
-def auto_restore(state: str, pane_id: str, tried: bool, checking: bool, last_restore: tuple | None, now: float) -> str | None:
-    """What emx does by itself about the main pane: RESTORE its session, GIVE_UP restoring it, or nothing (None).
-
-    Only the agent view qualifies: Claude Code opened it in place of the
-    session, and the session itself is untouched. A different session showing
-    ("mismatch") is left to him, and so is a viewer emx already tried, so a
-    refusal is said once rather than every half second. `last_restore` is
-    (pane id, time, count) of emx's latest automatic restores of one pane
-    (`record_restore`), kept until an "ok" read of that pane
-    (`last_restore_after`). The agent view back on that pane within
-    RESTORE_BACKOFF_SECONDS, or back after RESTORES_BEFORE_GIVING_UP restores
-    with no "ok" read between them, means the detection is probably wrong, and
-    restoring again would respawn main and take his focus on every cycle, so
-    emx gives up and leaves the "press r" warning to him.
-    """
-    if state != "agent_view" or tried or checking:
-        return None
-    if last_restore is not None and last_restore[0] == pane_id:
-        _, at, count = last_restore
-        if now - at < RESTORE_BACKOFF_SECONDS or count >= RESTORES_BEFORE_GIVING_UP:
-            return GIVE_UP
-    return RESTORE
-
-
-def record_restore(last_restore: tuple | None, pane_id: str, now: float) -> tuple:
-    """`last_restore` after emx restores `pane_id` at `now`: restores of the same pane add up until an "ok" read resets them."""
-    count = last_restore[2] + 1 if last_restore is not None and last_restore[0] == pane_id else 1
-    return (pane_id, now, count)
-
-
-def restore_still_wanted(auto: bool, state: str | None) -> bool:
-    """Whether a check's answer may still respawn main: always for his r, and for emx's own restore only while main still shows the agent view.
-
-    Otherwise he has moved on inside Claude Code meanwhile (picked a session,
-    or went back to work), and `state` (main's view now) says so.
-    """
-    return not auto or state == "agent_view"
-
-
 def notice_expired(until: float | None, now: float) -> bool:
     """Whether a notice shown only for a while (`until` is when it ends, None for one that stays) is due to go."""
     return until is not None and now >= until
-
-
-def last_restore_after(last_restore: tuple | None, pane_id: str, state: str) -> tuple | None:
-    """An "ok" read of the restored pane shows the restore worked, so a later agent view there is restored again."""
-    if last_restore is not None and last_restore[0] == pane_id and state == "ok":
-        return None
-    return last_restore
-
-
-def still_tried(tried: frozenset, flagged: frozenset) -> frozenset:
-    """The panes emx already tried to restore, kept only while they stay flagged; once a flag clears (an "ok" read or a respawn) the next agent view there is a new episode."""
-    return frozenset(tried) & frozenset(flagged)
-
-
-def restoring_main(asked: tuple, auto: bool, main_id: str | None) -> bool:
-    """Whether a running check is emx's own restore of the pane now in main; `asked` is the check's (session id, pane id)."""
-    return auto and main_id is not None and asked[1] == main_id
-
-
-def off_main_warning(flagged: frozenset, main_id: str | None, restoring: bool) -> bool:
-    """Whether the panel says main isn't showing its session: it is flagged, and emx is not already bringing it back."""
-    return main_id is not None and main_id in flagged and not restoring
-
-
-def latch_off_main(flagged: frozenset, pane_id: str, state: str) -> tuple:
-    """Track viewers caught showing something other than their own session.
-
-    A pane id joins the set on "agent_view" or "mismatch" and leaves it only on
-    "ok" (or when the caller respawns it), so the flag survives the viewer
-    leaving the main pane and an "unknown" read such as a dialog. Returns
-    (new_flagged, respawn): respawn says the viewer needs a fresh
-    `claude attach` before it is shown again.
-    """
-    if state in ("agent_view", "mismatch"):
-        flagged = flagged | {pane_id}
-    elif state == "ok":
-        flagged = flagged - {pane_id}
-    return frozenset(flagged), pane_id in flagged
 
 
 TRANSCRIPT_FIRST_BYTES = 128 * 1024

@@ -327,7 +327,7 @@ class AttachChecks(AppCase):
 
     def test_other_triggers_attach_only_on_a_checked_running_row(self):
         running, stopped = session("s1", "/p/alpha"), session("s1", "/p/alpha", state="stopped", pid=None)
-        for trigger in (core.RESTART, core.NEW):
+        for trigger in (core.NEW,):
             with self.subTest(trigger=trigger):
                 self.assertTrue(self.app.confirm_attach("s1", trigger, (running, True)))
                 self.assertFalse(self.app.confirm_attach("s1", trigger, (stopped, True)))
@@ -345,111 +345,6 @@ class AttachChecks(AppCase):
         exited = core.Session("new1", "emx-test-new1", "/p", "done", "", "", None, False)
         self.assertFalse(self.app.confirm_attach("new1", core.NEW, (exited, True)))
         self.assertTrue(self.app.notice.startswith("emx-test-new1 isn't running"), self.app.notice)
-
-
-class FakeTmux:
-    def __init__(self):
-        self.side = Pane("%1", "@1", False, "sidebar", "", 40, 121)
-        self.main = Pane("%2", "@1", False, "", "s1", 80, 121)
-        self.respawned = []
-
-    def panes(self):
-        return [self.side, self.main]
-
-    def respawn(self, pane, command):
-        self.respawned.append(pane)
-
-    def select(self, pane):
-        pass
-
-
-class RestartOffThread(AppCase):
-    """`r` lists on a worker thread; the panel keeps drawing, and the answer acts only if it is still about what's in main."""
-
-    def setUp(self):
-        super().setUp()
-        self.app.tmux = FakeTmux()
-        self.app.main_pane = self.app.tmux.main
-        self.poll(session("s1", "/p/alpha"), session("s2", "/p/alpha"))
-        self.app.refresh()
-        self.gate = threading.Event()
-        self.calls = []
-        self.answer = ([session("s1", "/p/alpha")], None)
-
-        def fetch(engine):
-            self.calls.append(threading.current_thread() is not threading.main_thread())
-            self.gate.wait(5)
-            return self.answer
-
-        p = mock.patch.object(sidebar, "fetch_sessions", fetch)
-        p.start()
-        self.addCleanup(p.stop)
-        self.addCleanup(self.gate.set)
-
-    def press_r(self):
-        self.app.handle_key("r")
-
-    def answer_arrives(self):
-        checker = self.app.checker
-        self.gate.set()
-        checker.join(5)
-        self.app.refresh()
-
-    def test_repeated_r_runs_one_check_and_the_panel_keeps_drawing(self):
-        for _ in range(3):
-            self.press_r()
-        deadline = time.monotonic() + 5
-        while not self.calls and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(self.app.notice.startswith("Checking emx-test-s1"), self.app.notice)
-        started = time.monotonic()
-        self.app.refresh()
-        self.assertLess(time.monotonic() - started, 1)
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.answer_arrives()
-        self.assertEqual(self.calls, [True])
-        self.assertEqual(self.app.tmux.respawned, ["%2"])
-        self.assertEqual(self.app.notice, "Viewer restarted.")
-        self.assertIsNone(self.app.checker)
-
-    def test_a_session_being_closed_is_not_restarted(self):
-        self.press_r()
-        self.app.closing["s1"] = None
-        self.answer_arrives()
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.assertEqual(self.app.notice, "Still closing emx-test-s1…")
-
-    def test_a_session_stopped_since_the_poll_is_left_alone(self):
-        self.answer = ([session("s1", "/p/alpha", state="stopped", pid=None)], None)
-        self.press_r()
-        self.answer_arrives()
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.assertIn("isn't running", self.app.notice)
-
-    def test_a_failed_or_timed_out_listing_refuses(self):
-        self.answer = (None, "claude agents --json timed out")
-        self.press_r()
-        self.answer_arrives()
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.assertIn("Couldn't list sessions", self.app.notice)
-
-    def test_an_answer_about_what_main_no_longer_shows_is_dropped(self):
-        for changed in (Pane("%2", "@1", False, "", "s2", 80, 121), Pane("%3", "@1", False, "", "s1", 80, 121)):
-            with self.subTest(main=changed):
-                self.app.tmux.main = self.app.main_pane = FakeTmux().main
-                self.gate.clear()
-                self.press_r()
-                self.app.tmux.main = changed
-                self.answer_arrives()
-                self.assertEqual(self.app.tmux.respawned, [])
-                self.assertIn("main pane changed", self.app.notice)
-
-    def test_no_check_while_the_panels_own_polling_is_failing(self):
-        self.app.list_error = "listing broken"
-        self.press_r()
-        self.assertIsNone(self.app.checker)
-        self.assertEqual(self.calls, [])
-        self.assertIn("Couldn't list sessions", self.app.notice)
 
 
 class StartWaitsUntilRunning(AppCase):
@@ -574,7 +469,7 @@ class SwitchTo(AppCase):
 
     def test_a_stopped_session_is_never_resumed_by_any_other_trigger(self):
         stopped = core.Session(KEY_A, "alpha", self.cwd, "stopped", "", "", 1.0, False)
-        for trigger in (core.NEW, core.RESTART, "interrupt"):
+        for trigger in (core.NEW, "restart", "interrupt"):
             for held in (None, Pane("%5", "@2", True, "", KEY_A, 100, 100, agent="claude")):
                 with self.subTest(trigger=trigger, held=held):
                     self.app.say("")
@@ -679,11 +574,12 @@ class FocusTmux:
         self.panel_active = True
         self.back = False
         self.cleared = []
+        self.main_agent = "claude"
 
     def panes(self):
         return [
             Pane("%1", "@1", False, "sidebar", "", 40, 121, self.panel_active, self.back),
-            Pane("%2", "@1", False, "", "b", 80, 121, not self.panel_active),
+            Pane("%2", "@1", False, "", "b", 80, 121, not self.panel_active, agent=self.main_agent),
         ]
 
     def clear_back(self, pane):
@@ -724,6 +620,14 @@ class Focus(AppCase):
         self.assertEqual(self.app.cursor, ("session", "b"))
         self.assertEqual(self.app.tmux.cleared, ["%1"])
         self.assertEqual(self.opened, [])
+
+    def test_left_from_a_pane_without_the_agent_tag_leaves_the_cursor_where_he_left_it(self):
+        self.app.tmux.main_agent = ""
+        self.app.main_pane = self.app.tmux.panes()[1]
+        self.leave_panel()
+        self.come_back(by_left=True)
+        self.assertIs(self.app.focused, True)
+        self.assertEqual(self.app.cursor, ("session", "c"))
 
     def test_coming_back_with_ctrl_backslash_or_a_click_leaves_the_cursor_where_he_left_it(self):
         self.leave_panel()
@@ -830,183 +734,6 @@ class ArrowKeys(AppCase):
             with self.subTest(arrow=arrow):
                 self.assertIn(arrow, sidebar.FOOTERS[0])
                 self.assertIn(arrow, help_keys)
-
-
-class AutoRestoreFakeTmux(FakeTmux):
-    def __init__(self):
-        super().__init__()
-        self.selected = []
-
-    def select(self, pane):
-        self.selected.append(pane)
-
-    def capture(self, pane):
-        return self.screen
-
-
-class AutoRestore(AppCase):
-    """Main caught showing Claude Code's agent view is brought back after a fresh listing, and focus goes to the panel."""
-
-    def setUp(self):
-        super().setUp()
-        self.app.tmux = AutoRestoreFakeTmux()
-        self.app.main_pane = self.app.tmux.main
-        self.poll(session("s1", "/p/alpha"))
-        self.app.refresh()
-        self.answer = ([session("s1", "/p/alpha")], None)
-        p = mock.patch.object(sidebar, "fetch_sessions", lambda engine: self.answer)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def show(self, screen_name):
-        (path,) = (Path(__file__).parent / "fixtures" / "screens").glob(f"{screen_name}.w*.txt")
-        text, width = path.read_text(encoding="utf-8"), int(path.stem.rsplit(".w", 1)[1])
-        self.app.tmux.screen = text
-        self.app.tmux.main = Pane("%2", "@1", False, "", "s1", width, 121)
-        self.app.main_pane = self.app.tmux.main
-
-    def settle(self):
-        self.app.checker.join(5)
-        self.app.finish_check()
-
-    def test_agent_view_is_restored_and_the_panel_focused_without_the_r_warning(self):
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.assertTrue(self.app.checker.auto)
-        self.assertNotIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
-        self.settle()
-        self.assertEqual(self.app.tmux.respawned, ["%2"])
-        self.assertEqual(self.app.tmux.selected, ["%1"])
-        self.assertIn("brought the session back", self.app.notice)
-
-    def test_the_restore_is_a_way_back_so_the_cursor_goes_to_mains_session(self):
-        self.app.focused, self.app.cursor = False, ("group", "/p/alpha")
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.settle()
-        self.assertIs(self.app.focused, True)
-        self.assertEqual(self.app.cursor, ("session", "s1"))
-
-    def test_a_refusal_is_said_once_and_the_warning_stays(self):
-        self.answer = ([session("s1", "/p/alpha", state="stopped", pid=None)], None)
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.settle()
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.assertIn("isn't running", self.app.notice)
-        self.app.check_main(self.app.main_pane)
-        self.assertIsNone(self.app.checker)
-        self.assertIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
-
-    def test_a_session_being_closed_is_not_restored(self):
-        self.app.closing["s1"] = None
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.assertIsNone(self.app.checker)
-        self.assertEqual(self.app.tmux.respawned, [])
-
-    def test_a_close_that_starts_while_the_restore_lists_stops_the_restore(self):
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.assertTrue(self.app.checker.auto)
-        self.app.closing["s1"] = None
-        self.settle()
-        self.assertEqual(self.app.tmux.respawned, [])
-        self.assertEqual(self.app.tmux.selected, [])
-        self.assertEqual(self.app.notice, "Still closing emx-test-s1…")
-
-    def test_another_session_showing_is_left_to_him(self):
-        self.app.sessions = [core.Session("s1", "emx-test-named", "/p/alpha", "working", "", "", 0.0, True)]
-        self.show("cross-wired")
-        self.app.check_main(self.app.main_pane)
-        self.assertIsNone(self.app.checker)
-        self.assertIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
-
-    def test_r_while_it_is_restoring_focuses_main_as_r_always_does(self):
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.app.handle_key("r")
-        self.settle()
-        self.assertEqual(self.app.tmux.selected, ["%2"])
-
-    def test_a_restore_is_dropped_when_main_has_left_the_agent_view_by_the_answer(self):
-        # He picked another session in Claude Code's agent view, or kept working, while the listing ran.
-        for since in ("named-viewer", "working-streaming", "permission-dialog"):
-            with self.subTest(main_now_shows=since):
-                self.app.tmux.respawned, self.app.tmux.selected = [], []
-                self.app.flagged_viewers = self.app.auto_tried = frozenset()
-                self.app.last_restore = None
-                self.show("agent-view")
-                self.app.check_main(self.app.main_pane)
-                self.assertIsNotNone(self.app.checker)
-                self.show(since)
-                self.settle()
-                self.assertEqual(self.app.tmux.respawned, [])
-                self.assertEqual(self.app.tmux.selected, [])
-                self.assertNotIn("bringing back", self.app.notice)
-
-    def restore_cycles(self, screens):
-        """Each screen is a fixture name, or "" for a viewer still starting, which reads "unknown"."""
-        for screen in screens:
-            if screen:
-                self.show(screen)
-            else:
-                self.app.tmux.screen = ""
-            self.app.check_main(self.app.main_pane)
-            if self.app.checker is not None:
-                self.settle()
-
-    def test_the_agent_view_back_right_after_a_restore_stops_restoring_and_warns(self):
-        self.restore_cycles(["agent-view", ""] * 4)
-        self.assertEqual(self.app.tmux.respawned, ["%2"])
-        self.assertEqual(self.app.tmux.selected, ["%1"])
-        shown = " ".join(t for t, _ in self.app.bottom_lines(60))
-        self.assertIn("press r", shown)
-        self.assertNotIn("brought the session back", shown)
-
-    def test_an_ok_read_after_a_restore_lets_the_next_agent_view_restore_again(self):
-        self.app.sessions = [core.Session("s1", "emx-test-named", "/p/alpha", "working", "", "", 0.0, True)]
-        self.restore_cycles(["agent-view", "named-viewer", "agent-view"])
-        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
-
-    def age_last_restore(self):
-        pane, _, count = self.app.last_restore
-        self.app.last_restore = (pane, time.monotonic() - core.RESTORE_BACKOFF_SECONDS - 1, count)
-
-    def test_after_the_backoff_window_the_agent_view_is_restored_again(self):
-        self.restore_cycles(["agent-view"])
-        self.age_last_restore()
-        self.restore_cycles(["", "agent-view"])
-        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
-
-    def test_the_agent_view_back_after_a_second_restore_stops_restoring_whatever_the_time(self):
-        self.restore_cycles(["agent-view"])
-        self.age_last_restore()
-        self.restore_cycles(["", "agent-view"])
-        self.age_last_restore()
-        self.restore_cycles(["", "agent-view"])
-        self.assertEqual(self.app.tmux.respawned, ["%2", "%2"])
-        self.assertIn("press r", " ".join(t for t, _ in self.app.bottom_lines(60)))
-
-    def test_the_restored_notice_goes_by_itself(self):
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.settle()
-        self.assertIn("brought the session back", self.app.notice)
-        self.app.refresh()
-        self.assertIn("brought the session back", self.app.notice)
-        self.app.notice_until = time.monotonic() - 1
-        self.app.refresh()
-        self.assertEqual(self.app.notice, "")
-
-    def test_a_later_notice_is_not_cut_short_by_the_restored_notices_timer(self):
-        self.show("agent-view")
-        self.app.check_main(self.app.main_pane)
-        self.settle()
-        self.app.say("Session started.")
-        self.app.refresh()
-        self.assertEqual(self.app.notice, "Session started.")
-        self.assertIsNone(self.app.notice_until)
 
 
 class CloseTmux:
@@ -1206,15 +933,6 @@ class EmptyListing(AppCase):
         self.poll(rows[0], rows[2])
         self.app.take_poll()
         self.assertEqual(self.app.cursor, ("session", "c"))
-
-    def test_a_pending_rename_survives_an_empty_listing(self):
-        self.poll(session("a", "/tmp/x"))
-        self.app.take_poll()
-        self.app.renaming = {"a": ("old", "new", time.monotonic() + 30)}
-        self.poll()
-        self.app.take_poll()
-        self.assertIn("a", self.app.renaming)
-
 
 class SessionCloseTmux(ClientTmux):
     """The panel (%1); main (%2) holding session `a`; session `b`'s own pane (%3) hidden; the placeholder (%4). Swaps and kills change what `panes` lists, as tmux would, and go into the shared `log`."""
@@ -1596,7 +1314,7 @@ class CloseSession(AppCase):
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
     def test_help_names_interrupt_and_close(self):
-        self.assertEqual(dict(sidebar.HELP)["^x"], "interrupt a working session; twice closes it (stop, then remove)")
+        self.assertEqual(dict(sidebar.HELP)["^x"], "interrupt a working session; twice closes it")
         at = [key for key, _ in sidebar.HELP].index("^x")
         self.assertEqual(sidebar.HELP[at + 1], ("", "on a project header, twice closes the group"))
         self.assertIn("^x close", sidebar.FOOTERS[0])
@@ -2416,7 +2134,6 @@ class RenameSession(AppCase):
         self.assertEqual(self.app.tmux.typed, [])
         self.assertIn(want, self.app.notice)
         self.assertTrue(self.app.notice_error)
-        self.assertNotIn("named", self.app.renaming)
 
     def test_ctrl_r_opens_an_inline_edit_holding_the_name(self):
         self.keys(sidebar.CTRL_R)
@@ -2576,7 +2293,6 @@ class RenameSession(AppCase):
         self.assertIn("applies the name when this turn ends", self.app.notice)
         self.assertNotIn("doesn't show", self.app.notice)
         self.assertFalse(self.app.notice_error)
-        self.assertIn("named", self.app.renaming)
 
     def test_a_working_session_whose_name_applies_at_once_is_reported_renamed(self):
         self.listings = [[session("named", "/p/alpha", state="working")]]
@@ -2594,25 +2310,6 @@ class RenameSession(AppCase):
         self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
         self.assertIn("prompt isn't empty", self.app.notice)
         self.assertTrue(self.app.notice_error)
-
-    def test_a_queued_rename_landing_late_does_not_flag_main(self):
-        working = session("named", "/p/alpha", state="working")
-        self.listings = [[working]]
-        self.after = working
-        self.rename_to("emx-test-renamed")
-        self.settle()
-        self.assertIn("named", self.app.renaming)
-        late = time.monotonic() + 10 * core.RENAME_PENDING_SECONDS
-        self.poll(working)
-        text, width = fixture_screen("named-viewer")
-        rule = next(line for line in text.split("\n") if line.endswith(" emx-test-named ─"))
-        self.app.tmux.screen = text.replace(rule, "─" * (width - 19) + " emx-test-renamed ─")
-        main = self.app.tmux.list[1]
-        with mock.patch.object(sidebar.time, "monotonic", lambda: late):
-            self.app.refresh()
-            self.app.check_main(main)
-        self.assertNotIn("%2", self.app.flagged_viewers)
-        self.assertIn("named", self.app.renaming)
 
     def test_the_line_goes_in_without_enter_and_enter_follows_only_the_exact_line_check(self):
         self.rename_to("fresh name")
@@ -2742,7 +2439,6 @@ class RenameSession(AppCase):
         self.settle()
         self.assertEqual(len(tmux.clear_gates), 1)
         self.assertIn("may still be in it", self.app.notice)
-        self.assertIn("named", self.app.renaming)
 
     def test_a_failed_listing_types_nothing(self):
         self.listings = [None]
@@ -2777,19 +2473,13 @@ class RenameSession(AppCase):
         self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
         self.assertEqual(self.app.notice, "emx-test-c's viewer has closed, so emx didn't rename it.")
 
-    def test_a_name_the_listing_never_shows_is_reported_and_stops_being_pending(self):
+    def test_a_name_the_listing_never_shows_is_reported(self):
         stopped_turn = session("named", "/p/alpha", state="done")
         self.after = stopped_turn
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual(len(self.app.tmux.typed), 1)
         self.assertIn("doesn't show a new name yet", self.app.notice)
-        self.assertIn("named", self.app.renaming)
-        later = time.monotonic() + core.RENAME_PENDING_SECONDS
-        self.poll(stopped_turn)
-        with mock.patch.object(sidebar.time, "monotonic", lambda: later):
-            self.app.refresh()
-        self.assertNotIn("named", self.app.renaming)
 
     def test_no_new_name_and_text_left_in_the_prompt_is_said_plainly(self):
         self.after = self.named
@@ -2799,7 +2489,6 @@ class RenameSession(AppCase):
         self.assertEqual(len(self.app.tmux.typed), 1)
         self.assertIn("prompt isn't empty", self.app.notice)
         self.assertTrue(self.app.notice_error)
-        self.assertIn("named", self.app.renaming)
 
     def test_a_tmux_error_rechecking_the_prompt_still_counts_the_rename_as_typed(self):
         self.after = self.named
@@ -2807,17 +2496,6 @@ class RenameSession(AppCase):
         self.rename_to("fresh name")
         self.settle()
         self.assertIn("doesn't show a new name yet", self.app.notice)
-        self.assertIn("named", self.app.renaming)
-
-    def test_the_new_name_on_main_is_not_flagged_while_the_listing_catches_up(self):
-        self.rename_to("emx-test-renamed")
-        self.app.renamer.join(5)
-        text, width = fixture_screen("named-viewer")
-        rule = next(line for line in text.split("\n") if line.endswith(" emx-test-named ─"))
-        self.app.tmux.screen = text.replace(rule, "─" * (width - 19) + " emx-test-renamed ─")
-        self.assertEqual(core.main_view_state(self.app.tmux.screen, "emx-test-named", width), "mismatch")
-        main = self.app.tmux.list[1]
-        self.assertEqual(self.app.view_state(main), "ok")
 
     def test_the_footer_and_help_offer_rename(self):
         self.assertIn("^r rename", sidebar.FOOTERS[0])
@@ -5051,8 +4729,8 @@ class NoticeWiring(AppCase):
         self.poll(*sessions)
         self.app.refresh()
 
-    def main_shows(self, sid, state=(1, "1", "%2", 3.0)):
-        self.app.main_pane = Pane("%2", "@1", False, "", sid, 100, 141)
+    def main_shows(self, sid, state=(1, "1", "%2", 3.0), agent="claude"):
+        self.app.main_pane = Pane("%2", "@1", False, "", sid, 100, 141, agent=agent)
         self.app.tmux = ClientTmux(state)
 
     def test_working_then_done_gives_one_notice_and_a_third_identical_poll_none(self):
@@ -5118,12 +4796,19 @@ class NoticeWiring(AppCase):
                 self.step(session("a", "/p/alpha", "done"))
                 self.assertEqual([n.id for n in self.pending()], ["a"])
 
-    def test_a_main_pane_flagged_off_is_not_in_front(self):
-        self.main_shows("a")
-        self.app.flagged_viewers = frozenset({"%2"})
+    def test_a_main_pane_without_the_agent_tag_is_not_in_front(self):
+        self.main_shows("a", agent="")
         self.step(session("a", "/p/alpha", "working"))
         self.step(session("a", "/p/alpha", "done"))
         self.assertEqual(len(self.pending()), 1)
+
+    def test_an_unnamed_session_in_front_is_quiet_whatever_its_screen_shows(self):
+        self.main_shows("a")
+        unnamed = [core.Session(sid, sid[:8], "/p/alpha", state, "", "", 0.0, True, named=False)
+                   for sid, state in (("a", "working"), ("b", "working"))]
+        self.step(*unnamed)
+        self.step(*[replace(s, state="done") for s in unnamed])
+        self.assertEqual([n.id for n in self.pending()], ["b"])
 
 class NoBanner(AppCase):
     def test_no_banner_code_is_left(self):
@@ -5285,7 +4970,7 @@ class MissedWiring(AppCase):
         self.app.me = "%1"
         self.poll(session("s1", "/p/alpha"))
         self.app.refresh()
-        sidebar.App.switch_to(self.app, "s1", core.RESTART, (session("s1", "/p/alpha"), True))
+        sidebar.App.switch_to(self.app, "s1", core.NEW, (session("s1", "/p/alpha"), True))
         self.assertEqual([m.id for m in self.app.missed], ["s1"])
 
     def test_a_notice_landing_after_the_open_is_dropped(self):
@@ -5311,7 +4996,7 @@ class MissedWiring(AppCase):
         self.assertNotIn("Notices", self.bottom(height=9))
 
     def test_an_in_front_session_never_reaches_the_list(self):
-        self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141)
+        self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
         self.app.tmux = ClientTmux((1, "1", "%2", 3.0))
         self.poll(session("a", "/p/alpha", "working"))
         self.app.refresh()

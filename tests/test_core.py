@@ -130,33 +130,33 @@ class ReopenRule(unittest.TestCase):
     def test_stopped_session_opens_only_on_his_explicit_open(self):
         stopped = mk(running=False, state="stopped")
         self.assertTrue(core.attach_allowed(stopped, core.OPEN))
-        for trigger in (core.RESTART, core.NEW, "respawn", "housekeep", "upgrade", "", "OPEN"):
+        for trigger in ("restart", core.NEW, "interrupt", "respawn", "housekeep", "upgrade", "", "OPEN"):
             for fresh in (True, False):
                 with self.subTest(trigger=trigger, fresh=fresh):
                     self.assertFalse(core.attach_allowed(stopped, trigger, fresh=fresh))
 
     def test_done_session_without_a_process_reopens_only_on_open(self):
         exited = mk(state="done", running=False)
-        self.assertFalse(core.attach_allowed(exited, core.RESTART, fresh=True))
+        self.assertFalse(core.attach_allowed(exited, core.NEW, fresh=True))
         self.assertTrue(core.attach_allowed(exited, core.OPEN))
 
     def test_running_session_attaches_for_known_triggers_on_a_fresh_listing(self):
         running = mk(state="working")
         self.assertTrue(core.attach_allowed(running, core.OPEN))
-        for trigger in (core.RESTART, core.NEW):
+        self.assertTrue(core.attach_allowed(running, core.NEW, fresh=True))
+        for trigger in ("restart", "interrupt", "respawn"):
             with self.subTest(trigger=trigger):
-                self.assertTrue(core.attach_allowed(running, trigger, fresh=True))
-        self.assertFalse(core.attach_allowed(running, "respawn", fresh=True))
+                self.assertFalse(core.attach_allowed(running, trigger, fresh=True))
 
     def test_a_row_from_an_old_poll_is_never_enough_except_for_open(self):
         running = mk(state="working")
-        for trigger in (core.RESTART, core.NEW, "respawn"):
+        for trigger in (core.NEW, "respawn"):
             with self.subTest(trigger=trigger):
                 self.assertFalse(core.attach_allowed(running, trigger))
                 self.assertFalse(core.attach_allowed(running, trigger, fresh=False))
 
     def test_unlisted_session_never_attaches(self):
-        for trigger in (core.OPEN, core.RESTART, core.NEW, "respawn"):
+        for trigger in (core.OPEN, core.NEW, "respawn"):
             for fresh in (True, False):
                 with self.subTest(trigger=trigger, fresh=fresh):
                     self.assertFalse(core.attach_allowed(None, trigger, fresh=fresh))
@@ -167,11 +167,9 @@ class AttachAllowed(unittest.TestCase):
         running, stopped = mk(state="working"), mk(state="stopped", running=False)
         self.assertTrue(core.attach_allowed(stopped, core.OPEN))
         self.assertFalse(hasattr(core, "INTERRUPT"))
-        for trigger in (core.RESTART, core.NEW):
-            with self.subTest(trigger=trigger):
-                self.assertTrue(core.attach_allowed(running, trigger, True))
-                self.assertFalse(core.attach_allowed(running, trigger, False))
-                self.assertFalse(core.attach_allowed(stopped, trigger, True))
+        self.assertTrue(core.attach_allowed(running, core.NEW, True))
+        self.assertFalse(core.attach_allowed(running, core.NEW, False))
+        self.assertFalse(core.attach_allowed(stopped, core.NEW, True))
 
 
 class PlacementFromGit(unittest.TestCase):
@@ -1505,13 +1503,6 @@ class OpenWhileStarting(unittest.TestCase):
         self.assertEqual(core.open_blocked(True, ("session", "s")), "Still starting the last session…")
 
 
-class ClaudeCommands(unittest.TestCase):
-    def test_viewer_command_quotes(self):
-        self.assertEqual(core.viewer_command("claude", "abc"), "exec claude attach abc")
-        cmd = core.viewer_command("/p with space/claude", "a;b")
-        self.assertEqual(cmd, "exec '/p with space/claude' attach 'a;b'")
-
-
 class HoldCursor(unittest.TestCase):
     def test_the_first_empty_listing_holds_the_cursor_and_items(self):
         self.assertEqual(core.hold_cursor(None, False, "b", ["a", "b"]), ("b", ["a", "b"]))
@@ -1678,94 +1669,6 @@ AGENT_VIEW = "\n".join([
 ])
 
 
-class MainViewState(unittest.TestCase):
-    def test_matching_name_is_ok(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha")), "alpha", 40), "ok")
-
-    def test_other_name_is_mismatch(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha", 40), "mismatch")
-
-    def test_agent_view_by_footer(self):
-        self.assertEqual(core.main_view_state(AGENT_VIEW, "alpha", 70), "agent_view")
-
-    def test_agent_view_by_counts_when_footer_is_cut(self):
-        screen = "\n".join(AGENT_VIEW.splitlines()[:-1] + ["  ? for shortcuts"])
-        self.assertEqual(core.main_view_state(screen, "alpha", 70), "agent_view")
-
-    def test_agent_view_for_unnamed_session(self):
-        self.assertEqual(core.main_view_state(AGENT_VIEW, "", 70), "agent_view")
-
-    def test_ansi_codes_are_ignored(self):
-        screen = viewer_screen("\x1b[2m" + named_rule("alpha") + "\x1b[0m")
-        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
-
-    def test_names_with_spaces_and_extra_whitespace(self):
-        screen = viewer_screen(named_rule("my  long name", width=60), width=60)
-        self.assertEqual(core.main_view_state(screen, "my long name", 60), "ok")
-
-    def test_truncated_name_matches_by_prefix(self):
-        for rule in (" a very long session na… ─", "───── a very long session na… ─"):
-            with self.subTest(rule=rule):
-                screen = viewer_screen(rule, width=len(rule))
-                self.assertEqual(core.main_view_state(screen, "a very long session name indeed", len(rule)), "ok")
-                self.assertEqual(core.main_view_state(screen, "a very different name", len(rule)), "mismatch")
-
-    def test_multiline_prompt_input(self):
-        screen = viewer_screen(named_rule("alpha"), prompt="❯ first line\n  second line\n  third line")
-        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
-        self.assertEqual(core.main_view_state(screen, "beta", 40), "mismatch")
-
-    def test_unnamed_session_never_mismatches(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("generated-name")), "", 40), "unknown")
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("x")), "   ", 40), "unknown")
-
-    def test_unsure_screens_are_unknown(self):
-        no_prompt = "\n".join(["Do you want to allow this?", " ❯ 1. Yes", "   2. No", "─" * 40, "Esc to cancel"])
-        bare_rule_no_counts = viewer_screen("─" * 40)
-        startup = "Loading…\n"
-        for screen in ("", "\n\n   \n", startup, no_prompt, bare_rule_no_counts):
-            with self.subTest(screen=screen):
-                self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
-
-    def test_transcript_text_raises_no_alarm(self):
-        transcript = (
-            "──── beta ─",
-            "❯ an earlier message about beta",
-            "──────────",
-            "noted: 2 awaiting input · 1 working",
-            "enter to return, said the doc",
-        )
-        screen = viewer_screen(named_rule("alpha"), transcript=transcript)
-        self.assertEqual(core.main_view_state(screen, "alpha", 40), "ok")
-        no_input_box = "\n".join([*transcript, "still thinking…", "", ""])
-        self.assertEqual(core.main_view_state(no_input_box, "alpha", 40), "unknown")
-
-    def test_prompt_far_above_bottom_is_ignored(self):
-        screen = named_rule("beta") + "\n❯ old\n" + "─" * 40 + "\n" + "\n".join(f"output line {i}" for i in range(30))
-        self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
-
-    def test_count_words_at_line_end_are_not_the_agent_header(self):
-        for top in ("Step 3 completed", "build: 4 working", "noted: 2 awaiting input · 1 working"):
-            with self.subTest(top=top):
-                screen = viewer_screen("─" * 40, transcript=(top, "more text", ""))
-                self.assertEqual(core.main_view_state(screen, "alpha", 40), "unknown")
-
-    def test_agent_header_needs_two_counts(self):
-        screen = "\n".join(AGENT_VIEW.splitlines()[:-1] + ["  ? for shortcuts"])
-        one_count = screen.replace("2 awaiting input · 1 working · 3 completed", "3 completed")
-        self.assertEqual(core.main_view_state(one_count, "alpha", 70), "unknown")
-
-    def test_wide_emoji_line_does_not_hide_the_input_box(self):
-        family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"
-        transcript = (family * 8, "some answer text", "")
-        self.assertGreater(core.display_width(family * 8), 40)
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("alpha"), transcript=transcript), "alpha", 40), "ok")
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta"), transcript=transcript), "alpha", 40), "mismatch")
-
-    def test_rule_narrower_than_the_pane_is_not_the_input_box(self):
-        self.assertEqual(core.main_view_state(viewer_screen(named_rule("beta")), "alpha", 41), "unknown")
-
-
 FIXTURES = Path(__file__).parent / "fixtures" / "screens"
 
 
@@ -1773,10 +1676,10 @@ def real_screen(name):
     """A screen captured from a throwaway Claude Code session; the file name carries the pane width.
 
     The prompt-* screens keep their styling (`capture-pane -e`) and come from
-    the version in prompt-cursors.json, with the cursor tmux reported; the
-    rest are plain text, agent-view and cross-wired from 2.1.294 (agent-view
-    from `claude agents --cwd`, so only throwaway sessions show) and the
-    others from 2.1.293.
+    the version in prompt-cursors.json (the interactive-* ones from the
+    version in interactive-cursors.json), with the cursor tmux reported; the
+    rest are plain text, cross-wired from 2.1.294, the interactive-* ones
+    from interactive `claude` and the others from 2.1.293.
     """
     (path,) = FIXTURES.glob(f"{name}.w*.txt")
     return path.read_text(encoding="utf-8"), int(path.stem.rsplit(".w", 1)[1])
@@ -1807,8 +1710,22 @@ class EmptyPromptOnRealScreens(unittest.TestCase):
         "prompt-model-menu": False,
     }
 
+    # Interactive `claude` keeps its input box open while it works, so a working screen reads empty too (lead's decision 1).
+    INTERACTIVE = {
+        "interactive-prompt-empty-named": True,
+        "interactive-prompt-empty-unnamed": True,
+        "interactive-prompt-working": True,
+        "interactive-prompt-permission": False,
+    }
+
     def test_every_capture_is_covered(self):
         self.assertEqual(set(PROMPT_CURSORS["cursors"]), set(self.CASES))
+        self.assertEqual(set(INTERACTIVE_CURSORS["cursors"]), set(self.INTERACTIVE))
+
+    def test_interactive_claude_captures(self):
+        for name, want in self.INTERACTIVE.items():
+            with self.subTest(screen=name):
+                self.assertEqual(core.empty_prompt(*at_cursor(name)), want)
 
     def test_cases(self):
         for name, want in self.CASES.items():
@@ -1973,136 +1890,8 @@ class FocusStyle(unittest.TestCase):
         self.assertEqual((core.title_style(True), core.title_style(False)), ("bold", "dim"))
 
 
-class AutoRestore(unittest.TestCase):
-    NOW = 1000.0
-
-    def decide(self, state="agent_view", tried=False, checking=False, last_restore=None):
-        return core.auto_restore(state, "%2", tried, checking, last_restore, self.NOW)
-
-    def test_only_the_agent_view_is_brought_back_once_and_never_over_a_running_check(self):
-        self.assertEqual(self.decide(), core.RESTORE)
-        self.assertIsNone(self.decide(tried=True))
-        self.assertIsNone(self.decide(checking=True))
-        for state in ("mismatch", "ok", "unknown"):
-            with self.subTest(state=state):
-                self.assertIsNone(self.decide(state))
-
-    def test_the_agent_view_back_soon_after_emxs_own_restore_gives_up(self):
-        soon = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS + 1, 1)
-        self.assertEqual(self.decide(last_restore=soon), core.GIVE_UP)
-        self.assertIsNone(self.decide(last_restore=soon, tried=True))
-        self.assertIsNone(self.decide("unknown", last_restore=soon))
-
-    def test_a_restore_long_ago_or_of_another_pane_does_not_hold_it_back(self):
-        long_ago = ("%2", self.NOW - core.RESTORE_BACKOFF_SECONDS - 1, 1)
-        self.assertEqual(self.decide(last_restore=long_ago), core.RESTORE)
-        self.assertEqual(self.decide(last_restore=("%7", self.NOW, 1)), core.RESTORE)
-
-    def test_the_agent_view_back_after_a_second_restore_gives_up_however_long_ago(self):
-        long_ago = self.NOW - 10 * core.RESTORE_BACKOFF_SECONDS
-        self.assertEqual(self.decide(last_restore=("%2", long_ago, 2)), core.GIVE_UP)
-        self.assertEqual(self.decide(last_restore=("%7", long_ago, 2)), core.RESTORE)
-
-    def test_restores_of_one_pane_add_up_and_another_pane_starts_again(self):
-        first = core.record_restore(None, "%2", 1.0)
-        self.assertEqual(first, ("%2", 1.0, 1))
-        self.assertEqual(core.record_restore(first, "%2", 9.0), ("%2", 9.0, 2))
-        self.assertEqual(core.record_restore(first, "%7", 9.0), ("%7", 9.0, 1))
-
-    def test_his_r_is_always_carried_out_and_emxs_restore_only_while_the_agent_view_shows(self):
-        self.assertTrue(core.restore_still_wanted(False, None))
-        self.assertTrue(core.restore_still_wanted(False, "ok"))
-        self.assertTrue(core.restore_still_wanted(True, "agent_view"))
-        for state in ("ok", "mismatch", "unknown", None):
-            with self.subTest(state=state):
-                self.assertFalse(core.restore_still_wanted(True, state))
-
-    def test_an_ok_read_of_the_restored_pane_ends_the_backoff(self):
-        last = ("%2", self.NOW, 1)
-        self.assertIsNone(core.last_restore_after(last, "%2", "ok"))
-        for pane, state in (("%2", "agent_view"), ("%2", "unknown"), ("%2", "mismatch"), ("%7", "ok")):
-            with self.subTest(pane=pane, state=state):
-                self.assertEqual(core.last_restore_after(last, pane, state), last)
-        self.assertIsNone(core.last_restore_after(None, "%2", "ok"))
-
-    def test_a_pane_stays_tried_only_while_it_is_flagged(self):
-        self.assertEqual(core.still_tried(frozenset({"%2", "%3"}), frozenset({"%3", "%4"})), frozenset({"%3"}))
-        self.assertEqual(core.still_tried(frozenset({"%2"}), frozenset()), frozenset())
-
-    def test_restoring_main_means_emxs_own_check_on_the_pane_in_main(self):
-        self.assertTrue(core.restoring_main(("s1", "%2"), True, "%2"))
-        self.assertFalse(core.restoring_main(("s1", "%2"), False, "%2"))
-        self.assertFalse(core.restoring_main(("s1", "%2"), True, "%5"))
-        self.assertFalse(core.restoring_main(("s1", "%2"), True, None))
-
-    def test_the_off_main_warning_waits_while_emx_brings_it_back(self):
-        flagged = frozenset({"%2"})
-        self.assertTrue(core.off_main_warning(flagged, "%2", restoring=False))
-        self.assertFalse(core.off_main_warning(flagged, "%2", restoring=True))
-        self.assertFalse(core.off_main_warning(flagged, "%5", restoring=False))
-        self.assertFalse(core.off_main_warning(flagged, None, restoring=False))
-
-
-class MainViewStateOnRealScreens(unittest.TestCase):
-    CASES = [
-        ("named-viewer", "emx-test-named", "ok"),
-        ("generated-name-viewer", "ping-pong-reply", "ok"),
-        ("unnamed-empty-viewer", "", "unknown"),
-        ("unnamed-empty-viewer", "emx-test-named", "unknown"),
-        ("agent-view", "emx-test-named", "agent_view"),
-        ("agent-view", "", "agent_view"),
-        ("working-streaming", "emx-test-working", "ok"),
-        ("working-spinner", "emx-test-perm", "ok"),
-        ("permission-dialog", "emx-test-perm", "unknown"),
-        ("permission-dialog", "emx-test-named", "unknown"),
-        ("permission-dismissed", "emx-test-perm", "ok"),
-        ("cross-wired", "emx-test-named", "mismatch"),
-        ("cross-wired", "emx-test-perm", "ok"),
-    ]
-
-    def test_cases(self):
-        for name, expected, want in self.CASES:
-            with self.subTest(screen=name, expected=expected):
-                text, width = real_screen(name)
-                self.assertEqual(core.main_view_state(text, expected, width), want)
-
-    def test_agent_view_header_alone(self):
-        text, width = real_screen("agent-view")
-        lines = [line for line in text.splitlines() if line.strip()]
-        cut = "\n".join(lines[:-1] + ["  ? for shortcuts"])
-        self.assertEqual(core.main_view_state(cut, "emx-test-named", width), "agent_view")
-
-
-class LatchOffMain(unittest.TestCase):
-    def test_off_states_flag_the_pane(self):
-        for state in ("agent_view", "mismatch"):
-            with self.subTest(state=state):
-                self.assertEqual(core.latch_off_main(frozenset(), "%1", state), (frozenset({"%1"}), True))
-
-    def test_ok_clears_only_that_pane(self):
-        self.assertEqual(core.latch_off_main(frozenset({"%1", "%2"}), "%1", "ok"), (frozenset({"%2"}), False))
-
-    def test_unknown_keeps_the_flag(self):
-        self.assertEqual(core.latch_off_main(frozenset({"%1"}), "%1", "unknown"), (frozenset({"%1"}), True))
-        self.assertEqual(core.latch_off_main(frozenset(), "%1", "unknown"), (frozenset(), False))
-
-    def test_flag_survives_another_session_in_main(self):
-        flagged, _ = core.latch_off_main(frozenset(), "%A", "agent_view")
-        flagged, respawn_c = core.latch_off_main(flagged, "%C", "ok")
-        self.assertFalse(respawn_c)
-        flagged, respawn_a = core.latch_off_main(flagged, "%A", "unknown")
-        self.assertTrue(respawn_a)
-        self.assertEqual(flagged, frozenset({"%A"}))
-
-    def test_input_set_is_not_mutated(self):
-        before = frozenset({"%1"})
-        core.latch_off_main(before, "%2", "mismatch")
-        core.latch_off_main(before, "%1", "ok")
-        self.assertEqual(before, frozenset({"%1"}))
-
-
-class RestartCheck(unittest.TestCase):
-    """The listing a restart waits on arrives later, on another thread."""
+class ListingChecks(unittest.TestCase):
+    """The listing a start or close waits on arrives later, on another thread."""
 
     def test_checked_row_from_a_listing(self):
         a, b = mk(id="a"), mk(id="b")
@@ -2110,17 +1899,9 @@ class RestartCheck(unittest.TestCase):
         self.assertEqual(core.checked_row([a], "b"), (None, True))
         self.assertEqual(core.checked_row(None, "b"), (None, False))
 
-    def test_the_answer_acts_only_on_the_session_and_pane_it_was_asked_about(self):
-        asked = ("s1", "%2")
-        self.assertTrue(core.check_still_applies(asked, "%2", "s1"))
-        for main_id, main_session in (("%2", "s2"), ("%5", "s1"), (None, None), ("%2", "")):
-            with self.subTest(main_id=main_id, main_session=main_session):
-                self.assertFalse(core.check_still_applies(asked, main_id, main_session))
-        self.assertFalse(core.check_still_applies(("", "%2"), "%2", ""))
-
     def test_refusal_says_why(self):
-        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.RESTART, False, mk()))
-        self.assertIn("isn't listed", core.refusal("emx-test-a", core.RESTART, True, None))
+        self.assertIn("Couldn't list", core.refusal("emx-test-a", core.NEW, False, mk()))
+        self.assertIn("isn't listed", core.refusal("emx-test-a", core.NEW, True, None))
         self.assertIn("isn't running", core.refusal("emx-test-a", core.NEW, True, mk(running=False)))
         self.assertTrue(core.refusal("emx-test-a", core.OPEN, False, None).startswith("emx-test-a isn't listed"))
 
@@ -2637,44 +2418,6 @@ class RenameChecks(unittest.TestCase):
         self.assertIsNone(core.renamed_to(core.Rename("a", "a1b2c3d4", "beta"), named("a", "Claude's title", own=False)))
         self.assertEqual(core.renamed_text(r, "beta"), "Renamed alpha to beta.")
         self.assertIn("doesn't show a new name", core.renamed_text(r, None))
-
-    def test_the_new_name_on_the_viewer_is_his_session_until_the_listing_catches_up(self):
-        text, width = real_screen("named-viewer")
-        self.assertEqual(core.main_view_state(text, "old-name", width), "mismatch")
-        self.assertEqual(core.view_state_for(text, ["old-name", "emx-test-named"], width), "ok")
-        self.assertEqual(core.view_state_for(text, ["old-name"], width), "mismatch")
-        self.assertEqual(core.view_state_for(text, ["", "other"], width), "unknown")
-        renaming = core.rename_started({}, core.Rename("a", "old-name", "emx-test-named"))
-        self.assertEqual(core.viewer_names(named("a", "old-name"), renaming), ["old-name", "emx-test-named"])
-        self.assertEqual(core.viewer_names(named("a", "a1b2c3d4", own=False), {}), [""])
-
-    def test_a_rename_that_typed_nothing_is_dropped_at_once(self):
-        r = core.Rename("a", "alpha", "beta")
-        renaming = core.rename_started({"b": ("bee", "bea", 50.0)}, r)
-        self.assertEqual(core.pending_renames(renaming, [named("a", "alpha")], "a", 10.0)["a"], ("alpha", "beta", None))
-        self.assertEqual(core.rename_finished(renaming, r, False, 10.0), {"b": ("bee", "bea", 50.0)})
-
-    def test_a_typed_rename_is_pending_while_the_listing_shows_the_old_name_until_its_time_is_up(self):
-        r = core.Rename("a", "alpha", "beta")
-        renaming = core.rename_finished(core.rename_started({}, r), r, True, 100.0)
-        sessions = [named("a", "alpha", state="done")]
-        self.assertIn("a", core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS - 1))
-        self.assertEqual(core.pending_renames(renaming, sessions, None, 100.0 + core.RENAME_PENDING_SECONDS), {})
-        self.assertEqual(core.pending_renames(renaming, [named("a", "beta")], None, 101.0), {})
-        self.assertEqual(core.pending_renames(renaming, [], None, 101.0), {})
-
-    def test_a_pending_rename_lives_while_the_session_works_with_its_old_name(self):
-        r = core.Rename("a", "alpha", "beta")
-        renaming = core.rename_finished(core.rename_started({}, r), r, True, 100.0)
-        late = 100.0 + 10 * core.RENAME_PENDING_SECONDS
-        for state in ("working", "blocked"):
-            with self.subTest(state=state):
-                kept = core.pending_renames(renaming, [named("a", "alpha", state=state)], None, late)
-                self.assertEqual(kept, {"a": ("alpha", "beta", late + core.RENAME_PENDING_SECONDS)})
-        interrupted = core.Session("a", "alpha", "/r/app", "working", "idle", "", None, True)
-        self.assertEqual(core.pending_renames(renaming, [interrupted], None, late), {})
-        self.assertEqual(core.pending_renames(renaming, [named("a", "beta", state="working")], None, late), {})
-        self.assertEqual(core.pending_renames(renaming, [named("a", "alpha", state="done")], None, late), {})
 
     def test_renamed_text_says_a_working_sessions_rename_is_queued(self):
         r = core.Rename("a", "alpha", "beta")

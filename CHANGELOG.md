@@ -2,6 +2,18 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.0.0 — 2026-10-14
+
+- emx now starts and keeps every session itself, each as the ordinary `claude` in its own window of emx's tmux. What you see in the main pane is that session, not a viewer of it.
+- Your current background sessions (the ones `claude --bg` started) no longer show in emx. They keep running in Claude Code and stay in `claude agents`. The first time this version starts, any of their windows emx had open closes, and the main pane shows the placeholder until you pick a session.
+- A new session reads Needs input until Claude reports anything, for example while it asks whether you trust the folder. emx never answers that question for you.
+- A session you have not named shows Claude's own title once Claude gives it one, and a short id before that. A /rename, whether through Ctrl+R or typed in the session, shows on its row.
+- Ctrl+X twice ends the session and removes it from emx. The conversation stays in Claude Code's history. Ctrl+X once still interrupts a working session.
+- If a session's `claude` exits, crashes, or your Mac restarts, its row reads Stopped. It continues only when you open it (Enter, → or a click), and then reads Idle until you send it something.
+- The r key (restart the main viewer) is gone: there is no viewer left to restart.
+- A "done" notice now waits about six seconds, so a message you queued while Claude was working, which starts its next turn a moment later, no longer gets a "done" for the pause in between.
+- Known gaps: Esc pressed before Claude has written anything leaves the row reading Working until the session reports again. Sessions emx starts also appear in `claude agents` as interactive sessions; emx no longer reads that list. For checks, `EMX_CONFIG_HOME` keeps emx's own settings elsewhere.
+
 ## 1.7.1 — 2026-10-13
 
 - Nothing changes in how emx works yet. This version adds the parts emx will use to start and keep every session in its own tmux (issue #41): where it records each session, how it learns a session's state from Claude's hooks, and how it would continue a stopped one. Nothing uses them yet, and the panel, your sessions and your Claude settings are untouched.

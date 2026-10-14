@@ -169,6 +169,74 @@ class LeftBinding(PrivateServer):
         self.assertEqual(self.typed("main"), LEFT)
 
 
+# Draws interactive Claude's input box as captured (the line with the cursor, then a pane-wide rule), the cursor where it was, then records every byte typed.
+PROMPT_RECORDER = """
+import json, os, shutil, sys, tty
+tty.setraw(0)
+line, x = json.loads(sys.argv[2])
+cols = shutil.get_terminal_size().columns
+os.write(1, ("\\x1b[2J\\x1b[H" + line + "\\x1b[0m\\r\\n" + "\\u2500" * cols + f"\\x1b[1;{x + 1}H").encode())
+while True:
+    data = os.read(0, 64)
+    if not data:
+        break
+    with open(sys.argv[1], "ab") as out:
+        out.write(data)
+"""
+
+SCREENS = Path(__file__).parent / "fixtures" / "screens"
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class LeftInASessionPane(PrivateServer):
+    """← in a pane holding one of emx's own sessions, with the real `emx left` check: Claude Code turns a ← it receives on an empty prompt into a fork of the conversation into its background service, so on an empty prompt it must never get through while the panel is there."""
+
+    def show_prompt(self, line, x):
+        script = os.path.join(self.dir, "prompt.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(PROMPT_RECORDER)
+        self.tmux.run(
+            "respawn-pane", "-k", "-t", self.main,
+            f"{sys.executable} -I {script} {self.keys('main')} '{json.dumps([line, x])}'",
+        )
+        self.tmux.set_pane_option(self.main, SESSION_OPT, str(uuid.uuid4()))
+        self.tmux.set_pane_option(self.main, AGENT_OPT, engine.AGENT)
+        self.tmux.select(self.main)
+        self.wait_for(lambda: self.show(self.main, "#{cursor_x}") == str(x), "the drawn prompt")
+
+    def captured_empty_prompt(self, name):
+        cursor = json.loads((SCREENS / "interactive-cursors.json").read_text("utf-8"))["cursors"][name]
+        (path,) = SCREENS.glob(f"{name}.w*.txt")
+        return path.read_text("utf-8").split("\n")[cursor["y"]], cursor["x"]
+
+    def press_left(self):
+        self.tmux.bind_left(self.sidebar, cli.self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
+        self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
+
+    def test_the_binding_waits_where_claudes_empty_prompt_puts_the_cursor(self):
+        for name in ("interactive-prompt-empty-named", "interactive-prompt-empty-unnamed", "interactive-prompt-working"):
+            with self.subTest(name=name):
+                self.assertEqual(self.captured_empty_prompt(name)[1], core.PROMPT_TEXT_X)
+
+    def test_left_on_an_empty_prompt_never_reaches_claude_and_lands_on_the_panel(self):
+        for name in ("interactive-prompt-empty-named", "interactive-prompt-empty-unnamed"):
+            with self.subTest(name=name):
+                self.show_prompt(*self.captured_empty_prompt(name))
+                self.press_left()
+                self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
+                self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "1")
+                time.sleep(0.3)
+                self.assertEqual(self.typed("main"), b"")
+                self.tmux.run("set-option", "-p", "-u", "-t", self.sidebar, BACK_OPT)
+
+    def test_left_with_text_typed_moves_the_text_cursor_in_claude(self):
+        self.show_prompt("❯\xa0abc", 5)
+        self.press_left()
+        self.wait_for(lambda: self.typed("main"), "the key in the session")
+        self.assertEqual(self.typed("main"), LEFT)
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+
+
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class CollapseBinding(PrivateServer):
     """The collapse key as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""

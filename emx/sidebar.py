@@ -63,15 +63,14 @@ HELP = (
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
     ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
-    ("^x", "interrupt a working session; twice closes it (stop, then remove)"),
+    ("^x", "interrupt a working session; twice closes it"),
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
-    ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
+    ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("m", "mute or unmute spoken notices"),
     ("h", "stop the voice now; later notices still speak"),
-    ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
@@ -574,25 +573,6 @@ class Starter(threading.Thread):
         except Exception as exc:
             session, error = None, f"starting a session failed: {core.error_line(exc)}"
         self.result = (session, error)
-
-
-class Checker(threading.Thread):
-    """Lists sessions off the main thread before a restart, so a slow `claude agents` never freezes the panel.
-
-    `asked` is (session id, main pane id) from when he pressed `r`, or from
-    when emx caught the agent view in main (`auto`).
-    """
-
-    def __init__(self, engine: Engine, asked: tuple, auto: bool = False):
-        super().__init__(daemon=True)
-        self.engine, self.asked, self.auto = engine, asked, auto
-        self.result = None
-
-    def run(self) -> None:
-        try:
-            self.result = fetch_sessions(self.engine)
-        except Exception as exc:
-            self.result = (None, f"listing sessions failed: {core.error_line(exc)}")
 
 
 class Resolver(threading.Thread):
@@ -1452,7 +1432,6 @@ class App:
         self.home = os.path.expanduser("~")
         self.starter = None
         self.started = None
-        self.checker = None
         self.closer = None
         self.interrupters = {}
         self.closing = {}
@@ -1463,12 +1442,8 @@ class App:
         self.renamer = None
         self.namer = None
         self.namer_gen = None
-        self.renaming = {}
         self.pin_misses = {}
         self.rename_misses = {}
-        self.flagged_viewers = frozenset()
-        self.auto_tried = frozenset()
-        self.last_restore = None
         self.focused = None
         self.pending_keys = []
         self.transcripts = {}
@@ -1606,8 +1581,6 @@ class App:
                 self.reconcile_widths(sidebar)
             if fresh_list:
                 self.close_stale(panes, main)
-            self.flagged_viewers &= {p.id for p in panes}
-            self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
         self.check_hush()
@@ -1634,9 +1607,7 @@ class App:
         left it.
         """
         if focused and self.focused is False and back:
-            main = self.main_pane
-            main_sid = main.session if main is not None and not self.main_is_off() else ""
-            self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
+            self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, self.main_session())
             self.wanted_cursor = None
         if not focused:
             self.confirm = None
@@ -1666,39 +1637,10 @@ class App:
                 self.say(f"tmux: {exc}", error=True)
         self.set_focus(sidebar.active, back=back)
 
-    def check_main(self, main: Pane | None) -> None:
-        """Flag the main pane once it stops showing the session emx put there, and bring the session back if it shows Claude Code's agent view."""
-        if main is None or main.dead or not main.session:
-            return
-        state = self.view_state(main)
-        self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
-        self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
-        self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
-        if main.session in self.closing:
-            return
-        action = core.auto_restore(
-            state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
-        )
-        if action is not None:
-            self.auto_tried |= {main.id}
-        if action == core.RESTORE:
-            self.start_check(main, auto=True)
-        elif action == core.GIVE_UP:
-            self.say("")
-
-    def view_state(self, viewer: Pane) -> str:
-        session = self.session(viewer.session)
-        if session is None:
-            return "unknown"
-        names = core.viewer_names(session, self.renaming)
-        return core.view_state_for(self.tmux.capture(viewer.id), names, viewer.width)
-
-    def main_is_off(self) -> bool:
-        return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
-
-    def restoring_main(self) -> bool:
-        checker = self.checker
-        return checker is not None and core.restoring_main(checker.asked, checker.auto, self.main_id())
+    def main_session(self) -> str:
+        """The key of the session in the main pane, from the pane's own tags: "" when main holds no session of emx's (the placeholder, or an old viewer)."""
+        main = self.main_pane
+        return main.session if main is not None and main.agent else ""
 
     def main_id(self) -> str | None:
         return self.main_pane.id if self.main_pane is not None else None
@@ -1810,7 +1752,6 @@ class App:
         cwd = shown.cwd if shown is not None and shown.cwd else None
         if dead is not None:
             self.tmux.respawn(dead.id, command, cwd=cwd)
-            self.flagged_viewers -= {dead.id}
             return dead.id
         pane_id = self.tmux.new_hidden_window(command, cwd=cwd)
         try:
@@ -1830,13 +1771,8 @@ class App:
         `checked` is (session, fresh) from a listing a worker thread took just
         now (`core.checked_row`); this thread never lists, so a slow listing
         can't freeze the panel. A trigger other than OPEN without one
-        is refused, and so is a RESTART of a session being closed: its
-        attach could land after the stop and resume it.
+        is refused.
         """
-        if trigger == core.RESTART and sid in self.closing:
-            shown = self.session(sid)
-            self.say(core.still_closing(shown.name if shown else sid))
-            return False
         if trigger == core.OPEN:
             session, fresh = self.session(sid), False
         else:
@@ -1847,62 +1783,6 @@ class App:
         shown = session or self.session(sid)
         self.say(core.refusal(shown.name if shown else sid, trigger, fresh, session), error=True)
         return False
-
-    def restart_viewer(self) -> None:
-        main = self.main_pane
-        if main is None or not main.session:
-            self.say("No session is open in the main pane.")
-            return
-        if self.checker is None:
-            self.start_check(main)
-        elif not core.check_still_applies(self.checker.asked, main.id, main.session):
-            self.say("The previous restart check is still finishing; press r again in a moment.")
-        else:
-            self.checker.auto = False
-
-    def start_check(self, main: Pane, auto: bool = False) -> None:
-        if self.list_error:
-            self.confirm_attach(main.session, core.RESTART)
-            return
-        self.checker = Checker(self.engine, (main.session, main.id), auto)
-        self.checker.start()
-        shown = self.session(main.session)
-        name = shown.name if shown else main.session
-        if auto:
-            self.say(f"Main showed Claude Code's agent view; bringing back {name}…")
-        else:
-            self.say(f"Checking {name} is still running…")
-
-    def finish_check(self) -> None:
-        checker = self.checker
-        if checker is None or checker.is_alive():
-            return
-        self.checker = None
-        sid, pane_id = checker.asked
-        sessions, _ = checker.result or (None, "listing sessions failed")
-        try:
-            _, main = self.layout_panes(self.tmux.panes())
-            if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
-                self.say("The main pane changed while emx was checking, so it wasn't restarted.")
-                return
-            state = self.view_state(main) if checker.auto else None
-            if not core.restore_still_wanted(checker.auto, state):
-                self.say("")
-                return
-            if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
-                return
-            self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
-            self.flagged_viewers -= {pane_id}
-            if checker.auto:
-                self.last_restore = core.record_restore(self.last_restore, pane_id, time.monotonic())
-                self.tmux.select(self.me)
-                self.set_focus(True, back=True)
-                self.say("Main showed Claude Code's agent view, so emx brought the session back.", seconds=RESTORED_NOTICE_SECONDS)
-            else:
-                self.tmux.select(pane_id)
-                self.say("Viewer restarted.")
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
 
     def group(self, key: str):
         return next((g for g in self.groups if g.key == key), None)
@@ -2093,7 +1973,6 @@ class App:
         self.rename_edit = None
         if rename is None:
             return
-        self.renaming = core.rename_started(self.renaming, rename)
         self.renamer = Renamer(self.engine, self.tmux, rename, self.me, self.poller.transcripts.wake)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
@@ -2145,7 +2024,6 @@ class App:
             return
         self.renamer = None
         done, message, typed = renamer.result or (False, "rename failed", False)
-        self.renaming = core.rename_finished(self.renaming, renamer.rename, typed, time.monotonic())
         self.say(message, error=not done)
         self.poller.wake.set()
 
@@ -2402,8 +2280,6 @@ class App:
             self.toggle_voice()
         elif key == "h":
             self.hush()
-        elif key == "r":
-            self.restart_viewer()
         elif key == "s":
             self.flip_side()
         elif key in ("<", ","):
@@ -2434,13 +2310,6 @@ class App:
     def bottom_lines(self, width: int, height: int | None = None) -> list:
         """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
-        if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
-            session = self.session(self.main_pane.session)
-            name = session.name if session else self.main_pane.session
-            # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
-            verb = "isn't" if session and session.name != session.id else "may not be"
-            warning = f"Main {verb} showing {name} — press r to go back"
-            lines += [(t, self.color("error")) for t in core.wrap_words(warning, width)[:3]]
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
         if self.notice:
@@ -2528,7 +2397,7 @@ class App:
             if not self.list_error:
                 self.put(list_top, 1, "Loading sessions…", curses.A_DIM)
         elif not self.sessions:
-            self.put(list_top, 1, "No background sessions.", curses.A_DIM)
+            self.put(list_top, 1, "No sessions.", curses.A_DIM)
             self.put(list_top + 1, 1, "Press n to start one.", curses.A_DIM)
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
@@ -2621,7 +2490,7 @@ class App:
     def draw_list(self, top: int, bottom: int, width: int, layout: tuple) -> None:
         lines, rows, heights = layout
         height = max(1, bottom - top)
-        main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
+        main_sid = self.main_session()
         cursor_group = core.cursor_group(self.cursor, self.groups)
         groups = {g.key: g for g in self.groups}
         frame = int(time.monotonic() / FRAME_SECONDS)
@@ -2737,9 +2606,6 @@ class App:
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
             self.save_prefs()
-        in_flight = self.renamer.rename.id if self.renamer else None
-        if sessions:
-            self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
         self.regroup()
         self.queue_notices(sessions)
         return True
@@ -2757,7 +2623,7 @@ class App:
         except TmuxError:
             attached, focus, active, idle = 0, "", "", None
         main = self.main_pane
-        main_sid = main.session if main is not None and not self.main_is_off() else ""
+        main_sid = self.main_session()
         main_id = main.id if main is not None else ""
         now = time.monotonic()
         for session in events:
@@ -2813,7 +2679,6 @@ class App:
     def refresh(self) -> None:
         try:
             self.finish_start()
-            self.finish_check()
             self.finish_close()
             self.finish_interrupt()
             self.finish_rename()
