@@ -130,10 +130,10 @@ Report **in-session, in plain language**: when a piece is merged, tell him what 
 
 ### How to run and try it
 
-- **Start command:** the real tool, run in throwaway sessions only, on a private socket with `EMX_SHOW_TEST_SESSIONS=1` set only for that run (see "Never touch his real sessions" below). The launcher is `bin/emx`; the exact command that starts it is not stated — ask Tural.
+- **Start command:** the real tool, run in throwaway sessions only, on a private socket with `EMX_SHOW_TEST_SESSIONS=1` set only for that run (see "Never touch his real sessions" below). The launcher is `bin/emx`, which opens the workspace in a private tmux server (`emx/cli.py:22-30`). Run it as `EMX_SOCKET=emx-test-… EMX_SHOW_TEST_SESSIONS=1 EMX_CONFIG_HOME="$(mktemp -d)" bin/emx`: `EMX_SOCKET` names the private socket, `EMX_SHOW_TEST_SESSIONS=1` shows the throwaway sessions and keeps that emx silent, and `EMX_CONFIG_HOME`, there "for live checks", holds emx's prefs in place of `XDG_CONFIG_HOME`, so the run never touches his real config home. The launcher ends in `tmux attach-session` (`emx/cli.py:129`); how to drive the attached workspace headless is not stated — ask Tural.
 - **Browser tool:** none (no screen).
 - **Test data:** throwaway `emx-test-` sessions started by you, each in a `mktemp -d` directory; fixtures and evidence come from throwaway data only.
-- **Never touch:** his real sessions, any id you did not start, anything under `~/.claude/`, and no `pkill` or `killall` — the rules under "Never touch his real sessions" below apply as written.
+- **Never touch:** his real sessions, any id you did not start, never edit, move or delete anything under `~/.claude/` (reading is fine), and no `pkill` or `killall` — the rules under "Never touch his real sessions" below apply as written.
 
 *Facts only; an unknown slot says so.*
 
