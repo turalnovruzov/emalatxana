@@ -1,0 +1,597 @@
+{
+ "claude_code": "2.1.296",
+ "note": "Real hook payloads from throwaway interactive sessions started with claude --settings; after_ms is time since the scenario's first event. Paths, scratchpad, tool results and last messages are scrubbed. No hook fires after a denied permission or an Esc interrupt.",
+ "scenarios": {
+  "interrupt-by-escape": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionStart",
+     "source": "startup",
+     "model": "claude-opus-5-5",
+     "session_title": "emx-test-hooks-a"
+    }
+   },
+   {
+    "after_ms": 17940,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "auto",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Count from 1 to 800, each number on its own line, nothing else.",
+     "session_title": "emx-test-hooks-a"
+    }
+   },
+   {
+    "after_ms": 40615,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "auto",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Write a very long 1500 word story about a lighthouse keeper.",
+     "session_title": "emx-test-hooks-a"
+    }
+   }
+  ],
+  "clear-then-resume-then-kill-pane": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionEnd",
+     "reason": "clear"
+    }
+   },
+   {
+    "after_ms": 58,
+    "payload": {
+     "session_id": "87a9cceb-f70f-4519-afb6-d784e1c8c94d",
+     "transcript_path": "<claude>/projects/-tmp-work/87a9cceb-f70f-4519-afb6-d784e1c8c94d.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionStart",
+     "source": "clear",
+     "session_title": "emx-test-renamed-a"
+    }
+   },
+   {
+    "after_ms": 14743,
+    "payload": {
+     "session_id": "87a9cceb-f70f-4519-afb6-d784e1c8c94d",
+     "transcript_path": "<claude>/projects/-tmp-work/87a9cceb-f70f-4519-afb6-d784e1c8c94d.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionEnd",
+     "reason": "resume"
+    }
+   },
+   {
+    "after_ms": 14778,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionStart",
+     "source": "resume",
+     "model": "claude-opus-5-5",
+     "session_title": "emx-test-renamed-a",
+     "seconds_since_last_response": 34,
+     "context_tokens": 48671,
+     "prompt_cache_likely_expired": false,
+     "estimated_cache_write_usd": 0.3894
+    }
+   },
+   {
+    "after_ms": 24140,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionEnd",
+     "reason": "other"
+    }
+   }
+  ],
+  "launch-with-resume": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionStart",
+     "source": "resume",
+     "session_title": "emx-test-renamed-a",
+     "seconds_since_last_response": 51,
+     "context_tokens": 48671,
+     "prompt_cache_likely_expired": false,
+     "estimated_cache_write_usd": 0.3894
+    }
+   },
+   {
+    "after_ms": 12580,
+    "payload": {
+     "session_id": "11111111-1111-4111-8111-111111111111",
+     "transcript_path": "<claude>/projects/-tmp-work/11111111-1111-4111-8111-111111111111.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionEnd",
+     "reason": "other"
+    }
+   }
+  ],
+  "permission-denied-with-no": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "SessionStart",
+     "source": "startup",
+     "model": "claude-opus-5-5"
+    }
+   },
+   {
+    "after_ms": 12506,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Run this bash command exactly: echo hello > out.txt"
+    }
+   },
+   {
+    "after_ms": 14635,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo hello > out.txt",
+      "description": "Write hello to out.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 14691,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PermissionRequest",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo hello > out.txt",
+      "description": "Write hello to out.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 20700,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "Notification",
+     "message": "Claude needs your permission",
+     "notification_type": "permission_prompt"
+    }
+   }
+  ],
+  "plain-turn-with-one-tool": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Write a 400 word essay about tides, then run: echo hi"
+    }
+   },
+   {
+    "after_ms": 12085,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo hi",
+      "description": "Print hi"
+     }
+    }
+   },
+   {
+    "after_ms": 13400,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PostToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo hi",
+      "description": "Print hi"
+     },
+     "duration_ms": 1279
+    }
+   },
+   {
+    "after_ms": 14161,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "after_ms": 16492,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "agent_id": "a2c15e1ffcfcf3673",
+     "agent_type": "",
+     "hook_event_name": "SubagentStop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   }
+  ],
+  "permission-approved": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Run this bash command exactly: echo two > out2.txt"
+    }
+   },
+   {
+    "after_ms": 1584,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo two > out2.txt",
+      "description": "Write two to out2.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 1632,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PermissionRequest",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo two > out2.txt",
+      "description": "Write two to out2.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 7637,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "Notification",
+     "message": "Claude needs your permission",
+     "notification_type": "permission_prompt"
+    }
+   },
+   {
+    "after_ms": 12083,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PostToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo two > out2.txt",
+      "description": "Write two to out2.txt"
+     },
+     "duration_ms": 48
+    }
+   },
+   {
+    "after_ms": 13244,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "cat out2.txt",
+      "description": "Show the contents of out2.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 13307,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PostToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "cat out2.txt",
+      "description": "Show the contents of out2.txt"
+     },
+     "duration_ms": 27
+    }
+   },
+   {
+    "after_ms": 14116,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "after_ms": 15500,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "agent_id": "aa9f70b8a4c9f0a72",
+     "agent_type": "",
+     "hook_event_name": "SubagentStop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   }
+  ],
+  "permission-denied-with-escape": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Run this bash command exactly: echo three > out3.txt"
+    }
+   },
+   {
+    "after_ms": 1567,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo three > out3.txt",
+      "description": "Write three to out3.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 1616,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PermissionRequest",
+     "tool_name": "Bash",
+     "tool_input": {
+      "command": "echo three > out3.txt",
+      "description": "Write three to out3.txt"
+     }
+    }
+   },
+   {
+    "after_ms": 7615,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "Notification",
+     "message": "Claude needs your permission",
+     "notification_type": "permission_prompt"
+    }
+   }
+  ],
+  "ask-user-question-answered": [
+   {
+    "after_ms": 0,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "UserPromptSubmit",
+     "prompt": "Use the AskUserQuestion tool to ask me whether I prefer tea or coffee. Do nothing else."
+    }
+   },
+   {
+    "after_ms": 1657,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PreToolUse",
+     "tool_name": "AskUserQuestion",
+     "tool_input": {
+      "questions": [
+       {
+        "question": "Do you prefer tea or coffee?",
+        "header": "Drink",
+        "options": [
+         {
+          "label": "Tea",
+          "description": "You prefer tea."
+         },
+         {
+          "label": "Coffee",
+          "description": "You prefer coffee."
+         }
+        ],
+        "multiSelect": false
+       }
+      ]
+     }
+    }
+   },
+   {
+    "after_ms": 1698,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PermissionRequest",
+     "tool_name": "AskUserQuestion",
+     "tool_input": {
+      "questions": [
+       {
+        "question": "Do you prefer tea or coffee?",
+        "header": "Drink",
+        "options": [
+         {
+          "label": "Tea",
+          "description": "You prefer tea."
+         },
+         {
+          "label": "Coffee",
+          "description": "You prefer coffee."
+         }
+        ],
+        "multiSelect": false
+       }
+      ]
+     }
+    }
+   },
+   {
+    "after_ms": 7704,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "hook_event_name": "Notification",
+     "message": "Claude needs your permission",
+     "notification_type": "permission_prompt"
+    }
+   },
+   {
+    "after_ms": 17720,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "PostToolUse",
+     "tool_name": "AskUserQuestion",
+     "tool_input": {
+      "questions": [
+       {
+        "question": "Do you prefer tea or coffee?",
+        "header": "Drink",
+        "options": [
+         {
+          "label": "Tea",
+          "description": "You prefer tea."
+         },
+         {
+          "label": "Coffee",
+          "description": "You prefer coffee."
+         }
+        ],
+        "multiSelect": false
+       }
+      ],
+      "answers": {
+       "Do you prefer tea or coffee?": "Tea"
+      },
+      "annotations": {}
+     },
+     "duration_ms": 0
+    }
+   },
+   {
+    "after_ms": 18514,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "hook_event_name": "Stop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   },
+   {
+    "after_ms": 19898,
+    "payload": {
+     "session_id": "33333333-3333-4333-8333-333333333333",
+     "transcript_path": "<claude>/projects/-tmp-work/33333333-3333-4333-8333-333333333333.jsonl",
+     "cwd": "<tmp>/work",
+     "permission_mode": "default",
+     "agent_id": "a6b4f9b97d936c9dc",
+     "agent_type": "",
+     "hook_event_name": "SubagentStop",
+     "stop_hook_active": false,
+     "background_tasks": [],
+     "session_crons": []
+    }
+   }
+  ]
+ }
+}

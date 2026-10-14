@@ -1,0 +1,25 @@
+{
+  "claude_code": "2.1.296",
+  "cursors": {
+    "interactive-prompt-empty-named": {
+      "x": 2,
+      "y": 36,
+      "shown": true
+    },
+    "interactive-prompt-empty-unnamed": {
+      "x": 2,
+      "y": 36,
+      "shown": true
+    },
+    "interactive-prompt-working": {
+      "x": 2,
+      "y": 36,
+      "shown": true
+    },
+    "interactive-prompt-permission": {
+      "x": 1,
+      "y": 20,
+      "shown": false
+    }
+  }
+}
