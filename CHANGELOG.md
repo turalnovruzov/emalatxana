@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.2.1 — 2026-10-15
+
+- A session that finishes and then only offers more work ("Should I also…?", "Shall I…?", "Would you like me to…?") reads Done, not Needs input, however the offer is phrased. A greeting that ends in a question ("What would you like to work on today?") reads Done too. A question the work is waiting on, such as "Should I go ahead and delete the old module?", still reads Needs input.
+
 ## 2.2.0 — 2026-10-15
 
 - `emx remote myserver` opens the emx running on a server in this terminal, over ssh. myserver is a name from your own SSH config, and the server needs emx, tmux, Python 3 and claude installed.
