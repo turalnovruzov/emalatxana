@@ -203,6 +203,46 @@ def control_dir(uid: int | None = None, pid: int | None = None, root: str = "/tm
     return path if len(path) <= core.CONTROL_PATH_MAX else None
 
 
+def clear_stale_sockets(control: str) -> None:
+    """Remove the socket a hard-killed `emx remote` left at `control`, and those of other pids that no longer run. Only sockets this user owns, directly inside `control`'s folder."""
+    folder = os.path.dirname(control)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        if path != control:
+            if not name.isdigit():
+                continue
+            try:
+                os.kill(int(name), 0)
+                continue
+            except PermissionError:
+                continue
+            except (ProcessLookupError, OverflowError, OSError):
+                pass
+        try:
+            info = os.lstat(path)
+            if stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid():
+                os.unlink(path)
+        except OSError:
+            pass
+
+
+# What tmux's client turns on that a clean detach would undo: alternate screen, mouse modes, focus events, bracketed paste, extended keys, cursor.
+TERMINAL_RESTORE = "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[>4m\x1b[?25h"
+
+
+def _restore_terminal() -> None:
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.write(TERMINAL_RESTORE)
+            sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
 def _exit_master(ssh: str, host: str, control: str) -> None:
     try:
         subprocess.run(
@@ -242,6 +282,7 @@ def connect(host_arg: str, env=os.environ) -> int:
     master, follower, note, code = False, None, None, 1
     try:
         if control:
+            clear_stale_sockets(control)
             try:
                 made = subprocess.run(core.ssh_master_args(ssh, host, control)).returncode == 0
             except OSError:
@@ -285,6 +326,7 @@ def connect(host_arg: str, env=os.environ) -> int:
     if note:
         print(note, file=sys.stderr)
     if code == 255:
+        _restore_terminal()
         print(
             f"emx: lost the connection to {host}. Your sessions there keep running; emx remote {host} reconnects.",
             file=sys.stderr,
@@ -295,7 +337,10 @@ def connect(host_arg: str, env=os.environ) -> int:
 def open_remote(sid: str, env=os.environ) -> int:
     """What a click on a banner for a server session runs on the laptop: asks the server's panel to open `sid` over ssh, and prints the bundle id of the laptop's terminal for the helper to bring forward. Never touches a local tmux. Never raises."""
     host = core.remote_host(env.get("EMX_REMOTE_HOST", ""))
-    if host is None or not core.is_session_id(sid):
+    if host is None:
+        print("emx: open needs EMX_REMOTE_HOST to be a host name from your SSH config.", file=sys.stderr)
+        return 2
+    if not core.is_session_id(sid):
         print("emx: open needs a session id.", file=sys.stderr)
         return 2
     bundle = core.terminal_bundle({"__CFBundleIdentifier": env.get("EMX_REMOTE_TERMINAL", "")})

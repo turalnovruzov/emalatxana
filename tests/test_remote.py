@@ -338,6 +338,33 @@ class Connect(unittest.TestCase):
         self.assertEqual(code, 255)
         self.assertEqual(err.count("lost the connection to emx-test-host"), 1)
 
+    def run_on_tty(self):
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+
+        out = Tty()
+        with mock.patch.object(remote.sys, "stdout", out):
+            self.run_connect()
+        return out.getvalue()
+
+    def test_a_lost_connection_puts_the_terminal_back_before_the_message(self):
+        self.server(code=255)
+        written = self.run_on_tty()
+        for seq in ("\x1b[?1049l", "\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", "\x1b[?1006l", "\x1b[?25h"):
+            self.assertIn(seq, written)
+
+    def test_a_clean_exit_writes_no_restore_sequences(self):
+        self.server(code=0)
+        self.assertEqual(self.run_on_tty(), "")
+
+    def test_a_lost_connection_writes_nothing_when_stdout_is_not_a_tty(self):
+        self.server(code=255)
+        out = io.StringIO()
+        with mock.patch.object(remote.sys, "stdout", out):
+            self.run_connect()
+        self.assertEqual(out.getvalue(), "")
+
     def test_a_different_version_is_told_before_and_after_and_it_still_attaches(self):
         self.server(version="9.9.9")
         code, err = self.run_connect()
@@ -388,6 +415,66 @@ class Connect(unittest.TestCase):
         self.assertIsNotNone(self.followers[0].proc.poll())
         last = self.argvs()[-1]
         self.assertEqual(last[last.index("-O"):last.index("-O") + 2], ["-O", "exit"])
+
+
+class StaleSockets(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.folder = Path(self.tmp)
+
+    def sock(self, name):
+        import socket as pysocket
+        s = pysocket.socket(pysocket.AF_UNIX)
+        self.addCleanup(s.close)
+        s.bind(str(self.folder / name))
+
+    def dead_pid(self):
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
+    def test_a_leftover_at_the_chosen_path_is_removed(self):
+        self.sock("77")
+        remote.clear_stale_sockets(str(self.folder / "77"))
+        self.assertFalse((self.folder / "77").exists())
+
+    def test_a_socket_of_a_pid_that_no_longer_runs_is_swept_and_a_running_ones_stays(self):
+        dead = str(self.dead_pid())
+        live = str(os.getpid())
+        self.sock(dead)
+        self.sock(live)
+        remote.clear_stale_sockets(str(self.folder / "1"))
+        self.assertFalse((self.folder / dead).exists())
+        self.assertTrue((self.folder / live).exists())
+
+    def test_files_that_are_not_sockets_or_pid_names_are_left_alone(self):
+        (self.folder / "notes").write_text("x")
+        dead = str(self.dead_pid())
+        (self.folder / dead).write_text("x")
+        remote.clear_stale_sockets(str(self.folder / "1"))
+        self.assertTrue((self.folder / "notes").exists())
+        self.assertTrue((self.folder / dead).exists())
+
+    def test_a_missing_folder_is_fine(self):
+        remote.clear_stale_sockets(str(self.folder / "gone" / "1"))
+
+
+class OpenRemote(unittest.TestCase):
+    def test_a_refused_host_gets_its_own_message(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = remote.open_remote(SID, {"EMX_REMOTE_HOST": "-oProxyCommand=x"})
+        self.assertEqual(code, 2)
+        self.assertIn("EMX_REMOTE_HOST", err.getvalue())
+        self.assertNotIn("session id", err.getvalue())
+
+    def test_a_bad_session_id_still_says_so(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = remote.open_remote("nope", {"EMX_REMOTE_HOST": "emx-test-host"})
+        self.assertEqual(code, 2)
+        self.assertIn("session id", err.getvalue())
 
 
 class ControlDir(unittest.TestCase):

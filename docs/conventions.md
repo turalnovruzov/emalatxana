@@ -281,6 +281,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `bundle_id` picks the test id for any absolute `EMX_NOTIFY_HOME`, including one that names the real folder, so `ensure_built` is the guard that refuses that pairing; a new place that builds or registers must go through both.
 
+### Anything emx runs on another machine goes through the ssh builders, and what comes back through `parse_relay`
+
+1. **Rule**: an ssh command is built only by `core.ssh_master_args` or `core.ssh_client_args`, the host comes from `core.remote_host`, and the command on the server from `core.remote_shell`. Every line that comes back from the server passes `core.parse_relay` before it reaches `say`, the helper or an argv.
+2. **Why**: the host and the command are surfaces for ssh options and shell code, and relay lines come from another machine, so neither is trusted as given.
+3. **Minimal example**:
+   ```python
+   host = core.remote_host(arg)
+   argv = core.ssh_client_args(ssh, host, control, core.remote_shell(base, "follow"))
+   ```
+4. **Gotcha**: `remote_shell` quotes the args but not `base` (`EMX_REMOTE_COMMAND` may carry `env X=Y`), so `base` must only come from the laptop's own environment, never from the server or a relay line.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
