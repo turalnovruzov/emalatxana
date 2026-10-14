@@ -4,7 +4,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 2.2.1 — 2026-10-15
 
-- A session that finishes and then only offers more work ("Should I also…?", "Shall I…?", "Would you like me to…?") reads Done, not Needs input, however the offer is phrased. A greeting that ends in a question ("What would you like to work on today?") reads Done too. A question the work is waiting on, such as "Should I go ahead and delete the old module?", still reads Needs input.
+- A session that finishes its work and then only offers more (a follow-up, an improvement, the next task) reads Done most of the time, but not always: in emx's own checks about one such offer in five still read Needs input. A greeting that ends in a question reads Done. A session that stops before a step it still means to take, needs a choice from you, wants a draft approved, or asks you to do something reads Needs input.
 
 ## 2.2.0 — 2026-10-15
 
