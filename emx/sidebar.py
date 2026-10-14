@@ -15,7 +15,7 @@ import time
 from emx import __version__, core, notify
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -1708,6 +1708,7 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
         self.check_hush()
+        self.check_open()
 
     def check_hush(self) -> None:
         """`emx hush` from outside writes a fresh token to a session option; a change since the last read stops the voice. A failed read changes nothing."""
@@ -1718,6 +1719,21 @@ class App:
         self.hush_seen, due = core.hush_due(self.hush_seen, value)
         if due:
             self.hush()
+
+    def check_open(self) -> None:
+        """`emx open` from outside (a notification click) writes a session id to a session option; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
+        if not self.loaded:
+            return
+        try:
+            value = self.tmux.session_option(OPEN_OPT)
+            if not value:
+                return
+            self.tmux.set_session_option(OPEN_OPT, "")
+        except TmuxError:
+            return
+        sid = core.open_request(value)
+        if sid:
+            self.open_listed(sid)
 
     def hush(self) -> None:
         """`h` and `emx hush` only stop speech, so in notification mode they do nothing at all."""

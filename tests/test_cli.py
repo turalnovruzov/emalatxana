@@ -11,7 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from emx import __version__, cli, core
-from emx.tmux import SESSION, VERSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import OPEN_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
 
 
 class Attached(Exception):
@@ -192,6 +192,128 @@ class Hush(unittest.TestCase):
 
     def test_the_usage_names_hush(self):
         self.assertIn("hush", cli.USAGE)
+
+
+SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+class OpenSession(unittest.TestCase):
+    """`emx open <sid>`, what a notification click runs. Every test runs with a temporary TMUX_TMPDIR and no real tmux or `open`."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for patch in (
+            mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name, "EMX_SOCKET": "emx-test-x", "EMX_OPEN": "/x/fake-open"}),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.calls = []
+
+    def run_open(self, sid=SID, attached=1, terminal="com.example.term", server=True):
+        def record(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[0] != "tmux":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "has-session" in argv:
+                return subprocess.CompletedProcess(argv, 0 if server else 1, "", "" if server else "no server running")
+            if "display-message" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{attached}\t1\t%2\t1\n", "")
+            if "show-options" in argv and TERMINAL_OPT in argv:
+                return subprocess.CompletedProcess(argv, 0, terminal + "\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["open", sid])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_open_writes_the_option_and_brings_the_terminal_forward(self):
+        code, out, err = self.run_open()
+        self.assertEqual((code, out, err), (0, "", ""))
+        (setting,) = [argv for argv in self.calls if "set-option" in argv]
+        self.assertEqual(setting, ["tmux", "-L", "emx-test-x", "set-option", "-t", "=emx:", OPEN_OPT, SID])
+        self.assertEqual(self.calls[-1], ["/x/fake-open", "-b", "com.example.term"])
+        self.assertLess(self.calls.index(setting), len(self.calls) - 1)
+
+    def test_open_without_a_known_terminal_only_writes_the_option(self):
+        code, _, _ = self.run_open(terminal="")
+        self.assertEqual(code, 0)
+        self.assertTrue([argv for argv in self.calls if OPEN_OPT in argv])
+        self.assertFalse([argv for argv in self.calls if argv[0] != "tmux"])
+
+    def test_open_with_no_client_attached_brings_nothing_forward(self):
+        code, _, _ = self.run_open(attached=0)
+        self.assertEqual(code, 0)
+        self.assertFalse([argv for argv in self.calls if argv[0] != "tmux"])
+
+    def test_open_refuses_a_non_session_id_and_writes_nothing(self):
+        for bad in ("", "garbage", "-x", "/tmp/x", SID + "x"):
+            with self.subTest(sid=bad):
+                self.calls.clear()
+                code, out, err = self.run_open(sid=bad)
+                self.assertEqual((code, out), (2, ""))
+                self.assertTrue(err)
+                self.assertEqual(self.calls, [])
+
+    def test_open_refuses_a_default_socket(self):
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": "default"}):
+            code, _, err = self.run_open()
+        self.assertEqual((code, err), (2, cli.SOCKET_REFUSAL + "\n"))
+        self.assertEqual(self.calls, [])
+
+    def test_open_never_starts_a_server_and_uses_no_config(self):
+        self.run_open()
+        code, _, err = self.run_open(server=False)
+        self.assertEqual((code, err), (1, "emx isn't running.\n"))
+        for argv in self.calls:
+            if argv[0] == "tmux":
+                self.assertEqual(argv[:3], ["tmux", "-L", "emx-test-x"])
+                self.assertNotIn("-f", argv)
+                self.assertNotIn("new-session", argv)
+
+    def test_the_usage_names_open_as_internal(self):
+        self.assertIn("emx open <session id> is internal", cli.USAGE)
+
+
+class RecordsTerminal(unittest.TestCase):
+    def launch(self, **env):
+        made = []
+
+        def make(*args, **kwargs):
+            made.append(FakeTmux(*args, **kwargs))
+            return made[-1]
+
+        clean = {k: v for k, v in os.environ.items() if k not in ("__CFBundleIdentifier", "TERM_PROGRAM")}
+        with mock.patch.object(cli, "Tmux", make), \
+                mock.patch.object(cli, "refresh_workspace", lambda tmux: None), \
+                mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"), \
+                mock.patch.dict(cli.os.environ, {**clean, "EMX_SOCKET": "emx-test-unit", **env}, clear=True), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached):
+            with self.assertRaises(Attached):
+                cli.launch()
+        return made[0].options
+
+    def test_launch_records_the_terminal_bundle(self):
+        self.assertEqual(self.launch(__CFBundleIdentifier="com.googlecode.iterm2")[TERMINAL_OPT], "com.googlecode.iterm2")
+        self.assertEqual(self.launch(TERM_PROGRAM="Apple_Terminal")[TERMINAL_OPT], "com.apple.Terminal")
+
+    def test_launch_skips_it_when_unknown(self):
+        self.assertNotIn(TERMINAL_OPT, self.launch(TERM_PROGRAM="tmux"))
+
+    def test_a_failed_record_still_attaches(self):
+        class Refusing(FakeTmux):
+            def set_session_option(self, name, value):
+                raise TmuxError("gone")
+
+        with mock.patch.object(cli, "Tmux", Refusing), \
+                mock.patch.object(cli, "refresh_workspace", lambda tmux: None), \
+                mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"), \
+                mock.patch.dict(cli.os.environ, {"EMX_SOCKET": "emx-test-unit", "__CFBundleIdentifier": "com.example.term"}), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached):
+            with self.assertRaises(Attached):
+                cli.launch()
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")

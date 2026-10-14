@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, sidebar
-from emx.tmux import AGENT_OPT, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, OPEN_OPT, SESSION_OPT, Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -5745,6 +5745,106 @@ class ModeKey(AppCase):
                 self.app.handle_key("m")
         self.app.poller.notifier.state = core.HELPER_PENDING
         self.assertFalse(any("notification" in t for t in self.top_line()))
+
+
+class OpenTmux(HushTmux):
+    """Session options by name; `fail` makes every read raise."""
+
+    def __init__(self):
+        super().__init__()
+        self.options = {}
+        self.fail = False
+
+    def session_option(self, name):
+        if self.fail:
+            raise TmuxError("gone")
+        return self.options.get(name, "")
+
+    def set_session_option(self, name, value):
+        self.options[name] = value
+
+
+class OpenRequests(AppCase):
+    SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = OpenTmux()
+        self.app.me = "%1"
+
+    def housekeep(self):
+        sidebar.App.housekeep(self.app, False)
+
+    def listed(self, *sids):
+        self.poll(*[session(sid, "/p/alpha") for sid in sids])
+        self.app.refresh()
+
+    def test_an_open_request_switches_to_that_session_and_clears_the_option(self):
+        self.listed(self.SID, "other")
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.housekeep()
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
+        self.assertEqual(self.app.cursor, ("session", self.SID))
+        self.housekeep()
+        self.assertEqual(len(self.opened), 1)
+
+    def test_an_open_request_written_before_the_first_read_is_honoured(self):
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], self.SID)
+        self.listed(self.SID)
+        self.housekeep()
+        self.assertEqual(self.opened, [(self.SID, core.OPEN)])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
+
+    def test_an_open_request_for_an_unknown_session_says_so_and_switches_nothing(self):
+        self.listed("other")
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.notice, sidebar.OPEN_GONE)
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
+
+    def test_a_garbage_request_is_cleared_and_opens_nothing(self):
+        self.listed(self.SID)
+        self.app.tmux.options[OPEN_OPT] = "-x; rm"
+        self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], "")
+
+    def test_an_open_request_for_a_closing_session_does_not_resume_it(self):
+        self.listed(self.SID)
+        self.app.closing = {self.SID: True}
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertIn("closing", self.app.notice.lower())
+
+    def test_a_failed_read_changes_nothing(self):
+        self.listed(self.SID)
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.app.tmux.fail = True
+        self.housekeep()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.tmux.options[OPEN_OPT], self.SID)
+
+    def test_a_request_marks_that_sessions_history_read(self):
+        self.app.switch_to = lambda sid, trigger, checked=None: sidebar.App.switch_to(self.app, sid, trigger, checked)
+
+        class Held(OpenTmux):
+            def panes(inner):
+                return [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "", "", 100, 141),
+                        Pane("%3", "@2", False, "", self.SID, 100, 141, agent="claude")]
+
+        self.app.tmux = Held()
+        self.listed(self.SID)
+        self.app.poller.notices.outbox = [(self.SID, core.NOTICE_DONE, "x · alpha", "Done.", time.monotonic())]
+        self.app.refresh()
+        self.app.tmux.options[OPEN_OPT] = self.SID
+        self.housekeep()
+        self.assertEqual([e.read for e in self.app.history], [True])
 
 
 class ModeDelivery(AppCase):

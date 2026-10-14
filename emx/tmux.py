@@ -16,6 +16,8 @@ LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
 FOCUS_OPT = "@emx_focus"
 HUSH_OPT = "@emx_hush"
+OPEN_OPT = "@emx_open"
+TERMINAL_OPT = "@emx_terminal"
 
 
 _PANE_ID = re.compile(r"%\d+")

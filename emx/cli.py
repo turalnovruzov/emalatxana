@@ -7,11 +7,12 @@ import os
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import time
 
 from emx import BIN, __version__, core
-from emx.tmux import HUSH_OPT, ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
+from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
@@ -20,14 +21,16 @@ CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 
 USAGE = """usage: emx [--version | hush]
-(emx hook <state folder> <session key> is internal: the command a session's hooks run.)
+(emx hook <state folder> <session key> is internal: the command a session's hooks run.
+emx open <session id> is internal too: what a click on one of emx's notifications runs.)
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
-EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too."""
+EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
+EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command."""
 
 
 SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."
@@ -125,6 +128,7 @@ def launch() -> int:
             refresh_workspace(tmux)
         except (TmuxError, OSError) as exc:
             print(f"emx: couldn't update the running workspace: {' '.join(str(exc).split())}", file=sys.stderr)
+    record_terminal(tmux)
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
     return 1
@@ -148,6 +152,52 @@ def hush() -> int:
     except TmuxError as exc:
         print(f"emx: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def record_terminal(tmux: Tmux) -> None:
+    """Remember which terminal app this emx was started from, so a click on a notification can bring it forward. Best effort."""
+    bundle = core.terminal_bundle(os.environ)
+    if not bundle:
+        return
+    try:
+        tmux.set_session_option(TERMINAL_OPT, bundle)
+    except (TmuxError, OSError):
+        pass
+
+
+def open_command() -> str:
+    return os.environ.get("EMX_OPEN") or "/usr/bin/open"
+
+
+def open_session(sid: str) -> int:
+    """What a click on a notification runs: asks the running panel to open `sid` through an option on emx's own tmux server, then brings the terminal emx runs in forward. Starts nothing, and never touches another server."""
+    if not core.is_session_id(sid):
+        print("emx: open needs a session id.", file=sys.stderr)
+        return 2
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    if shutil.which("tmux") is None:
+        print("emx needs tmux, and it is not on PATH.", file=sys.stderr)
+        return 1
+    tmux = Tmux(socket)
+    if not tmux.has_session():
+        print("emx isn't running.", file=sys.stderr)
+        return 1
+    try:
+        tmux.set_session_option(OPEN_OPT, sid)
+        attached, *_ = tmux.client_state()
+        bundle = tmux.session_option(TERMINAL_OPT)
+    except TmuxError as exc:
+        print(f"emx: {exc}", file=sys.stderr)
+        return 1
+    if attached and bundle:
+        try:
+            subprocess.run([open_command(), "-b", bundle], stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+        except (OSError, subprocess.SubprocessError):
+            pass
     return 0
 
 
@@ -248,6 +298,8 @@ def main(argv: list) -> int:
         return run(argv[1])
     if argv[0] == "hush" and len(argv) == 1:
         return hush()
+    if argv[0] == "open" and len(argv) == 2:
+        return open_session(argv[1])
     if argv[0] == "left":
         return left_check(argv[1:])
     if argv[0] == "blank":
