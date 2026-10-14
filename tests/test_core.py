@@ -1004,6 +1004,11 @@ class Layout(unittest.TestCase):
         self.assertEqual(core.width_action((200, 40), (200, 45)), "adopt-panel")
         self.assertIsNone(core.width_action((200, 40), (200, 40)))
 
+    def test_width_action_holds_while_zoomed(self):
+        self.assertEqual(core.width_action((200, 40), (160, 60), zoomed=True), "hold")
+        self.assertEqual(core.width_action(None, (200, 40), zoomed=True), "hold")
+        self.assertEqual(core.width_action((200, 40), (200, 45), zoomed=True), "hold")
+
 
 class Prefs(unittest.TestCase):
     def setUp(self):
@@ -1045,6 +1050,30 @@ class Prefs(unittest.TestCase):
         got = core.normalize_prefs({"side": "up", "panel_width": True, "last_folder": ""})
         self.assertEqual(got, core.DEFAULT_PREFS)
         self.assertEqual(core.normalize_prefs({"panel_width": "9"}), core.DEFAULT_PREFS)
+
+    def test_panel_collapsed_kept_only_as_a_bool(self):
+        self.assertIs(core.normalize_prefs({"panel_collapsed": True})["panel_collapsed"], True)
+        for bad in (1, "true", None, []):
+            with self.subTest(bad=bad):
+                self.assertNotIn("panel_collapsed", core.normalize_prefs({"panel_collapsed": bad}))
+        self.assertFalse(core.panel_collapsed(core.DEFAULT_PREFS))
+
+    def test_panel_collapsed_does_not_touch_folded_groups(self):
+        got = core.normalize_prefs({"panel_collapsed": True, "collapsed": {"project": ["/a"]}})
+        self.assertIs(got["panel_collapsed"], True)
+        self.assertEqual(got["collapsed"], {"project": ["/a"]})
+
+    def test_follow_zoom(self):
+        p = dict(core.DEFAULT_PREFS)
+        self.assertIs(core.follow_zoom(p, False), p)
+        hidden = core.follow_zoom(p, True)
+        self.assertIs(hidden["panel_collapsed"], True)
+        self.assertNotIn("panel_collapsed", p)
+        self.assertIs(core.follow_zoom(hidden, True), hidden)
+        shown = core.follow_zoom(hidden, False)
+        self.assertIs(shown["panel_collapsed"], False)
+        for got in (hidden, shown):
+            self.assertEqual(got["panel_width"], p["panel_width"])
 
     def test_normalize_clamps(self):
         self.assertEqual(core.normalize_prefs({"panel_width": 5})["panel_width"], core.MIN_PANEL)

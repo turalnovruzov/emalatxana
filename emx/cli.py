@@ -54,7 +54,8 @@ def self_command(*args: str) -> str:
 
 def create_workspace(tmux: Tmux) -> None:
     cols, lines = shutil.get_terminal_size((200, 50))
-    side = core.load_prefs(core.prefs_path())["side"]
+    prefs = core.load_prefs(core.prefs_path())
+    side = prefs["side"]
     main = tmux.run(
         "new-session", "-d", "-s", SESSION, "-n", SESSION, "-x", str(cols), "-y", str(lines),
         "-P", "-F", "#{pane_id}", self_command("blank", PLACEHOLDER_TEXT),
@@ -66,6 +67,8 @@ def create_workspace(tmux: Tmux) -> None:
         self_command("sidebar", tmux.socket),
     ).strip()
     tmux.set_pane_option(sidebar, ROLE, "sidebar")
+    if core.panel_collapsed(prefs):
+        tmux.toggle_zoom(main)
     tmux.set_session_option(VERSION_OPT, code_version())
 
 

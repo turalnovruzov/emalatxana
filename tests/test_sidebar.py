@@ -5212,6 +5212,92 @@ class HushTmux(ClientTmux):
         return lambda *args, **kwargs: None
 
 
+class CollapseTmux(ClientTmux):
+    """A panel pane %1 and a main pane %2 in one window; records the calls a collapse tick makes."""
+    socket = "emx-test-collapse"
+
+    def __init__(self):
+        super().__init__()
+        self.zoomed = False
+        self.window_width = 161
+        self.panel_width = 40
+        self.main_id = "%2"
+        self.calls = []
+
+    def panes(self):
+        return [
+            Pane("%1", "@1", False, "sidebar", "", self.panel_width, self.window_width, zoomed=self.zoomed),
+            Pane(self.main_id, "@1", False, "", "", 100, self.window_width, zoomed=self.zoomed),
+        ]
+
+    def bind_collapse(self, key, main):
+        self.calls.append(("bind_collapse", key, main))
+
+    def resize_width(self, pane, width):
+        self.calls.append(("resize_width", pane, width))
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+    def of(self, name):
+        return [c for c in self.calls if c[0] == name]
+
+
+class CollapseWiring(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.app.tmux = CollapseTmux()
+        self.app.me = "%1"
+
+    def tick(self, **state):
+        for name, value in state.items():
+            setattr(self.app.tmux, name, value)
+        sidebar.App.housekeep(self.app, False)
+
+    def saved(self):
+        return core.load_prefs(self.app.prefs_file)
+
+    def test_binds_the_key_to_main_and_rebinds_when_main_changes(self):
+        self.tick()
+        self.assertEqual(self.app.tmux.of("bind_collapse"), [("bind_collapse", sidebar.COLLAPSE_KEY, "%2")])
+        self.tick()
+        self.assertEqual(len(self.app.tmux.of("bind_collapse")), 1)
+        self.tick(main_id="%3")
+        self.assertEqual(self.app.tmux.of("bind_collapse")[1:], [("bind_collapse", sidebar.COLLAPSE_KEY, "%3")])
+
+    def test_hiding_is_saved_and_showing_is_saved(self):
+        self.tick(zoomed=True)
+        self.assertIs(self.saved()["panel_collapsed"], True)
+        self.tick(zoomed=False)
+        self.assertIs(self.saved()["panel_collapsed"], False)
+
+    def test_no_resize_while_hidden(self):
+        self.app.applied = (121, 40)
+        self.tick(zoomed=True, window_width=161, panel_width=60)
+        self.assertEqual(self.app.tmux.of("resize_width"), [])
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+        self.assertEqual(self.saved()["panel_width"], 40)
+
+    def test_showing_again_applies_the_saved_width(self):
+        self.app.applied = (121, 40)
+        self.tick(zoomed=True, window_width=161, panel_width=60)
+        self.tick(zoomed=False)
+        self.assertEqual(self.app.tmux.of("resize_width"), [("resize_width", "%1", core.compute_layout(161, 40).panel)])
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+
+    def test_a_hidden_start_at_the_same_width_still_reapplies(self):
+        self.app.applied = (161, 40)
+        self.tick(zoomed=True)
+        self.tick(zoomed=False, panel_width=39)
+        self.assertEqual(self.app.tmux.of("resize_width"), [("resize_width", "%1", 40)])
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+
+    def test_help_lists_the_key(self):
+        (entry,) = [text for key, text in sidebar.HELP if key == "^q"]
+        self.assertIn("^\\", entry)
+        self.assertIn("←", entry)
+
+
 class HushWiring(AppCase):
     def setUp(self):
         super().setUp()

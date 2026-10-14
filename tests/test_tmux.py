@@ -168,6 +168,108 @@ class LeftBinding(PrivateServer):
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class CollapseBinding(PrivateServer):
+    """The collapse key as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
+
+    KEY = "C-q"
+
+    def zoomed(self):
+        return self.show(self.main, "#{window_zoomed_flag}")
+
+    def press(self, key=KEY):
+        self.tmux.run("send-keys", "-K", "-c", self.client, key)
+
+    def test_the_collapse_binding_parses(self):
+        self.tmux.bind_collapse(self.KEY, self.main)
+        (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " C-q " in line]
+        listed = os.path.join(self.dir, "listed.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        self.tmux.run("source-file", "-n", listed)
+
+    def test_pressed_in_the_session_hides_and_again_shows(self):
+        self.tmux.bind_collapse(self.KEY, self.main)
+        self.press()
+        self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
+        self.assertEqual(self.show(self.main, "#{pane_width}"), self.show(self.main, "#{window_width}"))
+        self.press()
+        self.wait_for(lambda: self.zoomed() == "0", "the panel to show")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_pressed_in_the_panel_hides_and_lands_in_the_session(self):
+        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.select(self.sidebar)
+        self.press()
+        self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("sidebar"), b"")
+
+    def test_the_toggle_key_brings_the_panel_back(self):
+        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        self.press()
+        self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
+        self.press("C-\\")
+        self.wait_for(lambda: self.zoomed() == "0", "the panel to show")
+        self.assertEqual(self.show(self.sidebar, "#{pane_active}"), "1")
+
+    def test_the_raw_ctrl_q_byte_from_the_terminal_hides(self):
+        self.tmux.run("set-option", "-s", "extended-keys", "always")
+        self.tmux.run("set-option", "-s", "extended-keys-format", "csi-u")
+        self.tmux.bind_collapse(self.KEY, self.main)
+        os.write(self.client_fd, b"\x11")
+        self.wait_for(lambda: self.zoomed() == "1", "the raw byte to hide the panel")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        os.write(self.client_fd, b"\x1b[113;5u")
+        self.wait_for(lambda: self.zoomed() == "0", "the CSI-u form to show the panel")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_with_main_gone_the_key_reaches_the_pane(self):
+        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.kill_pane(self.main)
+        self.press()
+        self.wait_for(lambda: self.typed("sidebar"), "the key in the panel")
+        self.assertEqual(self.typed("sidebar"), b"\x11")
+        self.assertEqual(self.show(self.sidebar, "#{window_zoomed_flag}"), "0")
+
+    def test_panes_reads_the_zoom_flag(self):
+        self.assertEqual([p.zoomed for p in self.tmux.panes()], [False, False])
+        self.tmux.toggle_zoom(self.main)
+        self.assertEqual([p.zoomed for p in self.tmux.panes()], [True, True])
+
+    def test_the_hidden_panel_keeps_its_width(self):
+        self.tmux.resize_width(self.sidebar, 40)
+        self.tmux.toggle_zoom(self.main)
+        (panel,) = [p for p in self.tmux.panes() if p.id == self.sidebar]
+        self.assertEqual(panel.width, 40)
+
+    def test_left_at_an_empty_prompt_brings_the_panel_back(self):
+        self.tmux.toggle_zoom(self.main)
+        self.tmux.bind_left(self.sidebar, "true", 2)
+        self.press("Left")
+        self.wait_for(lambda: self.zoomed() == "0", "the panel to show")
+        self.assertEqual(self.show(self.sidebar, "#{pane_active}"), "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_swapping_into_main_shows_the_panel(self):
+        fresh = self.tmux.new_hidden_window("sleep 60")
+        self.tmux.toggle_zoom(self.main)
+        self.tmux.swap(fresh, self.main)
+        self.assertEqual(self.show(self.sidebar, "#{window_zoomed_flag}"), "0")
+
+    def test_selecting_the_panel_shows_it(self):
+        self.tmux.toggle_zoom(self.main)
+        self.tmux.select(self.sidebar)
+        self.assertEqual(self.zoomed(), "0")
+        self.assertEqual(self.show(self.sidebar, "#{pane_active}"), "1")
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class TypeIf(PrivateServer):
     """Typing into a viewer through `type_gate`, judged and typed by tmux in one command, with focus on the panel."""
 

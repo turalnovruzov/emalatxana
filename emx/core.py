@@ -1732,14 +1732,19 @@ def compute_layout(window_width: int, panel_width: int) -> Layout:
     return Layout(panel=panel, main=main)
 
 
-def width_action(applied: tuple | None, actual: tuple) -> str | None:
+def width_action(applied: tuple | None, actual: tuple, zoomed: bool = False) -> str | None:
     """Decide what a sidebar tick does about pane widths.
+
+    While `zoomed` (the panel hidden) this is always "hold": tmux rescales the
+    hidden panel's width on a window resize, and resizing it would unzoom.
 
     Both tuples are (window_width, panel_width). A new window width means the
     terminal resized, so the layout is reapplied from prefs. The same window
     width with a different panel width means he dragged the panel border, so
     "adopt-panel" makes that width the new pref.
     """
+    if zoomed:
+        return "hold"
     if applied is None or actual[0] != applied[0]:
         return "apply"
     if actual[1] != applied[1]:
@@ -1837,6 +1842,8 @@ def normalize_prefs(raw) -> dict:
         prefs["last_version"] = raw["last_version"]
     if isinstance(raw.get("voice"), bool):
         prefs["voice"] = raw["voice"]
+    if isinstance(raw.get("panel_collapsed"), bool):
+        prefs["panel_collapsed"] = raw["panel_collapsed"]
     collapsed = raw.get("collapsed")
     if isinstance(collapsed, dict):
         clean = {}
@@ -1865,6 +1872,17 @@ def voice_on(prefs: dict) -> bool:
 
 def toggle_voice(prefs: dict) -> dict:
     return {**prefs, "voice": not voice_on(prefs)}
+
+
+def panel_collapsed(prefs: dict) -> bool:
+    return prefs.get("panel_collapsed", False)
+
+
+def follow_zoom(prefs: dict, zoomed: bool) -> dict:
+    """Prefs recording the panel as hidden when tmux has it zoomed away; the same dict when they already agree."""
+    if panel_collapsed(prefs) == zoomed:
+        return prefs
+    return {**prefs, "panel_collapsed": zoomed}
 
 
 def collapsed_keys(prefs: dict, view: str) -> frozenset:

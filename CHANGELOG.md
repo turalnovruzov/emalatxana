@@ -2,6 +2,14 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 1.7.0 — 2026-10-13
+
+- Ctrl+Q hides the panel so the session fills the whole window, from the panel or from inside a session. Press it again, or Ctrl+\, to bring the panel back.
+- emx remembers it: if you leave the panel hidden, emx starts hidden next time.
+- While the panel is hidden it keeps running, so spoken notices and the missed-notices list carry on. A resize of the terminal keeps it hidden and never changes the panel width you chose.
+- While hidden, ← at an empty prompt brings the panel back too.
+- The panel also comes back by itself when the session in the main window closes, when a new session finishes opening, or when emx brings a session back.
+
 ## 1.6.1 — 2026-10-11
 
 - Nothing changes in how emx works yet. This version records your decision that emx will start and keep every session itself, in its own tmux, so other agents can join later (issue #41).
