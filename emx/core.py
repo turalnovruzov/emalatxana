@@ -2533,9 +2533,10 @@ def session_summary(session: Session, transcript: Transcript | None) -> str:
         return ""
     cat = category(session)
     if cat == NEEDS_INPUT:
-        if t.latest != "tool" or not t.pending:
-            return ""
-        return t.tool if t.question else f"approve {t.tool}"
+        if t.latest == "tool" and t.pending:
+            return t.tool if t.question else f"approve {t.tool}"
+        # A stop Haiku read as needing him (only such a row carries a stop_key): the reply holds what it asks.
+        return t.reply_line if session.stop_key and t.latest == "reply" and t.answered else ""
     if cat == WORKING:
         if t.latest == "tool":
             return first_line(t.tool_about) or t.tool
@@ -2845,8 +2846,8 @@ def parse_verdict(text: str) -> str | None:
 
 
 def summary_due(session: Session, excerpt: str, last: "Summary | None", failures: int, failed_at: float | None, now: float, transcript: Transcript | None = None) -> bool:
-    """Whether to ask Haiku about this session now: only when what it would be shown changed, a state change at once and otherwise every `SUMMARY_EVERY_SECONDS`, backing off after failures."""
-    if not excerpt or (last is not None and last.excerpt == excerpt):
+    """Whether to ask Haiku about this session now: only when what it would be shown changed, a state change at once and otherwise every `SUMMARY_EVERY_SECONDS`, backing off after failures. Never while a stop's verdict is awaited, since the row may be about to change state."""
+    if session.asking or not excerpt or (last is not None and last.excerpt == excerpt):
         return False
     if failed_at is not None and now - failed_at < retry_after(failures):
         return False
@@ -3087,8 +3088,12 @@ def notice_ready(kind: str, session: Session, transcript: Transcript | None, wai
     A Done with a prompt he queued while Claude worked (`Session.queued`)
     waits the whole window: Claude starts on the queued prompt about two
     seconds after the Stop, which makes the notice stale, and it is dropped
-    unspoken.
+    unspoken. A Done whose verdict is awaited (`Session.asking`) is held
+    until it lands, or `NOTICE_ASK_SECONDS` at most: a needs verdict makes
+    it stale, so a stop that asks him is never announced as done.
     """
+    if kind == NOTICE_DONE and session.asking:
+        return waited >= NOTICE_ASK_SECONDS
     if kind == NOTICE_DONE and session.queued:
         return waited >= NOTICE_SETTLE_SECONDS
     return bool(session_summary(session, transcript)) or waited >= NOTICE_SETTLE_SECONDS

@@ -5354,6 +5354,75 @@ class NoticeWiring(AppCase):
         self.step(*[replace(s, state="done") for s in unnamed])
         self.assertEqual([n.id for n in self.pending()], ["b"])
 
+class NoticesWaitForTheVerdict(AppCase):
+    """A stop Haiku reads as needing him is never announced as done, in either mode."""
+
+    answered = core.Transcript(prompt="Pick one", reply="Which one?", reply_line="Which one?", answered=True, latest="reply")
+
+    def setUp(self):
+        super().setUp()
+        self.app.poller.transcripts.found = {"a": self.answered, "b": self.answered}
+
+    def listing(self, *sessions):
+        self.poll(*sessions)
+        self.app.refresh()
+        self.app.poller.notices.want(sessions)
+        with mock.patch.object(sidebar, "announce", lambda *args: (None, "no haiku")), \
+                mock.patch.object(sidebar, "summary_scratch", lambda: "/tmp/emx-test-scratch"):
+            while self.app.poller.notices.step():
+                pass
+        self.app.take_notices()
+
+    def stopped(self, sid="a", asking=True, state="done"):
+        return replace(session(sid, "/p/alpha", state), reply="Which one?", stop_key="k1", asking=asking)
+
+    def run_modes(self, *listings):
+        for mode in core.MODES:
+            with self.subTest(mode=mode):
+                self.app.history, self.app.notice_seen = [], None
+                self.app.poller.notices.pending.clear()
+                self.app.poller.notifier.posts.clear()
+                self.spoken.clear()
+                self.app.prefs = {**self.app.prefs, "mode": mode}
+                self.app.apply_mode()
+                for listing in listings:
+                    self.listing(*listing)
+                said = [p[1] for p in self.app.poller.notifier.posts] + [s[0] for s in self.spoken]
+                yield mode, [e.kind for e in self.app.history], said
+
+    def test_done_then_needs_input_gives_only_the_needs_notice(self):
+        working = [session("a", "/p/alpha", "working")]
+        for mode, kinds, said in self.run_modes(working, working, [self.stopped()], [self.stopped(state="blocked", asking=False)]):
+            self.assertEqual(kinds, [core.NOTICE_NEEDS], mode)
+            self.assertEqual(len(said), 1, mode)
+            self.assertFalse([t for t in said if "is done" in t], mode)
+
+    def test_done_then_a_done_verdict_gives_one_done_notice(self):
+        working = [session("a", "/p/alpha", "working")]
+        for mode, kinds, said in self.run_modes(working, working, [self.stopped()], [self.stopped(asking=False)]):
+            self.assertEqual(kinds, [core.NOTICE_DONE], mode)
+            self.assertEqual(len(said), 1, mode)
+            self.assertIn("is done", said[0], mode)
+
+    def test_a_second_session_stopping_at_once_is_held_past_75_seconds_then_gives_way_to_needs(self):
+        working = [session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working")]
+        self.listing(*working)
+        self.listing(*working)
+        self.listing(self.stopped("a"), self.stopped("b"))
+        notices = self.app.poller.notices
+        notices.pending = [replace(n, at=n.at - 75) for n in notices.pending]
+        self.assertEqual([n.kind for n in notices.pending], [core.NOTICE_DONE, core.NOTICE_DONE])
+        self.listing(self.stopped("a", asking=False), self.stopped("b"))
+        self.assertEqual([n.id for n in notices.pending], ["b"])
+        self.assertEqual([(e.id, e.kind) for e in self.app.history], [("a", core.NOTICE_DONE)])
+        (held,) = notices.pending
+        notices.want([self.stopped("b", state="blocked", asking=False)])
+        self.assertTrue(notices.stale(held))
+        self.listing(self.stopped("a", asking=False), self.stopped("b", state="blocked", asking=False))
+        self.assertEqual(notices.pending, [])
+        self.assertEqual([(e.id, e.kind) for e in self.app.history], [("b", core.NOTICE_NEEDS), ("a", core.NOTICE_DONE)])
+
+
 class NoBanner(AppCase):
     def test_no_banner_code_is_left(self):
         self.assertFalse(hasattr(core, "osc9"))

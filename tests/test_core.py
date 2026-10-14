@@ -3175,6 +3175,42 @@ class SummaryOutput(unittest.TestCase):
         self.assertTrue(out.endswith("…"))
 
 
+class AskingHolds(unittest.TestCase):
+    answered = core.Transcript(prompt="Pick one", reply="Which database?", reply_line="Which database?", answered=True, latest="reply")
+
+    def asking(self, sid="i"):
+        return mk(id=sid, state="done", reply="Which database?", stop_key="k1", asking=True)
+
+    def test_a_done_notice_waits_while_the_verdict_is_awaited(self):
+        self.assertFalse(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, 0))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, core.NOTICE_ASK_SECONDS))
+        self.assertTrue(core.notice_ready(core.NOTICE_DONE, replace(self.asking(), asking=False), self.answered, 0))
+
+    def test_the_hold_outlasts_three_slow_tries_by_far(self):
+        tries = core.ASK_MAX_TRIES * core.ASK_TIMEOUT + sum(core.retry_after(n) for n in range(1, core.ASK_MAX_TRIES))
+        self.assertGreater(core.NOTICE_ASK_SECONDS, tries)
+        self.assertFalse(core.notice_ready(core.NOTICE_DONE, self.asking(), self.answered, 75))
+
+    def test_done_while_asking_then_needs_input_gives_one_event_each(self):
+        seen, _ = core.notice_transitions(None, [mk(id="i", state="working")], ())
+        seen, _ = core.notice_transitions(seen, [mk(id="i", state="working")], ())
+        seen, found = core.notice_transitions(seen, [self.asking()], ())
+        self.assertEqual([core.category(s) for s in found], [core.DONE])
+        needs = replace(self.asking(), state="blocked", asking=False)
+        seen, found = core.notice_transitions(seen, [needs], ())
+        self.assertEqual([core.category(s) for s in found], [core.NEEDS_INPUT])
+
+    def test_no_summary_is_asked_for_while_the_verdict_is_awaited(self):
+        self.assertFalse(core.summary_due(self.asking(), "a changed excerpt", None, 0, None, 1000.0))
+        self.assertTrue(core.summary_due(replace(self.asking(), asking=False), "a changed excerpt", None, 0, None, 1000.0))
+
+    def test_a_row_haiku_read_as_needing_him_shows_the_replys_line(self):
+        needs = mk(state="blocked", reply="Which database?", stop_key="k1")
+        self.assertEqual(core.session_summary(needs, self.answered), "Which database?")
+        question = core.parse_transcript(real_transcript("question"))
+        self.assertEqual(core.session_summary(needs, question), "Which colour do you prefer?")
+
+
 class SummaryDue(unittest.TestCase):
     def last(self, excerpt="old", cat=core.WORKING, at=100.0):
         return core.Summary("line", cat, excerpt, at)
