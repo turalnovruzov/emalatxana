@@ -2,7 +2,7 @@
 name: capture
 description: Capture an idea Tural states, briefly or at length, as one GitHub issue labelled `idea`, holding his words verbatim. Use when he says an idea, a wish or "I want X" and has not asked for it to be built now. Does no research and no refinement unless he asks.
 ---
-<!-- template: product-owner @ 0.2.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.4.0 — shared; change it through Codery -->
 
 # capture
 
@@ -41,4 +41,4 @@ Capture is only the first of three pieces: capture (this skill), `refine` (the i
 ## Never
 
 - Never open an issue he did not state as an idea, and never invent one from your own observation: an improvement you notice goes in your report, and he captures it or not (the project's CLAUDE.md says the same: "Never open an issue on your own").
-- Never relabel an issue `ready`. Only `refine` does, on his go.
+- Never relabel an issue `ready`. Only `refine` does, once his round is answered.

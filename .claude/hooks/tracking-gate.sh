@@ -1,5 +1,5 @@
 #!/bin/bash
-# template: product-owner @ 0.2.0 — shared; change it through Codery
+# template: product-owner @ 0.4.0 — shared; change it through Codery
 # Gate: tracking-gate (deny-once)
 #
 # PreToolUse hook on Bash. Reads the tool call from stdin, acts only on

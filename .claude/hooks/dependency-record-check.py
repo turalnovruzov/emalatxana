@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# template: product-owner @ 0.2.0 — shared; change it through Codery
+# template: product-owner @ 0.4.0 — shared; change it through Codery
 """SessionStart check: the detection half of the technology gate.
 
 Reports every dependency named in package.json (dependencies, devDependencies,

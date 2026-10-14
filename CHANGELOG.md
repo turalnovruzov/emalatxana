@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.0.1 — 2026-10-14
+
+- Nothing changes in how emx works. The project's working rules were updated for how its changes get checked; this version only records that.
+
 ## 2.0.0 — 2026-10-14
 
 - emx now starts and keeps every session itself, each as the ordinary `claude` in its own window of emx's tmux. What you see in the main pane is that session, not a viewer of it.
