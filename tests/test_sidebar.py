@@ -145,6 +145,11 @@ class ListsFromEngine(unittest.TestCase):
         self.assertEqual(set(poller.transcripts.wanted), {"a", "b"})
         self.assertEqual(set(poller.summaries.wanted), {"a", "b"})
         self.assertEqual(set(poller.notices.wanted), {"a", "b"})
+        self.assertEqual(poller.asks.wanted, {})
+        asking = replace(x, state="done", reply="Which one?", stop_key="k1", asking=True)
+        with mock.patch.object(sidebar, "fetch_sessions", return_value=([asking, y], None)):
+            poller.poll()
+        self.assertEqual(poller.asks.wanted, {("a", "k1"): asking})
 
     def test_an_engine_error_is_the_polls_error(self):
         poller = sidebar.Poller(FakeEngine((None, "Couldn't read emx's sessions folder: denied")))
@@ -285,6 +290,7 @@ class AppCase(unittest.TestCase):
             mock.patch.object(sidebar, "fetch_sessions", lambda engine: (None, "no engine in tests")),
             # No test may speak, ask Haiku or write to the real terminal.
             mock.patch.object(sidebar, "announce", self.recorder("announced", method=False, result=(None, "no haiku in tests"))),
+            mock.patch.object(sidebar, "classify", self.recorder("classified", method=False, result=(None, "no haiku in tests"))),
             mock.patch.object(sidebar, "list_voices", lambda say: []),
             mock.patch.object(sidebar.Voice, "speak", self.recorder("spoken")),
             mock.patch.object(sidebar.Voice, "silence", self.recorder("silenced")),
@@ -3314,6 +3320,107 @@ class Summarise(unittest.TestCase):
         self.assertEqual((call.text, call.model), ("Fixing the tests", "claude-haiku-5-5"))
 
 
+def haiku_json(result):
+    return json.dumps({"result": result, "is_error": False, "duration_ms": 600, "total_cost_usd": 0.0001,
+                       "usage": {"input_tokens": 2, "output_tokens": 1}, "modelUsage": {"claude-haiku-5-5": {}}})
+
+
+class Classify(unittest.TestCase):
+    def test_an_exact_word_is_the_verdict_and_the_reply_goes_on_stdin(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, haiku_json("NEEDS"))) as run:
+            self.assertEqual(sidebar.classify("claude", "Which one?", "/tmp/scratch"), ("needs", None))
+        self.assertEqual(run.call_args.kwargs["input"], "Which one?")
+        self.assertEqual(run.call_args.args[0], core.ask_args("claude"))
+        self.assertEqual(run.call_args.kwargs["timeout"], core.ASK_TIMEOUT)
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, haiku_json("DONE\n"))):
+            self.assertEqual(sidebar.classify("claude", "x", "/tmp"), ("done", None))
+
+    def test_any_other_answer_or_a_failure_is_an_error_line(self):
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, haiku_json("maybe"))):
+            verdict, error = sidebar.classify("claude", "x", "/tmp")
+        self.assertEqual((verdict, error), (None, sidebar.ASK_UNREADABLE))
+        for exc in (FileNotFoundError(), subprocess.TimeoutExpired("claude", 15), OSError("boom")):
+            with self.subTest(exc=exc), mock.patch.object(sidebar.subprocess, "run", side_effect=exc):
+                verdict, error = sidebar.classify("claude", "x", "/tmp")
+                self.assertIsNone(verdict)
+                self.assertIsInstance(error, str)
+
+
+class VerdictEngine:
+    claude = "claude"
+
+    def __init__(self):
+        self.verdicts = []
+
+    def set_verdict(self, key, stop_key, verdict):
+        self.verdicts.append((key, stop_key, verdict))
+        return True, None
+
+
+class AsksWorker(unittest.TestCase):
+    def setUp(self):
+        self.engine = VerdictEngine()
+        self.wake = threading.Event()
+        self.worker = sidebar.Asks(self.engine, self.wake)
+        self.calls = []
+        self.answer = ("needs", None)
+
+        def fake(claude, excerpt, cwd):
+            self.calls.append(excerpt)
+            return self.answer
+
+        for patch in (mock.patch.object(sidebar, "classify", fake),
+                      mock.patch.object(sidebar, "summary_scratch", return_value="/tmp/emx-test-scratch")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.clock = [1000.0]
+        clock = mock.patch.object(sidebar.time, "monotonic", lambda: self.clock[0])
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def stopped(self, sid="a", asking=True):
+        return replace(session(sid, "/p/alpha", "done"), reply="Which one?", stop_key="k1", asking=asking)
+
+    def test_a_stop_is_asked_about_once_and_its_verdict_recorded(self):
+        self.worker.want([self.stopped()])
+        self.worker.step()
+        self.worker.step()
+        self.assertEqual(self.calls, ["Which one?"])
+        self.assertEqual(self.engine.verdicts, [("a", "k1", "needs")])
+        self.assertTrue(self.wake.is_set())
+
+    def test_a_session_not_asking_is_never_asked_about(self):
+        self.worker.want([self.stopped(asking=False)])
+        self.worker.step()
+        self.assertEqual((self.calls, self.engine.verdicts), ([], []))
+
+    def test_a_failure_waits_out_its_backoff(self):
+        self.answer = (None, "boom")
+        self.worker.want([self.stopped()])
+        self.worker.step()
+        self.clock[0] += core.retry_after(1) - 0.1
+        self.worker.step()
+        self.assertEqual(len(self.calls), 1)
+        self.clock[0] += 0.2
+        self.worker.step()
+        self.assertEqual(len(self.calls), 2)
+
+    def test_after_the_last_try_fails_the_stop_reads_unknown_and_is_not_asked_again(self):
+        self.answer = (None, "boom")
+        self.worker.want([self.stopped()])
+        for _ in range(core.ASK_MAX_TRIES + 2):
+            self.worker.step()
+            self.clock[0] += core.RETRY_MAX_SECONDS
+        self.assertEqual(len(self.calls), core.ASK_MAX_TRIES)
+        self.assertEqual(self.engine.verdicts, [("a", "k1", "unknown")])
+
+    def test_a_refused_scratch_folder_counts_as_a_failure(self):
+        self.worker.want([self.stopped()])
+        with mock.patch.object(sidebar, "summary_scratch", side_effect=OSError("refused")):
+            self.worker.step()
+        self.assertEqual((self.calls, self.engine.verdicts, self.worker.failures[("a", "k1")][0]), ([], [], 1))
+
+
 class SummaryScratch(unittest.TestCase):
     def test_a_folder_open_to_group_or_others_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.object(sidebar.tempfile, "gettempdir", return_value=tmp):
@@ -4891,6 +4998,8 @@ class VoiceQueue(unittest.TestCase):
         self.assertEqual(threading.active_count(), before)
         self.assertIsNone(poller.voice.voice)
         self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive() or poller.notifier.is_alive())
+        self.assertFalse(poller.asks.is_alive())
+        self.assertIs(poller.asks.wake, poller.wake)
         self.assertIs(poller.voice.fallback_post.__self__, poller.notifier)
         self.assertIs(poller.notices.notifier, poller.notifier)
 

@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -3042,6 +3043,32 @@ class NameArgs(unittest.TestCase):
         args = core.name_args("claude")
         self.assertEqual(args[args.index("--model") + 1], "haiku")
         self.assertNotIn("--bare", args)
+
+
+class AskVerdict(unittest.TestCase):
+    def test_only_the_exact_word_is_a_verdict(self):
+        self.assertEqual(core.parse_verdict("NEEDS"), core.VERDICT_NEEDS)
+        self.assertEqual(core.parse_verdict(" DONE\n"), core.VERDICT_DONE)
+        for text in ("needs", "NEEDS.", "NEEDS DONE", "", None):
+            self.assertIsNone(core.parse_verdict(text), text)
+
+    def test_the_call_is_isolated_and_carries_the_instruction(self):
+        args = core.ask_args("claude")
+        for flag in ("--no-session-persistence", "--strict-mcp-config"):
+            self.assertIn(flag, args)
+        for flag, value in (("--model", "haiku"), ("--setting-sources", ""), ("--tools", ""),
+                            ("--system-prompt", core.ASK_INSTRUCTION)):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+
+    def test_the_instruction_names_both_answers_and_no_scanned_word(self):
+        self.assertIn("NEEDS", core.ASK_INSTRUCTION)
+        self.assertIn("DONE", core.ASK_INSTRUCTION)
+        words = set(re.findall(r"[A-Za-z0-9_-]+", core.ASK_INSTRUCTION))
+        self.assertFalse(words & {"agents", "attach", "--bg"})
+
+    def test_the_excerpt_is_the_reply(self):
+        self.assertEqual(core.ask_excerpt(mk(state="done", reply="Which one?")), "Which one?")
+        self.assertEqual(core.ask_excerpt(mk(state="done")), "")
 
 
 class CleanName(unittest.TestCase):
