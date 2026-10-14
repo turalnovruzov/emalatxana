@@ -12,6 +12,7 @@ import sys
 import time
 
 from emx import BIN, __version__, core
+from emx.notify import OPEN_ENV
 from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -19,10 +20,13 @@ CONFIG = os.path.join(HERE, "emx.tmux.conf")
 CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
+FALLBACK_TERMINAL = "com.apple.Terminal"
+OPEN_FILES_KEPT_SECONDS = 3600
 
 USAGE = """usage: emx [--version | hush]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
-emx open <session id> is internal too: what a click on one of emx's notifications runs.)
+emx open <session id> is internal too: what a click on one of emx's notifications runs; with no emx window open
+it opens emx in a new terminal window with that session.)
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
@@ -75,6 +79,10 @@ def create_workspace(tmux: Tmux) -> None:
     if core.panel_collapsed(prefs):
         tmux.toggle_zoom(main)
     tmux.set_session_option(VERSION_OPT, code_version())
+    # Set by the window a notification click opens when emx was not running.
+    wanted = os.environ.get("EMX_OPEN_SESSION", "")
+    if core.is_session_id(wanted):
+        tmux.set_session_option(OPEN_OPT, wanted)
 
 
 def code_version() -> str:
@@ -184,8 +192,7 @@ def open_session(sid: str) -> int:
         return 1
     tmux = Tmux(socket)
     if not tmux.has_session():
-        print("emx isn't running.", file=sys.stderr)
-        return 1
+        return open_window("", sid)
     try:
         tmux.set_session_option(OPEN_OPT, sid)
         attached, *_ = tmux.client_state()
@@ -193,11 +200,50 @@ def open_session(sid: str) -> int:
     except TmuxError as exc:
         print(f"emx: {exc}", file=sys.stderr)
         return 1
-    if attached and bundle:
-        try:
-            subprocess.run([open_command(), "-b", bundle], stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
-        except (OSError, subprocess.SubprocessError):
-            pass
+    if not attached:
+        return open_window(bundle)
+    if bundle:
+        _run_open([open_command(), "-b", bundle])
+    return 0
+
+
+def _run_open(argv: list) -> bool:
+    try:
+        return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def open_window(bundle: str, sid: str | None = None) -> int:
+    """Open emx in a new window of the terminal `bundle` names (Terminal.app when none is known), through a `.command` file under emx's state folder.
+
+    The file holds only emx's command and the environment `OPEN_ENV` allows;
+    the session id goes in it only when emx is not running, as
+    `EMX_OPEN_SESSION`, which `create_workspace` turns into an open request.
+    Files older than `OPEN_FILES_KEPT_SECONDS` are removed first.
+    """
+    folder = core.state_path() / "open"
+    try:
+        folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+        now = time.time()
+        for old in folder.glob("emx-*.command"):
+            if now - old.stat().st_mtime > OPEN_FILES_KEPT_SECONDS:
+                old.unlink()
+        env = {k: os.environ[k] for k in OPEN_ENV if os.environ.get(k)}
+        if sid:
+            env["EMX_OPEN_SESSION"] = sid
+        lines = ["#!/bin/sh"] + [f"export {k}={shlex.quote(v)}" for k, v in env.items()]
+        lines.append(f"exec {shlex.quote(sys.executable)} {shlex.quote(BIN)}")
+        path = folder / f"emx-{time.time_ns()}.command"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError as exc:
+        print(f"emx: couldn't open a new window: {exc}", file=sys.stderr)
+        return 1
+    if not _run_open([open_command(), "-b", bundle or FALLBACK_TERMINAL, str(path)]):
+        print("emx: couldn't open a new window.", file=sys.stderr)
+        return 1
     return 0
 
 

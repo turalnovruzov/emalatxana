@@ -1,12 +1,15 @@
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
+from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
@@ -203,8 +206,10 @@ class OpenSession(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        self.state = os.path.join(tmp.name, "state")
         for patch in (
-            mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name, "EMX_SOCKET": "emx-test-x", "EMX_OPEN": "/x/fake-open"}),
+            mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name, "EMX_SOCKET": "emx-test-x", "EMX_OPEN": "/x/fake-open",
+                                         "XDG_STATE_HOME": self.state, "EMX_SHOW_TEST_SESSIONS": "1"}),
             mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
         ):
             patch.start()
@@ -243,10 +248,88 @@ class OpenSession(unittest.TestCase):
         self.assertTrue([argv for argv in self.calls if OPEN_OPT in argv])
         self.assertFalse([argv for argv in self.calls if argv[0] != "tmux"])
 
-    def test_open_with_no_client_attached_brings_nothing_forward(self):
-        code, _, _ = self.run_open(attached=0)
-        self.assertEqual(code, 0)
-        self.assertFalse([argv for argv in self.calls if argv[0] != "tmux"])
+    def opened(self):
+        return [argv for argv in self.calls if argv[0] != "tmux"]
+
+    def command_files(self):
+        return sorted(Path(self.state, "emx", "open").glob("*.command"))
+
+    def test_detached_open_writes_the_option_and_opens_a_new_window_in_the_recorded_terminal(self):
+        code, out, err = self.run_open(attached=0, terminal="com.googlecode.iterm2")
+        self.assertEqual((code, out, err), (0, "", ""))
+        self.assertTrue([argv for argv in self.calls if "set-option" in argv and OPEN_OPT in argv and SID in argv])
+        (path,) = self.command_files()
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.googlecode.iterm2", str(path)]])
+        self.assertTrue(str(path).endswith(".command"))
+
+    def test_detached_open_without_a_recorded_terminal_uses_the_fallback(self):
+        self.run_open(attached=0, terminal="")
+        (path,) = self.command_files()
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(path)]])
+
+    def test_the_command_file_execs_emx_with_only_allowlisted_env_and_no_session_text(self):
+        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "s3cret", "EMX_SAY": "/x/say", "EMX_OPEN_SESSION": SID}):
+            self.run_open(attached=0)
+        (path,) = self.command_files()
+        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "#!/bin/sh")
+        self.assertEqual(lines[-1], f"exec {shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(cli.BIN))}")
+        for line in lines[1:-1]:
+            self.assertTrue(line.startswith("export "), line)
+            self.assertIn(line.split("=", 1)[0][len("export "):], cli.OPEN_ENV)
+        self.assertNotIn(SID, text)
+        self.assertNotIn("s3cret", text)
+        self.assertIn("export EMX_SOCKET=emx-test-x", lines)
+
+    def test_old_command_files_are_pruned(self):
+        folder = Path(self.state, "emx", "open")
+        folder.mkdir(parents=True)
+        old, recent = folder / "emx-1.command", folder / "emx-2.command"
+        for path in (old, recent):
+            path.write_text("#!/bin/sh\n", encoding="utf-8")
+        hour_ago = time.time() - cli.OPEN_FILES_KEPT_SECONDS - 5
+        os.utime(old, (hour_ago, hour_ago))
+        self.run_open(attached=0)
+        names = [p.name for p in self.command_files()]
+        self.assertNotIn("emx-1.command", names)
+        self.assertIn("emx-2.command", names)
+        self.assertEqual(len(names), 2)
+
+    def test_with_no_server_the_window_carries_the_session_and_create_workspace_writes_the_option(self):
+        code, out, err = self.run_open(server=False)
+        self.assertEqual((code, out, err), (0, "", ""))
+        (path,) = self.command_files()
+        self.assertIn(f"export EMX_OPEN_SESSION={SID}", path.read_text(encoding="utf-8").splitlines())
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(path)]])
+        self.assertFalse([argv for argv in self.calls if "set-option" in argv])
+        made = RecordingWorkspace("emx-test-x")
+        with mock.patch.dict(os.environ, {"EMX_OPEN_SESSION": SID, "XDG_CONFIG_HOME": self.state}):
+            os.environ.pop("EMX_CONFIG_HOME", None)
+            cli.create_workspace(made)
+        self.assertEqual(made.options.get(OPEN_OPT), SID)
+
+    def test_create_workspace_ignores_a_non_session_id_in_emx_open_session(self):
+        for bad in ("", "garbage", "-x", SID + "; rm"):
+            with self.subTest(value=bad):
+                made = RecordingWorkspace("emx-test-x")
+                with mock.patch.dict(os.environ, {"EMX_OPEN_SESSION": bad, "XDG_CONFIG_HOME": self.state}):
+                    os.environ.pop("EMX_CONFIG_HOME", None)
+                    cli.create_workspace(made)
+                self.assertNotIn(OPEN_OPT, made.options)
+
+    def test_a_failed_open_says_so(self):
+        def record(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[0] != "tmux":
+                return subprocess.CompletedProcess(argv, 1, "", "no such app")
+            return subprocess.CompletedProcess(argv, 1, "", "no server running")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["open", SID])
+        self.assertEqual((code, err.getvalue()), (1, "emx: couldn't open a new window.\n"))
 
     def test_open_refuses_a_non_session_id_and_writes_nothing(self):
         for bad in ("", "garbage", "-x", "/tmp/x", SID + "x"):
@@ -265,8 +348,9 @@ class OpenSession(unittest.TestCase):
 
     def test_open_never_starts_a_server_and_uses_no_config(self):
         self.run_open()
+        self.run_open(attached=0)
         code, _, err = self.run_open(server=False)
-        self.assertEqual((code, err), (1, "emx isn't running.\n"))
+        self.assertEqual((code, err), (0, ""))
         for argv in self.calls:
             if argv[0] == "tmux":
                 self.assertEqual(argv[:3], ["tmux", "-L", "emx-test-x"])
@@ -275,6 +359,26 @@ class OpenSession(unittest.TestCase):
 
     def test_the_usage_names_open_as_internal(self):
         self.assertIn("emx open <session id> is internal", cli.USAGE)
+
+
+class RecordingWorkspace:
+    """What `create_workspace` asks of tmux, recorded: no server is started."""
+
+    def __init__(self, socket):
+        self.socket = socket
+        self.options = {}
+
+    def run(self, *args):
+        return "%1\n"
+
+    def set_pane_option(self, pane, name, value):
+        pass
+
+    def toggle_zoom(self, pane):
+        pass
+
+    def set_session_option(self, name, value):
+        self.options[name] = value
 
 
 class RecordsTerminal(unittest.TestCase):
