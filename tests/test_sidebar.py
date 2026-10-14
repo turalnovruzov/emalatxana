@@ -2502,50 +2502,61 @@ class RenameSession(AppCase):
                 self.settle()
                 self.refused("emx-test-named's prompt isn't empty, so emx didn't type into it.")
 
-    def test_a_viewer_showing_the_agent_view_or_another_session_is_never_typed_into(self):
-        for screen in ("agent-view", "cross-wired"):
+    def test_the_pane_tagged_with_the_sessions_key_is_typed_into_whatever_name_its_screen_shows(self):
+        for screen in ("cross-wired", "interactive-unnamed-empty", "interactive-named-empty"):
             with self.subTest(screen=screen):
+                self.app.tmux = RenameTmux()
                 self.listings = [[self.named]]
                 self.app.tmux.view(screen, "prompt-empty")
                 self.rename_to("fresh name")
                 self.settle()
-                self.refused("isn't showing its prompt")
+                self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
 
-    def test_a_viewer_another_listed_session_would_look_the_same_in_is_never_typed_into(self):
-        twin = core.Session("d", "emx-test-named", "/p/delta", "blocked", "", "", 0.0, True)
-        self.listings = [[self.named, twin]]
+    def test_a_pane_holding_the_key_without_the_agent_tag_is_never_typed_into(self):
+        tmux = self.app.tmux
+        tmux.list = [replace(p, agent="") if p.session == "named" else p for p in tmux.list]
         self.rename_to("fresh name")
         self.settle()
-        self.refused("looks the same as another session's")
+        self.refused("viewer has closed")
+        self.assertEqual(tmux.gates, [])
 
     def test_an_unnamed_sessions_own_empty_prompt_is_typed_into(self):
-        unnamed = core.Session("named", "named", "/p/alpha", "blocked", "", "", 0.0, True)
+        unnamed = core.Session("named", "a1b2c3d4", "/p/alpha", "blocked", "", "", 0.0, True, named=False)
         self.poll(unnamed)
         self.app.refresh()
         self.listings = [[unnamed]]
-        self.app.tmux.view("unnamed-empty-viewer", "prompt-empty")
+        self.app.tmux.view("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
         self.keys(sidebar.CTRL_R)
         self.assertEqual(self.app.rename_edit["text"], "")
         self.keys(*"fresh name", "\r")
         self.settle()
         self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
-        self.assertEqual(self.app.notice, "Renamed named to fresh name.")
+        self.assertEqual(self.app.notice, "Renamed a1b2c3d4 to fresh name.")
 
-    def test_an_unnamed_sessions_viewer_showing_another_session_is_never_typed_into(self):
-        unnamed = core.Session("named", "named", "/p/alpha", "blocked", "", "", 0.0, True)
+    def test_claudes_title_landing_on_an_unnamed_row_during_the_wait_is_not_taken_for_the_new_name(self):
+        unnamed = core.Session("named", "a1b2c3d4", "/p/alpha", "blocked", "", "", 0.0, True, named=False)
         self.poll(unnamed)
         self.app.refresh()
         self.listings = [[unnamed]]
-        self.app.tmux.view("cross-wired", "prompt-empty")
+        self.after = core.Session("named", "Fixing the login bug", "/p/alpha", "blocked", "", "", 0.0, True, named=False)
+        self.app.tmux.view("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
         self.rename_to("fresh name")
         self.settle()
-        self.refused("isn't showing its prompt")
+        self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
+        self.assertNotIn("Renamed", self.app.notice)
+        self.assertIn("doesn't show a new name yet", self.app.notice)
 
-    def test_a_viewer_emx_caught_showing_something_else_is_never_typed_into(self):
-        self.app.flagged_viewers = frozenset({"%2"})
+    def test_ctrl_r_on_a_running_session_opens_the_edit_with_no_tmux_call(self):
+        self.app.tmux.panes = mock.Mock(side_effect=AssertionError("asked tmux"))
+        self.keys(sidebar.CTRL_R)
+        self.assertEqual(self.app.rename_edit["text"], "emx-test-named")
+
+    def test_a_typed_rename_wakes_the_transcript_reader_while_it_waits_for_the_name(self):
+        self.app.poller.transcripts.wake.clear()
+        self.after = session("named", "/p/alpha", state="blocked")
         self.rename_to("fresh name")
         self.settle()
-        self.refused("isn't showing its prompt")
+        self.assertTrue(self.app.poller.transcripts.wake.is_set())
 
     def test_a_stopped_session_is_never_typed_into(self):
         self.listings = [[session("named", "/p/alpha", state="stopped", pid=None)]]
@@ -2606,7 +2617,7 @@ class RenameSession(AppCase):
         self.rename_to("fresh name")
         self.settle()
         tmux = self.app.tmux
-        self.assertEqual(tmux.events, ["capture", "type_if", "capture", "submit_if", "enter"])
+        self.assertEqual(tmux.events, ["type_if", "submit_if", "enter"])
         at = 2 + len("/rename fresh name")
         self.assertEqual(tmux.enter_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
         self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
@@ -2616,12 +2627,12 @@ class RenameSession(AppCase):
         self.rename_to("名前です")
         self.settle()
         tmux = self.app.tmux
-        self.assertEqual(tmux.events, ["capture", "type_if", "capture", "submit_if", "enter"])
+        self.assertEqual(tmux.events, ["type_if", "submit_if", "enter"])
         at = 2 + core.display_width("/rename 名前です")
         self.assertEqual(tmux.enter_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
 
     def slow_to_draw(self, whole_after):
-        """The prompt first shows only the start of the line; the rest is drawn at the `whole_after`th capture of the Enter step."""
+        """The prompt first shows only the start of the line; the rest is drawn at the `whole_after`th read of the prompt line."""
         tmux = self.app.tmux
         captures = []
 
@@ -2631,14 +2642,14 @@ class RenameSession(AppCase):
             tmux.prompt = ("\x1b[39m❯\xa0" + text, tmux.prompt[1])
             tmux.cursor_at = (2 + len(text), *tmux.cursor_at[1:])
 
-        def capture(pane):
+        def prompt_probe(pane):
             captures.append(1)
             if len(captures) >= whole_after:
                 tmux.prompt, tmux.cursor_at = tmux.full
-            return tmux.screen
+            return (*tmux.cursor_at, tmux.in_mode)
 
         tmux.after_typing = partial
-        tmux.capture = capture
+        tmux.prompt_probe = prompt_probe
 
     def test_enter_waits_while_the_prompt_shows_only_the_start_of_the_line(self):
         self.slow_to_draw(whole_after=4)
@@ -2646,6 +2657,28 @@ class RenameSession(AppCase):
         self.settle()
         self.assertEqual(self.app.tmux.events[-2:], ["submit_if", "enter"])
         self.assertEqual(self.app.tmux.clear_gates, [])
+
+    def test_enter_waits_while_claudes_grey_name_hint_still_follows_the_command(self):
+        tmux = self.app.tmux
+        reads = []
+
+        def hint():
+            tmux.full = (tmux.prompt, tmux.cursor_at)
+            tmux.prompt = ("\x1b[39m❯\xa0\x1b[38;5;153m/rename\x1b[39m  \x1b[38;5;246m[name]\x1b[39m", tmux.prompt[1])
+            tmux.cursor_at = (2 + len("/rename "), *tmux.cursor_at[1:])
+
+        def prompt_probe(pane):
+            reads.append(1)
+            if len(reads) >= 4:
+                tmux.prompt, tmux.cursor_at = tmux.full
+            return (*tmux.cursor_at, tmux.in_mode)
+
+        tmux.after_typing, tmux.prompt_probe = hint, prompt_probe
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(tmux.events[-2:], ["submit_if", "enter"])
+        self.assertEqual(tmux.clear_gates, [])
+        self.assertEqual(self.app.notice, "Renamed emx-test-named to fresh name.")
 
     def test_a_line_that_never_finishes_drawing_gets_no_enter_after_the_bounded_wait(self):
         self.slow_to_draw(whole_after=10 ** 6)
@@ -2691,29 +2724,18 @@ class RenameSession(AppCase):
         self.assertEqual([e for e in tmux.events if e not in ("capture", "type_if")], [])
         self.assertIn("may still be in it", self.app.notice)
 
-    def test_a_viewer_that_stopped_showing_this_session_gets_no_enter_and_the_line_is_cleared(self):
-        tmux = self.app.tmux
-        tmux.after_typing = lambda: setattr(tmux, "screen", fixture_screen("cross-wired")[0])
-        self.rename_to("fresh name")
-        self.settle()
-        at = 2 + len("/rename fresh name")
-        self.assertNotIn("submit_if", tmux.events)
-        self.assertEqual(tmux.clear_gates, [core.type_gate("%2", "%1", "named", 26, sidebar.SESSION_OPT, at)])
-        self.assertIn("cleared the line", self.app.notice)
-        self.assertNotIn("named", self.app.renaming)
-
     def test_an_enter_tmux_refuses_clears_the_line_and_says_so(self):
         tmux = self.app.tmux
         tmux.enter_says = "0 0 1 20 27 named"
         self.rename_to("fresh name")
         self.settle()
-        self.assertEqual(tmux.events[-4:], ["submit_if", "capture", "clear_if", "capture"])
+        self.assertEqual(tmux.events[-2:], ["submit_if", "clear_if"])
         self.assertNotIn("enter", tmux.events)
         self.assertIn("cleared the line", self.app.notice)
 
     def test_a_line_that_cannot_be_cleared_is_left_and_said_so(self):
         tmux = self.app.tmux
-        tmux.after_typing = lambda: setattr(tmux, "screen", fixture_screen("cross-wired")[0])
+        tmux.enter_says = "0 0 1 20 27 named"
         tmux.clear_says = "0 0 1 20 26 named"
         self.rename_to("fresh name")
         self.settle()
@@ -2746,11 +2768,13 @@ class RenameSession(AppCase):
         self.assertIsNone(self.app.rename_edit)
         self.assertIsNone(self.app.renamer)
 
-    def test_no_open_viewer_means_no_rename(self):
+    def test_a_running_row_with_no_pane_of_its_own_gets_nothing_typed(self):
         self.app.cursor = ("session", "c")
-        self.keys(sidebar.CTRL_R)
-        self.assertIsNone(self.app.rename_edit)
-        self.assertEqual(self.app.notice, "Open emx-test-c once, then press ctrl+r to rename it.")
+        self.listings = [[session("c", "/p/gamma")]]
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
+        self.assertEqual(self.app.notice, "emx-test-c's viewer has closed, so emx didn't rename it.")
 
     def test_a_name_the_listing_never_shows_is_reported_and_stops_being_pending(self):
         stopped_turn = session("named", "/p/alpha", state="done")
@@ -3061,6 +3085,46 @@ class TranscriptReader(unittest.TestCase):
 
     def row(self, sid, cwd, uuid):
         return core.Session(sid, sid, cwd, "done", "", "", None, True, uuid)
+
+    def titled(self, sid, uuid, *titles):
+        lines = [json.dumps({"type": kind, key: value, "sessionId": uuid}) for kind, key, value in titles]
+        self.write("-tmp-a", uuid, *lines, transcript_line("assistant", [{"type": "text", "text": "Hi."}]))
+
+    def test_a_rename_in_the_transcript_is_recorded_once_per_name(self):
+        recorder = mock.Mock()
+        recorder.set_name.return_value = (True, None)
+        self.reader.engine = recorder
+        self.titled("s1", U1, ("custom-title", "customTitle", "emx-test-renamed"))
+        for state in ("done", "working"):
+            with self.subTest(state=state):
+                self.reader.want([core.Session("s1", "emx-test-old", "/tmp/a", state, "", "", None, True, U1)])
+                self.reader.read_all()
+                self.reader.read_all()
+        recorder.set_name.assert_called_once_with("s1", "emx-test-renamed")
+        recorder.set_title.assert_not_called()
+
+    def test_a_name_the_row_already_shows_is_not_recorded_again(self):
+        recorder = mock.Mock()
+        self.reader.engine = recorder
+        self.titled("s1", U1, ("custom-title", "customTitle", "emx-test-same"))
+        self.reader.want([core.Session("s1", "emx-test-same", "/tmp/a", "done", "", "", None, True, U1)])
+        self.reader.read_all()
+        recorder.set_name.assert_not_called()
+
+    def test_claudes_title_is_recorded_for_an_unnamed_session_only(self):
+        recorder = mock.Mock()
+        recorder.set_title.return_value = (True, None)
+        self.reader.engine = recorder
+        self.titled("s1", U1, ("ai-title", "aiTitle", "Fixing the login bug"))
+        self.titled("s2", U2, ("ai-title", "aiTitle", "Another title"))
+        self.reader.want([
+            core.Session("s1", U1[:8], "/tmp/a", "done", "", "", None, True, U1, named=False),
+            core.Session("s2", "emx-test-named", "/tmp/a", "done", "", "", None, True, U2),
+        ])
+        self.reader.read_all()
+        self.reader.read_all()
+        recorder.set_title.assert_called_once_with("s1", "Fixing the login bug")
+        recorder.set_name.assert_not_called()
 
     def test_reads_the_transcript_where_claude_code_keeps_it_for_the_folder(self):
         self.write("-tmp-a-proj", U1, transcript_line("assistant", [{"type": "text", "text": "Hi."}]))

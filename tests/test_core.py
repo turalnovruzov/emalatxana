@@ -1783,12 +1783,13 @@ def real_screen(name):
 
 
 PROMPT_CURSORS = json.loads((FIXTURES / "prompt-cursors.json").read_text(encoding="utf-8"))
+INTERACTIVE_CURSORS = json.loads((FIXTURES / "interactive-cursors.json").read_text(encoding="utf-8"))
 
 
 def at_cursor(name):
     """(cursor line, line under it, cursor x, cursor shown, pane width) for a prompt-* screen, as `emx left` gets them."""
     text, width = real_screen(name)
-    cursor = PROMPT_CURSORS["cursors"][name]
+    cursor = {**PROMPT_CURSORS["cursors"], **INTERACTIVE_CURSORS["cursors"]}[name]
     lines = text.split("\n")
     return lines[cursor["y"]], lines[cursor["y"] + 1], cursor["x"], cursor["shown"], width
 
@@ -1866,42 +1867,31 @@ class TypedLineStands(unittest.TestCase):
         self.others = [named("b", "bee")]
         _, below, _, shown, self.width = at_cursor("prompt-empty")
         self.below, self.shown = below, shown
-        self.captured, _ = real_screen("named-viewer")
 
     def screen(self, text="/rename beta", **changes):
         line = "\x1b[39m❯\xa0" + text
-        fields = dict(captured=self.captured, line=line, below=self.below, cursor_x=2 + core.display_width(text),
-                      cursor_y=26, cursor_shown=self.shown, width=self.width, in_mode=False, flagged=False)
+        fields = dict(line=line, below=self.below, cursor_x=2 + core.display_width(text),
+                      cursor_y=26, cursor_shown=self.shown, width=self.width, in_mode=False)
         return core.RenameScreen(**{**fields, **changes})
 
     def stands(self, screen):
-        return core.typed_line_stands(self.rename, self.session, [self.session] + self.others, screen)
+        return core.prompt_has_only_line(self.rename, screen)
 
     def test_the_line_alone_in_this_sessions_prompt_stands(self):
         self.assertTrue(self.stands(self.screen()))
 
     def test_anything_else_on_screen_after_typing_does_not(self):
-        permission, _ = real_screen("prompt-permission")
         line, below, x, shown, width = at_cursor("prompt-permission")
-        agent_view, _ = real_screen("agent-view")
         cases = {
-            "a dialog opened": self.screen(captured=permission, line=line, below=below, cursor_x=x, cursor_shown=shown),
+            "a dialog opened": self.screen(line=line, below=below, cursor_x=x, cursor_shown=shown),
             "a draft added to the line": self.screen("/rename beta and more"),
             "another name typed": self.screen("/rename other"),
             "scrolled back": self.screen(in_mode=True),
-            "flagged as showing something else": self.screen(flagged=True),
-            "another screen in the viewer": self.screen(captured=agent_view),
             "the cursor moved": self.screen(cursor_x=5),
         }
         for label, screen in cases.items():
             with self.subTest(label):
                 self.assertFalse(self.stands(screen))
-
-    def test_the_line_alone_is_found_even_when_the_identity_is_in_doubt(self):
-        twin = [self.session, named("d", "emx-test-named")]
-        self.assertFalse(core.typed_line_stands(self.rename, self.session, twin, self.screen()))
-        self.assertTrue(core.prompt_has_only_line(self.rename, self.screen(flagged=True)))
-        self.assertFalse(core.prompt_has_only_line(self.rename, self.screen(in_mode=True)))
 
     def test_the_unsent_text_says_whether_the_line_was_cleared(self):
         self.assertIn("cleared the line", core.line_unsent_text(self.rename, True))
@@ -1914,27 +1904,6 @@ class TypedLineStands(unittest.TestCase):
         line = "/rename 名前です"
         self.assertTrue(self.stands(self.screen(line)))
         self.assertFalse(self.stands(self.screen(line, cursor_x=2 + len(line))))
-
-    def test_a_line_drawn_only_in_part_is_arriving_and_nothing_else_is(self):
-        self.rename = core.Rename("a", "emx-test-named", "名前です")
-        full = "/rename 名前です"
-        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename 名")))
-        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/ren")))
-        self.rename = core.Rename("a", "emx-test-named", "fresh name")
-        self.assertTrue(core.typed_line_arriving(self.rename, self.screen("/rename fresh ")))
-        self.rename = core.Rename("a", "emx-test-named", "名前です")
-        cases = {
-            "all of it": self.screen(full),
-            "something else": self.screen("/rename 名x"),
-            "more than it": self.screen(full + "x"),
-            "nothing yet": self.screen(""),
-            "cursor not after it": self.screen("/ren", cursor_x=9),
-            "scrolled back": self.screen("/ren", in_mode=True),
-            "cursor hidden": self.screen("/ren", cursor_shown=False),
-        }
-        for label, screen in cases.items():
-            with self.subTest(label):
-                self.assertFalse(core.typed_line_arriving(self.rename, screen))
 
     def test_an_unconfirmed_enter_is_not_worded_as_not_pressed(self):
         for cleared in (True, False):
@@ -2336,8 +2305,8 @@ class CloseConfirm(unittest.TestCase):
         self.assertEqual(core.closing_after(after, {}, ["c"]), {})
 
 
-def named(sid, name, cwd="/r/app", state="blocked", running=True, started=None):
-    return core.Session(sid, name, cwd, state, "", "", started, running)
+def named(sid, name, cwd="/r/app", state="blocked", running=True, started=None, own=True):
+    return core.Session(sid, name, cwd, state, "", "", started, running, named=own)
 
 
 class Find(unittest.TestCase):
@@ -2507,10 +2476,9 @@ def renamed_rule(name):
     return text.replace(rule, "─" * (width - core.display_width(name) - 3) + f" {name} ─"), width
 
 
-def rename_screen(viewer, prompt, in_mode=False, flagged=False):
-    captured, _ = real_screen(viewer)
+def rename_screen(prompt, in_mode=False):
     line, below, x, shown, width = at_cursor(prompt)
-    return core.RenameScreen(captured, line, below, x, 26, shown, width, in_mode, flagged)
+    return core.RenameScreen(line, below, x, 26, shown, width, in_mode)
 
 
 class RenameChecks(unittest.TestCase):
@@ -2521,7 +2489,8 @@ class RenameChecks(unittest.TestCase):
 
     def test_the_edit_opens_with_the_name_or_empty_for_an_unnamed_session(self):
         self.assertEqual(core.rename_start(named("a", "alpha")), "alpha")
-        self.assertEqual(core.rename_start(named("a", "a")), "")
+        self.assertEqual(core.rename_start(named("a", "Fixing the login bug", own=False)), "")
+        self.assertEqual(core.rename_start(named("a1b2c3d4-x", "a1b2c3d4", own=False)), "")
 
     def test_a_request_is_one_plain_line_and_emoji_joiners_are_plain(self):
         self.assertEqual(core.rename_request("a", "old", "  my name; with spaces "),
@@ -2586,14 +2555,13 @@ class RenameChecks(unittest.TestCase):
         self.assertEqual(core.live_viewer(panes, "a").id, "%4")
         self.assertIsNone(core.live_viewer(panes[:4], "a"))
 
-    def test_ctrl_r_needs_a_running_session_with_an_open_viewer_and_a_healthy_listing(self):
+    def test_ctrl_r_needs_a_running_session_and_a_healthy_listing(self):
         running = named("a", "alpha")
-        self.assertIsNone(core.rename_blocked(False, None, running, True))
-        self.assertIn("Open alpha once", core.rename_blocked(False, None, running, False))
+        self.assertIsNone(core.rename_blocked(False, None, running))
         stopped = named("a", "alpha", state="stopped", running=False)
-        self.assertIn("isn't running", core.rename_blocked(False, None, stopped, True))
-        self.assertIn("Can't list", core.rename_blocked(True, None, running, True))
-        self.assertIn("Still renaming", core.rename_blocked(False, self.rename, running, True))
+        self.assertIn("isn't running", core.rename_blocked(False, None, stopped))
+        self.assertIn("Can't list", core.rename_blocked(True, None, running))
+        self.assertIn("Still renaming", core.rename_blocked(False, self.rename, running))
 
     def test_the_fresh_listing_must_show_it_running(self):
         self.assertIsNone(core.rename_listing_refusal(self.rename, named("a", "alpha", state="blocked"), True))
@@ -2608,71 +2576,21 @@ class RenameChecks(unittest.TestCase):
             with self.subTest(want=want):
                 self.assertIn(want, core.rename_listing_refusal(self.rename, session, fresh))
 
-    def identity(self, session, others, screen):
-        text, width = real_screen(screen) if isinstance(screen, str) else screen
-        return core.viewer_identity(session, [session] + others, text, width)
+    def test_the_pane_must_show_an_empty_prompt_outside_any_mode(self):
+        def refusal(screen):
+            return core.rename_screen_refusal(self.rename, screen)
 
-    def test_a_viewer_is_its_sessions_only_when_no_other_listed_session_fits_its_screen(self):
-        unnamed = named("u", "u")
-        stopped_unnamed = named("v", "v", state="stopped", running=False)
-        cases = [
-            (self.session, self.others, "named-viewer", "ok"),
-            (self.session, self.others + [named("d", "emx-test-named")], "named-viewer", "ambiguous"),
-            (named("a", "someone-else"), self.others, "named-viewer", "other"),
-            (self.session, self.others, "agent-view", "other"),
-            (self.session, self.others, "cross-wired", "other"),
-            (self.session, self.others, "unnamed-empty-viewer", "other"),
-            (unnamed, self.others, "unnamed-empty-viewer", "ok"),
-            (unnamed, self.others + [named("v", "v")], "unnamed-empty-viewer", "ambiguous"),
-            (unnamed, self.others + [stopped_unnamed], "unnamed-empty-viewer", "ok"),
-            (unnamed, self.others, "named-viewer", "other"),
-            (unnamed, self.others, "cross-wired", "other"),
-            (unnamed, self.others, "agent-view", "other"),
-        ]
-        for session, others, screen, want in cases:
-            with self.subTest(session=session.name, others=len(others), screen=screen):
-                self.assertEqual(self.identity(session, others, screen), want)
-
-    def test_a_name_cut_to_fit_proves_the_session_only_when_it_fits_no_other(self):
-        long = named("a", "emx-test-a-rather-long-session-name")
-        cut = renamed_rule("emx-test-a-rather…")
-        self.assertEqual(self.identity(long, self.others, cut), "ok")
-        self.assertEqual(self.identity(long, self.others + [named("d", "emx-test-a-rather-short")], cut), "ambiguous")
-
-    def test_a_stopped_session_with_the_same_name_is_no_twin(self):
-        stopped_twin = named("d", "emx-test-named", state="stopped", running=False)
-        self.assertEqual(self.identity(self.session, self.others + [stopped_twin], "named-viewer"), "ok")
-
-    def test_the_screen_must_show_this_sessions_empty_prompt_outside_any_mode(self):
-        sessions = [self.session] + self.others
-
-        def refusal(screen, listed=sessions):
-            return core.rename_screen_refusal(self.rename, self.session, listed, screen)
-
-        self.assertIsNone(refusal(rename_screen("named-viewer", "prompt-empty")))
-        self.assertIn("scrolled back", refusal(rename_screen("named-viewer", "prompt-empty", in_mode=True)))
-        self.assertIn("isn't showing its prompt", refusal(rename_screen("named-viewer", "prompt-empty", flagged=True)))
-        self.assertIn("isn't showing its prompt", refusal(rename_screen("agent-view", "prompt-empty")))
+        for prompt in ("prompt-empty", "interactive-prompt-empty-named", "interactive-prompt-empty-unnamed",
+                       "interactive-prompt-working"):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(refusal(rename_screen(prompt)))
+        self.assertIn("scrolled back", refusal(rename_screen("prompt-empty", in_mode=True)))
         for prompt in ("prompt-text", "prompt-text-at-start", "prompt-slash-menu", "prompt-permission", "prompt-multiline"):
             with self.subTest(prompt=prompt):
-                self.assertIn("isn't empty", refusal(rename_screen("named-viewer", prompt)))
-        twin = refusal(rename_screen("named-viewer", "prompt-empty"), sessions + [named("d", "emx-test-named")])
-        self.assertIn("looks the same as another session's", twin)
-
-    def test_an_unnamed_session_twinned_by_another_unnamed_one_is_sent_to_rename_itself(self):
-        unnamed = named("u", "u")
-        rename = core.Rename("u", "u", "fresh")
-        screen = rename_screen("unnamed-empty-viewer", "prompt-empty")
-        refusal = core.rename_screen_refusal(rename, unnamed, [unnamed, named("v", "v")], screen)
-        self.assertIn("both unnamed", refusal)
-        self.assertIn("Rename it in the session itself: /rename", refusal)
-
-    def test_the_rule_name_is_read_off_the_input_box(self):
-        cases = {"named-viewer": "emx-test-named", "unnamed-empty-viewer": "", "cross-wired": "emx-test-perm",
-                 "permission-dialog": None}
-        for screen, want in cases.items():
-            with self.subTest(screen=screen):
-                self.assertEqual(core.rule_name(*real_screen(screen)), want)
+                self.assertIn("isn't empty", refusal(rename_screen(prompt)))
+        for prompt in ("prompt-model-menu", "interactive-prompt-permission"):
+            with self.subTest(prompt=prompt):
+                self.assertIn("isn't showing its prompt", refusal(rename_screen(prompt)))
 
     def test_the_gate_takes_only_plain_ids(self):
         self.assertIsNotNone(core.type_gate("%3", "%1", "f00dcafe", 26, "@emx_session"))
@@ -2716,6 +2634,7 @@ class RenameChecks(unittest.TestCase):
         self.assertEqual(core.renamed_to(r, named("a", "beta")), "beta")
         self.assertEqual(core.renamed_to(r, named("a", "fam 👨 👩 👧")), "fam 👨 👩 👧")
         self.assertIsNone(core.renamed_to(core.Rename("a", "a", "beta"), named("a", "a")))
+        self.assertIsNone(core.renamed_to(core.Rename("a", "a1b2c3d4", "beta"), named("a", "Claude's title", own=False)))
         self.assertEqual(core.renamed_text(r, "beta"), "Renamed alpha to beta.")
         self.assertIn("doesn't show a new name", core.renamed_text(r, None))
 
@@ -2727,7 +2646,7 @@ class RenameChecks(unittest.TestCase):
         self.assertEqual(core.view_state_for(text, ["", "other"], width), "unknown")
         renaming = core.rename_started({}, core.Rename("a", "old-name", "emx-test-named"))
         self.assertEqual(core.viewer_names(named("a", "old-name"), renaming), ["old-name", "emx-test-named"])
-        self.assertEqual(core.viewer_names(named("a", "a"), {}), [""])
+        self.assertEqual(core.viewer_names(named("a", "a1b2c3d4", own=False), {}), [""])
 
     def test_a_rename_that_typed_nothing_is_dropped_at_once(self):
         r = core.Rename("a", "alpha", "beta")
@@ -2766,18 +2685,20 @@ class RenameChecks(unittest.TestCase):
         self.assertIn("prompt isn't empty", core.renamed_text(r, None, prompt_empty=False, queued=True))
 
     def test_a_working_session_showing_a_permission_dialog_is_refused(self):
-        working = named("named", "emx-test-named", state="working")
         rename = core.Rename("named", "emx-test-named", "fresh")
-        screen = rename_screen("prompt-permission", "prompt-permission")
         self.assertEqual(
-            core.rename_screen_refusal(rename, working, [working], screen),
+            core.rename_screen_refusal(rename, rename_screen("interactive-prompt-permission")),
             "emx-test-named's viewer isn't showing its prompt, so emx didn't rename it.",
+        )
+        self.assertEqual(
+            core.rename_screen_refusal(rename, rename_screen("prompt-permission")),
+            "emx-test-named's prompt isn't empty, so emx didn't type into it.",
         )
 
 
-def interrupt_screen(viewer, x=2, y=26, shown=True, in_mode=False, flagged=False):
-    captured, width = real_screen(viewer)
-    return core.RenameScreen(core.strip_ansi(captured), "", "", x, y, shown, width, in_mode, flagged)
+def interrupt_screen(viewer, x=2, y=26, shown=True, in_mode=False):
+    _, width = real_screen(viewer)
+    return core.RenameScreen("", "", x, y, shown, width, in_mode)
 
 
 class InterruptChecks(unittest.TestCase):
@@ -2887,6 +2808,35 @@ def entry(kind, content, at="2026-10-08T09:00:00Z", **extra):
 FIXTURE_KEYS = {"type", "subtype", "uuid", "parentUuid", "isSidechain", "isMeta", "timestamp", "version", "cwd",
                 "sessionId", "durationMs", "attachment", "message"}
 FIXTURE_MESSAGE_KEYS = {"role", "content", "stop_reason"}
+
+
+def transcript_entry(kind, content, at="2026-10-14T09:00:00Z"):
+    return json.dumps({"type": kind, "timestamp": at, "message": {"role": kind, "content": content}})
+
+
+class TranscriptTitles(unittest.TestCase):
+    def fixture(self):
+        return (INTERACTIVE_TRANSCRIPTS / "interactive-titles.jsonl").read_text(encoding="utf-8")
+
+    def test_the_latest_custom_title_and_ai_title_are_read_from_a_real_transcript(self):
+        found = core.parse_transcript(self.fixture())
+        self.assertEqual((found.title, found.ai_title), ("emx-test-renamed-a", "Writing six to o6.txt"))
+        self.assertEqual(found.latest, "")
+
+    def test_titles_ride_along_with_what_the_session_did(self):
+        text = self.fixture() + "\n" + transcript_entry("assistant", [{"type": "text", "text": "Done."}])
+        found = core.parse_transcript(text)
+        self.assertEqual((found.reply, found.latest, found.title), ("Done.", "reply", "emx-test-renamed-a"))
+
+    def test_a_tail_holding_only_titles_reads_on_for_what_the_session_did(self):
+        titles_only = core.parse_transcript(self.fixture())
+        self.assertEqual(core.tail_bytes(titles_only, core.TRANSCRIPT_FIRST_BYTES, 10 * core.TRANSCRIPT_FIRST_BYTES),
+                         2 * core.TRANSCRIPT_FIRST_BYTES)
+        said = core.parse_transcript(transcript_entry("assistant", [{"type": "text", "text": "Done."}]))
+        self.assertIsNone(core.tail_bytes(said, core.TRANSCRIPT_FIRST_BYTES, 10 * core.TRANSCRIPT_FIRST_BYTES))
+
+    def test_no_titles_and_nothing_said_is_still_nothing(self):
+        self.assertIsNone(core.parse_transcript('{"type": "custom-title", "customTitle": ""}\n'))
 
 
 class ParseRealTranscripts(unittest.TestCase):
@@ -4486,6 +4436,21 @@ class EngineSessions(unittest.TestCase):
     def test_the_record_session_id_stands_until_a_hook_gives_one(self):
         (s,) = self.listing([])
         self.assertEqual((s.session_id, s.transcript), (KEY, ""))
+
+    def test_a_session_with_no_name_or_title_shows_the_keys_first_eight_characters(self):
+        (s,) = self.listing([], record=self.record(name=""))
+        self.assertEqual((s.name, s.named, core.unnamed(s)), (KEY[:8], False, True))
+
+    def test_claudes_title_names_a_session_with_no_name_of_its_own(self):
+        (s,) = self.listing([], record=self.record(name="", title="Fixing the login bug"))
+        self.assertEqual((s.name, s.named), ("Fixing the login bug", False))
+
+    def test_a_custom_name_wins_over_claudes_title(self):
+        (s,) = self.listing([], record=self.record(name="alpha", title="Fixing the login bug"))
+        self.assertEqual((s.name, s.named), ("alpha", True))
+        (s,) = self.listing([event("SessionStart", at=150, session_title="from claude")],
+                            record=self.record(name="", title="Fixing the login bug"))
+        self.assertEqual((s.name, s.named), ("from claude", True))
 
     def test_name_falls_back_to_the_hook_title_then_the_short_key(self):
         (s,) = self.listing([event("SessionStart", at=150, session_title="from claude")], record=self.record(name=""))

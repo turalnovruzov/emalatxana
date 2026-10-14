@@ -210,17 +210,26 @@ def forget(key: str, state=None) -> tuple:
     return True, None
 
 
-def set_name(key: str, name: str, state=None) -> tuple:
-    """Record `name` as the session's own. (True, None) or (False, error)."""
+def _set_field(key: str, field: str, value: str, state) -> tuple:
     state = core.state_path() if state is None else state
     if not core.is_session_id(key):
         return False, "That is not a session of emx's."
     try:
         record = _read_record(state, key)
-        _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, "name": name})
+        _write_atomic(os.path.join(session_folder(state, key), "session.json"), {**record, field: value})
     except (OSError, ValueError) as exc:
         return False, f"Couldn't record the name: {' '.join(str(exc).split())}"
     return True, None
+
+
+def set_name(key: str, name: str, state=None) -> tuple:
+    """Record `name` as the session's own. (True, None) or (False, error)."""
+    return _set_field(key, "name", name, state)
+
+
+def set_title(key: str, title: str, state=None) -> tuple:
+    """Record the title Claude gave the session, shown while it has no name of its own. (True, None) or (False, error)."""
+    return _set_field(key, "title", title, state)
 
 
 @dataclass(frozen=True)
@@ -245,3 +254,6 @@ class Engine:
 
     def set_name(self, key: str, name: str) -> tuple:
         return set_name(key, name, self.state)
+
+    def set_title(self, key: str, title: str) -> tuple:
+        return set_title(key, title, self.state)

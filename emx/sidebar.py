@@ -339,25 +339,27 @@ class Closer(threading.Thread):
 
 
 class Renamer(threading.Thread):
-    """Renames a session off the curses thread by typing `/rename` into its open viewer.
+    """Renames a session off the curses thread by typing `/rename` into its own pane.
 
-    It types only once a fresh listing shows the session running, the
-    viewer's screen shows this session's empty prompt, and tmux, in the same
-    command that types, finds none of that changed and his focus still on
-    the panel. A working session is typed into too: Claude Code runs
+    It types only once a fresh listing shows the session running, its pane
+    (tagged with its key and agent) shows an empty prompt, and tmux, in the
+    same command that types, finds none of that changed and his focus still
+    on the panel. A working session is typed into too: Claude Code runs
     `/rename` as a command without ending the turn, queueing it when it must.
     The line goes in without Enter. Enter follows only after a second look
     finds the prompt holding that line alone, again through tmux's check; a
     prompt that changed in between (a dialog opened, a draft added) gets no
     Enter, and the line is cleared if the prompt still holds it alone. Then
-    it waits for the listing to show the new name. `result` is (renamed,
-    message, typed).
+    it waits for the listing to show the new name, which the transcript
+    reader records from Claude's `custom-title` entry; `named` wakes it.
+    `result` is (renamed, message, typed).
     """
 
-    def __init__(self, engine: Engine, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
+    def __init__(self, engine: Engine, tmux: Tmux, rename: core.Rename, panel: str,
+                 named: threading.Event | None = None):
         super().__init__(daemon=True)
-        self.engine, self.tmux, self.rename = engine, tmux, rename
-        self.panel, self.flagged = panel, flagged
+        self.engine, self.tmux, self.rename, self.panel = engine, tmux, rename, panel
+        self.named = named or threading.Event()
         self.result = None
 
     def run(self) -> None:
@@ -377,7 +379,7 @@ class Renamer(threading.Thread):
             if viewer is None:
                 return False, core.viewer_closed_text(self.rename), False
             screen = self.read_screen(viewer)
-            refusal = core.rename_screen_refusal(self.rename, session, sessions, screen)
+            refusal = core.rename_screen_refusal(self.rename, screen)
             if refusal:
                 return False, refusal, False
             gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
@@ -392,7 +394,7 @@ class Renamer(threading.Thread):
                 return False, refusal, False
         except TmuxError as exc:
             return False, f"tmux: {exc}", False
-        unsent = self.submit(viewer, session, sessions)
+        unsent = self.submit(viewer)
         if unsent is not None:
             return unsent
         name, last = self.wait_for_name()
@@ -402,21 +404,21 @@ class Renamer(threading.Thread):
         return done, core.renamed_text(self.rename, name, prompt_empty, queued), True
 
     def read_screen(self, viewer: Pane) -> core.RenameScreen:
-        captured = self.tmux.capture(viewer.id)
         x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
         line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-        return core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+        return core.RenameScreen(line, below, x, y, shown, width, in_mode)
 
-    def submit(self, viewer: Pane, session, sessions) -> tuple | None:
+    def submit(self, viewer: Pane) -> tuple | None:
         """None once Enter went in on the line alone, else the result for a line left unsent. Nothing here may press Enter on a prompt that changed since the line was typed."""
         unconfirmed = False
         try:
             screen = self.read_screen(viewer)
             deadline = time.monotonic() + PROMPT_SETTLE_SECONDS
-            while core.typed_line_arriving(self.rename, screen) and time.monotonic() < deadline:
+            # Claude Code can draw the line in steps, `/rename` with its grey `[name]` hint first, so a line not yet alone is read again.
+            while not core.prompt_has_only_line(self.rename, screen) and time.monotonic() < deadline:
                 time.sleep(PROMPT_SETTLE_STEP)
                 screen = self.read_screen(viewer)
-            if core.typed_line_stands(self.rename, session, sessions, screen):
+            if core.prompt_has_only_line(self.rename, screen):
                 gate = core.type_gate(
                     viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x,
                 )
@@ -462,6 +464,7 @@ class Renamer(threading.Thread):
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         last = None
         while True:
+            self.named.set()
             sessions, _ = fetch_sessions(self.engine)
             session, fresh = core.checked_row(sessions, self.rename.id)
             if fresh and session is not None:
@@ -532,7 +535,7 @@ class Interrupter(threading.Thread):
 
     def screen(self, pane: str) -> core.RenameScreen:
         x, y, shown, width, in_mode = self.tmux.prompt_probe(pane)
-        return core.RenameScreen("", "", "", x, y, shown, width, in_mode, False)
+        return core.RenameScreen("", "", x, y, shown, width, in_mode)
 
     def wait_until_stopped(self) -> bool | None:
         """True once a listing shows it stopped working, False if it still is at the deadline, None once a listing that worked no longer shows it."""
@@ -837,6 +840,11 @@ class Transcripts(threading.Thread):
     name in each project folder, which is retried later, backing off, rather
     than on every pass.
 
+    The name set by `/rename` (his own, or the one emx typed) and the title
+    Claude gives an unnamed session are recorded into emx's registry when
+    they differ from the row's, each once per value, so the next listing
+    carries them; `wake` cuts the wait short while a rename waits for it.
+
     A session reopened after Claude Code continued it elsewhere can have a
     file with no turn in it; the earlier transcript names it in a
     `continued-in` entry. Then the transcript read is the nearest earlier
@@ -845,9 +853,12 @@ class Transcripts(threading.Thread):
     file says something never looks.
     """
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, engine: Engine | None = None):
         super().__init__(daemon=True)
-        self.root = root
+        self.root, self.engine = root, engine
+        self.wake = threading.Event()
+        self.recorded = {}
+        self.names = {}
         self.lock = threading.Lock()
         self.wanted = {}
         self.found = {}
@@ -865,6 +876,7 @@ class Transcripts(threading.Thread):
     def want(self, sessions) -> None:
         with self.lock:
             self.wanted = {s.id: (s.cwd, s.session_id) for s in sessions if s.session_id}
+            self.names = {s.id: (s.name, s.named) for s in sessions}
 
     def run(self) -> None:
         while True:
@@ -872,17 +884,20 @@ class Transcripts(threading.Thread):
                 self.read_all()
             except Exception:
                 pass
-            time.sleep(TRANSCRIPT_SECONDS)
+            self.wake.wait(TRANSCRIPT_SECONDS)
+            self.wake.clear()
 
     def read_all(self) -> None:
         with self.lock:
-            wanted = dict(self.wanted)
+            wanted, names = dict(self.wanted), dict(self.names)
         self.reached, self.touched = set(), set()
         for sid, (cwd, uuid) in wanted.items():
             try:
-                self.read_one(sid, cwd, uuid)
+                self.read_one(sid, cwd, uuid, names.get(sid))
             except Exception:
                 continue
+        for sid in set(self.recorded) - set(wanted):
+            del self.recorded[sid]
         uuids = {uuid for _, uuid in wanted.values()}
         for uuid in set(self.paths) - uuids:
             del self.paths[uuid]
@@ -900,14 +915,17 @@ class Transcripts(threading.Thread):
                 if self.found.pop(sid, None) is not None:
                     self.changed = True
 
-    def read_one(self, sid: str, cwd: str, uuid: str) -> None:
+    def read_one(self, sid: str, cwd: str, uuid: str, shown: tuple | None = None) -> None:
         path = self.locate(cwd, uuid)
         if path is None:
             return
         kept = self.read_file(path)
         if kept is None:
             return
-        found = kept[2]
+        if kept[2] is not None and shown is not None:
+            self.record_names(sid, kept[2], *shown)
+        # A file holding only titles says nothing about what the session did.
+        found = kept[2] if kept[2] is not None and kept[2].latest else None
         seen, current, hops = {path}, path, 0
         while found is None and hops < core.MAX_CONTINUATION_HOPS:
             hops += 1
@@ -919,14 +937,26 @@ class Transcripts(threading.Thread):
             if read is None:
                 break
             current = earlier
-            if read[2] is not None:
+            if read[2] is not None and read[2].latest:
                 kept, found = read, read[2]
-        path, stamp, found = kept
+        path, stamp, _ = kept
         with self.lock:
             self.stamps[sid] = (path, *stamp)
             if self.found.get(sid) != found:
                 self.found[sid] = found
                 self.changed = True
+
+    def record_names(self, sid: str, found, name: str, named: bool) -> None:
+        """Record the transcript's latest `/rename` name, or for an unnamed session Claude's title, when the row shows another. A value written once is not written again, though the listing may not show it yet."""
+        if self.engine is None:
+            return
+        done = self.recorded.setdefault(sid, {})
+        if found.title and found.title != name and done.get("name") != found.title:
+            if self.engine.set_name(sid, found.title)[0]:
+                done["name"] = found.title
+        elif not named and found.ai_title and found.ai_title != name and done.get("title") != found.ai_title:
+            if self.engine.set_title(sid, found.ai_title)[0]:
+                done["title"] = found.ai_title
 
     def read_file(self, path: str) -> tuple | None:
         """(path, (mtime_ns, size), what its end says) for the transcript at `path`, read again only when its stat changed; None when it can't be read."""
@@ -1335,7 +1365,7 @@ class Poller(threading.Thread):
         self.wake = threading.Event()
         self.result = None
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
-        self.transcripts = Transcripts(claude_home())
+        self.transcripts = Transcripts(claude_home(), engine)
         self.summaries = Summaries(engine.claude, self.transcripts)
         self.voice = Voice()
         self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice)
@@ -2022,21 +2052,14 @@ class App:
         if session.id in self.closing:
             self.say(core.still_closing(session.name))
             return
-        try:
-            has_viewer = core.live_viewer(self.tmux.panes(), session.id) is not None
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
-            return
-        blocked = core.rename_blocked(
-            bool(self.list_error), self.renamer.rename if self.renamer else None, session, has_viewer,
-        )
+        blocked = core.rename_blocked(bool(self.list_error), self.renamer.rename if self.renamer else None, session)
         if blocked:
             self.say(blocked, error=True)
             return
         self.rename_gen += 1
         self.rename_edit = {
             "id": session.id, "old": session.name, "text": core.rename_start(session), "hint": "",
-            "offered": [], "gen": self.rename_gen,
+            "offered": [], "gen": self.rename_gen, "unnamed": core.unnamed(session),
         }
         self.rename_misses = {}
         self.say("")
@@ -2066,7 +2089,7 @@ class App:
         if rename is None:
             return
         self.renaming = core.rename_started(self.renaming, rename)
-        self.renamer = Renamer(self.engine, self.tmux, rename, self.me, self.flagged_viewers)
+        self.renamer = Renamer(self.engine, self.tmux, rename, self.me, self.poller.transcripts.wake)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
 
@@ -2085,7 +2108,7 @@ class App:
             return
         sid = edit["id"]
         self.namer = Namer(
-            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["old"] == sid, edit["offered"],
+            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["unnamed"], edit["offered"],
         )
         self.namer_gen = edit["gen"]
         edit["hint"] = ""

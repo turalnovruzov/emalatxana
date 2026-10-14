@@ -40,6 +40,12 @@ class Session:
     session_id: str = ""
     transcript: str = ""
     turned: bool = True
+    named: bool = True
+
+
+def unnamed(session: Session) -> bool:
+    """Whether the session has no name of its own (from emx's start or a `/rename`): its row then shows Claude's title, or a short id before there is one."""
+    return not session.named
 
 
 def _text(value) -> str:
@@ -406,8 +412,8 @@ class Rename:
 
 
 def rename_start(session: Session) -> str:
-    """The text the inline edit opens with: the name, or nothing for an unnamed session, whose name is its id."""
-    return "" if session.name == session.id else session.name
+    """The text the inline edit opens with: the name, or nothing for an unnamed session, whose row shows a title or short id instead."""
+    return "" if unnamed(session) else session.name
 
 
 def name_char_allowed(ch: str) -> bool:
@@ -452,11 +458,11 @@ def live_viewer(panes, sid: str):
     return next((p for p in panes if p.session == sid and p.agent and not p.dead), None)
 
 
-def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None, has_viewer: bool) -> str | None:
+def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None) -> str | None:
     """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
 
-    emx renames only by typing `/rename` into a viewer already open on a
-    running session: it never attaches just to rename.
+    emx renames only by typing `/rename` into a running session's own pane;
+    it never starts one just to rename it.
     """
     if busy is not None:
         return f"Still renaming {busy.old}…"
@@ -466,8 +472,6 @@ def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | N
         return None
     if not session.running:
         return f"{session.name} isn't running, so emx can't rename it. Open it first."
-    if not has_viewer:
-        return f"Open {session.name} once, then press ctrl+r to rename it."
     return None
 
 
@@ -492,42 +496,15 @@ def viewer_closed_text(rename: Rename) -> str:
     return f"{rename.old}'s viewer has closed, so emx didn't rename it."
 
 
-def viewer_identity(session: Session, sessions, captured: str, pane_width: int) -> str:
-    """Whether a viewer's screen shows `session`: "ok", "other", or "ambiguous" when another listed session would look the same.
-
-    The rule over the input box is all a viewer shows of which session it
-    is: the name, cut to fit with an ellipsis, or no name at all for an
-    unnamed session. Two sessions can share a name, a cut name can fit
-    several, and every unnamed session draws the same bare rule, so the
-    screen proves the session only when no other running session fits it:
-    a stopped one can't be on screen without being reopened.
-    """
-    if main_view_state(captured, "", pane_width) == "agent_view":
-        return "other"
-    shown = rule_name(captured, pane_width)
-    if shown is None:
-        return "other"
-    others = [s for s in sessions if s.id != session.id and s.running]
-    if session.name == session.id:
-        if shown:
-            return "other"
-        return "ambiguous" if any(s.name == s.id for s in others) else "ok"
-    if not shown or not _names_match(shown, session.name):
-        return "other"
-    return "ambiguous" if any(s.name != s.id and _names_match(shown, s.name) for s in others) else "ok"
-
-
 @dataclass(frozen=True)
 class RenameScreen:
-    """A session's viewer at the moment emx would type `/rename` into it.
+    """A session's pane at the moment emx would type `/rename` or send Esc into it.
 
-    `captured` is its plain text, `line` and `below` the cursor's line and
-    the one under it with their styling (`empty_prompt`); `in_mode` says
-    tmux has it in a mode such as copy mode, after a scroll; `flagged` says
-    emx has caught it showing something else (`latch_off_main`).
+    `line` and `below` are the cursor's line and the one under it with their
+    styling (`empty_prompt`); `in_mode` says tmux has it in a mode such as
+    copy mode, after a scroll.
     """
 
-    captured: str
     line: str
     below: str
     cursor_x: int
@@ -535,28 +512,21 @@ class RenameScreen:
     cursor_shown: bool
     width: int
     in_mode: bool
-    flagged: bool
 
 
-def rename_screen_refusal(rename: Rename, session: Session, sessions, screen: RenameScreen) -> str | None:
-    """Why emx may not type `/rename` into the session's viewer as it is on screen now, or None.
+def rename_screen_refusal(rename: Rename, screen: RenameScreen) -> str | None:
+    """Why emx may not type `/rename` into the session's pane as it is on screen now, or None.
 
-    In a mode, the keys would drive tmux, not Claude Code. The viewer must
-    show this session and no other (`viewer_identity`), and its prompt must
-    be empty (`empty_prompt`), so a draft of his is never touched and no
-    dialog or menu takes the keys.
+    Which session the pane holds is proven by its tags, never by its
+    screen. In a mode, the keys would drive tmux, not Claude Code. The
+    prompt must be empty (`empty_prompt`), so a draft of his is never
+    touched and no dialog or menu takes the keys.
     """
     if screen.in_mode:
         return f"{rename.old}'s viewer is scrolled back, so emx didn't type into it. Press q in it, then rename again."
-    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
-    if identity == "ambiguous" and session.name == session.id:
-        return (f"{rename.old} and another running session are both unnamed, so emx can't tell their viewers apart."
-                f" Rename it in the session itself: /rename <name>.")
-    if identity == "ambiguous":
-        return f"{rename.old}'s viewer looks the same as another session's, so emx didn't type into it."
-    if identity != "ok":
-        return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
     if not empty_prompt(screen.line, screen.below, screen.cursor_x, screen.cursor_shown, screen.width):
+        if not screen.cursor_shown:
+            return f"{rename.old}'s viewer isn't showing its prompt, so emx didn't rename it."
         return f"{rename.old}'s prompt isn't empty, so emx didn't type into it."
     return None
 
@@ -566,34 +536,6 @@ def prompt_has_only_line(rename: Rename, screen: RenameScreen) -> bool:
     return not screen.in_mode and prompt_holds_only(
         screen.line, screen.below, screen.cursor_x, screen.cursor_shown, screen.width, rename_line(rename.new),
     )
-
-
-def typed_line_stands(rename: Rename, session: Session, sessions, screen: RenameScreen) -> bool:
-    """Whether the screen, looked at after `/rename` was typed and before Enter, still shows this session's prompt holding that line alone.
-
-    A dialog that opened in between, a draft of his added to it, or
-    a viewer swapped for another session's all fail it, and then Enter is
-    not sent.
-    """
-    if not prompt_has_only_line(rename, screen):
-        return False
-    identity = "other" if screen.flagged else viewer_identity(session, sessions, screen.captured, screen.width)
-    return identity == "ok"
-
-
-def typed_line_arriving(rename: Rename, screen: RenameScreen) -> bool:
-    """Whether the prompt shows only the start of the `/rename` line, cursor right after it: the keys are in but not all drawn yet."""
-    if screen.in_mode or not screen.cursor_shown:
-        return False
-    text = "".join(ch for ch, _ in _styled_cells(screen.line)).replace("\xa0", " ").rstrip()
-    if not text.startswith("❯ "):
-        return False
-    shown, line = text[2:], rename_line(rename.new)
-    gap = screen.cursor_x - PROMPT_TEXT_X - display_width(shown)
-    if gap < 0:
-        return False
-    shown += " " * gap
-    return 0 < len(shown) < len(line) and line.startswith(shown)
 
 
 def line_unsent_text(rename: Rename, cleared: bool, unconfirmed: bool = False) -> str:
@@ -736,7 +678,7 @@ def renamed_to(rename: Rename, session: Session | None) -> str | None:
     (👨 U+200D 👩 U+200D 👧) into spaces), so any new name counts,
     and is what emx reports.
     """
-    if session is None or session.name in (rename.old, session.id):
+    if session is None or unnamed(session) or session.name == rename.old:
         return None
     return session.name
 
@@ -789,7 +731,7 @@ def pending_renames(renaming: Mapping, sessions, in_flight: str | None, now: flo
 
 def viewer_names(session: Session, renaming: Mapping) -> list:
     """The names a viewer's rule may show for `session`: its own ("" when unnamed), then the new name of a rename still pending."""
-    names = ["" if session.name == session.id else session.name]
+    names = ["" if unnamed(session) else session.name]
     if session.id in renaming:
         names.append(renaming[session.id][1])
     return names
@@ -2238,18 +2180,6 @@ def view_state_for(captured: str, names, pane_width: int) -> str:
     return "ok" if "ok" in states else states[0]
 
 
-def rule_name(captured: str, pane_width: int) -> str | None:
-    """The session name on the rule over the input box, "" for a pane-wide rule with no name (an unnamed session's), or None when no input box is found."""
-    lines = [line for line in (strip_ansi(raw).rstrip() for raw in captured.splitlines()) if line.strip()]
-    above = _line_above_prompt(lines, pane_width)
-    if above is None:
-        return None
-    if _FULL_RULE.match(above):
-        return ""
-    match = _NAME_RULE.match(above)
-    return match.group(1) if match else None
-
-
 def _line_above_prompt(lines: list, pane_width: int) -> str | None:
     """The line over the input box: the last `❯` line near the bottom with a pane-wide rule under it.
 
@@ -2505,8 +2435,10 @@ class Transcript:
     `tool_about` is the description the call gave of itself, and `tool_lines`
     the call in full for the peek. `reply_line` is the first line of `reply`.
     `answered` means `reply` came after the latest prompt. `latest` says
-    which of "prompt", "reply", "tool" and "interrupted" came last. Times are
-    epoch milliseconds.
+    which of "prompt", "reply", "tool" and "interrupted" came last, and is
+    empty when the text holds only titles. `title` is the latest name set
+    with `-n` or `/rename`, `ai_title` the latest title Claude gave the
+    session. Times are epoch milliseconds.
     """
 
     prompt: str = ""
@@ -2522,6 +2454,8 @@ class Transcript:
     question: bool = False
     pending: bool = False
     latest: str = ""
+    title: str = ""
+    ai_title: str = ""
 
 
 def transcript_dir(cwd: str) -> str:
@@ -2599,6 +2533,7 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
     if partial:
         lines = lines[1:]
     prompt = reply = tool = None
+    titles = {"custom-title": "", "ai-title": ""}
     batch, results, seq, marks = [], set(), 0, {}
     for raw in lines:
         try:
@@ -2608,6 +2543,9 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
         if not isinstance(entry, dict) or entry.get("isSidechain") is True or entry.get("isCompactSummary"):
             continue
         kind = entry.get("type")
+        if kind in titles:
+            titles[kind] = _one_line(entry.get("customTitle" if kind == "custom-title" else "aiTitle")) or titles[kind]
+            continue
         if kind not in ("user", "assistant") or not isinstance(entry.get("message"), dict):
             continue
         at = _iso_ms(entry.get("timestamp"))
@@ -2634,8 +2572,10 @@ def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
                 tool, marks["tool"] = (block["name"], given, at, block.get("id")), seq
                 batch.append(tool)
     if prompt is None and reply is None and tool is None:
-        return None
-    seen = Transcript(latest=max(marks, key=marks.get))
+        if not any(titles.values()):
+            return None
+        return Transcript(title=titles["custom-title"], ai_title=titles["ai-title"])
+    seen = Transcript(latest=max(marks, key=marks.get), title=titles["custom-title"], ai_title=titles["ai-title"])
     if prompt is not None:
         seen = replace(seen, prompt=prompt[0], prompt_at=prompt[1])
     if reply is not None:
@@ -2696,7 +2636,7 @@ def tail_bytes(found: Transcript | None, read: int, size: int) -> int | None:
         return None
     if read <= 0:
         return min(size, TRANSCRIPT_FIRST_BYTES)
-    if found is not None or read >= size or read >= TRANSCRIPT_MAX_BYTES:
+    if (found is not None and found.latest) or read >= size or read >= TRANSCRIPT_MAX_BYTES:
         return None
     return min(size, read * 2, TRANSCRIPT_MAX_BYTES)
 
@@ -3663,7 +3603,9 @@ def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupte
     tag, so a leftover `claude attach` viewer (a key, no agent) never counts.
     A running session no hook has reported on since this run began reads
     `starting` (Needs input), as does one whose last record is a `SessionEnd`
-    from the run before. An interrupted one reads Idle. Test sessions are
+    from the run before. An interrupted one reads Idle. The name is the
+    session's own (the record's, else the hooks' `session_title`), else the
+    title Claude gave it, else the key's first 8 characters. Test sessions are
     hidden unless `EMX_SHOW_TEST_SESSIONS=1`, by the name and folder in the
     record.
     """
@@ -3691,11 +3633,13 @@ def engine_sessions(records: list, hook_states: Mapping, panes: list, interrupte
             state = hooked.state
         if running and state in ("working", "blocked") and interrupted.get(key):
             state, status, waiting = "working", "idle", ""
+        own = name or hooked.title
         sessions.append(
             Session(
-                id=key, name=name or hooked.title or key[:8], cwd=cwd, state=state, status=status, waiting_for=waiting,
-                started_at=_number(rec.get("started_at")), running=running,
+                id=key, name=own or _text(rec.get("title")) or key[:8], cwd=cwd, state=state, status=status,
+                waiting_for=waiting, started_at=_number(rec.get("started_at")), running=running,
                 session_id=hooked.claude_sid or _text(rec.get("session_id")), transcript=hooked.transcript, turned=turned,
+                named=bool(own),
             )
         )
     return sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0))

@@ -346,6 +346,14 @@ class EngineStore(StoreCase):
         self.assertFalse(engine.set_name(OTHER, "x", state=self.state)[0])
         self.assertFalse(engine.set_name("..", "x", state=self.state)[0])
 
+    def test_set_title_records_claudes_title_beside_the_name(self):
+        self.write_record()
+        self.assertEqual(engine.set_title(KEY, "Fixing the login bug", state=self.state), (True, None))
+        with open(os.path.join(self.key_dir(), "session.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual((record["title"], record["cwd"]), ("Fixing the login bug", self.folder))
+        self.assertFalse(engine.set_title("..", "x", state=self.state)[0])
+
 
 class EngineHandle(StoreCase):
     """The object the panel's workers hold: every call goes to the same state folder, tmux server and claude command."""
