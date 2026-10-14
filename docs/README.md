@@ -1,4 +1,4 @@
-<!-- template: product-owner @ 0.2.0 — shared; change it through Codery -->
+<!-- template: product-owner @ 0.4.0 — shared; change it through Codery -->
 
 # emalatxana docs
 
@@ -10,7 +10,7 @@ The project's two contracts sit outside this folder and outrank everything in it
 
 ## If you are…
 
-**…about to do something a later session should keep doing the same way**, read [conventions.md](./conventions.md). House style for this codebase: each entry is rule → why → minimal example → gotcha. Entries arrive from the reviewer noticing that a change established a convention.
+**…about to do something a later session should keep doing the same way**, read [conventions.md](./conventions.md). House style for this codebase: each entry is rule → why → minimal example → gotcha. Entries arrive from the auditor noticing that a change established a convention.
 
 **…questioning *why* the codebase does X this way**, read [adr/](./adr/README.md). Numbered decision records for load-bearing choices, with the alternatives that lost. A new library, a new third-party service, or a major version bump always earns one.
 
