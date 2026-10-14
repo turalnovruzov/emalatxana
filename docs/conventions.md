@@ -254,6 +254,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the pref lags by up to `HOUSEKEEP_SECONDS`; `select-pane` of the panel, `resize-pane -x` and `swap-pane -d` all unzoom, so width and layout code must check `zoomed` and hold while hidden.
 
+### A command Claude Code runs as a hook never fails, speaks or reads past its folder
+
+1. **Rule**: a command Claude Code runs as a hook always exits 0, writes nothing to stdout or stderr, reads its whole stdin, records only allowlisted scalar fields, and writes only into an existing emx session folder named by a key that passes `core.is_session_id`.
+2. **Why**: Claude Code reads a hook's stdout as context or a decision and exit 2 as "block"; a broken hook must cost emx a state update, never cost him his session.
+3. **Minimal example**:
+   ```python
+   return f"{words} >/dev/null 2>&1; exit 0"   # engine.hook_command: the shell forces success and silence
+   except BaseException: pass; return 0        # cli.hook: everything else is swallowed
+   ```
+4. **Gotcha**: an interpreter that cannot open its script exits 2 before any Python runs, so success must be forced by the shell, never by the script; payloads can be megabytes, so read to the end and keep only the allowlisted fields.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

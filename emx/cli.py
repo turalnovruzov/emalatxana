@@ -10,11 +10,10 @@ import signal
 import sys
 import time
 
-from emx import __version__, core
+from emx import BIN, __version__, core
 from emx.tmux import HUSH_OPT, ROLE, SESSION, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
-BIN = os.path.join(os.path.dirname(HERE), "bin", "emx")
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
 CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
 
@@ -196,7 +195,7 @@ def left_check(args: list) -> int:
         return 1
 
 
-HOOK_STDIN_BYTES = 256 * 1024
+HOOK_STDIN_BYTES = 32 * 1024 * 1024
 
 
 def hook(args: list) -> int:

@@ -4,6 +4,7 @@ import os
 import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,10 +108,17 @@ class EngineStore(StoreCase):
             hooks = json.load(fh)["hooks"]
         self.assertEqual(set(hooks), set(core.HOOK_EVENTS))
         for event, groups in hooks.items():
-            words = shlex.split(groups[0]["hooks"][0]["command"])
-            self.assertEqual(words[0], "exec", event)
-            self.assertEqual(words[2], "-I", event)
-            self.assertEqual(words[3:], [cli.BIN, "hook", self.state, session.id], event)
+            command = groups[0]["hooks"][0]["command"]
+            self.assertTrue(command.endswith(" >/dev/null 2>&1; exit 0"), event)
+            words = shlex.split(command[: -len(" >/dev/null 2>&1; exit 0")])
+            self.assertEqual(words[1], "-I", event)
+            self.assertEqual(words[2:], [cli.BIN, "hook", self.state, session.id], event)
+
+    def test_a_hook_command_exits_0_silently_when_the_script_is_gone(self):
+        with mock.patch.object(engine, "BIN", os.path.join(self.dir, "missing", "emx")):
+            command = engine.hook_command(self.state, KEY)
+        done = subprocess.run(["sh", "-c", command], input="{}", capture_output=True, text=True, timeout=30)
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
 
     def test_start_opens_one_window_in_the_folder_and_tags_the_pane(self):
         tmux, (session, _) = self.start(message="fix it")
@@ -230,6 +238,14 @@ class EngineStore(StoreCase):
         self.assertEqual(lines[-1][:10], "line-01999")
         self.assertLess(len(lines), 2000)
         self.assertEqual(engine._tail_lines(os.path.join(self.dir, "missing.jsonl")), [])
+
+    def test_a_complete_first_line_is_kept_when_the_window_starts_on_a_line_boundary(self):
+        path = os.path.join(self.dir, "aligned.jsonl")
+        Path(path).write_text("".join(f"{n:09d}\n" for n in range(100)))
+        lines = engine._tail_lines(path, limit=50)
+        self.assertEqual(lines, [f"{n:09d}" for n in range(95, 100)])
+        lines = engine._tail_lines(path, limit=45)
+        self.assertEqual(lines, [f"{n:09d}" for n in range(96, 100)])
 
     def test_the_state_comes_from_the_end_of_a_long_event_file(self):
         self.write_record()

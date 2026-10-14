@@ -4459,6 +4459,23 @@ class FoldEvents(unittest.TestCase):
         self.assertEqual(self.fold(event("UserPromptSubmit"), note).waiting_for, "Claude needs your permission")
         self.assertEqual(self.fold(event("PermissionRequest", tool_name="Bash"), note).waiting_for, "approve Bash")
 
+    def test_a_permission_notification_blocks_a_working_session_with_its_message(self):
+        note = event("Notification", notification_type="permission_prompt", message="Claude needs your permission")
+        state = self.fold(event("UserPromptSubmit"), note)
+        self.assertEqual((state.state, state.waiting_for), ("blocked", "Claude needs your permission"))
+
+    def test_session_start_after_compaction_keeps_state_and_turn_but_follows_the_new_ids(self):
+        new = "22222222-2222-4222-8222-222222222222"
+        state = self.fold(
+            event("UserPromptSubmit"), event("SessionStart", source="compact", sid=new, transcript_path="/c/p/new.jsonl")
+        )
+        self.assertEqual((state.state, state.turned, state.claude_sid, state.transcript), ("working", True, new, "/c/p/new.jsonl"))
+
+    def test_a_cut_off_payload_still_gives_its_leading_fields(self):
+        text = json.dumps({"session_id": KEY, "hook_event_name": "PostToolUse", "cwd": "/w", "tool_response": "y" * 500})[:300]
+        record = core.hook_record(text, 5)
+        self.assertEqual((record["event"], record["session_id"], record["cwd"]), ("PostToolUse", KEY, "/w"))
+
     def test_other_notifications_change_nothing(self):
         state = self.fold(event("Stop"), event("Notification", notification_type="idle_prompt", message="waiting"))
         self.assertEqual(state.state, "done")

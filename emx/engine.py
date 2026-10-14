@@ -16,8 +16,7 @@ import sys
 import time
 import uuid
 
-from emx import core
-from emx.cli import BIN
+from emx import BIN, core
 from emx.tmux import AGENT_OPT, SESSION_OPT, Tmux, TmuxError
 
 AGENT = "claude"
@@ -37,8 +36,9 @@ def session_folder(state, key: str) -> str:
 
 
 def hook_command(state, key: str) -> str:
-    """The command every hook of one session runs. The state folder is written in so a hook never re-derives it from the pane's environment, which comes from the tmux server, not from the emx that wrote the file."""
-    return "exec " + " ".join(shlex.quote(a) for a in [sys.executable, "-I", BIN, "hook", str(state), key])
+    """The command every hook of one session runs. The state folder is written in so a hook never re-derives it from the pane's environment, which comes from the tmux server, not from the emx that wrote the file. The shell forces exit 0 and silence: an interpreter that cannot open its script exits 2, which Claude Code reads as "block"."""
+    words = " ".join(shlex.quote(a) for a in [sys.executable, "-I", BIN, "hook", str(state), key])
+    return f"{words} >/dev/null 2>&1; exit 0"
 
 
 def _now_ms() -> int:
@@ -78,12 +78,14 @@ def _tail_lines(path: str, limit: int = READ_TAIL_BYTES) -> list:
         with open(path, "rb") as fh:
             size = fh.seek(0, os.SEEK_END)
             start = max(0, size - limit)
-            fh.seek(start)
-            text = fh.read().decode("utf-8", errors="replace")
+            fh.seek(max(0, start - 1))
+            window = fh.read()
+            on_boundary = start == 0 or window[:1] == b"\n"
+            text = (window if start == 0 else window[1:]).decode("utf-8", errors="replace")
     except FileNotFoundError:
         return []
     lines = text.splitlines()
-    return lines[1:] if start > 0 else lines
+    return lines if on_boundary else lines[1:]
 
 
 def _events(state, key: str) -> list:
@@ -91,7 +93,7 @@ def _events(state, key: str) -> list:
     for line in _tail_lines(os.path.join(session_folder(state, key), "events.jsonl")):
         try:
             rec = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(rec, dict):
             records.append(rec)

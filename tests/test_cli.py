@@ -298,6 +298,14 @@ class HookCommand(unittest.TestCase):
         self.assertIsInstance(record["at"], int)
         self.assertFalse(os.path.exists(os.path.join(self.root, "elsewhere")))
 
+    def test_a_huge_payload_is_still_recorded(self):
+        big = "x" * (1024 * 1024 + 1)
+        done = self.run_hook(self.payload(hook_event_name="PostToolUse", tool_name="Read", tool_response={"content": big}))
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "", ""))
+        with open(os.path.join(self.folder, "events.jsonl"), encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        self.assertEqual([json.loads(line)["event"] for line in lines], ["PostToolUse"])
+
     def test_bad_json_appends_nothing_and_prints_nothing(self):
         for text in ("", "not json", "[1]", json.dumps({"session_id": self.KEY})):
             done = self.run_hook(text)

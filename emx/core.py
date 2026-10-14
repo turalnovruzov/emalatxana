@@ -3555,14 +3555,51 @@ HOOK_TIMEOUT_SECONDS = 10
 
 def hook_settings(command: str) -> dict:
     """The settings file given to one session with `--settings`: the same hook command on every event it needs."""
-    entry = [{"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}]
-    return {"hooks": {event: json.loads(json.dumps(entry)) for event in HOOK_EVENTS}}
+    return {
+        "hooks": {
+            event: [{"hooks": [{"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}]}]
+            for event in HOOK_EVENTS
+        }
+    }
 
 
 _HOOK_TEXT_KEYS = ("source", "reason", "notification_type", "tool_name")
 _EVENT_NAME = re.compile(r"[A-Za-z]{1,40}")
 HOOK_MESSAGE_CHARS = 200
 HOOK_PATH_CHARS = 1000
+
+
+def _leading_fields(text: str) -> dict:
+    """The top-level `"key": value` pairs at the start of a JSON object that is cut off or otherwise unparseable, up to the first pair that cannot be read. Claude Code puts its scalar fields before a tool's input and response, so a capped payload still gives them."""
+    decoder, found = json.JSONDecoder(), {}
+
+    def skip(i):
+        while i < len(text) and text[i] in " \t\r\n":
+            i += 1
+        return i
+
+    pos = skip(0)
+    if text[pos:pos + 1] != "{":
+        return found
+    pos += 1
+    try:
+        while True:
+            pos = skip(pos)
+            if text[pos:pos + 1] != '"':
+                break
+            name, pos = decoder.raw_decode(text, pos)
+            pos = skip(pos)
+            if text[pos:pos + 1] != ":":
+                break
+            value, pos = decoder.raw_decode(text, skip(pos + 1))
+            found[name] = value
+            pos = skip(pos)
+            if text[pos:pos + 1] != ",":
+                break
+            pos += 1
+    except (ValueError, RecursionError):
+        pass
+    return found
 
 
 def hook_record(payload_text: str, now_ms: float) -> dict | None:
@@ -3574,7 +3611,10 @@ def hook_record(payload_text: str, now_ms: float) -> dict | None:
     the transcript's timestamps.
     """
     try:
-        payload = json.loads(payload_text)
+        try:
+            payload = json.loads(payload_text)
+        except ValueError:
+            payload = _leading_fields(payload_text)
         if not isinstance(payload, dict):
             return None
         event, sid = payload.get("hook_event_name"), payload.get("session_id")
@@ -3637,9 +3677,7 @@ def fold_events(records) -> HookState:
     wins; only other reasons end the session.
 
     A message queued while Claude works gives a `Stop` and, seconds later,
-    a `PreToolUse`. That reads Done and then Working here; the notice for the
-    Done is dropped by the notice worker when the session is no longer Done
-    by the time it settles (`NOTICE_SETTLE_SECONDS`).
+    a `PreToolUse`. That reads Done and then Working here.
     """
     state = HookState()
     for rec in records:
@@ -3666,6 +3704,8 @@ def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
     tool = _one_line(rec.get("tool_name"))
     if event == "SessionStart":
         # A resumed session reads Idle, as a reopened background one did; a fresh one waits on him.
+        if rec.get("source") == "compact":
+            return replace(state)
         if rec.get("source") == "resume":
             return replace(state, state="working", status="idle", waiting_for="", turned=False)
         return replace(state, state="blocked", status="", waiting_for="", turned=False)
