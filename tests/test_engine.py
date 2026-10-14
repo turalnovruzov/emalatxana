@@ -1,11 +1,14 @@
+import ast
 import builtins
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -128,7 +131,7 @@ class EngineStore(StoreCase):
         self.assertEqual(words[:4], ["exec", "claude", "--session-id", session.id])
         self.assertEqual(words[4:6], ["--settings", os.path.join(self.key_dir(session.id), "settings.json")])
         self.assertEqual(words[-2:], ["--", "fix it"])
-        self.assertEqual(tmux.options, [("%7", SESSION_OPT, session.id), ("%7", AGENT_OPT, "claude")])
+        self.assertEqual(tmux.options, [("%7", AGENT_OPT, "claude"), ("%7", SESSION_OPT, session.id)])
 
     def test_the_returned_session_is_running_and_starting(self):
         _, (session, _) = self.start()
@@ -343,3 +346,106 @@ class EngineStore(StoreCase):
         self.assertEqual((record["name"], record["cwd"]), ("renamed", self.folder))
         self.assertFalse(engine.set_name(OTHER, "x", state=self.state)[0])
         self.assertFalse(engine.set_name("..", "x", state=self.state)[0])
+
+    def test_set_title_records_claudes_title_beside_the_name(self):
+        self.write_record()
+        self.assertEqual(engine.set_title(KEY, "Fixing the login bug", state=self.state), (True, None))
+        with open(os.path.join(self.key_dir(), "session.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        self.assertEqual((record["title"], record["cwd"]), ("Fixing the login bug", self.folder))
+        self.assertFalse(engine.set_title("..", "x", state=self.state)[0])
+
+    def overlapping(self, first, second):
+        """Run `first` and, while it holds the record it read, `second` on another thread: (whether `second` was still waiting then, the record after both)."""
+        self.write_record()
+        real, waiting = engine._read_record, []
+        mine = threading.current_thread()
+
+        def read_then_let_the_other_in(state, key):
+            record = real(state, key)
+            if threading.current_thread() is mine and not waiting:
+                other = threading.Thread(target=second)
+                other.start()
+                other.join(0.3)
+                waiting.append((other, other.is_alive()))
+            return record
+
+        with mock.patch.object(engine, "_read_record", read_then_let_the_other_in):
+            first()
+        other, blocked = waiting[0]
+        other.join(5)
+        with open(os.path.join(self.key_dir(), "session.json"), encoding="utf-8") as fh:
+            return blocked, json.load(fh)
+
+    def test_a_resume_and_a_rename_at_once_keep_both_fields(self):
+        blocked, record = self.overlapping(
+            lambda: engine.resume_command(KEY, "claude", state=self.state),
+            lambda: engine.set_name(KEY, "renamed", state=self.state),
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(record["name"], "renamed")
+        self.assertNotEqual(record["run_at"], 0)
+
+    def test_a_title_and_a_resume_at_once_keep_both_fields(self):
+        blocked, record = self.overlapping(
+            lambda: engine.set_title(KEY, "Fixing the login bug", state=self.state),
+            lambda: engine.resume_command(KEY, "claude", state=self.state),
+        )
+        self.assertTrue(blocked)
+        self.assertEqual(record["title"], "Fixing the login bug")
+        self.assertNotEqual(record["run_at"], 0)
+
+    def test_naming_a_forgotten_session_never_brings_its_folder_back(self):
+        self.write_record()
+        engine.forget(KEY, state=self.state)
+        self.assertFalse(engine.set_name(KEY, "x", state=self.state)[0])
+        self.assertFalse(os.path.exists(self.key_dir()))
+
+
+class EngineHandle(StoreCase):
+    """The object the panel's workers hold: every call goes to the same state folder, tmux server and claude command."""
+
+    def test_its_calls_reach_its_own_state_folder(self):
+        tmux = FakeTmux()
+        handle = engine.Engine(tmux, "claude", self.state)
+        session, error = handle.start(self.folder, "")
+        self.assertIsNone(error)
+        tmux.listed = [self.live(session.id)]
+        (listed,), _ = handle.list_sessions()
+        self.assertEqual((listed.id, listed.running), (session.id, True))
+        self.assertEqual(handle.set_name(session.id, "renamed"), (True, None))
+        command, _ = handle.resume_command(session.id)
+        self.assertEqual(shlex.split(command)[:3], ["exec", "claude", "--resume"])
+        self.assertEqual(handle.forget(session.id), (True, None))
+        self.assertEqual(os.listdir(os.path.join(self.state, "sessions")), [])
+
+
+SCANNED_WORDS = {"agents", "attach", "--bg"}
+
+
+class NoBackgroundServiceCalls(unittest.TestCase):
+    """No string in emx's code names a `claude agents`, `claude attach` or `claude --bg` call: emx holds every session itself. Docstrings are prose and are not scanned."""
+
+    def literals(self):
+        words = re.compile(r"[A-Za-z0-9_-]+")
+        found = []
+        for path in sorted(Path(cli.HERE).glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            docs = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+                    first = node.body[0]
+                    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                        docs.add(id(first.value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docs:
+                    found.append((path.name, node.lineno, set(words.findall(node.value))))
+        return found
+
+    def test_the_scan_reads_every_module(self):
+        names = {name for name, _, _ in self.literals()}
+        self.assertTrue({"core.py", "sidebar.py", "engine.py", "tmux.py", "cli.py"} <= names, names)
+
+    def test_no_literal_names_one(self):
+        hits = [(name, line, words & SCANNED_WORDS) for name, line, words in self.literals() if words & SCANNED_WORDS]
+        self.assertEqual(hits, [])

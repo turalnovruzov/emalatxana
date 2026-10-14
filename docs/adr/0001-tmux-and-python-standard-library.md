@@ -1,6 +1,6 @@
 # 0001. tmux and the Python Standard Library
 
-- **Status**: Accepted. Its rule that session data comes only from the `claude` CLI is to be replaced by [0005](./0005-emx-runs-agents-in-its-own-tmux.md) once #41 is built.
+- **Status**: Accepted; replaced in part by [0005](./0005-emx-runs-agents-in-its-own-tmux.md), built in [#41](https://github.com/turalnovruzov/emalatxana/issues/41) (emx 2.0.0). Its rule that session data comes only from the `claude` CLI (`claude agents`, `claude attach`, `claude --bg`), and the amendments' `claude stop`/`claude rm` close and hidden-viewer interrupt, no longer hold: emx starts and holds each session itself. tmux, the Python standard library, and the rule that emx never resumes a session on its own (only his open does) stand.
 - **Date**: 2026-10-07
 
 ## Context

@@ -1,6 +1,6 @@
 # 0005. emx runs every agent session itself, in its own private tmux
 
-- **Status**: Accepted (not built yet; [#41](https://github.com/turalnovruzov/emalatxana/issues/41))
+- **Status**: Accepted; built in [#41](https://github.com/turalnovruzov/emalatxana/issues/41) (emx 2.0.0), for Claude only. Hooks through `--settings` loaded and reported state, so no screen-reading fallback was built. Tural's answers on the open points (2026-10-13): after a reboot or crash every session shows Stopped and comes back only when he opens it (*"sure lets go with b"*); his existing `claude --bg` sessions are not listed and are moved by hand, once, on his word (*"maybe this should manual one time since i am the only user"*); remote use is not built. The major version is his word too: 2.0.0, "2.0.0 (Recommended)" chosen in-session (2026-10-13).
 - **Date**: 2026-10-11
 
 ## Context

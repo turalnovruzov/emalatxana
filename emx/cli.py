@@ -26,7 +26,8 @@ Opens the emx workspace in a private tmux server, or reattaches if it is running
 first moving a running workspace onto this version of emx. --version prints the version.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
-EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command."""
+EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
+EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too."""
 
 
 SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."
@@ -179,18 +180,19 @@ def blank(message: str) -> int:
 
 
 def left_check(args: list) -> int:
-    """Exit 0 when ← in this viewer should move focus to the panel, 1 when it should reach Claude Code. Prints nothing.
+    """Exit 0 when ← in a session's pane should reach Claude Code, 1 when it should move focus to the panel. Prints nothing.
 
     `args` are the socket, then the pane, cursor x and y, cursor shown flag
-    and pane width as tmux formats them. Any failure answers 1, so a broken
-    check costs him the shortcut, never a keypress.
+    and pane width as tmux formats them. Any failure answers 1: Claude Code
+    forks the conversation on a ← it gets at an empty prompt, so a broken
+    check costs him ← in typed text, never a fork.
     """
     try:
         socket, pane, x, y, shown, width = args
         if private_socket(socket) is None:
             return 1
         line, below = (Tmux(socket).cursor_lines(pane, int(y)) + ["", ""])[:2]
-        return 0 if core.empty_prompt(line, below, int(x), shown == "1", int(width)) else 1
+        return 1 if core.empty_prompt(line, below, int(x), shown == "1", int(width)) else 0
     except Exception:
         return 1
 

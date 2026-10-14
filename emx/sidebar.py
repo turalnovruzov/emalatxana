@@ -14,7 +14,8 @@ import time
 
 from emx import __version__, core
 from emx.cli import read_changelog, self_command
-from emx.tmux import HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.engine import AGENT, Engine, claude_home
+from emx.tmux import AGENT_OPT, HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -23,7 +24,7 @@ LISTED_WAIT_SECONDS = 5
 LISTED_CHECK_SECONDS = 0.5
 PROMPT_SETTLE_SECONDS = 1.0
 PROMPT_SETTLE_STEP = 0.05
-# Longer than a `claude agents` call's own timeout, so an interrupt cancelled mid-listing still ends inside it.
+# How long a close waits for a cancelled interrupt to finish its listing and tmux calls before giving up on the close.
 INTERRUPT_JOIN_SECONDS = 20
 GIT_SECONDS = 5
 LISTING_FRESH_SECONDS = 5
@@ -62,15 +63,14 @@ HELP = (
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
     ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
-    ("^x", "interrupt a working session; twice closes it (stop, then remove)"),
+    ("^x", "interrupt a working session; twice closes it"),
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
-    ("^r", "rename, via /rename in its open viewer; Tab there suggests a name"),
+    ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("m", "mute or unmute spoken notices"),
     ("h", "stop the voice now; later notices still speak"),
-    ("r", "restart the main viewer"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
@@ -97,7 +97,7 @@ PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next",
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
 PEEK_NO_ROOM = "Too short to peek."
-CLOSE_SECONDS = 30
+FORGET_TRIES = 3
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 MAX_QUEUED_KEYS = 64
@@ -118,35 +118,9 @@ BAR_BG = {"focused": 24, "unfocused": 236}
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
-def list_rows(claude: str) -> tuple:
-    """(rows of `claude agents --json --all`, None) on success, (None, one-line error) on any failure. Never raises.
-
-    `--all` keeps stopped and completed sessions listed, as `claude agents` shows them, until he removes them.
-    """
-    try:
-        done = subprocess.run(
-            [claude, "agents", "--json", "--all"], capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=15,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, "claude agents --json timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.first_message(done.stderr) or f"claude agents exited with {done.returncode}"
-    try:
-        return core.parse_agents(done.stdout), None
-    except core.AgentsError as exc:
-        return None, str(exc)
-
-
-def fetch_sessions(claude: str) -> tuple:
-    rows, error = list_rows(claude)
-    if error:
-        return None, error
-    return core.background_sessions(rows), None
+def fetch_sessions(engine: Engine) -> tuple:
+    """(emx's own sessions, None), or (None, one-line error). Off the curses thread only: it reads files and asks tmux."""
+    return engine.list_sessions()
 
 
 def run_git(cwd: str, *args: str) -> tuple:
@@ -184,72 +158,21 @@ def git_placement(cwd: str, home: str = "") -> tuple:
     return core.placement_from_git(cwd, rev_parse, branch, home, os.path.realpath), None
 
 
-def start_session(claude: str, folder: str, message: str) -> tuple:
-    """Run `claude --bg` in `folder`. Returns (session_id, None) or (None, error)."""
-    if not os.path.isdir(folder):
-        return None, f"folder not found: {folder}"
-    try:
-        done = subprocess.run(
-            core.new_session_args(claude, message),
-            cwd=folder, capture_output=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=60,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, "claude --bg timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.first_message(done.stderr) or core.first_message(done.stdout) or (
-            f"claude --bg exited with {done.returncode}"
-        )
-    sid = core.parse_new_session_id(done.stdout)
-    if not sid:
-        return None, "claude --bg started, but its output had no session id"
-    return sid, None
-
-
-def wait_until_running(claude: str, sid: str) -> tuple:
-    """(session, None) once `claude agents --json` lists `sid` with a live process, else (None, error) after a few seconds.
-
-    A session can be listed a moment before its pid is. The listing that
-    finds it running is the fresh one the new viewer attaches on.
-    """
+def wait_until_running(engine: Engine, sid: str) -> tuple:
+    """(session, None) once emx's listing shows `sid` running, else (None, error) after a few seconds. The listing that finds it running is the fresh one it opens on."""
     deadline = time.monotonic() + LISTED_WAIT_SECONDS
     seen = False
     while True:
-        rows, _ = list_rows(claude)
-        session = core.listed_session(rows, sid) if rows is not None else None
+        sessions, _ = fetch_sessions(engine)
+        session, _ = core.checked_row(sessions, sid)
         if session is not None and session.running:
             return session, None
         seen = seen or session is not None
         if time.monotonic() >= deadline:
             if seen:
-                return None, f"claude agents lists session {sid}, but it isn't running, so no viewer was opened"
-            return None, f"claude --bg reported session {sid}, but claude agents doesn't list it, so no viewer was opened"
+                return None, f"Session {sid} started, but it isn't running, so it wasn't opened"
+            return None, f"Session {sid} started, but emx doesn't list it, so it wasn't opened"
         time.sleep(LISTED_CHECK_SECONDS)
-
-
-def close_session(args: list) -> tuple:
-    """Run one of `core.close_args`' commands: (its output, None), or (None, its whole message on one line). Never raises."""
-    claude = args[0]
-    try:
-        done = subprocess.run(
-            args, capture_output=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL,
-            timeout=CLOSE_SECONDS,
-        )
-    except FileNotFoundError:
-        return None, f"can't find the claude command ({claude})"
-    except subprocess.TimeoutExpired:
-        return None, f"claude {args[1]} timed out"
-    except OSError as exc:
-        return None, f"can't run claude: {exc}"
-    if done.returncode != 0:
-        return None, core.one_line(done.stderr) or core.one_line(done.stdout) or (
-            f"claude {args[1]} exited with {done.returncode}"
-        )
-    return done.stdout, None
 
 
 def list_subdirs(folder: str) -> list | None:
@@ -319,24 +242,21 @@ class Listings:
 class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
-    A running session is stopped, then removed. `wait_for` holds the
-    Interrupters of any of them still running, cancelled when the close
-    began, and those that ended earlier possibly leaving the hidden viewer
-    they meant to kill. The close waits for them to end and tries each
-    kill again; while such a pane is still listed, nothing is closed. Any
-    of these he swapped into main is swapped out for the placeholder
-    before its kill. Any other hidden viewer an interrupt opened is gone,
-    or, with no close started, took the Esc or was swapped into main by
-    him, which makes it his like a viewer he opens; so an interrupt's
-    `claude attach` still starting can't land after the stop and resume
-    the session. Not covered: a window tmux made for a `new_hidden_window`
-    that then failed, since no pane id came back. `current` is the session
-    being closed now. `result` is (all closed, message, {id: closed}).
+    Closing ends the session and removes it from emx: a running one's pane
+    is killed (one in main is first swapped out for the placeholder, so the
+    layout keeps its two columns), and once a listing shows it no longer
+    running its folder under emx's state folder goes. The conversation
+    stays in Claude Code's history. `wait_for` holds the Interrupters of any
+    of them still running, cancelled when the close began; the close waits
+    for them to end, so no Esc lands in a pane being killed. `current` is
+    the session being closed now. `result` is (all closed, message, {id:
+    closed}).
     """
 
-    def __init__(self, claude: str, targets: tuple, wait_for: tuple = ()):
+    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = ""):
         super().__init__(daemon=True)
-        self.claude, self.targets, self.wait_for = claude, tuple(targets), tuple(wait_for)
+        self.engine, self.targets, self.wait_for = engine, tuple(targets), tuple(wait_for)
+        self.panel = panel
         self.current = self.targets[0]
         self.result = None
 
@@ -353,15 +273,9 @@ class Closer(threading.Thread):
         what = "it" if len(self.targets) == 1 else "any of them"
         for interrupter in self.wait_for:
             interrupter.join(max(0.0, deadline - time.monotonic()))
-            name = interrupter.interrupt.name
             if interrupter.is_alive():
                 finished.update((t.id, False) for t in self.targets)
-                return False, f"emx is still interrupting {name}, so it didn't close {what}.", finished
-            if not interrupter.ended:
-                interrupter.end_opened(closing=True)
-            if not interrupter.ended:
-                finished.update((t.id, False) for t in self.targets)
-                return False, f"emx couldn't close the viewer it opened for {name}, so it didn't close {what}.", finished
+                return False, f"emx is still interrupting {interrupter.interrupt.name}, so it didn't close {what}.", finished
         messages = []
         for confirm in self.targets:
             self.current = confirm
@@ -371,40 +285,80 @@ class Closer(threading.Thread):
         return all(finished.values()), " ".join(messages), finished
 
     def close_one(self, confirm: core.Confirm) -> tuple:
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, confirm.id)
         if not core.close_still_applies(confirm, session, fresh):
             return False, core.close_refusal(confirm, session, fresh)
-        output = ""
-        for args in core.close_args(self.claude, confirm):
-            output, error = close_session(args)
-            if error and args[1] == "rm" and confirm.running:
-                return False, core.stopped_not_removed_text(confirm, error)
-            if error:
-                return False, error
-        return True, core.closed_text(confirm, output)
+        if session.running:
+            try:
+                self.end(confirm.id)
+            except TmuxError as exc:
+                return False, f"tmux: {exc}"
+            if not self.wait_until_ended(confirm.id):
+                return False, f"{confirm.name} is still running, so emx didn't remove it."
+        error = self.forget(confirm.id)
+        if error:
+            return False, error
+        return True, core.closed_text(confirm)
+
+    def end(self, sid: str) -> None:
+        """Kill the session's own pane, swapping the placeholder into main first when the pane is there."""
+        panes = self.engine.tmux.panes()
+        windows = {p.id: p.window for p in panes}
+        for pane in panes:
+            if pane.session != sid or not pane.agent or pane.dead:
+                continue
+            if windows.get(pane.id) is not None and windows.get(pane.id) == windows.get(self.panel):
+                placeholder = next((p for p in panes if p.role == "placeholder"), None)
+                if placeholder is None:
+                    raise TmuxError("there is no placeholder to put in main")
+                self.engine.tmux.swap(placeholder.id, pane.id)
+            self.engine.tmux.kill_pane(pane.id)
+
+    def wait_until_ended(self, sid: str) -> bool:
+        deadline = time.monotonic() + LISTED_WAIT_SECONDS
+        while True:
+            sessions, _ = fetch_sessions(self.engine)
+            session, fresh = core.checked_row(sessions, sid)
+            if fresh and (session is None or not session.running):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LISTED_CHECK_SECONDS)
+
+    def forget(self, sid: str) -> str | None:
+        """None once the session's folder is gone, else the error. A few tries: the killed claude's last hook can still be writing into the folder as it goes."""
+        error = None
+        for _ in range(FORGET_TRIES):
+            done, error = self.engine.forget(sid)
+            if done:
+                return None
+            time.sleep(LISTED_CHECK_SECONDS)
+        return error
 
 
 class Renamer(threading.Thread):
-    """Renames a session off the curses thread by typing `/rename` into its open viewer.
+    """Renames a session off the curses thread by typing `/rename` into its own pane.
 
-    It types only once a fresh listing shows the session running, the
-    viewer's screen shows this session's empty prompt, and tmux, in the same
-    command that types, finds none of that changed and his focus still on
-    the panel. A working session is typed into too: Claude Code runs
+    It types only once a fresh listing shows the session running, its pane
+    (tagged with its key and agent) shows an empty prompt, and tmux, in the
+    same command that types, finds none of that changed and his focus still
+    on the panel. A working session is typed into too: Claude Code runs
     `/rename` as a command without ending the turn, queueing it when it must.
     The line goes in without Enter. Enter follows only after a second look
     finds the prompt holding that line alone, again through tmux's check; a
     prompt that changed in between (a dialog opened, a draft added) gets no
     Enter, and the line is cleared if the prompt still holds it alone. Then
-    it waits for the listing to show the new name. `result` is (renamed,
-    message, typed).
+    it waits for the listing to show the new name, which the transcript
+    reader records from Claude's `custom-title` entry; `named` wakes it.
+    `result` is (renamed, message, typed).
     """
 
-    def __init__(self, claude: str, tmux: Tmux, rename: core.Rename, panel: str, flagged: frozenset):
+    def __init__(self, engine: Engine, tmux: Tmux, rename: core.Rename, panel: str,
+                 named: threading.Event | None = None):
         super().__init__(daemon=True)
-        self.claude, self.tmux, self.rename = claude, tmux, rename
-        self.panel, self.flagged = panel, flagged
+        self.engine, self.tmux, self.rename, self.panel = engine, tmux, rename, panel
+        self.named = named or threading.Event()
         self.result = None
 
     def run(self) -> None:
@@ -414,7 +368,7 @@ class Renamer(threading.Thread):
             self.result = (False, f"rename failed: {core.error_line(exc)}", False)
 
     def attempt(self) -> tuple:
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, self.rename.id)
         refusal = core.rename_listing_refusal(self.rename, session, fresh)
         if refusal:
@@ -424,12 +378,12 @@ class Renamer(threading.Thread):
             if viewer is None:
                 return False, core.viewer_closed_text(self.rename), False
             screen = self.read_screen(viewer)
-            refusal = core.rename_screen_refusal(self.rename, session, sessions, screen)
+            refusal = core.rename_screen_refusal(self.rename, screen)
             if refusal:
                 return False, refusal, False
-            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x)
             if gate is None:
-                return False, f"emx can't check {self.rename.old}'s viewer safely, so it didn't rename it.", False
+                return False, f"emx can't check {self.rename.old}'s session safely, so it didn't rename it.", False
             report = self.tmux.type_if(
                 viewer.id, gate, core.rename_line(self.rename.new), core.TYPED, core.gate_report(SESSION_OPT),
                 enter=False,
@@ -439,7 +393,7 @@ class Renamer(threading.Thread):
                 return False, refusal, False
         except TmuxError as exc:
             return False, f"tmux: {exc}", False
-        unsent = self.submit(viewer, session, sessions)
+        unsent = self.submit(viewer)
         if unsent is not None:
             return unsent
         name, last = self.wait_for_name()
@@ -449,21 +403,21 @@ class Renamer(threading.Thread):
         return done, core.renamed_text(self.rename, name, prompt_empty, queued), True
 
     def read_screen(self, viewer: Pane) -> core.RenameScreen:
-        captured = self.tmux.capture(viewer.id)
         x, y, shown, width, in_mode = self.tmux.prompt_probe(viewer.id)
         line, below = (self.tmux.cursor_lines(viewer.id, y) + ["", ""])[:2]
-        return core.RenameScreen(captured, line, below, x, y, shown, width, in_mode, viewer.id in self.flagged)
+        return core.RenameScreen(line, below, x, y, shown, width, in_mode)
 
-    def submit(self, viewer: Pane, session, sessions) -> tuple | None:
+    def submit(self, viewer: Pane) -> tuple | None:
         """None once Enter went in on the line alone, else the result for a line left unsent. Nothing here may press Enter on a prompt that changed since the line was typed."""
         unconfirmed = False
         try:
             screen = self.read_screen(viewer)
             deadline = time.monotonic() + PROMPT_SETTLE_SECONDS
-            while core.typed_line_arriving(self.rename, screen) and time.monotonic() < deadline:
+            # Claude Code can draw the line in steps, `/rename` with its grey `[name]` hint first, so a line not yet alone is read again.
+            while not core.prompt_has_only_line(self.rename, screen) and time.monotonic() < deadline:
                 time.sleep(PROMPT_SETTLE_STEP)
                 screen = self.read_screen(viewer)
-            if core.typed_line_stands(self.rename, session, sessions, screen):
+            if core.prompt_has_only_line(self.rename, screen):
                 gate = core.type_gate(
                     viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x,
                 )
@@ -509,7 +463,8 @@ class Renamer(threading.Thread):
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         last = None
         while True:
-            sessions, _ = fetch_sessions(self.claude)
+            self.named.set()
+            sessions, _ = fetch_sessions(self.engine)
             session, fresh = core.checked_row(sessions, self.rename.id)
             if fresh and session is not None:
                 last = session
@@ -520,32 +475,22 @@ class Renamer(threading.Thread):
 
 
 class Interrupter(threading.Thread):
-    """Interrupts a working session off the curses thread by sending Esc into its viewer, as `claude agents` does.
+    """Interrupts a working session off the curses thread by sending Esc into its own pane, as Claude Code's own Esc does.
 
     It sends only once a fresh listing shows the session running and
-    working, its viewer shows this session with the cursor at its prompt,
-    and tmux, in the same command that sends, finds none of that changed and
-    his focus still on the panel. With no viewer open it opens a hidden one
-    first, with no swap and no select, so his focus stays where it is. Then
-    it waits for the listing to show the session stopped working. `cancel`
-    is set when a close of the session starts: from then on it opens and
-    sends nothing. Before it ends it kills the hidden viewer it opened,
-    unless the Esc went into it after its prompt came up and no close
-    started, or, with no close started, he has meanwhile opened it in main;
-    on a close, one in main is first swapped out for the placeholder.
-    `ended` is False only if a pane it meant to kill may still be there.
-    `result` is (stopped, message).
+    working, its pane (the one tagged with its key and agent) is not in a
+    mode and shows the cursor, and tmux, in the same command that sends,
+    finds none of that changed and his focus still on the panel. A session
+    with no live pane is not running, so nothing is sent. Then it waits for
+    the listing to show the session stopped working. `cancel` is set when a
+    close of the session starts: from then on it sends nothing. `result` is
+    (stopped, message).
     """
 
-    def __init__(self, claude: str, tmux: Tmux, interrupt: core.Interrupt, panel: str, flagged: frozenset,
-                 list_failing: bool):
+    def __init__(self, engine: Engine, tmux: Tmux, interrupt: core.Interrupt, panel: str):
         super().__init__(daemon=True)
-        self.claude, self.tmux, self.interrupt = claude, tmux, interrupt
-        self.panel, self.flagged, self.list_failing = panel, flagged, list_failing
+        self.engine, self.tmux, self.interrupt, self.panel = engine, tmux, interrupt, panel
         self.cancel = threading.Event()
-        self.opened = None
-        self.sent = False
-        self.ended = True
         self.result = None
 
     def run(self) -> None:
@@ -553,53 +498,10 @@ class Interrupter(threading.Thread):
             self.result = self.attempt()
         except Exception as exc:
             self.result = (False, f"interrupt failed: {core.error_line(exc)}")
-        finally:
-            closing = self.cancel.is_set()
-            if self.opened is not None and (closing or not self.sent):
-                self.end_opened(closing)
-
-    def end_opened(self, closing: bool) -> None:
-        """Kill the hidden viewer this worker opened: its `claude attach` may still be starting, and once a close has stopped the session it would resume it.
-
-        He may have swapped it into main (Enter on its row while it came
-        up). With no close that makes it his and it stays; on a close the
-        placeholder is swapped into main first, as `close_viewers` does, so
-        main keeps a pane. When tmux can't say where it is, there is no
-        placeholder, or the swap fails, nothing is killed and `ended` is
-        False, which holds the close back.
-        """
-        try:
-            panes = self.tmux.panes()
-        except TmuxError:
-            self.ended = False
-            return
-        windows = {p.id: p.window for p in panes}
-        in_main = windows.get(self.opened) is not None and windows.get(self.opened) == windows.get(self.panel)
-        if in_main and not closing:
-            self.ended = True
-            return
-        if in_main:
-            placeholder = next((p for p in panes if p.role == "placeholder"), None)
-            if placeholder is None:
-                self.ended = False
-                return
-            try:
-                self.tmux.swap(placeholder.id, self.opened)
-            except TmuxError:
-                self.ended = False
-                return
-        try:
-            self.tmux.kill_pane(self.opened)
-            self.ended = True
-        except TmuxError:
-            try:
-                self.ended = all(p.id != self.opened for p in self.tmux.panes())
-            except TmuxError:
-                self.ended = False
 
     def attempt(self) -> tuple:
         interrupt = self.interrupt
-        sessions, _ = fetch_sessions(self.claude)
+        sessions, _ = fetch_sessions(self.engine)
         session, fresh = core.checked_row(sessions, interrupt.id)
         refusal = core.interrupt_listing_refusal(interrupt, session, fresh)
         if refusal == core.NOTHING_TO_INTERRUPT:
@@ -607,36 +509,22 @@ class Interrupter(threading.Thread):
         if refusal:
             return False, refusal
         try:
-            viewer = core.live_viewer(self.tmux.panes(), interrupt.id)
-            if viewer is not None:
-                pane = viewer.id
-                screen = self.screen(pane)
-                refusal = core.interrupt_screen_refusal(interrupt, session, sessions, screen)
-                if refusal:
-                    return False, refusal
-            else:
-                fresh = fresh and not self.list_failing
-                if self.cancel.is_set():
-                    return False, ""
-                if not core.attach_allowed(session, core.INTERRUPT, fresh):
-                    return False, core.refusal(interrupt.name, core.INTERRUPT, fresh, session)
-                pane = self.opened = self.tmux.new_hidden_window(core.viewer_command(self.claude, interrupt.id))
-                self.tmux.set_pane_option(pane, SESSION_OPT, interrupt.id)
-                screen = self.wait_for_prompt(pane, session, sessions)
-                if self.cancel.is_set():
-                    return False, ""
-                if screen is None:
-                    return False, f"{interrupt.name}'s viewer didn't come up in time, so emx didn't interrupt it."
+            pane = core.live_viewer(self.tmux.panes(), interrupt.id)
+            if pane is None:
+                return False, f"{interrupt.name} isn't running, so emx didn't interrupt it."
+            screen = self.screen(pane.id)
+            refusal = core.interrupt_screen_refusal(interrupt, screen)
+            if refusal:
+                return False, refusal
             if self.cancel.is_set():
                 return False, ""
-            gate = core.type_gate(pane, self.panel, interrupt.id, screen.cursor_y, SESSION_OPT, cursor_x=screen.cursor_x)
+            gate = core.type_gate(pane.id, self.panel, interrupt.id, screen.cursor_y, SESSION_OPT, cursor_x=screen.cursor_x)
             if gate is None:
-                return False, f"emx can't check {interrupt.name}'s viewer safely, so it didn't interrupt it."
-            report = self.tmux.key_if(pane, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
+                return False, f"emx can't check {interrupt.name}'s session safely, so it didn't interrupt it."
+            report = self.tmux.key_if(pane.id, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
             refusal = core.gate_refusal(interrupt, report, screen.cursor_y, cursor_x=screen.cursor_x)
             if refusal:
                 return False, refusal
-            self.sent = True
         except TmuxError as exc:
             return False, f"tmux: {exc}"
         stopped = self.wait_until_stopped()
@@ -645,27 +533,14 @@ class Interrupter(threading.Thread):
         return stopped, core.interrupted_text(interrupt, stopped)
 
     def screen(self, pane: str) -> core.RenameScreen:
-        captured = self.tmux.capture(pane)
         x, y, shown, width, in_mode = self.tmux.prompt_probe(pane)
-        return core.RenameScreen(captured, "", "", x, y, shown, width, in_mode, pane in self.flagged)
-
-    def wait_for_prompt(self, pane: str, session: core.Session, sessions) -> core.RenameScreen | None:
-        """The viewer just opened, once its screen passes the checks; None if it doesn't within LISTED_WAIT_SECONDS or a close starts."""
-        deadline = time.monotonic() + LISTED_WAIT_SECONDS
-        while not self.cancel.is_set():
-            screen = self.screen(pane)
-            if core.interrupt_screen_refusal(self.interrupt, session, sessions, screen) is None:
-                return screen
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(LISTED_CHECK_SECONDS)
-        return None
+        return core.RenameScreen("", "", x, y, shown, width, in_mode)
 
     def wait_until_stopped(self) -> bool | None:
         """True once a listing shows it stopped working, False if it still is at the deadline, None once a listing that worked no longer shows it."""
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
         while not self.cancel.is_set():
-            sessions, _ = fetch_sessions(self.claude)
+            sessions, _ = fetch_sessions(self.engine)
             session, fresh = core.checked_row(sessions, self.interrupt.id)
             if fresh and session is None:
                 return None
@@ -678,41 +553,26 @@ class Interrupter(threading.Thread):
 
 
 class Starter(threading.Thread):
-    """Starts a session off the main thread, so the panel keeps drawing while `claude --bg` runs."""
+    """Starts a session off the main thread, so the panel keeps drawing while its window opens.
 
-    def __init__(self, claude: str, folder: str, message: str):
+    It waits for a listing that shows the session's pane running, not for a
+    hook: Claude reports nothing until its folder-trust question is answered.
+    """
+
+    def __init__(self, engine: Engine, folder: str, message: str):
         super().__init__(daemon=True)
-        self.claude, self.folder, self.message = claude, folder, message
+        self.engine, self.folder, self.message = engine, folder, message
         self.result = None
 
     def run(self) -> None:
         try:
-            sid, error = start_session(self.claude, self.folder, self.message)
+            started, error = self.engine.start(self.folder, self.message)
             session = None
-            if sid:
-                session, error = wait_until_running(self.claude, sid)
+            if started is not None:
+                session, error = wait_until_running(self.engine, started.id)
         except Exception as exc:
             session, error = None, f"starting a session failed: {core.error_line(exc)}"
         self.result = (session, error)
-
-
-class Checker(threading.Thread):
-    """Lists sessions off the main thread before a restart, so a slow `claude agents` never freezes the panel.
-
-    `asked` is (session id, main pane id) from when he pressed `r`, or from
-    when emx caught the agent view in main (`auto`).
-    """
-
-    def __init__(self, claude: str, asked: tuple, auto: bool = False):
-        super().__init__(daemon=True)
-        self.claude, self.asked, self.auto = claude, asked, auto
-        self.result = None
-
-    def run(self) -> None:
-        try:
-            self.result = fetch_sessions(self.claude)
-        except Exception as exc:
-            self.result = (None, f"listing sessions failed: {core.error_line(exc)}")
 
 
 class Resolver(threading.Thread):
@@ -785,10 +645,6 @@ class Resolver(threading.Thread):
                 return None
             self.changed = False
             return dict(self.placements)
-
-
-def claude_home() -> str:
-    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
 
 
 def read_transcript(path: str, size: int) -> tuple:
@@ -964,6 +820,11 @@ class Transcripts(threading.Thread):
     name in each project folder, which is retried later, backing off, rather
     than on every pass.
 
+    The name set by `/rename` (his own, or the one emx typed) and the title
+    Claude gives an unnamed session are recorded into emx's registry when
+    they differ from the row's, each once per value, so the next listing
+    carries them; `wake` cuts the wait short while a rename waits for it.
+
     A session reopened after Claude Code continued it elsewhere can have a
     file with no turn in it; the earlier transcript names it in a
     `continued-in` entry. Then the transcript read is the nearest earlier
@@ -972,9 +833,12 @@ class Transcripts(threading.Thread):
     file says something never looks.
     """
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, engine: Engine | None = None):
         super().__init__(daemon=True)
-        self.root = root
+        self.root, self.engine = root, engine
+        self.wake = threading.Event()
+        self.recorded = {}
+        self.names = {}
         self.lock = threading.Lock()
         self.wanted = {}
         self.found = {}
@@ -991,7 +855,8 @@ class Transcripts(threading.Thread):
 
     def want(self, sessions) -> None:
         with self.lock:
-            self.wanted = {s.id: (s.cwd, s.session_id) for s in sessions if s.session_id}
+            self.wanted = {s.id: (s.cwd, s.session_id, s.transcript) for s in sessions if s.session_id}
+            self.names = {s.id: (s.name, s.named) for s in sessions}
 
     def run(self) -> None:
         while True:
@@ -999,18 +864,21 @@ class Transcripts(threading.Thread):
                 self.read_all()
             except Exception:
                 pass
-            time.sleep(TRANSCRIPT_SECONDS)
+            self.wake.wait(TRANSCRIPT_SECONDS)
+            self.wake.clear()
 
     def read_all(self) -> None:
         with self.lock:
-            wanted = dict(self.wanted)
+            wanted, names = dict(self.wanted), dict(self.names)
         self.reached, self.touched = set(), set()
-        for sid, (cwd, uuid) in wanted.items():
+        for sid, (cwd, uuid, hinted) in wanted.items():
             try:
-                self.read_one(sid, cwd, uuid)
+                self.read_one(sid, cwd, uuid, names.get(sid), hinted)
             except Exception:
                 continue
-        uuids = {uuid for _, uuid in wanted.values()}
+        for sid in set(self.recorded) - set(wanted):
+            del self.recorded[sid]
+        uuids = {uuid for _, uuid, _ in wanted.values()}
         for uuid in set(self.paths) - uuids:
             del self.paths[uuid]
         for uuid in set(self.misses) - uuids:
@@ -1027,14 +895,17 @@ class Transcripts(threading.Thread):
                 if self.found.pop(sid, None) is not None:
                     self.changed = True
 
-    def read_one(self, sid: str, cwd: str, uuid: str) -> None:
-        path = self.locate(cwd, uuid)
+    def read_one(self, sid: str, cwd: str, uuid: str, shown: tuple | None = None, hinted: str = "") -> None:
+        path = self.locate(cwd, uuid, hinted)
         if path is None:
             return
         kept = self.read_file(path)
         if kept is None:
             return
-        found = kept[2]
+        if kept[2] is not None and shown is not None:
+            self.record_names(sid, kept[2], *shown)
+        # A file holding only titles says nothing about what the session did.
+        found = kept[2] if kept[2] is not None and kept[2].latest else None
         seen, current, hops = {path}, path, 0
         while found is None and hops < core.MAX_CONTINUATION_HOPS:
             hops += 1
@@ -1046,14 +917,26 @@ class Transcripts(threading.Thread):
             if read is None:
                 break
             current = earlier
-            if read[2] is not None:
+            if read[2] is not None and read[2].latest:
                 kept, found = read, read[2]
-        path, stamp, found = kept
+        path, stamp, _ = kept
         with self.lock:
             self.stamps[sid] = (path, *stamp)
             if self.found.get(sid) != found:
                 self.found[sid] = found
                 self.changed = True
+
+    def record_names(self, sid: str, found, name: str, named: bool) -> None:
+        """Record the transcript's latest `/rename` name, or for an unnamed session Claude's title, when the row shows another. A value written once is not written again, though the listing may not show it yet."""
+        if self.engine is None:
+            return
+        done = self.recorded.setdefault(sid, {})
+        if found.title and found.title != name and done.get("name") != found.title:
+            if self.engine.set_name(sid, found.title)[0]:
+                done["name"] = found.title
+        elif not named and found.ai_title and found.ai_title != name and done.get("title") != found.ai_title:
+            if self.engine.set_title(sid, found.ai_title)[0]:
+                done["title"] = found.ai_title
 
     def read_file(self, path: str) -> tuple | None:
         """(path, (mtime_ns, size), what its end says) for the transcript at `path`, read again only when its stat changed; None when it can't be read."""
@@ -1108,10 +991,15 @@ class Transcripts(threading.Thread):
                 return path
         return None
 
-    def locate(self, cwd: str, uuid: str) -> str | None:
+    def locate(self, cwd: str, uuid: str, hinted: str = "") -> str | None:
+        """The session's transcript: first the path its hooks reported, only when it lies under Claude's projects folder and is named for this session; then where Claude Code keeps it for the folder; then by its file name in any project folder."""
         if not core.is_session_id(uuid):
             return None
         name = uuid + ".jsonl"
+        if hinted and os.path.basename(hinted) == name:
+            real = os.path.realpath(hinted)
+            if real.startswith(os.path.realpath(os.path.join(self.root, "projects")) + os.sep) and os.path.isfile(real):
+                return real
         direct = os.path.join(self.root, "projects", core.transcript_dir(cwd), name)
         if os.path.isfile(direct):
             return direct
@@ -1425,7 +1313,7 @@ class Notices(threading.Thread):
     def send(self, notice: core.Notice, session: core.Session, transcript) -> None:
         placements = self.resolver.snapshot()
         project = core.notice_project(session, placements)
-        excerpt = core.notice_excerpt(project, session, transcript)
+        excerpt = core.notice_excerpt(project, session, transcript, notice.named)
         call, text = None, ""
         if excerpt:
             try:
@@ -1436,7 +1324,7 @@ class Notices(threading.Thread):
                 call = None
             text = core.clean_notice(call.text) if call is not None else ""
         if not text:
-            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.id, notice.kind))
+            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.named, notice.kind))
         if self.stale(notice):
             self.drop(notice)
             return
@@ -1455,20 +1343,20 @@ class Notices(threading.Thread):
 class Poller(threading.Thread):
     """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either."""
 
-    def __init__(self, claude: str):
+    def __init__(self, engine: Engine):
         super().__init__(daemon=True)
-        self.claude = claude
+        self.engine = engine
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.result = None
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
-        self.transcripts = Transcripts(claude_home())
-        self.summaries = Summaries(claude, self.transcripts)
+        self.transcripts = Transcripts(claude_home(), engine)
+        self.summaries = Summaries(engine.claude, self.transcripts)
         self.voice = Voice()
-        self.notices = Notices(claude, self.transcripts, self.resolver, self.voice)
+        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice)
 
     def poll(self) -> tuple:
-        sessions, error = fetch_sessions(self.claude)
+        sessions, error = fetch_sessions(self.engine)
         if error:
             return None, error
         if sessions:
@@ -1505,6 +1393,8 @@ class App:
         self.scr = scr
         self.tmux = tmux
         self.claude = claude
+        self.state = core.state_path()
+        self.legacy_cleared = False
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
         self.prefs = core.load_prefs(self.prefs_file)
@@ -1530,7 +1420,7 @@ class App:
         self.row_map = {}
         self.scroll = 0
         self.last_housekeep = 0.0
-        self.poller = Poller(claude)
+        self.poller = Poller(Engine(tmux, claude, self.state))
         self.poller.notices.voice = core.voice_on(self.prefs)
         self.poller.voice.muted = not self.poller.notices.voice
         self.notice_seen = None
@@ -1542,10 +1432,8 @@ class App:
         self.home = os.path.expanduser("~")
         self.starter = None
         self.started = None
-        self.checker = None
         self.closer = None
         self.interrupters = {}
-        self.unended = {}
         self.closing = {}
         self.confirm = None
         self.find = None
@@ -1554,12 +1442,8 @@ class App:
         self.renamer = None
         self.namer = None
         self.namer_gen = None
-        self.renaming = {}
         self.pin_misses = {}
         self.rename_misses = {}
-        self.flagged_viewers = frozenset()
-        self.auto_tried = frozenset()
-        self.last_restore = None
         self.focused = None
         self.pending_keys = []
         self.transcripts = {}
@@ -1568,6 +1452,10 @@ class App:
         self.peek_wrapped = (None, [])
         self.whats_new = None
         self.note_new_version()
+
+    @property
+    def engine(self) -> Engine:
+        return Engine(self.tmux, self.claude, self.state)
 
     def note_new_version(self) -> None:
         """Record the version this panel runs, showing its changelog lines when it is newer than the one recorded."""
@@ -1675,10 +1563,12 @@ class App:
         try:
             panes = self.tmux.panes()
             sidebar, main = self.layout_panes(panes)
+            if not self.legacy_cleared:
+                panes, main = self.clear_legacy_viewers(panes, main)
             self.main_pane = main
             if sidebar and main and self.bound != (sidebar.id, main.id):
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
-                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket), core.PROMPT_TEXT_X)
+                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket))
                 self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
@@ -1691,8 +1581,6 @@ class App:
                 self.reconcile_widths(sidebar)
             if fresh_list:
                 self.close_stale(panes, main)
-            self.flagged_viewers &= {p.id for p in panes}
-            self.check_main(main)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
         self.check_hush()
@@ -1719,9 +1607,7 @@ class App:
         left it.
         """
         if focused and self.focused is False and back:
-            main = self.main_pane
-            main_sid = main.session if main is not None and not self.main_is_off() else ""
-            self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, main_sid)
+            self.cursor = core.cursor_on_focus(self.items(), self.cursor, self.groups, self.main_session())
             self.wanted_cursor = None
         if not focused:
             self.confirm = None
@@ -1751,39 +1637,10 @@ class App:
                 self.say(f"tmux: {exc}", error=True)
         self.set_focus(sidebar.active, back=back)
 
-    def check_main(self, main: Pane | None) -> None:
-        """Flag the main pane once it stops showing the session emx put there, and bring the session back if it shows Claude Code's agent view."""
-        if main is None or main.dead or not main.session:
-            return
-        state = self.view_state(main)
-        self.flagged_viewers, _ = core.latch_off_main(self.flagged_viewers, main.id, state)
-        self.auto_tried = core.still_tried(self.auto_tried, self.flagged_viewers)
-        self.last_restore = core.last_restore_after(self.last_restore, main.id, state)
-        if main.session in self.closing:
-            return
-        action = core.auto_restore(
-            state, main.id, main.id in self.auto_tried, self.checker is not None, self.last_restore, time.monotonic(),
-        )
-        if action is not None:
-            self.auto_tried |= {main.id}
-        if action == core.RESTORE:
-            self.start_check(main, auto=True)
-        elif action == core.GIVE_UP:
-            self.say("")
-
-    def view_state(self, viewer: Pane) -> str:
-        session = self.session(viewer.session)
-        if session is None:
-            return "unknown"
-        names = core.viewer_names(session, self.renaming)
-        return core.view_state_for(self.tmux.capture(viewer.id), names, viewer.width)
-
-    def main_is_off(self) -> bool:
-        return self.main_pane is not None and self.main_pane.id in self.flagged_viewers
-
-    def restoring_main(self) -> bool:
-        checker = self.checker
-        return checker is not None and core.restoring_main(checker.asked, checker.auto, self.main_id())
+    def main_session(self) -> str:
+        """The key of the session in the main pane, from the pane's own tags: "" when main holds no session of emx's (the placeholder, or an old viewer)."""
+        main = self.main_pane
+        return main.session if main is not None and main.agent else ""
 
     def main_id(self) -> str | None:
         return self.main_pane.id if self.main_pane is not None else None
@@ -1806,12 +1663,36 @@ class App:
         if sidebar:
             self.applied = (sidebar.window_width, sidebar.width)
 
+    def clear_legacy_viewers(self, panes: list, main: Pane | None) -> tuple:
+        """Once per panel start, kill the `claude attach` viewers an emx before 2.0.0 left: a pane with a session key and no agent tag. Returns the panes and main as they are after.
+
+        `close_stale` would never close them, since emx's listing does not
+        hold their sessions and an empty listing counts as no news. Killing a
+        viewer leaves its background session running in Claude Code. One in
+        main is swapped out for the placeholder first; with no placeholder it
+        stays, so the layout keeps its two columns.
+        """
+        legacy = [p for p in panes if p.session and not p.agent]
+        if legacy:
+            placeholder = next((p for p in panes if p.role == "placeholder"), None)
+            for pane in legacy:
+                if main is not None and pane.id == main.id:
+                    if placeholder is None:
+                        continue
+                    self.tmux.swap(placeholder.id, pane.id)
+                self.tmux.kill_pane(pane.id)
+            panes = self.tmux.panes()
+            _, main = self.layout_panes(panes)
+        self.legacy_cleared = True
+        return panes, main
+
     def close_stale(self, panes: list, main: Pane | None) -> None:
+        """A pane holding one of emx's own sessions (agent-tagged) is the session itself, so it is never closed here: only a double Ctrl+X ends a session."""
         now = time.monotonic()
         live = {s.id for s in self.sessions}
         self.fresh = {sid: t for sid, t in self.fresh.items() if sid not in live and now - t < FRESH_GRACE_SECONDS}
-        viewers = {p.session for p in panes if p.session and p.session not in self.fresh}
-        dead = {p.session for p in panes if p.session and p.dead}
+        viewers = {p.session for p in panes if p.session and not p.agent and p.session not in self.fresh}
+        dead = {p.session for p in panes if p.session and not p.agent and p.dead}
         self.misses, close = core.stale_viewers(viewers, live, self.misses, dead)
         self.close_viewers(panes, main, close)
 
@@ -1834,21 +1715,13 @@ class App:
             if main is None:
                 self.say("The main pane is missing; restart emx.", error=True)
                 return
-            viewer = next((p for p in panes if p.session == sid), None)
-            command = core.viewer_command(self.claude, sid)
-            if viewer is None:
-                if not self.confirm_attach(sid, trigger, checked):
-                    return
-                pane_id = self.tmux.new_hidden_window(command)
-                self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+            held = next((p for p in panes if p.session == sid and p.agent), None)
+            if held is not None and not held.dead:
+                pane_id = held.id
             else:
-                pane_id = viewer.id
-                self.flagged_viewers, respawn = core.latch_off_main(self.flagged_viewers, pane_id, self.view_state(viewer))
-                if viewer.dead or respawn:
-                    if not self.confirm_attach(sid, trigger, checked):
-                        return
-                    self.tmux.respawn(pane_id, command)
-                    self.flagged_viewers -= {pane_id}
+                pane_id = self.resume(sid, trigger, checked, held)
+                if pane_id is None:
+                    return
             if pane_id != main.id:
                 self.tmux.swap(pane_id, main.id)
             self.tmux.select(pane_id)
@@ -1860,19 +1733,53 @@ class App:
             self.say(f"tmux: {exc}", error=True)
         self.housekeep(fresh_list=False)
 
+    def resume(self, sid: str, trigger: str, checked: tuple | None, dead: Pane | None) -> str | None:
+        """Continue a session whose process has ended, in its dead pane or else a new hidden window, and return that pane; None when it may not or could not.
+
+        Its own small files under emx's state folder are read and rewritten on
+        this thread, as the prefs are; no file of Claude's is. A new pane is
+        tagged before it can be swapped into main, since the ← binding and
+        `cursor_on_focus` read the tag; one that can't be tagged is killed, or
+        a second open would resume the same conversation again. Only his
+        open resumes: any other trigger finding no live pane is refused, even
+        when the listing it took still showed the session running.
+        """
+        if not self.confirm_attach(sid, trigger, checked):
+            return None
+        if trigger != core.OPEN:
+            shown = self.session(sid) or (checked[0] if checked else None)
+            self.say(core.refusal(shown.name if shown else sid, trigger, True, shown), error=True)
+            return None
+        command, error = self.engine.resume_command(sid)
+        if error:
+            self.say(error, error=True)
+            return None
+        shown = self.session(sid) or (checked[0] if checked else None)
+        cwd = shown.cwd if shown is not None and shown.cwd else None
+        if dead is not None:
+            self.tmux.respawn(dead.id, command, cwd=cwd)
+            return dead.id
+        pane_id = self.tmux.new_hidden_window(command, cwd=cwd)
+        try:
+            # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
+            self.tmux.set_pane_option(pane_id, AGENT_OPT, AGENT)
+            self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+        except TmuxError:
+            try:
+                self.tmux.kill_pane(pane_id)
+            except TmuxError:
+                pass
+            raise
+        return pane_id
+
     def confirm_attach(self, sid: str, trigger: str, checked: tuple | None = None) -> bool:
-        """Ask core whether `claude attach` may run, and say why not when it may not.
+        """Ask core whether emx may start or resume the session's process, and say why not when it may not.
 
         `checked` is (session, fresh) from a listing a worker thread took just
-        now (`core.checked_row`); this thread never lists, so a slow `claude
-        agents` can't freeze the panel. A trigger other than OPEN without one
-        is refused, and so is a RESTART of a session being closed: its
-        attach could land after the stop and resume it.
+        now (`core.checked_row`); this thread never lists, so a slow listing
+        can't freeze the panel. A trigger other than OPEN without one
+        is refused.
         """
-        if trigger == core.RESTART and sid in self.closing:
-            shown = self.session(sid)
-            self.say(core.still_closing(shown.name if shown else sid))
-            return False
         if trigger == core.OPEN:
             session, fresh = self.session(sid), False
         else:
@@ -1883,62 +1790,6 @@ class App:
         shown = session or self.session(sid)
         self.say(core.refusal(shown.name if shown else sid, trigger, fresh, session), error=True)
         return False
-
-    def restart_viewer(self) -> None:
-        main = self.main_pane
-        if main is None or not main.session:
-            self.say("No session is open in the main pane.")
-            return
-        if self.checker is None:
-            self.start_check(main)
-        elif not core.check_still_applies(self.checker.asked, main.id, main.session):
-            self.say("The previous restart check is still finishing; press r again in a moment.")
-        else:
-            self.checker.auto = False
-
-    def start_check(self, main: Pane, auto: bool = False) -> None:
-        if self.list_error:
-            self.confirm_attach(main.session, core.RESTART)
-            return
-        self.checker = Checker(self.claude, (main.session, main.id), auto)
-        self.checker.start()
-        shown = self.session(main.session)
-        name = shown.name if shown else main.session
-        if auto:
-            self.say(f"Main showed Claude Code's agent view; bringing back {name}…")
-        else:
-            self.say(f"Checking {name} is still running…")
-
-    def finish_check(self) -> None:
-        checker = self.checker
-        if checker is None or checker.is_alive():
-            return
-        self.checker = None
-        sid, pane_id = checker.asked
-        sessions, _ = checker.result or (None, "listing sessions failed")
-        try:
-            _, main = self.layout_panes(self.tmux.panes())
-            if main is None or not core.check_still_applies(checker.asked, main.id, main.session):
-                self.say("The main pane changed while emx was checking, so it wasn't restarted.")
-                return
-            state = self.view_state(main) if checker.auto else None
-            if not core.restore_still_wanted(checker.auto, state):
-                self.say("")
-                return
-            if not self.confirm_attach(sid, core.RESTART, core.checked_row(sessions, sid)):
-                return
-            self.tmux.respawn(pane_id, core.viewer_command(self.claude, sid))
-            self.flagged_viewers -= {pane_id}
-            if checker.auto:
-                self.last_restore = core.record_restore(self.last_restore, pane_id, time.monotonic())
-                self.tmux.select(self.me)
-                self.set_focus(True, back=True)
-                self.say("Main showed Claude Code's agent view, so emx brought the session back.", seconds=RESTORED_NOTICE_SECONDS)
-            else:
-                self.tmux.select(pane_id)
-                self.say("Viewer restarted.")
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
 
     def group(self, key: str):
         return next((g for g in self.groups if g.key == key), None)
@@ -1989,9 +1840,8 @@ class App:
         wait_for = tuple(self.interrupters[sid] for sid in sorted(ids) if sid in self.interrupters)
         for interrupter in wait_for:
             interrupter.cancel.set()
-        wait_for += tuple(i for sid in sorted(ids) for i in self.unended.get(sid, ()))
         self.closing.update((sid, None) for sid in ids)
-        self.closer = Closer(self.claude, targets, wait_for)
+        self.closer = Closer(self.engine, targets, wait_for, self.me)
         self.closer.start()
         self.say(core.closing_text(act))
 
@@ -2000,8 +1850,7 @@ class App:
         if session.id in self.interrupters:
             return
         interrupter = self.interrupters[session.id] = Interrupter(
-            self.claude, self.tmux, core.Interrupt(session.id, session.name), self.me, self.flagged_viewers,
-            bool(self.list_error),
+            self.engine, self.tmux, core.Interrupt(session.id, session.name), self.me,
         )
         interrupter.start()
         self.say(f"Interrupting {session.name}…")
@@ -2011,8 +1860,6 @@ class App:
             if interrupter.is_alive():
                 continue
             del self.interrupters[sid]
-            if not interrupter.ended:
-                self.unended.setdefault(sid, []).append(interrupter)
             if interrupter.cancel.is_set():
                 continue
             done, message = interrupter.result or (False, "interrupt failed")
@@ -2024,8 +1871,6 @@ class App:
         if closer is None or closer.is_alive():
             return
         self.closer = None
-        self.unended = {sid: left for sid, workers in self.unended.items()
-                        if (left := [i for i in workers if not i.ended])}
         done, message, finished = closer.result or (False, "close failed", {t.id: False for t in closer.targets})
         self.say(message, error=not done)
         self.closing = core.closing_after(self.closing, finished, None)
@@ -2099,21 +1944,14 @@ class App:
         if session.id in self.closing:
             self.say(core.still_closing(session.name))
             return
-        try:
-            has_viewer = core.live_viewer(self.tmux.panes(), session.id) is not None
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
-            return
-        blocked = core.rename_blocked(
-            bool(self.list_error), self.renamer.rename if self.renamer else None, session, has_viewer,
-        )
+        blocked = core.rename_blocked(bool(self.list_error), self.renamer.rename if self.renamer else None, session)
         if blocked:
             self.say(blocked, error=True)
             return
         self.rename_gen += 1
         self.rename_edit = {
             "id": session.id, "old": session.name, "text": core.rename_start(session), "hint": "",
-            "offered": [], "gen": self.rename_gen,
+            "offered": [], "gen": self.rename_gen, "unnamed": core.unnamed(session),
         }
         self.rename_misses = {}
         self.say("")
@@ -2142,8 +1980,7 @@ class App:
         self.rename_edit = None
         if rename is None:
             return
-        self.renaming = core.rename_started(self.renaming, rename)
-        self.renamer = Renamer(self.claude, self.tmux, rename, self.me, self.flagged_viewers)
+        self.renamer = Renamer(self.engine, self.tmux, rename, self.me, self.poller.transcripts.wake)
         self.renamer.start()
         self.say(f"Renaming {rename.old}…")
 
@@ -2162,7 +1999,7 @@ class App:
             return
         sid = edit["id"]
         self.namer = Namer(
-            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["old"] == sid, edit["offered"],
+            self.claude, self.poller.transcripts.path(sid), sid, edit["old"], edit["unnamed"], edit["offered"],
         )
         self.namer_gen = edit["gen"]
         edit["hint"] = ""
@@ -2194,7 +2031,6 @@ class App:
             return
         self.renamer = None
         done, message, typed = renamer.result or (False, "rename failed", False)
-        self.renaming = core.rename_finished(self.renaming, renamer.rename, typed, time.monotonic())
         self.say(message, error=not done)
         self.poller.wake.set()
 
@@ -2331,7 +2167,7 @@ class App:
             self.pick_folder()
             return
         self.prompt = None
-        self.starter = Starter(self.claude, p["folder"], p["text"])
+        self.starter = Starter(self.engine, p["folder"], p["text"])
         self.starter.start()
         self.say("Starting a session…")
 
@@ -2451,8 +2287,6 @@ class App:
             self.toggle_voice()
         elif key == "h":
             self.hush()
-        elif key == "r":
-            self.restart_viewer()
         elif key == "s":
             self.flip_side()
         elif key in ("<", ","):
@@ -2483,13 +2317,6 @@ class App:
     def bottom_lines(self, width: int, height: int | None = None) -> list:
         """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
-        if core.off_main_warning(self.flagged_viewers, self.main_id(), self.restoring_main()):
-            session = self.session(self.main_pane.session)
-            name = session.name if session else self.main_pane.session
-            # An unnamed session's screen can't confirm it is back, so the flag may outlive the cross-wire.
-            verb = "isn't" if session and session.name != session.id else "may not be"
-            warning = f"Main {verb} showing {name} — press r to go back"
-            lines += [(t, self.color("error")) for t in core.wrap_words(warning, width)[:3]]
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
         if self.notice:
@@ -2577,7 +2404,7 @@ class App:
             if not self.list_error:
                 self.put(list_top, 1, "Loading sessions…", curses.A_DIM)
         elif not self.sessions:
-            self.put(list_top, 1, "No background sessions.", curses.A_DIM)
+            self.put(list_top, 1, "No sessions.", curses.A_DIM)
             self.put(list_top + 1, 1, "Press n to start one.", curses.A_DIM)
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
@@ -2670,7 +2497,7 @@ class App:
     def draw_list(self, top: int, bottom: int, width: int, layout: tuple) -> None:
         lines, rows, heights = layout
         height = max(1, bottom - top)
-        main_sid = self.main_pane.session if self.main_pane and not self.main_is_off() else ""
+        main_sid = self.main_session()
         cursor_group = core.cursor_group(self.cursor, self.groups)
         groups = {g.key: g for g in self.groups}
         frame = int(time.monotonic() / FRAME_SECONDS)
@@ -2786,9 +2613,6 @@ class App:
         self.prefs, self.pin_misses, pruned = core.prune_pins(self.prefs, [s.id for s in sessions], self.pin_misses)
         if pruned:
             self.save_prefs()
-        in_flight = self.renamer.rename.id if self.renamer else None
-        if sessions:
-            self.renaming = core.pending_renames(self.renaming, sessions, in_flight, time.monotonic())
         self.regroup()
         self.queue_notices(sessions)
         return True
@@ -2806,12 +2630,12 @@ class App:
         except TmuxError:
             attached, focus, active, idle = 0, "", "", None
         main = self.main_pane
-        main_sid = main.session if main is not None and not self.main_is_off() else ""
+        main_sid = self.main_session()
         main_id = main.id if main is not None else ""
         now = time.monotonic()
         for session in events:
             if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
-                self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now))
+                self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:
         for sid, text, at in self.poller.notices.take():
@@ -2862,7 +2686,6 @@ class App:
     def refresh(self) -> None:
         try:
             self.finish_start()
-            self.finish_check()
             self.finish_close()
             self.finish_interrupt()
             self.finish_rename()

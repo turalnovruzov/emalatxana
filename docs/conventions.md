@@ -62,58 +62,49 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `-q` also hides a session that does not exist (`=emxx:` returns `''` with exit 0 too), so an empty value never proves the option is unset. Read it only after `has_session()`.
 
-### Every `claude attach` asks `core.attach_allowed` first
+### Every start of `claude` for an existing session asks `core.attach_allowed` first
 
-1. **Rule**: before emx runs `claude attach` (a new viewer window, a respawn, a restart), it passes the session's row and a named trigger (`OPEN`, `RESTART`, `NEW`, `INTERRUPT`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter or click, may attach a session with no live process, and any trigger other than `OPEN` is judged on a listing a worker thread took for that attach (`Checker`'s, through `core.checked_row`, for `RESTART`; `Starter`'s, from `wait_until_running`, for `NEW`; the `Interrupter`'s own, for `INTERRUPT`), never on one taken on the curses thread. `INTERRUPT` attaches a running session only, and opens its viewer in a hidden window with no swap and no select, so his focus stays on the panel.
-2. **Why**: attaching to a stopped session resumes it, and he must be the only one who reopens a session he stopped.
+1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane is swapped into main.
+2. **Why**: resuming a stopped session starts it again, and he must be the only one who reopens a session that stopped, after an exit, a crash or a reboot (ADR 0001, kept by ADR 0005; Tural, 2026-10-13, "sure lets go with b").
 3. **Minimal example**:
    ```python
-   # worker thread (Checker): one listing, taken now
-   self.result = fetch_sessions(self.claude)
-
-   # curses thread: judges, never lists
-   sessions, _ = checker.result or (None, "listing sessions failed")
-   checked = core.checked_row(sessions, sid)          # (session, fresh)
-   if trigger == core.OPEN:
-       session, fresh = self.session(sid), False      # the row he clicked
-   else:
-       session, fresh = checked or (None, False)
-       fresh = fresh and not self.list_error
-   if core.attach_allowed(session, trigger, fresh):
-       self.tmux.respawn(pane, core.viewer_command(self.claude, sid))
+   # curses thread, in App.resume: judges, never lists
+   if not self.confirm_attach(sid, trigger, checked):
+       return None
+   command, error = self.engine.resume_command(sid)
    ```
-4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means an integer pid and a state that isn't stopped, never `state` alone. The answer arrives later, so before acting check that it is still about what is on screen (`core.check_still_applies`): he may have opened another session in main meanwhile. A worker that may attach must stand down when a close of that session starts (the `Interrupter`'s `cancel`), because `new_hidden_window` returns before `claude attach` has connected; otherwise a starting attach could land after the stop and resume the session. The `Interrupter` kills the hidden viewer it opened before it ends, on a close and on any other way it ends (timeout, error, refusal). With no close started it keeps it once its prompt came up and the Esc went in, or when he has swapped it into main, which makes it his. On a close it always kills it, and one in main is first swapped out for the placeholder, as `close_viewers` does, so main keeps a pane; when tmux can't say where the pane is, there is no placeholder or the swap fails, it kills nothing and leaves `ended` False. The close waits for a running worker to end, and also takes in any earlier one that may have left its pane (its kill failed, or tmux could not say where the pane was): it tries again the same way and closes nothing while the pane may still be there. Not covered: a window tmux made for a `new_hidden_window` that then failed, since no pane id came back. For the same reason a `RESTART`, by `r` or the automatic restore, of a session in `App.closing` is refused, and the automatic restore does not start for one.
+4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means a live pane carrying both the session's key and the agent tag, never `state` alone. A new pane is tagged before it can be swapped into main, and one that can't be tagged is killed, or a second open would resume the same conversation again. The agent tag goes on before the session's key: a pane with a key and no agent tag is an old `claude attach` viewer, which the panel kills, and a listing can land between the two `set-option`s. Respawning a live session's pane ends that session, so nothing respawns a pane that is not dead, and a trigger other than `OPEN` that finds the session's pane dead or gone is refused even when its listing showed it running.
 
 ### `claude` calls, git calls and filesystem scans never run on the curses thread
 
-1. **Rule**: any call to the `claude` CLI or git runs on a worker thread. One-shot workers (`Starter`, `Checker`) are started by the curses thread, which checks `is_alive()` from `refresh()` and then reads `.result`. Long-running ones (`Poller`, and the `Resolver` it starts) loop on their own, and `refresh()` collects their latest answer with `.take()`, which hands it over under a lock and returns None when nothing is new. The curses thread never calls `list_rows`, `fetch_sessions` or `run_git` itself. Listing or stat-ing any folder the picker reads follows the same rule (startup reads of home, the prefs file and emx's own `CHANGELOG.md` excepted): the folder picker asks `Listings.get` or `Listings.readable`, which return whatever is cached (None until the first read lands) and starts a short-lived thread per folder, never two for one folder and at most `MAX_LISTINGS` at once; the curses thread judges a typed path from those cached reads (`core.folder_exists`) and dedupes paths with `normpath` only.
-2. **Why**: `claude agents` can take up to its 15 s timeout, and a folder on a hung mount can block a listing or a stat for good. On the curses thread either freezes the panel, and every key he presses meanwhile is lost or queued.
+1. **Rule**: any call to the `claude` CLI or git, and any listing of emx's sessions, runs on a worker thread. One-shot workers (`Starter`, `Closer`, `Interrupter`, `Renamer`) are started by the curses thread, which checks `is_alive()` from `refresh()` and then reads `.result`. Long-running ones (`Poller`, and the `Resolver` and `Transcripts` it starts) loop on their own, and `refresh()` collects their latest answer with `.take()`, which hands it over under a lock and returns None when nothing is new. The curses thread never calls `fetch_sessions` or `run_git` itself. Opening a session reads and rewrites only that session's own small files under emx's state folder on the curses thread, as the prefs are. Listing or stat-ing any folder the picker reads follows the same rule (startup reads of home, the prefs file and emx's own `CHANGELOG.md` excepted): the folder picker asks `Listings.get` or `Listings.readable`, which return whatever is cached (None until the first read lands) and starts a short-lived thread per folder, never two for one folder and at most `MAX_LISTINGS` at once; the curses thread judges a typed path from those cached reads (`core.folder_exists`) and dedupes paths with `normpath` only.
+2. **Why**: a listing reads every session's hook records and transcript tail and asks tmux, a `claude -p` call takes seconds, and a folder on a hung mount can block a listing or a stat for good. On the curses thread any of them freezes the panel, and every key he presses meanwhile is lost or queued.
 3. **Minimal example**:
    ```python
-   self.checker = Checker(self.claude, (main.session, main.id))
-   self.checker.start()
+   self.starter = Starter(self.engine, folder, message)
+   self.starter.start()
    # later, in refresh():
-   checker = self.checker
-   if checker is not None and not checker.is_alive():
-       sessions, _ = checker.result or (None, "listing sessions failed")
+   starter = self.starter
+   if starter is not None and not starter.is_alive():
+       session, error = starter.result or (None, "starting a session failed")
    ```
 4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; interrupts are one per session, so a second working row is interrupted while the first still is; folder listings are the other exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
-### A tmux key binding that intercepts a key fails open
+### A tmux key binding that intercepts a key fails open, except ← in a session's pane
 
-1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding.
-2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths.
+1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding. The one exception is ← in a pane tagged with a session and an agent: there `bin/emx left` exits 0 only to let ← reach Claude Code, and every other outcome, a crash or a check that can't run included, selects the panel. Its format condition (both tags, cursor shown, panel in the window) never guesses the prompt's column; the check reads it from where the `❯` is drawn.
+2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths. For ← the costs run the other way: Claude Code turns a ← it gets on an empty prompt into a fork of the conversation into its background service, so a broken check costs him ← in typed text instead.
 3. **Minimal example** (the ← binding as `list-keys` shows it, abridged):
    ```
-   bind-key -n Left if-shell -F "#{&&:<at an empty prompt>,#{P:#{?#{==:#{pane_id},%1},1,}}}" \
-       "if-shell \"#{@emx_left} #{pane_id} …\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\" \"send-keys Left\"" \
+   bind-key -n Left if-shell -F "#{&&:#{@emx_session},#{&&:#{@emx_agent},#{&&:#{cursor_flag},#{P:#{?#{==:#{pane_id},%1},1,}}}}}" \
+       "if-shell \"#{@emx_left} #{pane_id} …\" \"send-keys Left\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\"" \
        "send-keys Left"
    ```
-4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms). And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
+4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms); in a session's pane every ← with the cursor shown pays it. And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
 
 ### Style-aware detectors are tested on styled captures
 
-1. **Rule**: a detector that depends on styling is tested on `capture-pane -e` captures, with the cursor tmux reported recorded in `prompt-cursors.json` together with the Claude Code version.
+1. **Rule**: a detector that depends on styling is tested on `capture-pane -e` captures, with the cursor tmux reported recorded in `prompt-cursors.json` (interactive `claude`: `interactive-cursors.json`) together with the Claude Code version.
 2. **Why**: the dim example text is the only thing that tells an empty prompt apart from typed text.
 3. **Minimal example**:
    ```python
@@ -123,20 +114,20 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### emx closes a session only on a confirmed double Ctrl+X on its row or its project's header
 
-1. **Rule**: `claude stop` and `claude rm` run only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids, names and commands come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` runs `core.close_args`, which stops a running session and then removes it, and only removes any other. No other key, trigger or automatic path stops or removes a session, and no call passes `--discard-unpushed` or `--force-remove-worktree`.
-2. **Why**: closing ends his work in progress, and `claude rm` deletes the session and its worktree. A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session.
+1. **Rule**: a session is ended and removed from emx only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids and names come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` kills a running session's own pane (one in main is first swapped out for the placeholder), waits for a listing that shows it not running, and then `engine.forget`s it, which removes its folder under emx's state folder and nothing of Claude's. No other key, trigger or automatic path ends or forgets a session.
+2. **Why**: closing ends his work in progress (Tural, 2026-10-13: "End it and remove it"). A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session. The conversation stays in Claude Code's own history.
 3. **Minimal example**:
    ```python
    self.confirm, act = core.press_close(self.confirm, self.cursor, row, time.monotonic(), self.view())
    if act is not None:
-       self.closer = Closer(self.claude, core.close_targets(act))   # lists, re-checks, then stop and rm
+       self.closer = Closer(self.engine, core.close_targets(act), wait_for, self.me)   # lists, re-checks, kills, forgets
        self.closer.start()
    ```
-4. **Gotcha**: the cursor and the rows can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys; a group's confirm drops when a session joins or leaves it. The command follows `running`, not the shown state: a Done row whose process has exited is only removed. And while a close runs its row must not open: an Enter on a session being stopped would resume it.
+4. **Gotcha**: the cursor and the rows can change without a key (a poll regrouping, ← from main), so `refresh()` re-checks `core.confirm_holds` every tick, not only on keys; a group's confirm drops when a session joins or leaves it. A session still listed running after the kill is not forgotten, and a forget is tried a few times, since the killed `claude`'s last hook can still be writing into the folder. And while a close runs its row must not open: an Enter on a session being ended would resume it.
 
 ### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
 
-1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` (and, for a listed session whose own file has no turn, the bounded tails, `CONTINUED_TAIL_BYTES`, of the `<session-id>.jsonl` files in that session's own project folder, to find its continued-in predecessor; cached per file stat, backed off on a miss) in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
+1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. A path a session's hooks reported is opened only when it lies under Claude's `projects` folder (after `realpath`) and is named `<that session's id>.jsonl`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` (and, for a listed session whose own file has no turn, the bounded tails, `CONTINUED_TAIL_BYTES`, of the `<session-id>.jsonl` files in that session's own project folder, to find its continued-in predecessor; cached per file stat, backed off on a miss) in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
 2. **Why**: the contract allows reading `~/.claude` and forbids writing, moving or deleting anything there. Transcripts run to many megabytes and grow while being read, and a read on the curses thread would freeze the panel.
 3. **Minimal example**:
    ```python
@@ -152,21 +143,21 @@ The house style for writing code in this repo: how *this* codebase does things, 
    # curses thread, in refresh()
    found = self.poller.transcripts.take()
    ```
-4. **Gotcha**: a tail's first line is cut and its last line may be half-written, so neither is read as an entry: the first is dropped (`partial=True`) and a half-written last one fails to parse as JSON and is skipped. The project folder name is Claude Code's own mangling of the cwd and can be shortened, so a miss is looked up by `<sessionId>.jsonl` across the project folders, with backoff. The listing, not the transcript, decides a session's state.
+4. **Gotcha**: a tail's first line is cut and its last line may be half-written, so neither is read as an entry: the first is dropped (`partial=True`) and a half-written last one fails to parse as JSON and is skipped. The project folder name is Claude Code's own mangling of the cwd and can be shortened, so a miss is looked up by `<sessionId>.jsonl` across the project folders, with backoff. A session's hooks, not its transcript, decide its state, with one exception: Claude Code fires no hook when Esc interrupts a turn or a permission is denied, so a working or blocked session whose transcript's latest request is an interrupt marker stamped after its latest work hook reads Idle (`core.interrupted_after`). The `/rename` name and Claude's title are read from the transcript and written into emx's own record, never back into Claude's files.
 
 ### A session counts as gone only after `STALE_AFTER_MISSES` listings in a row without it
 
 1. **Rule**: emx acts on a session's absence from a listing (dropping its pin, discarding an open edit about it, closing its viewer) only after `core.STALE_AFTER_MISSES` successful listings in a row lack it, and a listing with no sessions at all counts as no listing. The count, the decision and the empty-listing rule live in core `stale_viewers`, or a helper built on it such as `prune_pins` or `edit_session_gone`. The one thing an empty listing still counts against is a viewer whose pane is dead (`dead=`), since a stopped session ends its viewer.
-2. **Why**: `claude agents` can return one glitchy or empty result. Acting on it closes or discards something he is using.
+2. **Why**: a listing can come back empty or short for a moment (a record being rewritten, a read that failed). Acting on it closes or discards something he is using. A pane holding one of emx's own sessions is the session itself and is never closed on an absence; only old `claude attach` viewers are.
 3. **Minimal example**:
    ```python
    misses, gone = core.edit_session_gone(sid, live_ids, misses)
    ```
-4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's.
+4. **Gotcha**: each use keeps its own misses dict, or one use's count leaks into another's. The cleanup a panel does once when it starts (`App.clear_legacy_viewers`) does not wait for listings: it kills every old `claude attach` viewer (a key, no agent tag) at once, since emx's own registry is empty on upgrade day and an empty listing would never count against them.
 
 ### emx types into a session only through `Tmux.type_if`, `submit_if`, `clear_if` or `key_if`, after the listing and screen checks
 
-1. **Rule**: before emx types anything into a session's viewer, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check for what is typed: running for a line, working allowed (`rename_listing_refusal`), running and working and not yet idle for Esc (`interrupt_listing_refusal`). The core screen checks pass on the viewer as it is now: not in a mode, showing this session and no other, and for a line an empty prompt; for Esc the cursor is shown and a draft does not refuse. Then the keys go only through `Tmux.type_if` (a line; it goes in with `enter=False`), `Tmux.submit_if` (Enter), `Tmux.clear_if` (C-u) or `Tmux.key_if` (one allowlisted key), with a gate format built by `core.type_gate` pinned at the cursor the checks saw, so tmux re-checks the viewer and his focus and types in the same command. Enter follows only through `submit_if`, after `core.typed_line_stands` holds on a fresh read, with a gate pinned at `cursor_x = 2 + display_width(line)`. After `type_if`, while `core.typed_line_arriving` holds, the reader waits up to `PROMPT_SETTLE_SECONDS` before the second look; the wait never stands in for `typed_line_stands`. An unsent line is taken back only through `clear_if` while `core.prompt_has_only_line` holds.
+1. **Rule**: before emx types anything into a session's pane, three things hold, in order. A fresh listing taken on a worker thread passes the listing refusal check for what is typed: running for a line, working allowed (`rename_listing_refusal`), running and working and not yet idle for Esc (`interrupt_listing_refusal`). The pane is the one tagged with the session's key and the agent (`core.live_viewer`); its tags, never its screen, prove which session it holds. The core screen checks pass on the pane as it is now: not in a mode, and for a line an empty prompt; for Esc the cursor is shown and a draft does not refuse. Then the keys go only through `Tmux.type_if` (a line; it goes in with `enter=False`), `Tmux.submit_if` (Enter), `Tmux.clear_if` (C-u) or `Tmux.key_if` (one allowlisted key), with a gate format built by `core.type_gate` pinned at the cursor the checks saw, so tmux re-checks the viewer and his focus and types in the same command. Enter follows only through `submit_if`, after `core.prompt_has_only_line` holds on a fresh read, with a gate pinned at `cursor_x = 2 + display_width(line)`. After `type_if`, while the line does not yet stand alone (Claude Code draws `/rename` with a grey `[name]` hint first), the reader reads again for up to `PROMPT_SETTLE_SECONDS`; the wait never stands in for the check. An unsent line is taken back only through `clear_if` while `core.prompt_has_only_line` holds. An empty prompt is never taken as proof that a session is idle: interactive `claude` keeps its input box open while it works.
 2. **Why**: a check in Python and a separate `send-keys` leave a gap of 15–50 ms. A key of his that lands in it is submitted along with the line, and a viewer he scrolled back in the meantime (copy mode) takes the keys as tmux commands instead of text. Enter is a second step because (Tural, 2026-10-08, "Narrow it") a dialog can open in a working session between typing and Enter, and Enter on it would answer it. Esc needs no empty prompt because, tried on throwaway sessions, Esc during a turn interrupted it and left a draft in the prompt untouched.
 3. **Minimal example**:
    ```python
@@ -178,17 +169,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: tmux reads a `;` at the end of an argument as a command separator even with `-l`, so the text goes as hex (`-H`). `display-message` reads `%` as a time format, so the report carries none. `-t` on a pane that is gone falls back to another pane, so the gate tests the pane id itself. An id enters a format only after it matches the plain-id pattern, or it could break out of the format. Fixed key names go through `_key_if` and bypass `KEYS_SENT`; never pass a caller's key there. One Esc worker per session at a time (`App.interrupters`, keyed by id): two Escs in quick succession into one session open Claude Code's rewind, while Escs into different sessions are independent.
 
-### A cancelled worker ends what it started before it returns
+### A cancelled worker acts no more after its cancel
 
-1. **Rule**: a worker thread that is cancelled ends any long-lived process or pane it started (the `Interrupter`'s hidden viewer) before it returns, and records whether it could (`ended`).
-2. **Why**: a waiter's join must mean nothing the worker launched can still act. A `claude attach` that is still starting reopens a session the close has just stopped.
+1. **Rule**: a worker that may type into a session (the `Interrupter`) checks its `cancel` event before it sends anything, and a close of that session sets it and joins the worker (`Closer.wait_for`, up to `INTERRUPT_JOIN_SECONDS`) before it kills anything.
+2. **Why**: an Esc landing in a pane being killed, or after a close has begun, acts on a session he has just decided to end.
 3. **Minimal example**:
    ```python
    if self.cancel.is_set():
-       self.tmux.kill_pane(opened)
-       return
+       return False, ""
+   report = self.tmux.key_if(pane.id, gate, "Escape", core.TYPED, core.gate_report(SESSION_OPT))
    ```
-4. **Gotcha**: `new_hidden_window` returns before the command inside it has done anything, so the pane must be killed even when the worker never saw the viewer come up. A kill that fails on a pane already gone is not a failure; check `panes()` before calling it one.
+4. **Gotcha**: a close held back by an interrupt that has not ended closes none of its targets and says so; it never closes half a group.
 
 ### The session list is measured in screen rows, not items
 
@@ -223,15 +214,15 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: the 1.0.0 entry in `CHANGELOG.md`.
 4. **Gotcha**: no `###` subheadings (Keep-a-Changelog's "### Fixed"). Any `#` line that is not a version heading ends the entry, so lines after it silently never reach the panel.
 
-### Every consumer of `claude agents` reads it through `core.background_sessions`
+### Every consumer of emx's sessions reads them through `engine.list_sessions`
 
-1. **Rule**: whatever lists sessions (the panel, the counts, the notices) takes them from `core.background_sessions`, through `sidebar.fetch_sessions` or `core.listed_session`, and never from raw `list_rows` rows.
-2. **Why**: it is the one place interactive sessions and the `emx-test-` throwaway sessions agents start for checks are dropped, so none of them reach his panel, counts or spoken notices.
+1. **Rule**: whatever lists sessions (the panel, the counts, the notices, the workers' fresh listings) takes them from `sidebar.fetch_sessions`, which is `engine.list_sessions`, which builds them in `core.engine_sessions` from emx's own records, the hooks' records, the panes and the transcript rule.
+2. **Why**: it is the one place a session's state, its name and whether it is running are decided, and the one place the `emx-test-` throwaway sessions checks start are dropped (by the name and folder in emx's own record), so none of them reach his panel, counts or spoken notices.
 3. **Minimal example**:
    ```python
-   sessions = core.background_sessions(rows)   # not: for row in rows
+   sessions, error = fetch_sessions(self.engine)   # worker thread; None and an error when it can't be read
    ```
-4. **Gotcha**: a test that feeds `emx-test-` rows with a temporary cwd must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; a row is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden.
+4. **Gotcha**: a test that feeds `emx-test-` sessions with a temporary cwd must set `EMX_SHOW_TEST_SESSIONS=1`, or they are dropped; one is dropped only when its cwd is under a temporary directory too, so a fixture cwd like `/p/alpha` is never hidden. An unreadable state folder is an error, never an empty list.
 
 ### A command from outside reaches the running panel through a session option, never a signal
 
@@ -266,6 +257,18 @@ The house style for writing code in this repo: how *this* codebase does things, 
    return 0
    ```
 4. **Gotcha**: an interpreter that cannot open its script exits 2 before any Python runs, so success must be forced by the shell, never by the script; payloads can be megabytes, so read to the end and keep only the allowlisted fields.
+
+### Every read-modify-write of a session's `session.json` runs under `engine._record_lock`
+
+1. **Rule**: every read-modify-write of a session's `session.json` runs under `engine._record_lock(state, key)`, which locks `session.lock` in the same folder.
+2. **Why**: `_write_atomic` replaces `session.json`'s inode, so a lock on that file would be lost with it; opening the lock file without creating the folder keeps a forgotten session gone.
+3. **Minimal example**:
+   ```python
+   with _record_lock(state, key):
+       record = _read_record(state, key)
+       _write_atomic(path, {**record, field: value})
+   ```
+4. **Gotcha**: `start` writes without the lock because it creates the record; hold the lock only around these small reads and writes, never around a tmux or `claude` call.
 
 ## The contract for this file
 

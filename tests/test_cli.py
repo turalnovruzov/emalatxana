@@ -75,7 +75,7 @@ class FailingUpgrade(unittest.TestCase):
 
 
 class LeftCheck(unittest.TestCase):
-    """`emx left` answers tmux's if-shell with an exit code; anything wrong means ← goes to Claude Code, silently."""
+    """`emx left` answers tmux's if-shell with an exit code, 0 only for ← to reach Claude Code; anything wrong means ← goes to the panel, silently, since Claude Code forks the conversation on a ← at an empty prompt."""
 
     def run_check(self, args, lines=None, error=None):
         def cursor_lines(tmux, pane, y):
@@ -89,10 +89,13 @@ class LeftCheck(unittest.TestCase):
         self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
         return code
 
-    def test_an_empty_prompt_answers_0(self):
+    def test_an_empty_prompt_answers_1_and_typed_text_0(self):
         lines = ["❯\xa0", "─" * 30]
-        self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], lines), 0)
-        self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], ["❯ typed", "─" * 30]), 1)
+        self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], lines), 1)
+        self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], ["❯ typed", "─" * 30]), 0)
+
+    def test_an_empty_prompt_a_column_over_answers_1(self):
+        self.assertEqual(self.run_check(["emx-test-unit", "%2", "3", "5", "1", "30"], [" ❯\xa0", "─" * 30]), 1)
 
     def test_anything_wrong_answers_1(self):
         good = ["%2", "2", "5", "1", "30"]
