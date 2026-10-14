@@ -16,6 +16,8 @@ LEFT_OPT = "@emx_left"
 BACK_OPT = "@emx_back"
 FOCUS_OPT = "@emx_focus"
 HUSH_OPT = "@emx_hush"
+OPEN_OPT = "@emx_open"
+TERMINAL_OPT = "@emx_terminal"
 
 
 _PANE_ID = re.compile(r"%\d+")
@@ -110,6 +112,10 @@ class Tmux:
     def set_session_option(self, name: str, value: str) -> None:
         self.run("set-option", "-t", f"={SESSION}:", name, value)
 
+    def clear_session_option_if(self, name: str, value: str) -> None:
+        """Empty the option only while it still holds `value`, decided on the tmux server so a write in between survives. `value` must not hold quotes or format characters (a session id does not)."""
+        self.run("if-shell", "-F", "-t", f"={SESSION}:", "#{==:#{" + name + "}," + value + "}", f'set-option -t ={SESSION}: {name} ""')
+
     def source_config(self) -> None:
         self.run("source-file", self.config)
 
@@ -132,6 +138,11 @@ class Tmux:
         except ValueError:
             idle = None
         return count, focus, active, idle
+
+    def client_ttys(self) -> list:
+        """The tty of each client attached to the emx session."""
+        out = self.run("list-clients", "-t", f"={SESSION}:", "-F", "#{client_tty}")
+        return [line.strip() for line in out.splitlines() if line.strip()]
 
     def new_hidden_window(self, command: str, cwd: str | None = None) -> str:
         where = ["-c", cwd] if cwd else []

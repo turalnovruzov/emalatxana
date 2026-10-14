@@ -28,6 +28,7 @@ When **not** to write one:
 | [0003](./0003-haiku-suggests-a-name-on-tab.md) | Haiku suggests a session name on Tab in the rename box | Accepted |
 | [0004](./0004-spoken-notices.md) | emx words its own notices with Haiku and speaks them with the system voice | Accepted |
 | [0005](./0005-emx-runs-agents-in-its-own-tmux.md) | emx runs every agent session itself, in its own private tmux | Accepted (not built yet) |
+| [0006](./0006-emx-notify-helper.md) | emx shows its notifications through a small helper app of its own, emx-notify.app | Accepted |
 
 ---
 

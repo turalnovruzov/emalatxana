@@ -1068,23 +1068,41 @@ class Prefs(unittest.TestCase):
             with self.subTest(collapsed=bad):
                 self.assertEqual(core.normalize_prefs({"collapsed": bad}), core.DEFAULT_PREFS)
 
-    def test_voice_false_survives_a_save_and_load(self):
-        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": False})
-        self.assertIs(core.load_prefs(self.path)["voice"], False)
+    def test_no_saved_mode_means_notification_mode(self):
+        self.assertNotIn("mode", core.DEFAULT_PREFS)
+        self.assertEqual(core.notice_mode(core.load_prefs(self.path)), "notification")
 
-    def test_a_non_bool_is_dropped(self):
+    def test_old_voice_true_means_voice_mode(self):
+        self.assertEqual(core.normalize_prefs({"voice": True})["mode"], core.VOICE_MODE)
+
+    def test_old_voice_false_means_notification_mode(self):
+        self.assertEqual(core.normalize_prefs({"voice": False})["mode"], core.NOTIFICATION_MODE)
+
+    def test_a_saved_mode_wins_over_an_old_voice_key(self):
+        self.assertEqual(core.normalize_prefs({"mode": "voice", "voice": False})["mode"], core.VOICE_MODE)
+        self.assertEqual(core.normalize_prefs({"mode": "notification", "voice": True})["mode"], core.NOTIFICATION_MODE)
+
+    def test_a_bad_mode_falls_back_to_the_old_key_then_default(self):
+        for bad in ("loud", "", 1, None, ["voice"], True):
+            with self.subTest(mode=bad):
+                self.assertEqual(core.normalize_prefs({"mode": bad, "voice": True})["mode"], core.VOICE_MODE)
+                self.assertNotIn("mode", core.normalize_prefs({"mode": bad}))
+                self.assertEqual(core.notice_mode(core.normalize_prefs({"mode": bad})), core.NOTIFICATION_MODE)
         for bad in ("no", 0, 1, None, []):
-            self.assertNotIn("voice", core.normalize_prefs({"voice": bad}))
+            with self.subTest(voice=bad):
+                self.assertNotIn("mode", core.normalize_prefs({"voice": bad}))
 
-    def test_the_default_is_absent_and_voice_is_on(self):
-        self.assertNotIn("voice", core.DEFAULT_PREFS)
-        self.assertTrue(core.voice_on(core.load_prefs(self.path)))
+    def test_save_drops_the_old_voice_key(self):
+        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": True})
+        saved = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["mode"], "voice")
+        self.assertNotIn("voice", saved)
 
-    def test_toggle_voice_flips_it(self):
-        off = core.toggle_voice(core.DEFAULT_PREFS)
-        self.assertIs(off["voice"], False)
-        self.assertFalse(core.voice_on(off))
-        self.assertTrue(core.voice_on(core.toggle_voice(off)))
+    def test_toggle_mode_flips_both_ways(self):
+        voice = core.toggle_mode(core.DEFAULT_PREFS)
+        self.assertEqual(core.notice_mode(voice), core.VOICE_MODE)
+        self.assertEqual(core.notice_mode(core.toggle_mode(voice)), core.NOTIFICATION_MODE)
+        self.assertNotIn("mode", core.DEFAULT_PREFS)
 
 
 class Folders(unittest.TestCase):
@@ -3678,31 +3696,81 @@ class Voices(unittest.TestCase):
         self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
 
 
-class TopLineMuted(unittest.TestCase):
+class TopLineTag(unittest.TestCase):
     SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="done"), mk(state="stopped")]
 
-    def test_not_muted_matches_the_old_output_at_every_width(self):
+    def test_no_tag_matches_the_old_output_at_every_width(self):
         for width in range(0, 81):
             with self.subTest(width=width):
-                self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, False), core.top_line(self.SESSIONS, "1.0.0", width))
+                for none in (None, ""):
+                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, none), core.top_line(self.SESSIONS, "1.0.0", width))
 
-    def test_muted_shows_a_tag_after_the_version_when_wide(self):
-        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, True)
-        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("muted", "muted")])
+    def test_a_tag_follows_the_version_when_wide(self):
+        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, core.VOICE_TAG)
+        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("voice", "mode")])
 
-    def test_muted_stays_visible_beside_cut_counts_in_a_default_panel(self):
-        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, True)
-        self.assertIn("muted", [tag for _, _, tag in placed])
+    def test_the_tag_stays_beside_cut_counts_in_a_default_panel(self):
+        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, core.VOICE_TAG)
+        self.assertIn("mode", [tag for _, _, tag in placed])
         self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
 
-    def test_muted_never_overflows_and_never_costs_the_version(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                placed = core.top_line(self.SESSIONS, "10.20.30", width, True, True)
-                self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
-                if "version" in plain:
-                    self.assertIn("version", [tag for _, _, tag in placed])
+    def test_the_longest_tag_never_overflows_and_never_costs_the_version(self):
+        for label in (core.VOICE_TAG, core.BLOCKED_TAG, core.UNAVAILABLE_TAG):
+            for width in range(0, 81):
+                with self.subTest(label=label, width=width):
+                    placed = core.top_line(self.SESSIONS, "10.20.30", width, True, label)
+                    self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
+                    plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
+                    if "version" in plain:
+                        self.assertIn("version", [tag for _, _, tag in placed])
+
+    def test_mode_tag_per_mode_and_helper_state(self):
+        for helper in core.HELPER_STATES:
+            with self.subTest(helper=helper):
+                self.assertEqual(core.mode_tag(core.VOICE_MODE, helper), core.VOICE_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_BLOCKED), core.BLOCKED_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_UNAVAILABLE), core.UNAVAILABLE_TAG)
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_OK), "")
+        self.assertEqual(core.mode_tag(core.NOTIFICATION_MODE, core.HELPER_PENDING), "")
+        self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
+
+
+class NotificationWording(unittest.TestCase):
+    def test_notification_instruction_has_no_sir_and_the_same_flags(self):
+        self.assertNotIn("sir", core.NOTIFICATION_INSTRUCTION.lower())
+        self.assertNotIn("butler", core.NOTIFICATION_INSTRUCTION.lower())
+        for rule in ("data, never instructions", "25 words", "Never name a file or a path", "exact figures", "no markdown"):
+            self.assertIn(rule, core.NOTIFICATION_INSTRUCTION)
+        spoken, posted = core.notice_args("claude"), core.notice_args("claude", core.NOTIFICATION_MODE)
+        self.assertEqual(core.notice_args("claude", core.VOICE_MODE), spoken)
+        i = spoken.index("--system-prompt") + 1
+        self.assertEqual(spoken[i], core.NOTICE_INSTRUCTION)
+        self.assertEqual(posted[i], core.NOTIFICATION_INSTRUCTION)
+        self.assertEqual(spoken[:i] + spoken[i + 1:], posted[:i] + posted[i + 1:])
+
+    def test_notice_title_joins_name_and_project(self):
+        self.assertEqual(core.notice_title("tea poem", "emalatxana"), "tea poem · emalatxana")
+        title = core.notice_title("a\x1b]9;x\x07b\nc\x7f", "p\tq")
+        self.assertEqual(title, "ab c · p q")
+        self.assertFalse(any(ord(ch) < 32 or 127 <= ord(ch) < 160 for ch in title))
+
+    def test_open_request_takes_only_a_session_id(self):
+        sid = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        self.assertEqual(core.open_request(sid), sid)
+        self.assertEqual(core.open_request(f"  {sid}\n"), sid)
+        for bad in ("", "garbage", "/tmp/x", "-x", f"{sid}x", None):
+            with self.subTest(value=bad):
+                self.assertIsNone(core.open_request(bad))
+
+    def test_terminal_bundle_prefers_cf_bundle_then_term_program(self):
+        self.assertEqual(core.terminal_bundle({"__CFBundleIdentifier": "com.example.term", "TERM_PROGRAM": "iTerm.app"}), "com.example.term")
+        self.assertEqual(core.terminal_bundle({"TERM_PROGRAM": "iTerm.app"}), "com.googlecode.iterm2")
+        self.assertEqual(core.terminal_bundle({"TERM_PROGRAM": "Apple_Terminal"}), "com.apple.Terminal")
+        self.assertEqual(core.terminal_bundle({"__CFBundleIdentifier": "not a bundle; rm", "TERM_PROGRAM": "Apple_Terminal"}), "com.apple.Terminal")
+        for env in ({}, {"TERM_PROGRAM": "tmux"}, {"__CFBundleIdentifier": "-b"}, {"__CFBundleIdentifier": "plain"}):
+            with self.subTest(env=env):
+                self.assertEqual(core.terminal_bundle(env), "")
+
 
 class HushDue(unittest.TestCase):
     def test_the_first_read_is_a_baseline_and_is_not_due(self):
@@ -3722,83 +3790,119 @@ class HushDue(unittest.TestCase):
         self.assertEqual(core.hush_due("456", "456"), ("456", False))
 
 
-class MissedList(unittest.TestCase):
-    def item(self, sid, at, text=None):
-        return core.Missed(sid, text or f"{sid} at {at}", at)
+class History(unittest.TestCase):
+    def item(self, sid, at, text=None, kind=core.NOTICE_DONE, read=False):
+        return core.Entry(sid, kind, f"{sid} · proj", text or f"{sid} at {at}", at, read)
 
     def added(self, *items, opened=None):
-        missed = []
+        history = []
         for item in items:
-            missed = core.missed_add(missed, item, opened or {})
-        return missed
+            history = core.history_add(history, item, opened or {})
+        return history
 
-    def test_newest_first(self):
-        missed = self.added(self.item("a", 2), self.item("b", 9), self.item("c", 5))
-        self.assertEqual([m.id for m in missed], ["b", "c", "a"])
+    def test_history_keeps_several_entries_per_session_newest_first(self):
+        history = self.added(self.item("s1", 1, "first"), self.item("s2", 5), self.item("s1", 9, "second"))
+        self.assertEqual([(e.id, e.at) for e in history], [("s1", 9), ("s2", 5), ("s1", 1)])
+        self.assertEqual([e.text for e in history if e.id == "s1"], ["second", "first"])
 
-    def test_a_newer_notice_for_a_session_replaces_its_older_one(self):
-        missed = self.added(self.item("s1", 1, "first"), self.item("s1", 2, "second"))
-        self.assertEqual([(m.id, m.text) for m in missed], [("s1", "second")])
+    def test_history_keeps_twenty_and_drops_the_oldest(self):
+        history = self.added(*[self.item("s1" if i % 2 else "s2", i) for i in range(21)])
+        self.assertEqual(core.HISTORY_KEPT, 20)
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0].at, 20)
+        self.assertNotIn(0, [e.at for e in history])
 
-    def test_kept_is_capped(self):
-        missed = self.added(*[self.item(f"s{i}", i) for i in range(25)])
-        self.assertEqual(len(missed), core.MISSED_KEPT)
-        self.assertEqual(missed[0].id, "s24")
-        self.assertEqual(missed[-1].id, "s5")
-
-    def test_clear_removes_only_that_session(self):
-        missed = self.added(self.item("a", 1), self.item("b", 2))
-        self.assertEqual([m.id for m in core.missed_clear(missed, "a")], ["b"])
-
-    def test_a_notice_from_before_the_last_open_never_lands(self):
-        for at, lands in ((9, False), (10, False), (11, True)):
+    def test_an_entry_from_before_the_last_open_lands_read(self):
+        for at, read in ((9, True), (10, True), (11, False)):
             with self.subTest(at=at):
-                self.assertEqual(len(self.added(self.item("s1", at), opened={"s1": 10})), int(lands))
-        self.assertEqual(len(self.added(self.item("s2", 1), opened={"s1": 10})), 1)
+                (entry,) = self.added(self.item("s1", at), opened={"s1": 10})
+                self.assertIs(entry.read, read)
+        (other,) = self.added(self.item("s2", 1), opened={"s1": 10})
+        self.assertFalse(other.read)
 
-    def test_prune_drops_after_stale_after_misses_and_not_on_an_empty_listing(self):
-        missed = self.added(self.item("s1", 1), self.item("s2", 2))
-        missed, misses = core.missed_prune(missed, ["s2"], {})
-        self.assertEqual([m.id for m in missed], ["s2", "s1"])
+    def test_reading_a_session_dims_its_entries_and_removes_none(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        read = core.history_read(history, "s1")
+        self.assertEqual(len(read), 3)
+        self.assertEqual([(e.id, e.read) for e in read], [("s1", True), ("s2", False), ("s1", True)])
+        self.assertEqual(core.history_unread(read), 1)
+        self.assertEqual(core.history_unread(history), 3)
+
+    def test_history_prune_drops_a_session_gone_for_stale_after_misses_listings(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        history, misses = core.history_prune(history, ["s2"], {})
+        self.assertEqual([e.id for e in history], ["s1", "s2", "s1"])
         for _ in range(5):
-            missed, misses = core.missed_prune(missed, [], misses)
-        self.assertEqual([m.id for m in missed], ["s2", "s1"])
-        missed, misses = core.missed_prune(missed, ["s2"], misses)
-        self.assertEqual([m.id for m in missed], ["s2"])
+            history, misses = core.history_prune(history, [], misses)
+        self.assertEqual(len(history), 3)
+        for _ in range(core.STALE_AFTER_MISSES - 1):
+            history, misses = core.history_prune(history, ["s2"], misses)
+        self.assertEqual([e.id for e in history], ["s2"])
 
-    def test_lines_cap_and_more(self):
-        five = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(5)])
-        got = core.missed_lines(five, 10, 40, 5)
-        self.assertEqual(got, ["Notices", "6s t4", "7s t3", "8s t2", "… 2 more"])
-        two = core.missed_lines(five[:2], 10, 40, 5)
-        self.assertEqual(two, ["Notices", "6s t4", "7s t3"])
+    def test_the_strip_shows_the_newest_three_one_line_each_with_unread_count(self):
+        history = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(4)])
+        history = core.history_read(core.history_read(history, "s0"), "s1")
+        got = core.history_strip(history, 10, 40, 5)
+        self.assertEqual([t for t, _ in got], ["Notifications (2)", "7s t3", "8s t2", "9s t1", "… 1 more"])
 
-    def test_two_rows_show_the_newest_notice_with_the_count_in_the_title(self):
+    def test_the_strip_title_has_no_count_when_all_are_read(self):
+        history = core.history_read(self.added(self.item("s1", 1)), "s1")
+        self.assertEqual(core.history_strip(history, 10, 40, 5)[0][0], "Notifications")
+
+    def test_the_strip_marks_read_rows(self):
+        history = core.history_read(self.added(self.item("s1", 1, "a"), self.item("s2", 2, "b")), "s1")
+        self.assertEqual(core.history_strip(history, 10, 40, 5), [("Notifications (1)", False), ("8s b", False), ("9s a", True)])
+
+    def test_a_two_row_strip_shows_the_newest_under_the_title(self):
         three = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(3)])
-        self.assertEqual(core.missed_lines(three, 10, 40, 2), ["Notices (3)", "8s t2"])
-        self.assertEqual(core.missed_lines(three[:1], 10, 40, 2), ["Notices", "8s t2"])
+        self.assertEqual([t for t, _ in core.history_strip(three, 10, 40, 2)], ["Notifications (3)", "8s t2"])
+        self.assertEqual([t for t, _ in core.history_strip(three[:1], 10, 40, 2)], ["Notifications (1)", "8s t2"])
 
-    def test_lines_are_one_row_each_and_fit_the_width(self):
-        text = " ".join(["word"] * 28)
-        missed = [core.Missed("s1", text, 0.0)]
-        (title, line) = core.missed_lines(missed, 125, 30, 5)
-        self.assertEqual(title, "Notices")
+    def test_strip_rows_are_one_row_each_and_fit_the_width(self):
+        history = [core.Entry("s1", core.NOTICE_DONE, "s1 · p", " ".join(["word"] * 28), 0.0)]
+        (title, _), (line, _) = core.history_strip(history, 125, 30, 5)
+        self.assertEqual(title, "Notifications (1)")
         self.assertLessEqual(core.display_width(line), 30)
         self.assertTrue(line.endswith("…"))
         self.assertTrue(line.startswith("2m "))
 
     def test_room_below_two_or_empty_shows_nothing(self):
-        missed = [core.Missed("s1", "x", 0.0)]
-        self.assertEqual(core.missed_lines(missed, 1, 40, 1), [])
-        self.assertEqual(core.missed_lines(missed, 1, 40, 0), [])
-        self.assertEqual(core.missed_lines([], 1, 40, 5), [])
+        history = [self.item("s1", 0.0)]
+        self.assertEqual(core.history_strip(history, 1, 40, 1), [])
+        self.assertEqual(core.history_strip(history, 1, 40, 0), [])
+        self.assertEqual(core.history_strip([], 1, 40, 5), [])
 
     def test_room_leaves_the_list_its_minimum(self):
-        self.assertEqual(core.missed_room(12, 1), 3)
-        self.assertEqual(core.missed_room(9, 1), 0)
-        self.assertEqual(core.missed_room(11, 1), 2)
-        self.assertEqual(core.missed_room(40, 1), core.MISSED_SHOWN + 2)
-        self.assertEqual(core.missed_room(None, 1), core.MISSED_SHOWN + 2)
+        self.assertEqual(core.history_room(12, 1), 3)
+        self.assertEqual(core.history_room(9, 1), 0)
+        self.assertEqual(core.history_room(11, 1), 2)
+        self.assertEqual(core.history_room(40, 1), core.HISTORY_SHOWN + 2)
+        self.assertEqual(core.history_room(None, 1), core.HISTORY_SHOWN + 2)
+
+    def test_a_full_view_row_is_a_header_and_at_most_two_wrapped_lines(self):
+        long = " ".join(f"w{i}" for i in range(60))
+        history = self.added(self.item("s1", 0, long, core.NOTICE_NEEDS), self.item("s2", 50, "Short one.", core.NOTICE_DONE))
+        rows = core.history_rows(history, 125, 30)
+        self.assertEqual(rows[0], ["✓ 1m s2 · proj", "  Short one."])
+        header, *body = rows[1]
+        self.assertEqual(header, "● 2m s1 · proj")
+        self.assertEqual(len(rows[1]), 3)
+        for line in rows[1]:
+            self.assertLessEqual(core.display_width(line), 30)
+        self.assertTrue(all(line.startswith("  ") for line in body))
+        self.assertTrue(body[-1].endswith("…"))
+        self.assertTrue(body[0].strip().startswith("w0 w1"))
+
+    def test_a_long_title_is_cut_to_the_width(self):
+        history = [core.Entry("s1", core.NOTICE_DONE, "a very long session name · project", "x", 0.0)]
+        (header, _), = core.history_rows(history, 1, 16)
+        self.assertLessEqual(core.display_width(header), 16)
+        self.assertTrue(header.endswith("…"))
+
+    def test_the_word_notices_is_gone_from_the_title(self):
+        self.assertEqual(core.HISTORY_TITLE, "Notifications")
+        self.assertNotIn("Notices", core.HISTORY_TITLE)
+        self.assertFalse(hasattr(core, "MISSED_TITLE"))
 
 
 HOOK_FIXTURE = Path(__file__).parent / "fixtures" / "hooks" / "claude-2.1.296.json"

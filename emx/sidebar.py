@@ -12,10 +12,10 @@ import textwrap
 import threading
 import time
 
-from emx import __version__, core
+from emx import __version__, core, notify
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, ROLE, SESSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -36,11 +36,17 @@ SUMMARY_CALLS_KEPT = 500
 NOTICE_TIMEOUT = 15
 NOTICE_TICK_SECONDS = 0.5
 SPEAK_TIMEOUT = 60
+NOTIFY_STATUS_SECONDS = 60
+# The permission prompt waits on him; the helper gives up on its own after 300 s.
+AUTHORIZE_TIMEOUT = 310
 VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
 COLLAPSE_KEY = "C-q"
 RESTORED_NOTICE_SECONDS = 4
+MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notification mode"}
 WHATS_NEW_SECONDS = 60
+ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
+ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
 FOOTERS = (
     "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
     "→ open ← back ␣ peek n new ^f find ^t pin ^r rename ^x close ^s view ? keys",
@@ -69,8 +75,9 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
-    ("m", "mute or unmute spoken notices"),
-    ("h", "stop the voice now; later notices still speak"),
+    ("N", "notifications: the last 20; ↵ opens one"),
+    ("m", "voice mode or notification mode"),
+    ("h", "stop the voice now (voice mode)"),
     ("s", "panel to the other side"),
     ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
@@ -93,6 +100,9 @@ RENAME_FOOTER = "tab suggest · enter save · esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
 FIND_HINT = "↑↓ move · ↵ open · Esc clear"
+HISTORY_HINT = "↑↓ move · ↵ open · Esc back"
+HISTORY_EMPTY = "No notifications yet."
+OPEN_GONE = "That session isn't listed any more."
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
@@ -697,9 +707,9 @@ def suggest_name(claude: str, excerpt: str, cwd: str) -> tuple:
     return (call, error) if error != core.HAIKU_DECLINED else (None, NAME_REFUSED)
 
 
-def announce(claude: str, excerpt: str, cwd: str) -> tuple:
-    """(core.SummaryCall, None) from one `claude -p` call that has Haiku word a notice from `excerpt`, or (None, one-line error). Never raises."""
-    return _run_haiku(core.notice_args(claude), excerpt, cwd, NOTICE_TIMEOUT, core.clean_notice)
+def announce(claude: str, excerpt: str, cwd: str, mode: str = core.VOICE_MODE) -> tuple:
+    """(core.SummaryCall, None) from one `claude -p` call that has Haiku word a notice from `excerpt`, to be heard or read as `mode` wants, or (None, one-line error). Never raises."""
+    return _run_haiku(core.notice_args(claude, mode), excerpt, cwd, NOTICE_TIMEOUT, core.clean_notice)
 
 
 def say_command() -> str:
@@ -1139,11 +1149,16 @@ class Voice(threading.Thread):
         self.playing = None
         self.muted = False
         self.hushed_at = float("-inf")
+        self.fallback_post = None
 
-    def speak(self, text: str, at: float | None = None) -> None:
-        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through. `at` is when the notice's transition happened: a hush after that drops it too."""
+    def speak(self, text: str, at: float | None = None, fallback: tuple | None = None) -> None:
+        """Dropped while muted, so a mute between a notice being read and spoken lets nothing through. `at` is when the notice's transition happened: a hush after that drops it too.
+
+        `fallback` is (title, plain line, session id): what `fallback_post` is
+        given when `say` fails, so voice mode still reaches him as a notification.
+        """
         if not self.muted:
-            self.put(("say", text), at)
+            self.put(("say", text, fallback and (*fallback, at)), at)
 
     def put(self, item: tuple, at: float | None = None) -> None:
         with self.lock:
@@ -1190,13 +1205,18 @@ class Voice(threading.Thread):
         if item is None:
             self.wake.wait()
             self.wake.clear()
-        else:
-            self.speak_aloud(item[1], generation)
-
-    def speak_aloud(self, text: str, generation: int) -> None:
-        """The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
-        if under_test() and not os.environ.get("EMX_SAY"):
             return
+        spoken = self.speak_aloud(item[1], generation)
+        with self.lock:
+            hushed = generation != self.generation
+        fallback = item[2] if len(item) > 2 else None
+        if not spoken and not hushed and fallback and self.fallback_post is not None:
+            self.fallback_post(*fallback)
+
+    def speak_aloud(self, text: str, generation: int) -> bool:
+        """False when `say` could not speak it: it would not start, timed out or exited non-zero, a stop by `silence` aside. The text goes on stdin, never in the command line, so a text starting with `-` can't be read as a flag."""
+        if under_test() and not os.environ.get("EMX_SAY"):
+            return True
         argv = [self.say] + (["-v", self.voice] if self.voice else [])
         try:
             proc = subprocess.Popen(
@@ -1204,28 +1224,133 @@ class Voice(threading.Thread):
                 encoding="utf-8", errors="replace",
             )
         except (OSError, ValueError):
-            return
+            return False
         with self.lock:
             # A silence that came while this one was starting must still stop it.
             muted = generation != self.generation
             if not muted:
                 self.playing = proc
+        spoken = True
         try:
             if muted:
                 self.stop(proc)
             proc.communicate("" if muted else text, timeout=SPEAK_TIMEOUT)
         except subprocess.TimeoutExpired:
+            spoken = False
             proc.kill()
             proc.communicate()
         except (OSError, ValueError):
-            pass
+            spoken = False
         finally:
             with self.lock:
                 if self.playing is proc:
                     self.playing = None
+                silenced = generation != self.generation
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+        return silenced or (spoken and proc.returncode == 0)
+
+
+class Notifier(threading.Thread):
+    """Shows notifications through emx-notify.app, one helper call at a time on its own thread: builds the helper, asks the permission, posts, and keeps `state` fresh.
+
+    Building it here does nothing: only `run` builds or calls the helper. An
+    emx a live check started (`under_test`) never builds one, and posts only
+    to the command `EMX_NOTIFY` names, or nowhere.
+    """
+
+    def __init__(self, socket: str = "emx"):
+        super().__init__(daemon=True)
+        self.socket = socket
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.queue = []
+        self.mode = core.NOTIFICATION_MODE
+        self.command = None
+        self.app = None
+        self.asking = False
+        self.asked = False
+        self.checked_at = None
+        self.state = core.HELPER_PENDING
+        self.undecided = True
+
+    def settle(self, report, error) -> None:
+        """Takes the helper's answer as `state`. A permission still undecided after it was asked for counts as blocked, so an unanswered prompt does not leave the mode silently dead; `undecided` keeps the helper's real answer, so a later switch into notification mode asks again."""
+        state = notify.helper_state(report, error)
+        self.undecided = state == core.HELPER_PENDING
+        self.state = core.HELPER_BLOCKED if state == core.HELPER_PENDING and self.asked else state
+
+    def post(self, title: str, body: str, sid: str, at: float | None = None) -> None:
+        with self.lock:
+            self.queue.append((title, body, sid))
+        self.wake.set()
+
+    def authorize(self) -> None:
+        """Ask the permission once it is known not to be settled; nothing happens when it is."""
+        with self.lock:
+            self.asking = True
+        self.wake.set()
+
+    def run(self) -> None:
+        try:
+            self.prepare()
+        except Exception:
+            self.command = None
+            self.state = core.HELPER_UNAVAILABLE
+        while True:
+            try:
+                self.step()
+            except Exception:
+                pass
+
+    def prepare(self) -> None:
+        env = os.environ
+        if env.get("EMX_NOTIFY"):
+            self.command = env["EMX_NOTIFY"]
+        elif not under_test():
+            home = notify.helper_home(env)
+            app, _ = notify.ensure_built(home, notify.bundle_id(env)) if home is not None else (None, None)
+            self.command = notify.helper_command(env, home) if app is not None else None
+            self.app = app
+        if self.command is None:
+            self.state = core.HELPER_UNAVAILABLE
+            return
+        self.check()
+        with self.lock:
+            if self.mode == core.NOTIFICATION_MODE:
+                self.asking = True
+
+    def check(self) -> None:
+        self.checked_at = time.monotonic()
+        report, error = notify.run(self.command, "status")
+        self.settle(report, error)
+
+    def step(self) -> None:
+        """Asks the permission when wanted, else posts the oldest queued notification, else refreshes `state` every NOTIFY_STATUS_SECONDS."""
+        with self.lock:
+            asking, self.asking = self.asking and self.undecided, False
+            item = self.queue.pop(0) if self.queue and not asking else None
+        if self.command is None:
+            with self.lock:
+                self.queue = []
+            self.wake.wait()
+            self.wake.clear()
+        elif asking:
+            report, error = notify.authorize(self.command, self.app, AUTHORIZE_TIMEOUT)
+            self.asked = True
+            self.settle(report, error)
+        elif item is not None:
+            title, body, sid = item
+            ident = f"emx-{sid}-{time.time_ns()}"
+            report, error = notify.run(self.command, "post", notify.payload(title, body, ident, sid, self.socket))
+            self.settle(report, error)
+            self.checked_at = time.monotonic()
+        elif self.checked_at is None or time.monotonic() - self.checked_at >= NOTIFY_STATUS_SECONDS:
+            self.check()
+        else:
+            self.wake.wait(max(0.0, NOTIFY_STATUS_SECONDS - (time.monotonic() - self.checked_at)))
+            self.wake.clear()
 
 
 class Notices(threading.Thread):
@@ -1237,13 +1362,14 @@ class Notices(threading.Thread):
     never loses it: a plain line takes the place of Haiku's.
     """
 
-    def __init__(self, claude: str, transcripts: Transcripts, resolver: Resolver, speaker: Voice):
+    def __init__(self, claude: str, transcripts: Transcripts, resolver: Resolver, speaker: Voice, notifier=None):
         super().__init__(daemon=True)
         self.claude = claude
         self.transcripts = transcripts
         self.resolver = resolver
         self.speaker = speaker
-        self.voice = True
+        self.notifier = notifier
+        self.mode = core.NOTIFICATION_MODE
         self.lock = threading.Lock()
         self.wanted = {}
         self.pending = []
@@ -1260,7 +1386,7 @@ class Notices(threading.Thread):
             self.pending.append(notice)
 
     def take(self) -> list:
-        """The (session id, text, transition time) of each notice worded since the last take, oldest first."""
+        """The (session id, kind, title, text, transition time) of each notice worded since the last take, oldest first."""
         with self.lock:
             out, self.outbox = self.outbox, []
         return out
@@ -1311,20 +1437,24 @@ class Notices(threading.Thread):
                 self.pending.remove(notice)
 
     def send(self, notice: core.Notice, session: core.Session, transcript) -> None:
+        with self.lock:
+            mode = self.mode
         placements = self.resolver.snapshot()
         project = core.notice_project(session, placements)
+        title = core.notice_title(session.name, project)
+        plain = core.clean_notice(core.fallback_notice(project, notice.name, notice.named, notice.kind))
         excerpt = core.notice_excerpt(project, session, transcript, notice.named)
         call, text = None, ""
         if excerpt:
             try:
                 if self.scratch is None:
                     self.scratch = summary_scratch()
-                call, _ = announce(self.claude, excerpt, self.scratch)
+                call, _ = announce(self.claude, excerpt, self.scratch, mode)
             except OSError:
                 call = None
             text = core.clean_notice(call.text) if call is not None else ""
         if not text:
-            text = core.clean_notice(core.fallback_notice(project, notice.name, notice.named, notice.kind))
+            text = plain
         if self.stale(notice):
             self.drop(notice)
             return
@@ -1334,10 +1464,14 @@ class Notices(threading.Thread):
             self.pending.remove(notice)
             if call is not None:
                 self.calls = (self.calls + [call])[-SUMMARY_CALLS_KEPT:]
-            self.outbox.append((notice.id, text, notice.at))
-            speak = self.voice
-        if speak and text:
-            self.speaker.speak(text, notice.at)
+            self.outbox.append((notice.id, notice.kind, title, text, notice.at))
+            mode = self.mode
+        if not text:
+            return
+        if mode == core.VOICE_MODE:
+            self.speaker.speak(text, notice.at, fallback=(title, plain, notice.id))
+        elif self.notifier is not None:
+            self.notifier.post(title, text, notice.id, notice.at)
 
 
 class Poller(threading.Thread):
@@ -1352,8 +1486,10 @@ class Poller(threading.Thread):
         self.resolver = Resolver(os.path.realpath(os.path.expanduser("~")))
         self.transcripts = Transcripts(claude_home(), engine)
         self.summaries = Summaries(engine.claude, self.transcripts)
+        self.notifier = Notifier(getattr(getattr(engine, "tmux", None), "socket", None) or "emx")
         self.voice = Voice()
-        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice)
+        self.voice.fallback_post = self.notifier.post
+        self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice, self.notifier)
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.engine)
@@ -1370,6 +1506,7 @@ class Poller(threading.Thread):
         self.resolver.start()
         self.transcripts.start()
         self.summaries.start()
+        self.notifier.start()
         self.voice.start()
         self.notices.start()
         while True:
@@ -1421,12 +1558,13 @@ class App:
         self.scroll = 0
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state))
-        self.poller.notices.voice = core.voice_on(self.prefs)
-        self.poller.voice.muted = not self.poller.notices.voice
+        self.apply_mode()
         self.notice_seen = None
         self.hush_seen = None
-        self.missed = []
-        self.missed_misses = {}
+        self.history = []
+        self.history_misses = {}
+        self.history_view = None
+        self.history_scroll = 0
         self.opened = {}
         self.listings = Listings()
         self.home = os.path.expanduser("~")
@@ -1584,6 +1722,7 @@ class App:
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
         self.check_hush()
+        self.check_open()
 
     def check_hush(self) -> None:
         """`emx hush` from outside writes a fresh token to a session option; a change since the last read stops the voice. A failed read changes nothing."""
@@ -1595,7 +1734,53 @@ class App:
         if due:
             self.hush()
 
+    def check_open(self) -> None:
+        """`emx open` from outside (a notification click) writes a session id to a session option; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
+        if not self.loaded:
+            return
+        try:
+            value = self.tmux.session_option(OPEN_OPT)
+            if not value:
+                return
+            sid = core.open_request(value)
+            if sid:
+                self.tmux.clear_session_option_if(OPEN_OPT, sid)
+            else:
+                self.tmux.set_session_option(OPEN_OPT, "")
+        except TmuxError:
+            return
+        if sid:
+            self.open_listed(sid)
+            self.bring_tab_forward()
+
+    def bring_tab_forward(self) -> None:
+        """In iTerm2, bring forward the tab emx runs in: the helper can only activate the app, which lands on whichever tab was last active.
+
+        The escape goes straight to the client's tty, so it bypasses tmux and
+        needs no tmux passthrough. Best effort: nothing here fails the open.
+        """
+        try:
+            if self.tmux.session_option(TERMINAL_OPT) != ITERM_BUNDLE:
+                return
+            ttys = self.tmux.client_ttys()
+        except TmuxError:
+            return
+        for tty in ttys:
+            try:
+                fd = os.open(tty, os.O_WRONLY | os.O_NOCTTY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            try:
+                os.write(fd, ITERM_STEAL_FOCUS)
+            except OSError:
+                pass
+            finally:
+                os.close(fd)
+
     def hush(self) -> None:
+        """`h` and `emx hush` only stop speech, so in notification mode they do nothing at all."""
+        if self.mode() == core.NOTIFICATION_MODE:
+            return
         self.poller.voice.silence()
         self.say("Stopped speaking.", seconds=RESTORED_NOTICE_SECONDS)
 
@@ -1727,7 +1912,7 @@ class App:
             self.tmux.select(pane_id)
             if trigger == core.OPEN:
                 self.opened[sid] = time.monotonic()
-                self.missed = core.missed_clear(self.missed, sid)
+                self.history = core.history_read(self.history, sid)
             self.say("")
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
@@ -2224,6 +2409,11 @@ class App:
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
         item = self.row_map.get(y)
+        if self.history_view is not None:
+            if item and item[0] == "entry":
+                self.history_view = item[1]
+                self.open_entry()
+            return
         if self.find is not None:
             # A header click would fold a group he cannot see folded until find closes.
             if not item or item[0] == "group":
@@ -2254,6 +2444,8 @@ class App:
             self.rename_key(key)
         elif self.find is not None:
             self.find_key(key)
+        elif self.history_view is not None:
+            self.history_key(key)
         elif self.help or key == "?":
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
@@ -2283,8 +2475,10 @@ class App:
             self.start_rename()
         elif key == "n":
             self.open_prompt()
+        elif key == "N":
+            self.open_history()
         elif key == "m":
-            self.toggle_voice()
+            self.toggle_mode()
         elif key == "h":
             self.hush()
         elif key == "s":
@@ -2296,15 +2490,54 @@ class App:
         elif key == "q":
             self.detach()
 
-    def toggle_voice(self) -> None:
-        self.prefs = core.toggle_voice(self.prefs)
+    def open_history(self) -> None:
+        """Opening the view marks nothing read: only opening a session does."""
+        self.history_view, self.history_scroll = 0, 0
+        self.peeking = False
+
+    def history_key(self, key) -> None:
+        if key == "\x1b":
+            self.history_view = None
+        elif key in (curses.KEY_UP, "k"):
+            self.history_view = max(0, self.history_view - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            self.history_view = max(0, min(len(self.history) - 1, self.history_view + 1))
+        elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
+            self.open_entry()
+
+    def open_entry(self) -> None:
+        if not 0 <= self.history_view < len(self.history):
+            return
+        if self.open_listed(self.history[self.history_view].id):
+            self.history_view = None
+
+    def open_listed(self, sid: str) -> bool:
+        """Open a session from outside the list (the history, a notification click) as the list would; False, saying so, when it isn't listed."""
+        if self.session(sid) is None:
+            self.say(OPEN_GONE, seconds=RESTORED_NOTICE_SECONDS)
+            return False
+        if self.find is not None:
+            self.close_find()
+        self.activate(("session", sid))
+        return True
+
+    def mode(self) -> str:
+        return core.notice_mode(self.prefs)
+
+    def apply_mode(self) -> None:
+        mode = self.mode()
+        self.poller.notices.mode = mode
+        self.poller.notifier.mode = mode
+        self.poller.voice.muted = mode == core.NOTIFICATION_MODE
+
+    def toggle_mode(self) -> None:
+        self.prefs = core.toggle_mode(self.prefs)
         self.save_prefs()
-        on = core.voice_on(self.prefs)
-        self.poller.notices.voice = on
-        self.poller.voice.muted = not on
-        if not on:
+        self.apply_mode()
+        if self.mode() == core.NOTIFICATION_MODE:
             self.poller.voice.silence()
-        self.say("Spoken notices on" if on else "Spoken notices off", seconds=RESTORED_NOTICE_SECONDS)
+            self.poller.notifier.authorize()
+        self.say(MODE_MESSAGES[self.mode()], seconds=RESTORED_NOTICE_SECONDS)
 
     def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
@@ -2315,7 +2548,7 @@ class App:
                 pass
 
     def bottom_lines(self, width: int, height: int | None = None) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, missed notices, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
+        """(text, attr) lines for the area under the list: notice, prompt, the notifications strip, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
         lines = []
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
@@ -2339,10 +2572,12 @@ class App:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
+        if self.history_view is not None:
+            return lines + [(t, curses.A_DIM) for t in core.wrap_words(HISTORY_HINT, width)[:2]]
         footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
         footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
-        shown = core.missed_lines(self.missed, time.monotonic(), width, core.missed_room(height, len(lines) + 1))
-        lines += [(t, curses.A_BOLD if i == 0 else 0) for i, t in enumerate(shown)]
+        shown = core.history_strip(self.history, time.monotonic(), width, core.history_room(height, len(lines) + 1))
+        lines += [(t, curses.A_BOLD if i == 0 else curses.A_DIM if read else 0) for i, (t, read) in enumerate(shown)]
         lines.append((footer, curses.A_DIM))
         return lines
 
@@ -2398,7 +2633,9 @@ class App:
         self.put(1, 0, "─" * w, self.palette.attr("muted"))
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 2, h - len(bottom)
-        if self.help:
+        if self.history_view is not None:
+            self.draw_history(list_top, list_bottom, w)
+        elif self.help:
             self.draw_help(list_top, list_bottom, w)
         elif not self.loaded:
             if not self.list_error:
@@ -2450,14 +2687,44 @@ class App:
 
     def draw_top_line(self, width: int) -> None:
         style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM, "muted": curses.A_DIM}
-        muted = not core.voice_on(self.prefs)
-        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, muted):
+        label = core.mode_tag(self.mode(), self.poller.notifier.state)
+        warn = label in (core.BLOCKED_TAG, core.UNAVAILABLE_TAG)
+        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM,
+                "mode": self.palette.attr("error") if warn else curses.A_DIM}
+        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, label):
             if tag in logo:
                 attr = logo[tag]
             else:
                 attr = self.palette.attr("muted" if tag in (None, core.STOPPED) else CATEGORY_TONE[tag]) | style
             self.put(0, 1 + x, text, attr)
+
+    def draw_history(self, top: int, bottom: int, width: int) -> None:
+        self.put(top, 1, core.HISTORY_TITLE, curses.A_BOLD)
+        if not self.history:
+            self.put(top + 1, 1, HISTORY_EMPTY, curses.A_DIM)
+            return
+        self.history_view = max(0, min(self.history_view, len(self.history) - 1))
+        rows = core.history_rows(self.history, time.monotonic(), max(1, width - 2))
+        lines = [("entry", i) for i in range(len(rows))]
+        heights = [len(r) for r in rows]
+        top, height = top + 1, max(1, bottom - top - 1)
+        self.history_scroll = core.list_window(heights, self.history_view, self.history_scroll, height)
+        self.row_map = core.row_hits(lines, heights, self.history_scroll, top, height)
+        y = top - self.history_scroll
+        for i, entry in enumerate(self.history):
+            for j, text in enumerate(rows[i]):
+                if top <= y < top + height:
+                    selected = core.selection_bar(i == self.history_view, self.focused is not False)
+                    if selected:
+                        self.put(y, 0, " " * width, self.palette.attr("plain", selected))
+                    if entry.read:
+                        attr = self.palette.attr("muted", selected) | curses.A_DIM
+                    elif j == 0:
+                        attr = self.palette.attr(CATEGORY_TONE.get(entry.kind, "plain"), selected) | curses.A_BOLD
+                    else:
+                        attr = self.palette.attr("plain", selected)
+                    self.put(y, 1, text, attr)
+                y += 1
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, "Keys", curses.A_BOLD)
@@ -2597,7 +2864,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
-        self.missed, self.missed_misses = core.missed_prune(self.missed, [s.id for s in sessions], self.missed_misses)
+        self.history, self.history_misses = core.history_prune(self.history, [s.id for s in sessions], self.history_misses)
         self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:
             self.rename_misses = {}
@@ -2638,8 +2905,8 @@ class App:
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:
-        for sid, text, at in self.poller.notices.take():
-            self.missed = core.missed_add(self.missed, core.Missed(sid, text, at), self.opened)
+        for sid, kind, title, text, at in self.poller.notices.take():
+            self.history = core.history_add(self.history, core.Entry(sid, kind, title, text, at), self.opened)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()

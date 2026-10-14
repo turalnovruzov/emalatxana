@@ -1,17 +1,20 @@
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
+from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 from emx import __version__, cli, core
-from emx.tmux import SESSION, VERSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import OPEN_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
 
 
 class Attached(Exception):
@@ -192,6 +195,295 @@ class Hush(unittest.TestCase):
 
     def test_the_usage_names_hush(self):
         self.assertIn("hush", cli.USAGE)
+
+
+SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+class OpenSession(unittest.TestCase):
+    """`emx open <sid>`, what a notification click runs. Every test runs with a temporary TMUX_TMPDIR and no real tmux or `open`."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = os.path.join(tmp.name, "state")
+        for patch in (
+            mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name, "EMX_SOCKET": "emx-test-x", "EMX_OPEN": "/x/fake-open",
+                                         "XDG_STATE_HOME": self.state, "EMX_SHOW_TEST_SESSIONS": "1"}),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.calls = []
+
+    def run_open(self, sid=SID, attached=1, terminal="com.example.term", server=True):
+        def record(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[0] != "tmux":
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            if "has-session" in argv:
+                return subprocess.CompletedProcess(argv, 0 if server else 1, "", "" if server else "no server running")
+            if "display-message" in argv:
+                return subprocess.CompletedProcess(argv, 0, f"{attached}\t1\t%2\t1\n", "")
+            if "show-options" in argv and TERMINAL_OPT in argv:
+                return subprocess.CompletedProcess(argv, 0, terminal + "\n", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["open", sid])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_open_writes_the_option_and_prints_the_terminal_for_the_click_to_bring_forward(self):
+        code, out, err = self.run_open()
+        self.assertEqual((code, out, err), (0, "com.example.term\n", ""))
+        (setting,) = [argv for argv in self.calls if "set-option" in argv]
+        self.assertEqual(setting, ["tmux", "-L", "emx-test-x", "set-option", "-t", "=emx:", OPEN_OPT, SID])
+        self.assertEqual(self.opened(), [])
+
+    def test_open_without_a_known_terminal_only_writes_the_option(self):
+        code, out, _ = self.run_open(terminal="")
+        self.assertEqual((code, out), (0, ""))
+        self.assertTrue([argv for argv in self.calls if OPEN_OPT in argv])
+        self.assertFalse([argv for argv in self.calls if argv[0] != "tmux"])
+
+    def opened(self):
+        return [argv for argv in self.calls if argv[0] != "tmux"]
+
+    def command_files(self):
+        return sorted(Path(self.state, "emx", "open").glob("*.command"))
+
+    def launch_file(self):
+        return Path(self.state, "emx", "open", "emx.command")
+
+    def pending_file(self):
+        return Path(self.state, "emx", "open", "pending")
+
+    def create_workspace(self):
+        made = RecordingWorkspace("emx-test-x")
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.state}):
+            os.environ.pop("EMX_CONFIG_HOME", None)
+            cli.create_workspace(made)
+        return made
+
+    def test_detached_open_writes_the_option_and_opens_a_new_window_in_the_recorded_terminal(self):
+        code, out, err = self.run_open(attached=0, terminal="com.googlecode.iterm2")
+        self.assertEqual((code, out, err), (0, "", ""))
+        self.assertTrue([argv for argv in self.calls if "set-option" in argv and OPEN_OPT in argv and SID in argv])
+        self.assertEqual(self.command_files(), [self.launch_file()])
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.googlecode.iterm2", str(self.launch_file())]])
+
+    def test_detached_open_without_a_recorded_terminal_uses_the_fallback(self):
+        self.run_open(attached=0, terminal="")
+        (path,) = self.command_files()
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(path)]])
+
+    def test_the_command_file_execs_emx_with_only_allowlisted_env_and_no_session_text(self):
+        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "s3cret", "EMX_SAY": "/x/say"}):
+            self.run_open(attached=0)
+        (path,) = self.command_files()
+        self.assertEqual(path, self.launch_file())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "#!/bin/sh")
+        self.assertEqual(lines[-1], f"exec {shlex.quote(sys.executable)} {shlex.quote(os.path.abspath(cli.BIN))}")
+        for line in lines[1:-1]:
+            self.assertTrue(line.startswith("export "), line)
+            self.assertIn(line.split("=", 1)[0][len("export "):], cli.OPEN_ENV)
+        self.assertNotIn(SID, text)
+        self.assertNotIn("s3cret", text)
+        self.assertIn("export EMX_SOCKET=emx-test-x", lines)
+
+    def test_every_click_rewrites_the_one_launch_file_in_place(self):
+        self.run_open(attached=0, terminal="com.googlecode.iterm2")
+        first = self.launch_file().read_text(encoding="utf-8")
+        with mock.patch.dict(os.environ, {"EMX_CLAUDE": "/x/other-claude"}):
+            self.run_open(attached=0, terminal="com.googlecode.iterm2")
+        self.run_open(server=False)
+        self.assertEqual(self.command_files(), [self.launch_file()])
+        self.assertEqual(self.launch_file().stat().st_mode & 0o777, 0o700)
+        self.assertEqual(sorted(p.name for p in self.launch_file().parent.iterdir()), ["emx.command", "pending"])
+        self.assertEqual(self.launch_file().read_text(encoding="utf-8"), first)
+        self.assertEqual({tuple(argv) for argv in self.opened()},
+                         {("/x/fake-open", "-b", runner, str(self.launch_file())) for runner in ("com.googlecode.iterm2", "com.apple.Terminal")})
+
+    def test_launch_files_of_earlier_builds_are_removed(self):
+        folder = Path(self.state, "emx", "open")
+        folder.mkdir(parents=True)
+        for name in ("emx-1.command", "emx-2.command"):
+            (folder / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        self.run_open(attached=0)
+        self.assertEqual(self.command_files(), [self.launch_file()])
+
+    def test_a_terminal_that_is_not_a_known_runner_gets_its_new_window_in_terminal_app(self):
+        code, _, _ = self.run_open(attached=0, terminal="com.microsoft.VSCode")
+        self.assertEqual(code, 0)
+        (path,) = self.command_files()
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(path)]])
+
+    def test_an_attached_open_prints_any_recorded_terminal_and_opens_nothing(self):
+        code, out, _ = self.run_open(attached=1, terminal="com.microsoft.VSCode")
+        self.assertEqual((code, out), (0, "com.microsoft.VSCode\n"))
+        self.assertEqual(self.opened(), [])
+
+    def test_an_existing_open_folder_is_tightened_to_0700(self):
+        folder = Path(self.state, "emx", "open")
+        folder.mkdir(parents=True)
+        os.chmod(folder, 0o755)
+        self.run_open(attached=0)
+        self.assertEqual(folder.stat().st_mode & 0o777, 0o700)
+
+    def test_with_no_server_the_session_waits_in_the_pending_file_and_create_workspace_takes_it(self):
+        code, out, err = self.run_open(server=False)
+        self.assertEqual((code, out, err), (0, "", ""))
+        text = self.launch_file().read_text(encoding="utf-8")
+        self.assertNotIn(SID, text)
+        self.assertNotIn("EMX_OPEN_SESSION", text)
+        self.assertEqual(self.opened(), [["/x/fake-open", "-b", "com.apple.Terminal", str(self.launch_file())]])
+        self.assertFalse([argv for argv in self.calls if "set-option" in argv])
+        self.assertEqual(self.pending_file().stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.pending_file().read_text(encoding="utf-8"), SID + "\n")
+        self.assertEqual(self.create_workspace().options.get(OPEN_OPT), SID)
+        self.assertFalse(self.pending_file().exists())
+        self.assertNotIn(OPEN_OPT, self.create_workspace().options)
+
+    def test_create_workspace_ignores_and_removes_a_pending_file_that_is_not_a_session_id(self):
+        for bad in ("", "garbage", "-x", SID + "; rm", "../" + SID):
+            with self.subTest(value=bad):
+                self.pending_file().parent.mkdir(parents=True, exist_ok=True)
+                self.pending_file().write_text(bad, encoding="utf-8")
+                self.assertNotIn(OPEN_OPT, self.create_workspace().options)
+                self.assertFalse(self.pending_file().exists())
+
+    def test_create_workspace_ignores_and_removes_a_stale_pending_file_and_honours_a_fresh_one(self):
+        for age, honoured in ((cli.PENDING_MAX_AGE + 1, False), (3 * 86400, False), (cli.PENDING_MAX_AGE - 10, True)):
+            with self.subTest(age=age):
+                self.pending_file().parent.mkdir(parents=True, exist_ok=True)
+                self.pending_file().write_text(SID + "\n", encoding="utf-8")
+                then = time.time() - age
+                os.utime(self.pending_file(), (then, then))
+                self.assertEqual(self.create_workspace().options.get(OPEN_OPT), SID if honoured else None)
+                self.assertFalse(self.pending_file().exists())
+
+    def test_create_workspace_without_a_pending_file_requests_nothing(self):
+        self.assertNotIn(OPEN_OPT, self.create_workspace().options)
+
+    def test_create_workspace_no_longer_reads_emx_open_session(self):
+        with mock.patch.dict(os.environ, {"EMX_OPEN_SESSION": SID}):
+            self.assertNotIn(OPEN_OPT, self.create_workspace().options)
+
+    def test_a_failed_window_leaves_no_pending_session(self):
+        def record(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[0] != "tmux":
+                return subprocess.CompletedProcess(argv, 1, "", "no such app")
+            return subprocess.CompletedProcess(argv, 1, "", "no server running")
+
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["open", SID]), 1)
+        self.assertFalse(self.pending_file().exists())
+
+    def test_a_failed_open_says_so(self):
+        def record(argv, **kwargs):
+            self.calls.append(argv)
+            if argv[0] != "tmux":
+                return subprocess.CompletedProcess(argv, 1, "", "no such app")
+            return subprocess.CompletedProcess(argv, 1, "", "no server running")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["open", SID])
+        self.assertEqual((code, err.getvalue()), (1, "emx: couldn't open a new window.\n"))
+
+    def test_open_refuses_a_non_session_id_and_writes_nothing(self):
+        for bad in ("", "garbage", "-x", "/tmp/x", SID + "x"):
+            with self.subTest(sid=bad):
+                self.calls.clear()
+                code, out, err = self.run_open(sid=bad)
+                self.assertEqual((code, out), (2, ""))
+                self.assertTrue(err)
+                self.assertEqual(self.calls, [])
+
+    def test_open_refuses_a_default_socket(self):
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": "default"}):
+            code, _, err = self.run_open()
+        self.assertEqual((code, err), (2, cli.SOCKET_REFUSAL + "\n"))
+        self.assertEqual(self.calls, [])
+
+    def test_open_never_starts_a_server_and_uses_no_config(self):
+        self.run_open()
+        self.run_open(attached=0)
+        code, _, err = self.run_open(server=False)
+        self.assertEqual((code, err), (0, ""))
+        for argv in self.calls:
+            if argv[0] == "tmux":
+                self.assertEqual(argv[:3], ["tmux", "-L", "emx-test-x"])
+                self.assertNotIn("-f", argv)
+                self.assertNotIn("new-session", argv)
+
+    def test_the_usage_names_open_as_internal(self):
+        self.assertIn("emx open <session id> is internal", cli.USAGE)
+
+
+class RecordingWorkspace:
+    """What `create_workspace` asks of tmux, recorded: no server is started."""
+
+    def __init__(self, socket):
+        self.socket = socket
+        self.options = {}
+
+    def run(self, *args):
+        return "%1\n"
+
+    def set_pane_option(self, pane, name, value):
+        pass
+
+    def toggle_zoom(self, pane):
+        pass
+
+    def set_session_option(self, name, value):
+        self.options[name] = value
+
+
+class RecordsTerminal(unittest.TestCase):
+    def launch(self, **env):
+        made = []
+
+        def make(*args, **kwargs):
+            made.append(FakeTmux(*args, **kwargs))
+            return made[-1]
+
+        clean = {k: v for k, v in os.environ.items() if k not in ("__CFBundleIdentifier", "TERM_PROGRAM")}
+        with mock.patch.object(cli, "Tmux", make), \
+                mock.patch.object(cli, "refresh_workspace", lambda tmux: None), \
+                mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"), \
+                mock.patch.dict(cli.os.environ, {**clean, "EMX_SOCKET": "emx-test-unit", **env}, clear=True), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached):
+            with self.assertRaises(Attached):
+                cli.launch()
+        return made[0].options
+
+    def test_launch_records_the_terminal_bundle(self):
+        self.assertEqual(self.launch(__CFBundleIdentifier="com.googlecode.iterm2")[TERMINAL_OPT], "com.googlecode.iterm2")
+        self.assertEqual(self.launch(TERM_PROGRAM="Apple_Terminal")[TERMINAL_OPT], "com.apple.Terminal")
+
+    def test_launch_skips_it_when_unknown(self):
+        self.assertNotIn(TERMINAL_OPT, self.launch(TERM_PROGRAM="tmux"))
+
+    def test_a_failed_record_still_attaches(self):
+        class Refusing(FakeTmux):
+            def set_session_option(self, name, value):
+                raise TmuxError("gone")
+
+        with mock.patch.object(cli, "Tmux", Refusing), \
+                mock.patch.object(cli, "refresh_workspace", lambda tmux: None), \
+                mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"), \
+                mock.patch.dict(cli.os.environ, {"EMX_SOCKET": "emx-test-unit", "__CFBundleIdentifier": "com.example.term"}), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached):
+            with self.assertRaises(Attached):
+                cli.launch()
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
