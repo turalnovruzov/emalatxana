@@ -381,7 +381,7 @@ class Renamer(threading.Thread):
             refusal = core.rename_screen_refusal(self.rename, screen)
             if refusal:
                 return False, refusal, False
-            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT)
+            gate = core.type_gate(viewer.id, self.panel, self.rename.id, screen.cursor_y, SESSION_OPT, screen.cursor_x)
             if gate is None:
                 return False, f"emx can't check {self.rename.old}'s session safely, so it didn't rename it.", False
             report = self.tmux.type_if(

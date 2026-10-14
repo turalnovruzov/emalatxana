@@ -258,6 +258,18 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: an interpreter that cannot open its script exits 2 before any Python runs, so success must be forced by the shell, never by the script; payloads can be megabytes, so read to the end and keep only the allowlisted fields.
 
+### Every read-modify-write of a session's `session.json` runs under `engine._record_lock`
+
+1. **Rule**: every read-modify-write of a session's `session.json` runs under `engine._record_lock(state, key)`, which locks `session.lock` in the same folder.
+2. **Why**: `_write_atomic` replaces `session.json`'s inode, so a lock on that file would be lost with it; opening the lock file without creating the folder keeps a forgotten session gone.
+3. **Minimal example**:
+   ```python
+   with _record_lock(state, key):
+       record = _read_record(state, key)
+       _write_atomic(path, {**record, field: value})
+   ```
+4. **Gotcha**: `start` writes without the lock because it creates the record; hold the lock only around these small reads and writes, never around a tmux or `claude` call.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

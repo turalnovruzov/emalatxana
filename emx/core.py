@@ -2903,7 +2903,7 @@ class Notice:
     name: str
     cwd: str
     at: float
-    named: bool = True
+    named: bool
 
 
 class NoticeSeen(dict):
@@ -2999,7 +2999,7 @@ def notice_project(session: Session, placements: Mapping) -> str:
     return "a project"
 
 
-def notice_excerpt(project: str, session: Session, transcript: Transcript | None, named: bool = True) -> str:
+def notice_excerpt(project: str, session: Session, transcript: Transcript | None, named: bool) -> str:
     """What Haiku is shown for a notice, or "" when the transcript has nothing to say."""
     body = summary_excerpt(session, transcript)
     if not body:

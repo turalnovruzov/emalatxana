@@ -3501,14 +3501,14 @@ class NoticeText(unittest.TestCase):
     def test_the_excerpt_starts_with_project_session_and_what_happened(self):
         session = mk(id="i1", name="tax fix", state="done")
         t = core.Transcript(prompt="Fix rounding", reply="Fixed it.", answered=True, latest="reply")
-        lines = core.notice_excerpt("invoicing", session, t).splitlines()
+        lines = core.notice_excerpt("invoicing", session, t, named=True).splitlines()
         self.assertEqual(lines[:3], ["Project: invoicing", "Session: tax fix", "What happened: it has finished"])
         self.assertEqual("\n".join(lines[3:]), core.summary_excerpt(session, t))
 
     def test_a_session_that_needs_him_says_so(self):
         session = mk(id="i1", name="i1", state="blocked", waiting_for="approve Bash")
         t = core.Transcript(prompt="Go", tool="Bash: ls", pending=True, latest="tool")
-        self.assertIn("What happened: it needs him", core.notice_excerpt("app", session, t))
+        self.assertIn("What happened: it needs him", core.notice_excerpt("app", session, t, named=True))
 
     def test_an_unnamed_session_has_no_session_line(self):
         session = mk(id="1a2b3c4d", name="1a2b3c4d", state="done", named=False)
@@ -3524,8 +3524,8 @@ class NoticeText(unittest.TestCase):
         self.assertIn("Session: tax fix", core.notice_excerpt("app", session, t, named=session.named).splitlines())
 
     def test_no_transcript_gives_nothing(self):
-        self.assertEqual(core.notice_excerpt("app", mk(state="done"), None), "")
-        self.assertEqual(core.notice_excerpt("app", mk(state="done"), core.Transcript()), "")
+        self.assertEqual(core.notice_excerpt("app", mk(state="done"), None, named=True), "")
+        self.assertEqual(core.notice_excerpt("app", mk(state="done"), core.Transcript(), named=True), "")
 
     def test_the_project_is_the_repo_then_the_folder_then_a_placeholder(self):
         placements = {"/r/app/.claude/worktrees/x": core.Placement("/r/app", "x")}

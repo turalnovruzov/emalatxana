@@ -2340,6 +2340,17 @@ class RenameSession(AppCase):
         self.assertIn("prompt isn't empty", self.app.notice)
         self.assertTrue(self.app.notice_error)
 
+    def test_a_prompt_drawn_a_column_over_is_gated_at_its_own_cursor_column(self):
+        tmux = self.app.tmux
+        x, y, shown, width = tmux.cursor_at
+        line, below = tmux.prompt
+        tmux.prompt = (" " + line, below)
+        tmux.cursor_at = (x + 1, y, shown, width)
+        self.rename_to("fresh name")
+        self.settle()
+        self.assertEqual(tmux.gates, [core.type_gate("%2", "%1", "named", y, sidebar.SESSION_OPT, x + 1)])
+        self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
+
     def test_the_line_goes_in_without_enter_and_enter_follows_only_the_exact_line_check(self):
         self.rename_to("fresh name")
         self.settle()
@@ -4416,6 +4427,13 @@ class NoticesWorker(unittest.TestCase):
         self.assertEqual(self.worker.pending, [])
         self.assertTrue(self.asked[0].startswith("Project: alpha\nSession: emx-test-a\nWhat happened: it has finished"))
         self.assertEqual(self.texts(), [])
+
+    def test_an_unnamed_session_is_asked_about_without_a_session_line(self):
+        self.notice(named=False)
+        self.worker.step()
+        self.assertEqual(len(self.asked), 1)
+        self.assertTrue(self.asked[0].startswith("Project: alpha\nWhat happened: it has finished"))
+        self.assertNotIn("Session:", self.asked[0])
 
     def test_an_error_a_refusal_or_an_empty_answer_gives_the_plain_line(self):
         empty = core.SummaryCall("", "m", 1, 1, 0.0, 1, 1, 0, 0)
