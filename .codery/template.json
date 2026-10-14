@@ -1,0 +1,10 @@
+{
+  "template": "product-owner",
+  "version": "0.1.0",
+  "params": {
+    "project_name": "emalatxana",
+    "test_command": "python3 -m unittest discover -s tests -v",
+    "has_screen": false,
+    "extra_deny": "\"Bash(pkill:*)\", \"Bash(killall:*)\""
+  }
+}

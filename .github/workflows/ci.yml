@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tmux
+        run: brew install tmux
+      - name: Show versions
+        run: |
+          python3 --version
+          tmux -V
+      - name: Run the suite
+        run: python3 -m unittest discover -s tests -v

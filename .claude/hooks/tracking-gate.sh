@@ -1,7 +1,6 @@
 #!/bin/bash
+# template: product-owner @ 0.1.0 — shared; change it through Codery
 # Gate: tracking-gate (deny-once)
-# Part of emalatxana's system, set up 2026-10-07; maintained in place. First rendered from the Codery
-# enforcement-gate scaffold @ 0.1.0.
 #
 # PreToolUse hook on Bash. Reads the tool call from stdin, acts only on
 # commands matching the gate's pattern, and enforces the repo's rule:
