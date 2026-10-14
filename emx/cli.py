@@ -211,6 +211,8 @@ def hook(args: list) -> int:
         if not os.path.isabs(root) or not core.is_session_id(key) or not os.path.isfile(os.path.join(folder, "session.json")):
             return 0
         text = sys.stdin.buffer.read(HOOK_STDIN_BYTES).decode("utf-8", errors="replace")
+        while sys.stdin.buffer.read(1 << 20):
+            pass
         record = core.hook_record(text, time.time() * 1000)
         if record is None:
             return 0

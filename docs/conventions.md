@@ -261,7 +261,9 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**:
    ```python
    return f"{words} >/dev/null 2>&1; exit 0"   # engine.hook_command: the shell forces success and silence
-   except BaseException: pass; return 0        # cli.hook: everything else is swallowed
+   except BaseException:                       # cli.hook: everything else is swallowed
+       pass
+   return 0
    ```
 4. **Gotcha**: an interpreter that cannot open its script exits 2 before any Python runs, so success must be forced by the shell, never by the script; payloads can be megabytes, so read to the end and keep only the allowlisted fields.
 

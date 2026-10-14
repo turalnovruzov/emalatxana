@@ -254,6 +254,13 @@ class EngineStore(StoreCase):
         self.assertGreater(os.path.getsize(os.path.join(self.key_dir(), "events.jsonl")), engine.READ_TAIL_BYTES)
         self.assertEqual(self.only_session().state, "done")
 
+    def test_a_line_too_deeply_nested_to_parse_is_skipped_not_raised(self):
+        self.write_record()
+        with open(os.path.join(self.key_dir(), "events.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write("[" * 100000 + "\n")
+        self.write_events({"event": "Stop", "at": 9, "session_id": CLAUDE_SID})
+        self.assertEqual(self.only_session().state, "done")
+
     def transcript_in_projects(self):
         path = os.path.join(self.home, "projects", "-work", f"{CLAUDE_SID}.jsonl")
         os.makedirs(os.path.dirname(path))

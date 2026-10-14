@@ -3723,7 +3723,7 @@ def _fold_step(state: HookState, event, rec: dict) -> HookState | None:
             return None
         # PermissionRequest already blocked at once; this notice lands seconds later, after he may have approved.
         if state.state != "blocked":
-            return replace(state)
+            return None
         waiting = state.waiting_for or _one_line(rec.get("message")) or "approve"
         return replace(state, waiting_for=waiting)
     if event == "Stop":
