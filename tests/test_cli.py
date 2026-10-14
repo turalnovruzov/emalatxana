@@ -453,6 +453,123 @@ class FollowCommand(unittest.TestCase):
         self.assertIn("emx follow is internal", cli.USAGE)
 
 
+class OpenRemote(unittest.TestCase):
+    """A click on a banner for a server session: ssh to the server, never a local tmux."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.log = os.path.join(tmp.name, "ssh.log")
+        fake = str(Path(__file__).resolve().parent / "fake_ssh.py")
+        env = {"EMX_REMOTE_HOST": "srv", "EMX_SSH": fake, "EMX_REMOTE_TERMINAL": "com.googlecode.iterm2",
+               "EMX_REMOTE_COMMAND": "true", "FAKE_SSH_LOG": self.log, "EMX_SOCKET": "emx-test-x"}
+        for patch in (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(cli, "Tmux", side_effect=AssertionError("a local tmux was touched")),
+            mock.patch.object(cli, "_run_open", side_effect=AssertionError("a local window was opened")),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_open(self, sid=SID):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.open_session(sid)
+        return code, out.getvalue(), err.getvalue()
+
+    def calls(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="utf-8") as fh:
+            return [json.loads(l) for l in fh]
+
+    def test_it_prints_the_laptops_terminal_and_asks_the_server_in_batch_mode(self):
+        code, out, _ = self.run_open()
+        self.assertEqual((code, out), (0, "com.googlecode.iterm2\n"))
+        (call,) = self.calls()
+        self.assertIn("BatchMode=yes", call)
+        self.assertTrue(call[-1].endswith(f"open --no-window {SID}'"))
+
+    def test_a_non_id_is_refused_and_nothing_runs(self):
+        code, out, err = self.run_open("garbage")
+        self.assertEqual((code, out), (2, ""))
+        self.assertTrue(err)
+        self.assertEqual(self.calls(), [])
+
+    def test_a_terminal_that_is_not_a_bundle_id_prints_nothing(self):
+        with mock.patch.dict(os.environ, {"EMX_REMOTE_TERMINAL": "not a bundle; rm"}):
+            code, out, _ = self.run_open()
+        self.assertEqual((code, out), (0, ""))
+
+
+class OpenNoWindowTmux:
+    instances = []
+
+    def __init__(self, socket, config=None):
+        self.socket = socket
+        self.options = {}
+        self.exists = True
+        OpenNoWindowTmux.instances.append(self)
+
+    def has_session(self):
+        return self.exists
+
+    def set_session_option(self, name, value):
+        self.options[name] = value
+
+    def client_state(self):
+        return (0, "", "", None)
+
+    def session_option(self, name):
+        return ""
+
+
+class OpenNoWindow(unittest.TestCase):
+    def setUp(self):
+        OpenNoWindowTmux.instances = []
+        for patch in (
+            mock.patch.dict(os.environ, {"EMX_SOCKET": "emx-test-x"}),
+            mock.patch.object(cli, "Tmux", OpenNoWindowTmux),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+            mock.patch.object(cli, "_run_open", side_effect=AssertionError("a window was opened")),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        os.environ.pop("EMX_REMOTE_HOST", None)
+
+    def run_main(self, exists=True):
+        original = OpenNoWindowTmux.has_session
+        OpenNoWindowTmux.has_session = lambda self: exists
+        self.addCleanup(setattr, OpenNoWindowTmux, "has_session", original)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["open", "--no-window", SID])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_it_sets_the_open_option_prints_nothing_and_opens_no_window(self):
+        code, out, _ = self.run_main()
+        self.assertEqual((code, out), (0, ""))
+        self.assertEqual(OpenNoWindowTmux.instances[0].options, {OPEN_OPT: SID})
+
+    def test_with_no_session_it_says_so_and_opens_no_window(self):
+        code, out, err = self.run_main(exists=False)
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("isn't running", err)
+
+
+class RemoteCommand(unittest.TestCase):
+    def test_no_host_is_a_usage_error(self):
+        err = io.StringIO()
+        with redirect_stderr(err):
+            code = cli.main(["remote"])
+        self.assertEqual(code, 2)
+        self.assertIn("remote <host>", err.getvalue())
+
+    def test_the_usage_names_the_command_and_its_setting(self):
+        self.assertIn("remote <host>", cli.USAGE)
+        self.assertIn("EMX_REMOTE_COMMAND", cli.USAGE)
+
+
 class RecordingWorkspace:
     """What `create_workspace` asks of tmux, recorded: no server is started."""
 
