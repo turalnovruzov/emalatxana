@@ -111,6 +111,7 @@ class RunGitNeverRaises(unittest.TestCase):
 
 
 REAL_FETCH_SESSIONS = sidebar.fetch_sessions
+REAL_ANNOUNCE = sidebar.announce
 
 
 class FakeEngine:
@@ -228,6 +229,29 @@ class FakePalette:
         return 0
 
 
+class FakeNotifier:
+    """Stands in for `sidebar.Notifier` as `FakeSay` does for `say`: records posts and permission requests, with a settable `state`."""
+
+    def __init__(self, socket="emx"):
+        self.socket = socket
+        self.posts = []
+        self.asked = 0
+        self.state = core.HELPER_OK
+        self.mode = core.NOTIFICATION_MODE
+
+    def post(self, title, body, sid, at=None):
+        self.posts.append((title, body, sid))
+
+    def authorize(self):
+        self.asked += 1
+
+    def start(self):
+        pass
+
+    def is_alive(self):
+        return False
+
+
 class ClientTmux:
     """The two tmux calls a listing makes for notices; anything else is an error, as it is with no tmux at all."""
 
@@ -251,8 +275,11 @@ class AppCase(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         patches = [
-            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "XDG_STATE_HOME": tmp.name, "TMUX_PANE": "%1"}),
+            mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "XDG_STATE_HOME": tmp.name, "TMUX_PANE": "%1",
+                                         "EMX_NOTIFY_HOME": os.path.join(tmp.name, "notify")}),
             mock.patch.object(sidebar, "Palette", FakePalette),
+            # No test may build the helper or post a real notification.
+            mock.patch.object(sidebar, "Notifier", FakeNotifier),
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
             # A worker a test didn't mean to start must never run his real claude.
             mock.patch.object(sidebar, "fetch_sessions", lambda engine: (None, "no engine in tests")),
@@ -4358,8 +4385,11 @@ class Announce(unittest.TestCase):
         with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, LONG_JSON)) as run:
             call, error = sidebar.announce("claude", "--Project: app", "/tmp/scratch")
         self.assertIsNone(error)
-        self.assertEqual(run.call_args.args[0], core.notice_args("claude"))
+        self.assertEqual(run.call_args.args[0], core.notice_args("claude", core.VOICE_MODE))
         self.assertEqual(run.call_args.kwargs["input"], "--Project: app")
+        with mock.patch.object(sidebar.subprocess, "run", return_value=completed(0, LONG_JSON)) as run:
+            sidebar.announce("claude", "x", "/tmp/scratch", core.NOTIFICATION_MODE)
+        self.assertEqual(run.call_args.args[0], core.notice_args("claude", core.NOTIFICATION_MODE))
         self.assertEqual(run.call_args.kwargs["cwd"], "/tmp/scratch")
         self.assertEqual(run.call_args.kwargs["timeout"], sidebar.NOTICE_TIMEOUT)
 
@@ -4384,25 +4414,32 @@ class Announce(unittest.TestCase):
 class StubVoice:
     def __init__(self):
         self.spoken = []
+        self.fallbacks = []
 
-    def speak(self, text, at=None):
+    def speak(self, text, at=None, fallback=None):
         self.spoken.append(text)
+        self.fallbacks.append(fallback)
 
 
 class NoticesWorker(unittest.TestCase):
     def setUp(self):
         self.transcripts = sidebar.Transcripts("/nonexistent")
         self.speaker = StubVoice()
-        self.worker = sidebar.Notices("claude", self.transcripts, sidebar.Resolver("/h"), self.speaker)
+        self.notifier = FakeNotifier()
+        self.worker = sidebar.Notices("claude", self.transcripts, sidebar.Resolver("/h"), self.speaker, self.notifier)
+        self.worker.mode = core.VOICE_MODE
         self.alpha = session("a", "/p/alpha", "done")
         self.worker.want([self.alpha])
         self.transcripts.found = {"a": core.Transcript(prompt="Fix it", reply="Fixed.", reply_line="Fixed.", answered=True, latest="reply")}
         self.asked = []
         self.answer = (core.SummaryCall("Alpha, sir: all fixed.", "claude-haiku-5-5", 1, 1, 0.0, 1, 1, 0, 0), None)
 
-        def fake(claude, excerpt, cwd):
+        def fake(claude, excerpt, cwd, mode=core.VOICE_MODE):
             self.asked.append(excerpt)
+            self.modes.append(mode)
             return self.answer
+
+        self.modes = []
 
         for name, value in (("announce", fake), ("summary_scratch", lambda: "/tmp/emx-test-scratch")):
             patch = mock.patch.object(sidebar, name, value)
@@ -4508,7 +4545,7 @@ class NoticesWorker(unittest.TestCase):
         self.assertEqual(self.texts(), ["A session in alpha is done."])
 
     def test_a_session_that_changed_state_during_the_call_is_dropped_too(self):
-        def slow(claude, excerpt, cwd):
+        def slow(claude, excerpt, cwd, mode=core.VOICE_MODE):
             self.worker.want([session("a", "/p/alpha", "working")])
             return self.answer
 
@@ -4528,12 +4565,68 @@ class NoticesWorker(unittest.TestCase):
         self.worker.step()
         self.assertEqual(self.texts(), ["emx-test-a, in alpha, is done."])
 
-    def test_with_the_voice_off_the_outbox_still_gets_it_and_nothing_is_spoken(self):
-        self.worker.voice = False
+    def test_in_notification_mode_the_outbox_still_gets_it_and_nothing_is_spoken(self):
+        self.worker.mode = core.NOTIFICATION_MODE
         self.notice()
         self.worker.step()
         self.assertEqual(self.texts(), ["Alpha, sir: all fixed."])
         self.assertEqual(self.speaker.spoken, [])
+
+    def named_alpha(self):
+        alpha = replace(self.alpha, name="Alpha")
+        self.worker.want([alpha])
+        notice = core.Notice("a", core.NOTICE_DONE, "Alpha", "/p/alpha", time.monotonic(), True)
+        self.worker.add(notice)
+        return notice
+
+    def test_notification_mode_posts_and_never_speaks(self):
+        self.worker.mode = core.NOTIFICATION_MODE
+        self.answer = (core.SummaryCall("The alpha app: all fixed.", "m", 1, 1, 0.0, 1, 1, 0, 0), None)
+        self.named_alpha()
+        self.worker.step()
+        self.assertEqual(self.notifier.posts, [("Alpha · alpha", "The alpha app: all fixed.", "a")])
+        self.assertEqual(self.speaker.spoken, [])
+
+    def test_voice_mode_speaks_and_never_posts(self):
+        self.named_alpha()
+        self.worker.step()
+        self.assertEqual(self.speaker.spoken, ["Alpha, sir: all fixed."])
+        self.assertEqual(self.speaker.fallbacks, [("Alpha · alpha", "Alpha, in alpha, is done.", "a")])
+        self.assertEqual(self.notifier.posts, [])
+
+    def test_the_mode_is_read_before_the_haiku_call_and_delivery_follows_it(self):
+        def switching(claude, excerpt, cwd, mode=core.VOICE_MODE):
+            self.modes.append(mode)
+            self.worker.mode = core.NOTIFICATION_MODE
+            return self.answer
+
+        with mock.patch.object(sidebar, "announce", switching):
+            self.named_alpha()
+            self.worker.step()
+        self.assertEqual(self.modes, [core.VOICE_MODE])
+        self.assertEqual(self.speaker.spoken, ["Alpha, sir: all fixed."])
+        self.assertEqual(self.notifier.posts, [])
+
+    def test_notification_mode_uses_the_notification_instruction_and_voice_the_butler_one(self):
+        seen = []
+
+        def run(argv, **kwargs):
+            seen.append(argv[argv.index("--system-prompt") + 1])
+            return completed(0, LONG_JSON)
+
+        with mock.patch.object(sidebar, "announce", REAL_ANNOUNCE), mock.patch.object(sidebar.subprocess, "run", run):
+            for mode in (core.NOTIFICATION_MODE, core.VOICE_MODE):
+                self.worker.mode = mode
+                self.notice()
+                self.worker.step()
+        self.assertEqual(seen, [core.NOTIFICATION_INSTRUCTION, core.NOTICE_INSTRUCTION])
+
+    def test_a_failed_haiku_posts_the_plain_line(self):
+        self.worker.mode = core.NOTIFICATION_MODE
+        self.answer = (None, "boom")
+        self.named_alpha()
+        self.worker.step()
+        self.assertEqual(self.notifier.posts, [("Alpha · alpha", "Alpha, in alpha, is done.", "a")])
 
     def test_a_refused_scratch_folder_still_gives_the_plain_line(self):
         with mock.patch.object(sidebar, "summary_scratch", side_effect=OSError("refused")):
@@ -4681,7 +4774,7 @@ class VoiceQueue(unittest.TestCase):
         self.assertEqual(self.voice.queue, [])
         self.voice.muted = False
         self.voice.speak("heard")
-        self.assertEqual(self.voice.queue, [("say", "heard")])
+        self.assertEqual(self.voice.queue, [("say", "heard", None)])
 
     def test_under_test_nothing_real_is_spoken(self):
         with mock.patch.dict(sidebar.os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}), \
@@ -4735,7 +4828,7 @@ class VoiceQueue(unittest.TestCase):
         self.voice.speak("old", before)
         self.assertEqual(self.voice.queue, [])
         self.voice.speak("new", after)
-        self.assertEqual(self.voice.queue, [("say", "new")])
+        self.assertEqual(self.voice.queue, [("say", "new", None)])
         self.voice.speak("untimed")
         self.assertEqual(len(self.voice.queue), 2)
 
@@ -4776,7 +4869,178 @@ class VoiceQueue(unittest.TestCase):
             poller = sidebar.Poller(FakeEngine())
         self.assertEqual(threading.active_count(), before)
         self.assertIsNone(poller.voice.voice)
-        self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive())
+        self.assertFalse(poller.notices.is_alive() or poller.voice.is_alive() or poller.notifier.is_alive())
+        self.assertIs(poller.voice.fallback_post.__self__, poller.notifier)
+        self.assertIs(poller.notices.notifier, poller.notifier)
+
+
+class FailingSay(FakeSay):
+    def communicate(self, text=None, timeout=None):
+        out = super().communicate(text, timeout)
+        self.returncode = 1
+        return out
+
+
+class SayFallback(unittest.TestCase):
+    """In voice mode a `say` that fails posts the plain line as a notification; a hush never does."""
+
+    PLAIN = "Alpha, in alpha, is done."
+
+    def setUp(self):
+        FakeSay.reset()
+        for target, name, value in ((sidebar, "list_voices", lambda say: []),):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.posts = []
+        self.voice = sidebar.Voice()
+        self.voice.fallback_post = lambda *args: self.posts.append(args)
+
+    def speak_once(self, popen):
+        with mock.patch.object(sidebar.subprocess, "Popen", popen):
+            self.voice.speak("Alpha, sir: all fixed.", 5.0, fallback=("Alpha · alpha", self.PLAIN, "a"))
+            self.voice.step()
+
+    def test_a_failed_say_posts_a_banner_in_voice_mode(self):
+        self.speak_once(FailingSay)
+        self.assertEqual(self.posts, [("Alpha · alpha", self.PLAIN, "a", 5.0)])
+        self.assertNotIn("sir", self.posts[0][1])
+
+    def test_a_missing_say_posts_a_banner(self):
+        self.speak_once(mock.Mock(side_effect=FileNotFoundError("say")))
+        self.assertEqual(len(self.posts), 1)
+
+    def test_a_say_that_speaks_posts_nothing(self):
+        self.speak_once(FakeSay)
+        self.assertEqual(self.posts, [])
+
+    def test_a_hushed_say_does_not_post(self):
+        FakeSay.reset(hold=5)
+
+        class HushedFailing(FailingSay):
+            def communicate(inner, text=None, timeout=None):
+                threading.Timer(0.05, self.voice.silence).start()
+                return super().communicate(text, timeout)
+
+        self.speak_once(HushedFailing)
+        self.assertEqual(self.posts, [])
+
+    def test_no_fallback_given_posts_nothing(self):
+        with mock.patch.object(sidebar.subprocess, "Popen", FailingSay):
+            self.voice.speak("x")
+            self.voice.step()
+        self.assertEqual(self.posts, [])
+
+
+class RecordingHelper:
+    """A fake emx-notify script in a temp folder: logs each verb and its stdin, answers with the `auth` in a file the test sets."""
+
+    def __init__(self, test, auth="notDetermined"):
+        tmp = tempfile.mkdtemp()
+        test.addCleanup(shutil.rmtree, tmp, True)
+        self.log = os.path.join(tmp, "log")
+        self.auth = os.path.join(tmp, "auth")
+        self.path = os.path.join(tmp, "fake-notify")
+        self.set(auth)
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                f'input=$(cat); printf "%s %s\\n" "$1" "$input" >> {shlex.quote(self.log)}\n'
+                f"auth=$(cat {shlex.quote(self.auth)})\n"
+                'echo "{\\"auth\\": \\"$auth\\", \\"alerts\\": \\"enabled\\", \\"posted\\": true, \\"shown\\": true, \\"delivered\\": 1}"\n'
+            )
+        os.chmod(self.path, 0o700)
+
+    def set(self, auth):
+        with open(self.auth, "w", encoding="utf-8") as fh:
+            fh.write(auth)
+
+    def calls(self):
+        try:
+            with open(self.log, encoding="utf-8") as fh:
+                return [line.rstrip("\n").split(" ", 1) for line in fh]
+        except FileNotFoundError:
+            return []
+
+
+class NotifierWorker(unittest.TestCase):
+    def env(self, **values):
+        patch = mock.patch.dict(os.environ, values)
+        patch.start()
+        self.addCleanup(patch.stop)
+        for name in ("EMX_NOTIFY", "EMX_NOTIFY_HOME", "EMX_SHOW_TEST_SESSIONS"):
+            if name not in values:
+                os.environ.pop(name, None)
+
+    def test_under_test_without_emx_notify_nothing_is_built_or_posted(self):
+        self.env(EMX_SHOW_TEST_SESSIONS="1")
+        notifier = sidebar.Notifier("emx-test-x")
+        with mock.patch.object(sidebar.notify.subprocess, "run", side_effect=AssertionError("run")) as run, \
+                mock.patch.object(sidebar.notify.subprocess, "Popen", side_effect=AssertionError("Popen")), \
+                mock.patch.object(sidebar.notify, "ensure_built", side_effect=AssertionError("ensure_built")):
+            notifier.prepare()
+            notifier.post("t", "b", "s")
+            notifier.step()
+        run.assert_not_called()
+        self.assertEqual(notifier.state, core.HELPER_UNAVAILABLE)
+        self.assertEqual(notifier.queue, [])
+
+    def test_under_test_with_a_helper_home_still_builds_nothing(self):
+        home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, home, True)
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY_HOME=home)
+        notifier = sidebar.Notifier("emx-test-x")
+        with mock.patch.object(sidebar.notify.subprocess, "run", side_effect=AssertionError("run")) as run, \
+                mock.patch.object(sidebar.notify, "ensure_built", side_effect=AssertionError("ensure_built")) as built:
+            notifier.prepare()
+        run.assert_not_called()
+        built.assert_not_called()
+        self.assertEqual(os.listdir(home), [])
+        self.assertEqual(notifier.state, core.HELPER_UNAVAILABLE)
+
+    def test_a_notification_mode_start_asks_the_permission_once_and_then_posts(self):
+        helper = RecordingHelper(self)
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        self.assertEqual(notifier.state, core.HELPER_PENDING)
+        helper.set("authorized")
+        notifier.post("Alpha · alpha", "-Alpha is done.", "sid-1")
+        notifier.step()
+        notifier.step()
+        notifier.authorize()
+        notifier.step()
+        verbs = [verb for verb, _ in helper.calls()]
+        self.assertEqual(verbs, ["status", "authorize", "post"])
+        sent = json.loads(helper.calls()[2][1])
+        self.assertEqual((sent["title"], sent["body"], sent["open"]["sid"]), ("Alpha · alpha", "-Alpha is done.", "sid-1"))
+        self.assertEqual(sent["open"]["env"]["EMX_SOCKET"], "emx-test-x")
+        self.assertEqual(notifier.state, core.HELPER_OK)
+
+    def test_a_voice_mode_start_asks_nothing_until_switched(self):
+        helper = RecordingHelper(self)
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.mode = core.VOICE_MODE
+        notifier.prepare()
+        notifier.checked_at = time.monotonic()
+        with mock.patch.object(notifier.wake, "wait"):
+            notifier.step()
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status"])
+        notifier.authorize()
+        notifier.step()
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status", "authorize"])
+
+    def test_a_denied_report_reads_blocked(self):
+        helper = RecordingHelper(self, auth="denied")
+        self.env(EMX_SHOW_TEST_SESSIONS="1", EMX_NOTIFY=helper.path)
+        notifier = sidebar.Notifier("emx-test-x")
+        notifier.prepare()
+        self.assertEqual(notifier.state, core.HELPER_BLOCKED)
+        with mock.patch.object(notifier.wake, "wait") as wait:
+            notifier.step()
+        wait.assert_called_once()
+        self.assertEqual([verb for verb, _ in helper.calls()], ["status"])
 
 
 class NoticeWiring(AppCase):
@@ -5343,13 +5607,14 @@ class HushWiring(AppCase):
         super().setUp()
         self.app.tmux = HushTmux()
         self.app.me = "%1"
+        self.app.prefs = {**self.app.prefs, "mode": core.VOICE_MODE}
+        self.app.apply_mode()
 
     def housekeep(self, value):
         self.app.tmux.hush = value
         sidebar.App.housekeep(self.app, False)
 
     def test_h_hushes_without_muting(self):
-        self.app.handle_key("m")
         before = dict(self.app.prefs)
         self.app.handle_key("h")
         self.assertEqual(len(self.silenced), 1)
@@ -5378,7 +5643,17 @@ class HushWiring(AppCase):
     def test_the_help_lists_h_and_m(self):
         keys = dict(sidebar.HELP)
         self.assertIn("stop the voice", keys["h"])
-        self.assertIn("mute", keys["m"])
+        self.assertIn("voice mode or notification mode", keys["m"])
+
+    def test_h_in_notification_mode_calls_no_voice_and_shows_no_message(self):
+        self.app.prefs = {**self.app.prefs, "mode": core.NOTIFICATION_MODE}
+        self.app.apply_mode()
+        self.app.say("before")
+        self.app.handle_key("h")
+        self.housekeep("100")
+        self.housekeep("200")
+        self.assertEqual(self.silenced, [])
+        self.assertEqual(self.app.notice, "before")
 
 
 class ModeKey(AppCase):
@@ -5387,24 +5662,25 @@ class ModeKey(AppCase):
 
     def test_a_new_panel_starts_in_notification_mode(self):
         self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
-        self.assertFalse(self.app.poller.notices.voice)
+        self.assertEqual(self.app.poller.notices.mode, core.NOTIFICATION_MODE)
+        self.assertEqual(self.app.poller.notifier.mode, core.NOTIFICATION_MODE)
         self.assertTrue(self.app.poller.voice.muted)
 
     def test_m_switches_to_voice_saves_it_and_a_new_panel_keeps_it(self):
         self.app.handle_key("m")
         self.assertEqual(self.prefs_on_disk()["mode"], "voice")
         self.assertNotIn("voice", self.prefs_on_disk())
-        self.assertTrue(self.app.poller.notices.voice)
+        self.assertEqual(self.app.poller.notices.mode, core.VOICE_MODE)
         self.assertEqual(self.app.notice, "Voice mode")
         again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
-        self.assertTrue(again.poller.notices.voice)
+        self.assertEqual(again.poller.notices.mode, core.VOICE_MODE)
         self.assertFalse(again.poller.voice.muted)
 
     def test_m_again_returns_to_notification_mode(self):
         self.app.handle_key("m")
         self.app.handle_key("m")
         self.assertEqual(self.prefs_on_disk()["mode"], "notification")
-        self.assertFalse(self.app.poller.notices.voice)
+        self.assertEqual(self.app.poller.notices.mode, core.NOTIFICATION_MODE)
         self.assertEqual(self.app.notice, "Notification mode")
 
     def test_m_sets_the_voice_muted_flag_both_ways(self):
@@ -5421,23 +5697,109 @@ class ModeKey(AppCase):
         self.app.handle_key("m")
         self.assertEqual(len(self.silenced), 1)
 
+    def test_entering_notification_mode_asks_the_notifier_for_the_permission(self):
+        self.app.handle_key("m")
+        self.assertEqual(self.app.poller.notifier.asked, 0)
+        self.app.handle_key("m")
+        self.assertEqual(self.app.poller.notifier.asked, 1)
+
+    def test_the_help_has_the_m_line(self):
+        self.assertIn(("m", "voice mode or notification mode"), sidebar.HELP)
+
+    def test_a_saved_old_voice_setting_starts_in_its_mode(self):
+        for voice, mode in ((True, core.VOICE_MODE), (False, core.NOTIFICATION_MODE)):
+            with self.subTest(voice=voice):
+                self.app.prefs_file.parent.mkdir(parents=True, exist_ok=True)
+                self.app.prefs_file.write_text(json.dumps({"voice": voice}), encoding="utf-8")
+                again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+                self.assertEqual(again.poller.notices.mode, mode)
+
     def test_m_while_typing_in_the_find_box_is_text(self):
         self.app.handle_key("/")
         self.app.handle_key("m")
         self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
 
-    def test_the_top_line_shows_voice_only_in_voice_mode(self):
-        def top_line():
-            drawn = []
-            self.app.put = lambda y, x, text, attr=0: drawn.append(text)
-            self.app.draw_top_line(60)
-            return drawn
+    def top_line(self):
+        drawn = []
+        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
+        self.app.draw_top_line(60)
+        return drawn
 
-        self.assertNotIn("voice", top_line())
+    def test_the_top_line_shows_the_mode_word_only_in_voice_mode(self):
+        plain = self.top_line()
+        self.assertNotIn("voice", plain)
+        self.assertFalse(any("notification" in t for t in plain), plain)
         self.app.handle_key("m")
-        self.assertIn("voice", top_line())
+        self.assertIn("voice", self.top_line())
         self.app.handle_key("m")
-        self.assertNotIn("voice", top_line())
+        self.assertEqual(self.top_line(), plain)
+
+    def test_the_top_line_shows_blocked_or_unavailable_only_in_notification_mode(self):
+        for state, label in ((core.HELPER_BLOCKED, "notifications blocked"), (core.HELPER_UNAVAILABLE, "notifications unavailable")):
+            with self.subTest(state=state):
+                self.app.poller.notifier.state = state
+                self.assertIn(label, self.top_line())
+                self.app.handle_key("m")
+                self.assertNotIn(label, self.top_line())
+                self.assertIn("voice", self.top_line())
+                self.app.handle_key("m")
+        self.app.poller.notifier.state = core.HELPER_PENDING
+        self.assertFalse(any("notification" in t for t in self.top_line()))
+
+
+class ModeDelivery(AppCase):
+    """Both modes add the same history entries, whatever the notifier's state; notification mode never speaks."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.poller.transcripts.found = {}
+        notices = self.app.poller.notices
+        notices.want([replace(session("a", "/p/alpha", "done"), name="Alpha")])
+
+    def deliver(self):
+        notices = self.app.poller.notices
+        notices.add(core.Notice("a", core.NOTICE_DONE, "Alpha", "/p/alpha", time.monotonic() - 10, True))
+        with mock.patch.object(sidebar, "announce", lambda *args: (None, "no haiku")), \
+                mock.patch.object(sidebar, "summary_scratch", lambda: "/tmp/emx-test-scratch"):
+            self.assertTrue(notices.step())
+        self.app.take_notices()
+
+    def test_a_blocked_notifier_never_falls_back_to_voice(self):
+        self.app.poller.notifier.state = core.HELPER_BLOCKED
+        self.deliver()
+        self.assertEqual(self.spoken, [])
+        self.assertEqual(len(self.app.poller.notifier.posts), 1)
+        self.assertEqual([e.text for e in self.app.history], ["Alpha, in alpha, is done."])
+
+    def test_every_notice_lands_in_the_history_in_both_modes(self):
+        for mode in core.MODES:
+            for state in core.HELPER_STATES:
+                with self.subTest(mode=mode, state=state):
+                    self.app.history = []
+                    self.app.prefs = {**self.app.prefs, "mode": mode}
+                    self.app.apply_mode()
+                    self.app.poller.notifier.state = state
+                    self.deliver()
+                    self.assertEqual(len(self.app.history), 1)
+
+
+class AppBuildsNoHelper(unittest.TestCase):
+    def test_constructing_the_app_runs_no_helper_command(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp, "TMUX_PANE": "%1",
+                                          "EMX_NOTIFY_HOME": os.path.join(tmp, "notify")}), \
+                mock.patch.object(sidebar, "Palette", FakePalette), \
+                mock.patch.object(sidebar.notify.subprocess, "run", side_effect=AssertionError("run")) as run, \
+                mock.patch.object(sidebar.notify.subprocess, "Popen", side_effect=AssertionError("Popen")) as popen, \
+                mock.patch.object(sidebar.notify, "ensure_built", side_effect=AssertionError("ensure_built")) as built:
+            app = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+        self.assertIsInstance(app.poller.notifier, sidebar.Notifier)
+        self.assertFalse(app.poller.notifier.is_alive())
+        run.assert_not_called()
+        popen.assert_not_called()
+        built.assert_not_called()
+        self.assertFalse(os.path.exists(os.path.join(tmp, "notify")))
 
 
 if __name__ == "__main__":
