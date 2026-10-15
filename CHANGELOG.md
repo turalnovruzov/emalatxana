@@ -4,7 +4,10 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 2.2.1 — 2026-10-15
 
-- A session that finishes its work and then only offers more (a follow-up, an improvement, the next task) reads Done more often than before, but not always: in emx's own checks about two such offers in three read Done, up from about one in five, and the rest still read Needs input. A session that asks you to do something yourself, such as restart a server or run something and report back, or that needs a choice, a name or your approval, reads Needs input; none of those read Done in emx's own checks.
+- When a session stops, Haiku now reads what you last asked that session for next to the end of Claude's last message, to tell "finished, and offering something extra" (Done) from "stopped short, waiting on you" (Needs input). An offer of a step you didn't ask for, such as "Should I also delete the old config.ini?" after a config migration, reads Done; the same question reads Needs input when deleting it was part of what you asked.
+- In emx's own checks, finished work that ends by offering more (or a greeting) read Done 43 of 45 times, up from 26 of 45 before this change. Sessions that stopped to have you do something, choose, approve or give permission read Done 0 of 36 times, the same as before.
+- In the same checks, one final message judged under two different requests, once asking for the offered step and once not, got both right 7 of 12 times, up from 1 of 12.
+- When emx can't find what you asked, it judges from Claude's last message alone, as before. A turn started by a slash command is judged next to the request you typed before it.
 
 ## 2.2.0 — 2026-10-15
 
