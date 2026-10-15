@@ -231,7 +231,7 @@ def clear_stale_sockets(control: str) -> None:
 
 
 # What tmux's client turns on that a clean detach would undo: alternate screen, mouse modes, focus events, bracketed paste, extended keys, cursor.
-TERMINAL_RESTORE = "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[>4m\x1b[?25h"
+TERMINAL_RESTORE = "\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[>4m\x1b[?1l\x1b>\x1b[?25h"
 
 
 def _restore_terminal() -> None:

@@ -283,7 +283,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Anything emx runs on another machine goes through the ssh builders, and what comes back through `parse_relay`
 
-1. **Rule**: an ssh command is built only by `core.ssh_master_args` or `core.ssh_client_args`, the host comes from `core.remote_host`, and the command on the server from `core.remote_shell`. Every line that comes back from the server passes `core.parse_relay` before it reaches `say`, the helper or an argv.
+1. **Rule**: an ssh command is built only by `core.ssh_master_args`, `core.ssh_client_args` or `core.ssh_exit_args`, the host comes from `core.remote_host`, and the command on the server from `core.remote_shell`. Every line that comes back from the server passes `core.parse_relay` before it reaches `say`, the helper or an argv.
 2. **Why**: the host and the command are surfaces for ssh options and shell code, and relay lines come from another machine, so neither is trusted as given.
 3. **Minimal example**:
    ```python

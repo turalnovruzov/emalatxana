@@ -351,7 +351,7 @@ class Connect(unittest.TestCase):
     def test_a_lost_connection_puts_the_terminal_back_before_the_message(self):
         self.server(code=255)
         written = self.run_on_tty()
-        for seq in ("\x1b[?1049l", "\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", "\x1b[?1006l", "\x1b[?25h"):
+        for seq in ("\x1b[?1049l", "\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", "\x1b[?1006l", "\x1b[?1l\x1b>", "\x1b[?25h"):
             self.assertIn(seq, written)
 
     def test_a_clean_exit_writes_no_restore_sequences(self):
