@@ -15,7 +15,7 @@ from pathlib import Path
 
 from emx import __version__, core, notify, remote
 from emx.cli import read_changelog, self_command
-from emx.engine import AGENT, Engine, claude_home
+from emx.engine import AGENT, Engine, allowed_transcript, claude_home
 from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
@@ -793,6 +793,33 @@ def read_requests(path: str) -> tuple:
     return requests, gap_at, True
 
 
+def read_latest_request(path: str) -> str:
+    """The last request he typed in the transcript at `path`, or "" when the path is not a transcript `allowed_transcript` passes, can't be read, or holds none in its last `core.ASK_REQUEST_MAX_BYTES`. Never raises, and never writes.
+
+    The tail read starts at `core.TRANSCRIPT_FIRST_BYTES` and doubles until a
+    request turns up, since one long turn of tool output can bury it.
+    """
+    try:
+        real = allowed_transcript(path)
+        if real is None:
+            return ""
+        with open(real, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            window = core.TRANSCRIPT_FIRST_BYTES
+            while True:
+                window = min(window, size, core.ASK_REQUEST_MAX_BYTES)
+                start = size - window
+                f.seek(start)
+                # Split on newlines only: Claude Code writes U+2028 unescaped, and `splitlines` would cut a line there.
+                lines = f.read(window).decode("utf-8", errors="replace").split("\n")
+                found = core.latest_request(lines[1:] if start > 0 else lines)
+                if found or start == 0 or window >= core.ASK_REQUEST_MAX_BYTES:
+                    return found
+                window *= 2
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 NAME_NO_TRANSCRIPT = "emx hasn't found this session's transcript yet."
 NAME_UNREADABLE = "emx couldn't read this session's transcript."
 NAME_NO_REQUESTS = "No requests of yours in this session yet."
@@ -1201,7 +1228,8 @@ class Asks(threading.Thread):
         try:
             if self.scratch is None:
                 self.scratch = summary_scratch()
-            verdict, _ = classify(self.engine.claude, core.ask_excerpt(session), self.scratch)
+            request = read_latest_request(session.transcript)
+            verdict, _ = classify(self.engine.claude, core.ask_excerpt(session, request), self.scratch)
         except OSError:
             verdict = None
         if verdict is None:

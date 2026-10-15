@@ -292,6 +292,19 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `remote_shell` quotes the args but not `base` (`EMX_REMOTE_COMMAND` may carry `env X=Y`), so `base` must only come from the laptop's own environment, never from the server or a relay line.
 
+### A transcript path from a hook record goes through `engine.allowed_transcript` first
+
+1. **Rule**: a Claude transcript emx opens at a path taken from a hook record passes `engine.allowed_transcript(path)` first and is opened only at the real path it returns. (The older `Transcripts.locate` in `emx/sidebar.py` does its own equivalent check; new code uses the helper.)
+2. **Why**: transcript paths arrive from hook records and could point anywhere; the guard keeps reads inside Claude's projects folder and only on `<uuid>.jsonl` files.
+3. **Minimal example**:
+   ```python
+   real = engine.allowed_transcript(path)
+   if real:
+       with open(real, encoding="utf-8") as fh:
+           ...
+   ```
+4. **Gotcha**: the guard checks name and location, not file type, so reads stay on a worker thread, never the curses thread.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
