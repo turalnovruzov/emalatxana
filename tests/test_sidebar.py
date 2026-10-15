@@ -3447,7 +3447,15 @@ class AsksWorker(unittest.TestCase):
             self.calls.append(excerpt)
             return self.answer
 
+        self.request = ""
+        self.read = []
+
+        def read_request(path):
+            self.read.append(path)
+            return self.request
+
         for patch in (mock.patch.object(sidebar, "classify", fake),
+                      mock.patch.object(sidebar, "read_latest_request", read_request),
                       mock.patch.object(sidebar, "summary_scratch", return_value="/tmp/emx-test-scratch")):
             patch.start()
             self.addCleanup(patch.stop)
@@ -3463,9 +3471,25 @@ class AsksWorker(unittest.TestCase):
         self.worker.want([self.stopped()])
         self.worker.step()
         self.worker.step()
-        self.assertEqual(self.calls, ["Which one?"])
+        self.assertEqual(self.calls, [f"{core.ASK_REPLY_LABEL} Which one?"])
         self.assertEqual(self.engine.verdicts, [("a", "k1", "needs")])
         self.assertTrue(self.wake.is_set())
+
+    def test_the_call_gets_the_request_and_the_reply(self):
+        self.request = "Fix the pager"
+        stop = replace(self.stopped(), transcript="/claude/projects/x/11111111-1111-4111-8111-111111111111.jsonl")
+        self.worker.want([stop])
+        self.worker.step()
+        self.assertEqual(self.read, [stop.transcript])
+        self.assertEqual(self.calls, [core.ask_excerpt(stop, "Fix the pager")])
+        self.assertEqual(self.calls[0].splitlines()[0], f"{core.ASK_REQUEST_LABEL} Fix the pager")
+
+    def test_no_request_found_still_asks_on_the_reply(self):
+        self.worker.want([self.stopped()])
+        self.worker.step()
+        self.assertEqual(self.calls, ["Final message: Which one?"])
+        self.assertEqual(self.engine.verdicts, [("a", "k1", "needs")])
+        self.assertEqual(self.worker.failures, {})
 
     def test_a_session_not_asking_is_never_asked_about(self):
         self.worker.want([self.stopped(asking=False)])

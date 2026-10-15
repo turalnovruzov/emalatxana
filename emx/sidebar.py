@@ -1228,7 +1228,8 @@ class Asks(threading.Thread):
         try:
             if self.scratch is None:
                 self.scratch = summary_scratch()
-            verdict, _ = classify(self.engine.claude, core.ask_excerpt(session), self.scratch)
+            request = read_latest_request(session.transcript)
+            verdict, _ = classify(self.engine.claude, core.ask_excerpt(session, request), self.scratch)
         except OSError:
             verdict = None
         if verdict is None:
