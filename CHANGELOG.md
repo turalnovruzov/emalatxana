@@ -5,8 +5,8 @@ What changed in emx, newest version first. The panel shows a version's lines the
 ## 2.2.1 — 2026-10-15
 
 - When a session stops, Haiku now reads what you last asked that session for next to the end of Claude's last message, to tell "finished, and offering something extra" (Done) from "stopped short, waiting on you" (Needs input). An offer of a step you didn't ask for, such as "Should I also delete the old config.ini?" after a config migration, is meant to read Done, and the same question Needs input when deleting it was part of what you asked; how often each happened in emx's checks is below.
-- In emx's own checks, finished work that ends by offering more (or a greeting) read Done 43 of 45 times, up from 26 of 45 before this change. Sessions that stopped to have you do something, choose, approve or give permission read Done 0 of 36 times, the same as before.
-- In the same checks, one final message judged under two different requests, once asking for the offered step and once not, got both right 7 of 12 times, up from 1 of 12.
+- In emx's own checks, finished work that ends by offering more (or a greeting) read Done 43 of 45 times, up from 17 of 45 with 2.2.0 (3 runs each of 15 messages, held-out set). Sessions that stopped to have you do something, choose, approve or give permission read Done 0 of 36 times, the same as 2.2.0.
+- In the same checks, one final message judged under two different requests, once asking for the offered step and once not, got both right 7 of 12 times, up from 0 of 12 with 2.2.0 (4 such pairs, 3 runs each).
 - When emx can't find what you asked, it judges from Claude's last message alone, as before. A turn started by a slash command is judged next to the request you typed before it.
 
 ## 2.2.0 — 2026-10-15
