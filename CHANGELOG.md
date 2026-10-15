@@ -4,7 +4,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 2.2.1 — 2026-10-15
 
-- A session that finishes its work and then only offers more (a follow-up, an improvement, the next task) reads Done most of the time, but not always: in emx's own checks about one such offer in five still read Needs input. A greeting that ends in a question reads Done. A session that stops before a step it still means to take, needs a choice from you, wants a draft approved, or asks you to do something reads Needs input.
+- A session that finishes its work and then only offers more (a follow-up, an improvement, the next task) reads Done more often than before, but not always: in emx's own checks about two such offers in three read Done, up from about one in five, and the rest still read Needs input. A session that asks you to do something yourself, such as restart a server or run something and report back, or that needs a choice, a name or your approval, reads Needs input; none of those read Done in emx's own checks.
 
 ## 2.2.0 — 2026-10-15
 
