@@ -19,3 +19,4 @@ What is in use in this repo, and why each piece is here. This is the record the 
 | Claude Haiku via `claude -p` on his login | The one-line summary under each session's name, the name Tab suggests in the rename box, and the words of each notice; no library, no API key | [0002](./adr/0002-haiku-row-summaries-through-claude-p.md), [0003](./adr/0003-haiku-suggests-a-name-on-tab.md), [0004](./adr/0004-spoken-notices.md) |
 | macOS `say` (built in) | Spoken notices, in voice mode | [0004](./adr/0004-spoken-notices.md) |
 | `swiftc` (Apple's command line tools) and the `emx-notify.app` helper it builds | Notifications from emx itself, in notification mode; with `codesign`, `iconutil`, `lsregister` and `open`, all Apple's | [0006](./adr/0006-emx-notify-helper.md) |
+| OpenSSH client (`ssh`), the system's own | `emx remote` reaches the emx on a server; connection sharing (ControlMaster) carries the notifications back | [0007](./adr/0007-emx-reaches-a-server-over-ssh.md) |

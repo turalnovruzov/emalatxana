@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 
-from emx import BIN, __version__, core
+from emx import BIN, __version__, core, remote
 from emx.notify import OPEN_ENV
 from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
@@ -25,8 +25,9 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | hush]
+USAGE = """usage: emx [--version | hush | remote <host>]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
+emx follow is internal too: it streams the notices of this emx to stdout, for a laptop's `emx remote` to read.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
 of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
 terminal window with that session.)
@@ -34,9 +35,11 @@ terminal window with that session.)
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
+remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
 EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
+EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell), EMX_SSH replaces ssh.
 EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command."""
 
 
@@ -200,17 +203,28 @@ def take_pending_open() -> str | None:
     return core.open_request(text) if fresh else None
 
 
+def follow() -> int:
+    """The server half of `emx remote`: streams the panel's notices to stdout until the pipe closes."""
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket))
+
+
 def open_command() -> str:
     return os.environ.get("EMX_OPEN") or "/usr/bin/open"
 
 
-def open_session(sid: str) -> int:
+def open_session(sid: str, window: bool = True) -> int:
     """What a click on a notification runs: asks the running panel to open `sid` through an option on emx's own tmux server, then prints the bundle id of the terminal emx runs in. Starts nothing, and never touches another server.
 
     It never brings that terminal forward itself: macOS does not let a
     background process activate another app, so the helper, which the click
     made active, reads the printed id and hands activation on.
     """
+    if os.environ.get("EMX_REMOTE_HOST"):
+        return remote.open_remote(sid, os.environ)
     if not core.is_session_id(sid):
         print("emx: open needs a session id.", file=sys.stderr)
         return 2
@@ -223,7 +237,17 @@ def open_session(sid: str) -> int:
         return 1
     tmux = Tmux(socket)
     if not tmux.has_session():
+        if not window:
+            print("emx isn't running.", file=sys.stderr)
+            return 1
         return open_window("", sid)
+    if not window:
+        try:
+            tmux.set_session_option(OPEN_OPT, sid)
+        except TmuxError as exc:
+            print(f"emx: {exc}", file=sys.stderr)
+            return 1
+        return 0
     try:
         tmux.set_session_option(OPEN_OPT, sid)
         attached, *_ = tmux.client_state()
@@ -409,6 +433,12 @@ def main(argv: list) -> int:
         return hush()
     if argv[0] == "open" and len(argv) == 2:
         return open_session(argv[1])
+    if argv[0] == "open" and len(argv) == 3 and argv[1] == "--no-window":
+        return open_session(argv[2], window=False)
+    if argv[0] == "remote" and len(argv) == 2:
+        return remote.connect(argv[1])
+    if argv[0] == "follow" and len(argv) == 1:
+        return follow()
     if argv[0] == "left":
         return left_check(argv[1:])
     if argv[0] == "blank":

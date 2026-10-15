@@ -86,6 +86,15 @@ class Payload(unittest.TestCase):
         self.assertEqual(opener["env"]["PATH"], "/usr/bin:/bin:/opt/brew/bin")
         self.assertNotIn(body, json.dumps(opener))
 
+    def test_the_remote_route_survives_into_the_clicks_environment(self):
+        env = {**self.ENV, "EMX_REMOTE_HOST": "srv", "EMX_REMOTE_CONTROL": "/tmp/emx-ssh-1/2",
+               "EMX_REMOTE_TERMINAL": "com.apple.Terminal", "SECRET": "x"}
+        with mock.patch.object(notify.shutil, "which", return_value="/usr/bin/tmux"):
+            kept = notify.payload("t", "b", "n1", "sid", "emx", env)["open"]["env"]
+        for name in ("EMX_REMOTE_HOST", "EMX_REMOTE_CONTROL", "EMX_REMOTE_TERMINAL"):
+            self.assertEqual(kept[name], env[name])
+        self.assertNotIn("SECRET", kept)
+
     def test_a_path_already_holding_tmux_is_left_as_it_is(self):
         with mock.patch.object(notify.shutil, "which", return_value="/usr/bin/tmux"):
             got = notify.payload("t", "b", "n1", "sid", "emx", self.ENV)
