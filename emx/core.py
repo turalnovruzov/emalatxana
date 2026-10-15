@@ -2340,6 +2340,12 @@ def user_requests(lines) -> list:
     return found
 
 
+def latest_request(lines) -> str:
+    """The last request he typed in the transcript `lines`, or "" when there is none. Never raises."""
+    found = user_requests(lines)
+    return found[-1] if found else ""
+
+
 def parse_transcript(text: str, partial: bool = False) -> Transcript | None:
     """What the session did last, from JSONL text at the end of its transcript, or None when nothing in it says. Never raises.
 
@@ -2833,6 +2839,7 @@ ASK_INSTRUCTION = (
 ASK_MAX_BUDGET_USD = 0.002
 ASK_TIMEOUT = 15
 ASK_MAX_TRIES = 3
+ASK_REQUEST_MAX_BYTES = NAME_READ_MAX_BYTES
 # The Done notice is held while a verdict is awaited; the `Asks` worker always ends that, so this only covers a stuck worker.
 NOTICE_ASK_SECONDS = 300
 

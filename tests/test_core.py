@@ -2965,6 +2965,35 @@ class UserRequests(unittest.TestCase):
         self.assertEqual(core.user_requests(lines), ["fix it"])
 
 
+class LatestRequest(unittest.TestCase):
+    def test_latest_request_skips_synthetic_prompts(self):
+        lines = [
+            entry("user", "Migrate the config to TOML"),
+            entry("assistant", [{"type": "text", "text": "Migrated."}]),
+            entry("user", "<task-notification><task-id>b1</task-id>finished</task-notification>"),
+            entry("user", "<agent-message from=x>result</agent-message>"),
+            entry("assistant", [{"type": "text", "text": "The background task finished too."}]),
+        ]
+        self.assertEqual(core.latest_request(lines), "Migrate the config to TOML")
+
+    def test_latest_request_skips_wrapped_meta_and_sidechain_text(self):
+        lines = [
+            entry("user", "Rename the pager module"),
+            entry("user", [{"type": "text", "text": "<system-reminder>context</system-reminder>"}]),
+            entry("user", "meta text", isMeta=True),
+            entry("user", "subagent prompt", isSidechain=True),
+            entry("user", [{"type": "text", "text": "[Request interrupted by user]"}]),
+        ]
+        self.assertEqual(core.latest_request(lines), "Rename the pager module")
+
+    def test_latest_request_with_none_is_empty(self):
+        self.assertEqual(core.latest_request([]), "")
+        self.assertEqual(core.latest_request([entry("assistant", [{"type": "text", "text": "Hello."}])]), "")
+        self.assertEqual(core.latest_request([entry("user", "<task-notification>done</task-notification>"),
+                                              entry("user", "<agent-message from=a>x")]), "")
+        self.assertEqual(core.latest_request(["{not json", "[1]", ""]), "")
+
+
 class NameReadRanges(unittest.TestCase):
     def test_whole_up_to_the_cap_then_head_and_tail(self):
         cap, half = core.NAME_READ_MAX_BYTES, core.NAME_READ_MAX_BYTES // 2

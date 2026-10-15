@@ -201,13 +201,19 @@ def resume_command(key: str, claude: str, state=None) -> tuple:
     return core.pane_command(core.AGENTS[AGENT].resume(claude, sid, settings)), None
 
 
-def _transcript_lines(path: str) -> list:
-    """The tail of the transcript at `path` when it lies under Claude's projects folder and is named `<uuid>.jsonl`; otherwise nothing is opened."""
+def allowed_transcript(path: str) -> str | None:
+    """The real path of `path` when it lies under Claude's projects folder and is named `<uuid>.jsonl`, else None; only such a path is ever opened as a transcript."""
     if not path or not os.path.basename(path).endswith(".jsonl") or not core.is_session_id(os.path.basename(path)[:-6]):
-        return []
+        return None
     projects = os.path.realpath(os.path.join(claude_home(), "projects"))
     real = os.path.realpath(path)
-    if not real.startswith(projects + os.sep):
+    return real if real.startswith(projects + os.sep) else None
+
+
+def _transcript_lines(path: str) -> list:
+    """The tail of the transcript at `path` when `allowed_transcript` passes it; otherwise nothing is opened."""
+    real = allowed_transcript(path)
+    if real is None:
         return []
     try:
         return _tail_lines(real)

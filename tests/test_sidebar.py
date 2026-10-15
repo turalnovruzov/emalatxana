@@ -3182,6 +3182,82 @@ class ReadRequests(unittest.TestCase):
             self.assertEqual(sidebar.read_requests(os.path.join(d, "missing.jsonl")), (None, None, False))
 
 
+class ReadLatestRequest(unittest.TestCase):
+    SID = "22222222-2222-4222-8222-222222222222"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        self.home = os.path.join(self.dir, "claude-home")
+        self.project = os.path.join(self.home, "projects", "-tmp-work")
+        os.makedirs(self.project)
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.home})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def write(self, lines, folder=None, name=None):
+        path = os.path.join(folder or self.project, name or f"{self.SID}.jsonl")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("".join(line + "\n" for line in lines))
+        return path
+
+    def padding(self, size):
+        result = transcript_line("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "o" * 1000}])
+        return [result] * (size // len(result) + 1)
+
+    def test_read_latest_request_finds_a_request_beyond_the_first_tail(self):
+        lines = [transcript_line("user", "older request"), transcript_line("user", "Fix the pager")]
+        lines += self.padding(core.TRANSCRIPT_FIRST_BYTES * 3)
+        path = self.write(lines)
+        self.assertGreater(os.stat(path).st_size, core.TRANSCRIPT_FIRST_BYTES * 3)
+        self.assertEqual(sidebar.read_latest_request(path), "Fix the pager")
+
+    def test_read_latest_request_gives_up_at_the_cap(self):
+        lines = [transcript_line("user", "Fix the pager")] + self.padding(8192)
+        path = self.write(lines)
+        with mock.patch.object(core, "TRANSCRIPT_FIRST_BYTES", 1024), mock.patch.object(core, "ASK_REQUEST_MAX_BYTES", 4096):
+            self.assertEqual(sidebar.read_latest_request(path), "")
+            self.assertEqual(sidebar.read_latest_request(self.write([transcript_line("user", "Fix the pager")]
+                                                                    + self.padding(1024))), "Fix the pager")
+
+    def test_read_latest_request_refuses_a_path_outside_claude_projects(self):
+        lines = [transcript_line("user", "Fix the pager")]
+        outside = os.path.join(self.dir, "elsewhere")
+        os.makedirs(outside)
+        paths = [self.write(lines, folder=outside), self.write(lines, name="not-a-session.jsonl"), "",
+                 os.path.join(self.project, "33333333-3333-4333-8333-333333333333.jsonl")]
+        with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
+            for path in paths:
+                with self.subTest(path=path):
+                    self.assertEqual(sidebar.read_latest_request(path), "")
+        self.assertEqual([c.args[0] for c in opened.call_args_list], [paths[3]])
+
+    def test_read_latest_request_reads_read_only_and_never_writes(self):
+        path = self.write([transcript_line("user", "Fix the pager")])
+        before = os.stat(path)
+        with mock.patch.object(sidebar, "open", wraps=open, create=True) as opened:
+            self.assertEqual(sidebar.read_latest_request(path), "Fix the pager")
+        self.assertEqual([c.args[1] for c in opened.call_args_list], ["rb"])
+        self.assertEqual(os.stat(path).st_mtime_ns, before.st_mtime_ns)
+
+    def test_read_latest_request_keeps_a_line_with_u2028_whole(self):
+        text = "Fix the pager\u2028then the footer"
+        path = self.write([json.dumps({"type": "user", "message": {"role": "user", "content": text}}, ensure_ascii=False)])
+        with open(path, encoding="utf-8") as fh:
+            self.assertIn("\u2028", fh.read())
+        self.assertEqual(sidebar.read_latest_request(path), text)
+
+    def test_read_latest_request_never_raises(self):
+        os.mkdir(os.path.join(self.project, "44444444-4444-4444-8444-444444444444.jsonl"))
+        garbage = os.path.join(self.project, f"{self.SID}.jsonl")
+        with open(garbage, "wb") as fh:
+            fh.write(b"\xff\xfe not json\n{\"type\": \n\x80\x81\n")
+        for path in (None, os.path.join(self.project, "44444444-4444-4444-8444-444444444444.jsonl"), garbage):
+            with self.subTest(path=path):
+                self.assertEqual(sidebar.read_latest_request(path), "")
+
+
 NAME_JSON = json.dumps({"result": "tea poem and csv parser", "is_error": False, "duration_ms": 700,
                         "total_cost_usd": 0.001, "usage": {"input_tokens": 50, "output_tokens": 8},
                         "modelUsage": {"claude-haiku-5-5": {}}})
