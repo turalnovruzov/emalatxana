@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.2.2 — 2026-10-16
+
+- Nothing changes in how emx works. The note on what a server needs was corrected: on a server set to end a user's programs at logout (`KillUserProcesses=yes`), `loginctl enable-linger` alone does not keep your sessions running; turning that setting off, or excluding your user from it, does. Ubuntu and Debian leave it off.
+
 ## 2.2.1 — 2026-10-15
 
 - When a session stops, Haiku now reads what you last asked that session for next to the end of Claude's last message, to tell "finished, and offering something extra" (Done) from "stopped short, waiting on you" (Needs input). An offer of a step you didn't ask for, such as "Should I also delete the old config.ini?" after a config migration, is meant to read Done, and the same question Needs input when deleting it was part of what you asked; how often each happened in emx's checks is below.

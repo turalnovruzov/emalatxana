@@ -31,7 +31,7 @@ ssh is a system tool like tmux and `say`: no library, no new service.
 - Nothing is replayed: what happened while disconnected stays in the server panel's Notifications list only.
 - A hard-killed `emx remote` leaves the master alive for 30 s (`ControlPersist`) after its last client.
 - A sleeping laptop ends the attach after about 45 s (`ServerAliveInterval=15`, `CountMax=3`).
-- The server must keep a user's processes after the last ssh login ends (the usual default; on a server whose systemd ends them, `loginctl enable-linger` is server setup, not emx's).
+- The server must keep a user's processes after the last ssh login ends. emx's tmux starts inside the ssh login's `session-N.scope`, so systemd-logind's `KillUserProcesses=yes` ends it and every session with that login; Ubuntu 24.04 and Debian 12 and 13 ship `KillUserProcesses=no`. `loginctl enable-linger` alone does not prevent it (it keeps only `user@UID.service`). What does: `KillUserProcesses=no`, the user in `KillExcludeUsers`, or linger together with `EMX_REMOTE_COMMAND='systemd-run --user --scope --quiet emx'`. That is server setup, not emx's; checked in throwaway Ubuntu 24.04 containers running systemd 255, 3 disconnects (q, a killed master, a closed window) per setting.
 - A click after disconnecting only brings the terminal forward: the ssh call needs the open connection or a key without a passphrase.
 - Two emx on different sockets sharing one state folder would relay each other's notices.
 - On a Linux server emx leaves an empty `~/Library/Application Support/emx` folder (the macOS helper's home, which it tries and fails to build there).
