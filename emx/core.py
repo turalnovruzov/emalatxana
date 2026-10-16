@@ -1628,6 +1628,149 @@ def relaunch_plan(panes, upgrade: bool) -> tuple:
     return respawn, drop
 
 
+MIN_INSTALLABLE = (2, 3, 0)
+UPDATE_CHECK_SECONDS = 600
+UPDATE_QUIET_SECONDS = 180
+UPDATE_REASON_MAX = 200
+UPDATE_STATUSES = ("updated", "current", "off", "failed")
+_UPDATE_LINE = re.compile(r"emx-update (\S+) (\S+) (.*)")
+
+
+def _home_setting(env: Mapping, name: str, default: Path) -> tuple:
+    value = env.get(name)
+    if not value:
+        return default, None
+    if not os.path.isabs(value):
+        return None, f"{name} must be an absolute path, not {value!r}"
+    return Path(value), None
+
+
+def install_root(env: Mapping) -> tuple:
+    """(root, None) for the folder emx installs into, or (None, error) when `EMX_HOME` is set but relative: that never falls back to the default, which is the real install."""
+    xdg = env.get("XDG_DATA_HOME", "")
+    base = Path(xdg) if xdg and os.path.isabs(xdg) else Path(os.path.expanduser("~")) / ".local" / "share"
+    return _home_setting(env, "EMX_HOME", base / "emx")
+
+
+def bin_home(env: Mapping) -> tuple:
+    return _home_setting(env, "EMX_BIN_HOME", Path(os.path.expanduser("~")) / ".local" / "bin")
+
+
+def installed_layout(code_dir: str) -> tuple | None:
+    """(root, "X.Y.Z") when `code_dir` is `<root>/versions/<X.Y.Z>`, from the path alone; the caller checks `current` and `source.git` on disk."""
+    parent, name = os.path.split(os.path.normpath(code_dir))
+    root, versions = os.path.split(parent)
+    if versions != "versions" or parse_version(name) is None:
+        return None
+    return root, name
+
+
+def tag_version(name) -> str | None:
+    if not isinstance(name, str) or not name.startswith("v"):
+        return None
+    return name[1:] if parse_version(name[1:]) else None
+
+
+def tag_versions(text: str) -> list:
+    return [v for v in map(tag_version, (text or "").split()) if v]
+
+
+def _semver_sorted(versions) -> list:
+    return sorted({v for v in versions if parse_version(v)}, key=parse_version)
+
+
+def newest(versions) -> str | None:
+    found = [v for v in _semver_sorted(versions) if parse_version(v) >= MIN_INSTALLABLE]
+    return found[-1] if found else None
+
+
+def pick_update(current: str, versions) -> tuple:
+    """(auto, major): the newest version above `current` in its major, which an update may take on its own, and the newest in a higher major, which waits for his yes."""
+    now = parse_version(current)
+    auto = major = None
+    if now is None:
+        return None, None
+    for v in _semver_sorted(versions):
+        parsed = parse_version(v)
+        if parsed <= now or parsed < MIN_INSTALLABLE:
+            continue
+        if parsed[0] == now[0]:
+            auto = v
+        else:
+            major = v
+    return auto, major
+
+
+def prune_plan(on_disk, current: str, running) -> list:
+    """The version folders to delete: every one below `current` except the newest of those and `running`. A folder above `current` may be prepared and about to be flipped to, so it stays."""
+    now = parse_version(current)
+    if now is None:
+        return []
+    below = [v for v in _semver_sorted(on_disk) if parse_version(v) < now]
+    keep = {below[-1], running} if below else {running}
+    return [v for v in below if v not in keep]
+
+
+def update_quiet(attached: int, idle, busy: bool) -> bool:
+    if busy:
+        return False
+    return attached == 0 or (idle is not None and idle >= UPDATE_QUIET_SECONDS)
+
+
+def path_line(path_env: str, bin_dir, home: str | None = None) -> str | None:
+    """The line to add to a shell's startup file when `bin_dir` is not on PATH, else None."""
+    bin_dir = os.path.normpath(str(bin_dir))
+    if bin_dir in (os.path.normpath(p) for p in (path_env or "").split(os.pathsep) if p):
+        return None
+    home = os.path.normpath(home or os.path.expanduser("~"))
+    shown = "$HOME" + bin_dir[len(home):] if bin_dir.startswith(home + os.sep) else bin_dir
+    return f'export PATH="{shown}:$PATH"'
+
+
+def update_report(status: str, before: str, after: str, major) -> str:
+    """The one line `emx update --report` prints for a laptop's `emx remote` to read. For `failed`, `after` holds the reason."""
+    if status == "failed":
+        return f"emx-update failed {before} {' '.join(str(after).split())}"
+    return f"emx-update {status} {before} {after} {major or '-'}"
+
+
+def parse_update_report(text: str) -> dict | None:
+    """The last `emx-update` line of a server's output, checked field by field: the output is untrusted, so a bad line is None and a reason is cleaned and capped."""
+    found = None
+    for line in (text or "").splitlines():
+        match = _UPDATE_LINE.fullmatch(line.strip())
+        if match:
+            found = match
+    if found is None:
+        return None
+    status, before, rest = found.groups()
+    if status not in UPDATE_STATUSES or parse_version(before) is None:
+        return None
+    if status == "failed":
+        return {"status": status, "before": before, "after": None, "major": None,
+                "reason": clean_notice(rest)[:UPDATE_REASON_MAX]}
+    parts = rest.split(" ")
+    if len(parts) != 2 or parse_version(parts[0]) is None:
+        return None
+    after, major = parts
+    if major != "-" and parse_version(major) is None:
+        return None
+    return {"status": status, "before": before, "after": after, "major": None if major == "-" else major, "reason": ""}
+
+
+def remote_update_ask(local: str, server: str, local_major, server_major) -> str | None:
+    """The version to ask him about once for both machines: a newer major on either side, or the higher of the two when their majors differ."""
+    here, there = parse_version(local), parse_version(server)
+    candidates = [v for v in (local_major, server_major) if parse_version(v)]
+    if here and there and here[0] != there[0]:
+        candidates.append(local if here > there else server)
+    return max(candidates, key=parse_version) if candidates else None
+
+
+def updated_heading(version: str) -> str:
+    return f"emx updated to {version}."
+
+
 def prefs_path(env: Mapping | None = None) -> Path:
     """`EMX_CONFIG_HOME` moves the prefs for a live check without setting `XDG_CONFIG_HOME`, which the claude in every session pane inherits from emx's tmux server and reads too (it then reports "Not logged in")."""
     env = os.environ if env is None else env
