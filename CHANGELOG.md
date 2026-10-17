@@ -2,6 +2,11 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.4.0 — 2026-10-17
+
+- emx has docs: getting started, guides for sessions, voice and notifications, remote and updating, a page on how emx works, and a reference of every command, key and setting.
+- `emx docs` prints the docs index and `emx docs <page>` prints one page, on your laptop or on a server (`emx remote` shows the server's version of them), so you or any agent can read them. `emx --help` and the README point to them.
+
 ## 2.3.0 — 2026-10-17
 
 - emx installs as an app of its own with one line: clone this repo to a temporary folder and run its `install.sh`. It puts emx in `~/.local/share/emx`, apart from any project folder, and `emx` in `~/.local/bin`; if that folder isn't on your PATH, it prints the one line to add and changes none of your shell files. It works on a Mac and on Linux, using git and your own GitHub login.
