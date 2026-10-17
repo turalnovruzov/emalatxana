@@ -20,3 +20,4 @@ What is in use in this repo, and why each piece is here. This is the record the 
 | macOS `say` (built in) | Spoken notices, in voice mode | [0004](./adr/0004-spoken-notices.md) |
 | `swiftc` (Apple's command line tools) and the `emx-notify.app` helper it builds | Notifications from emx itself, in notification mode; with `codesign`, `iconutil`, `lsregister` and `open`, all Apple's | [0006](./adr/0006-emx-notify-helper.md) |
 | OpenSSH client (`ssh`), the system's own | `emx remote` reaches the emx on a server; connection sharing (ControlMaster) carries the notifications back | [0007](./adr/0007-emx-reaches-a-server-over-ssh.md) |
+| `git` and `tar`, the system's own | Installing emx and updating it from the repo's `vX.Y.Z` tags: a bare clone, `git archive` of a tag, unpacked into its own folder | [0008](./adr/0008-emx-installs-and-updates-itself-from-git.md) |
