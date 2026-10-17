@@ -25,7 +25,7 @@ The server's notifications reach your laptop, spoken or as emx's notification, i
 
 ## Versions
 
-If the server's emx is a different version, `emx remote` says so before it connects and again when you leave. When it connects it also asks the server's emx to update itself, and tells you if it did or why it could not.
+If the server's emx is a different version, `emx remote` says so before it connects and again when you leave. If a newer major version is waiting on either machine, or the two majors differ, and you are at a terminal, `emx remote` asks `Update emx on <host> and this laptop to X? [y/N]`; answer `y` and it updates both. When it connects it also asks the server's emx to update itself, and tells you if it did or why it could not.
 
 ## If the server cannot find emx
 

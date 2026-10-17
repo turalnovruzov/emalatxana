@@ -96,7 +96,9 @@ def docs_command(args: list) -> int:
         print(f'emx: cannot read the docs page "{page}"', file=sys.stderr)
         return 1
     try:
-        sys.stdout.write(text)
+        # A stream that cannot encode the page's characters gets "?" for them rather than a traceback.
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        sys.stdout.write(text.encode(enc, "replace").decode(enc))
         sys.stdout.flush()
     except BrokenPipeError:
         # Point stdout at devnull so the interpreter's exit flush does not raise a second time.

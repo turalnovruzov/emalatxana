@@ -28,8 +28,9 @@ The panel lists your sessions, grouped by project, with what each one is doing (
 ## Start your first session
 
 1. In the panel press `n`.
-2. Type a message for Claude, or leave it empty to start an empty session, then press `↵`.
-3. The session opens on the other side. Type to Claude as usual.
+2. With no sessions yet, emx asks for a folder first: pick one from the list with `↑` and `↓` (type to filter) and press `↵`.
+3. Type a message for Claude, or leave it empty to start an empty session, then press `↵`.
+4. The session opens on the other side. Type to Claude as usual.
 
 More about starting sessions is in `emx docs sessions`.
 

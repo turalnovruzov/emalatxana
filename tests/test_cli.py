@@ -1015,6 +1015,15 @@ class DocsCommand(unittest.TestCase):
             with self.subTest(page=page):
                 self.assertEqual(self.run_main("docs", page), (0, docs_text(page), ""))
 
+    def test_docs_prints_without_a_traceback_when_stdout_cannot_encode_it(self):
+        raw = io.BytesIO()
+        out = io.TextIOWrapper(raw, encoding="ascii", errors="strict")
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = cli.main(["docs", "index"])
+        out.flush()
+        self.assertEqual(code, 0)
+        self.assertEqual(raw.getvalue().decode("ascii").count("\n"), docs_text("index").count("\n"))
+
     def test_docs_accepts_the_md_suffix(self):
         self.assertEqual(self.run_main("docs", "reference.md"), self.run_main("docs", "reference"))
 

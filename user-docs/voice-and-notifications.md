@@ -5,7 +5,7 @@ emx tells you when a session finishes (done) or stops for you (needs input). It 
 ## The two modes
 
 - **Notification mode** (the default) shows a normal macOS notification and never speaks.
-- **Voice mode** speaks the notice aloud, and shows no notification.
+- **Voice mode** speaks the notice aloud instead of showing a notification. If speaking fails, or there is no `say`, emx shows the notification instead.
 
 Press `m` in the panel to switch. Your choice is saved.
 
