@@ -457,8 +457,9 @@ def update_command(args: list) -> int:
     if after == before:
         print(f"emx is up to date ({after}).")
     else:
-        # The panel's updater prunes too, but a machine may run no panel; one previous version stays either way.
-        install.prune(root, emx.RUNNING)
+        # The panel's updater prunes too, but a machine may run no panel; one previous version stays either way, and
+        # a panel still on the version before this process's own keeps its folder.
+        install.prune(root, emx.RUNNING, keep_lagging=True)
         print(f"emx updated to {after}. The running panel switches to it at a quiet moment, or when you next run emx.")
     return 0
 

@@ -2,7 +2,7 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
-## 2.3.0 — 2026-10-16
+## 2.3.0 — 2026-10-17
 
 - emx installs as an app of its own with one line: clone this repo to a temporary folder and run its `install.sh`. It puts emx in `~/.local/share/emx`, apart from any project folder, and `emx` in `~/.local/bin`; if that folder isn't on your PATH, it prints the one line to add and changes none of your shell files. It works on a Mac and on Linux, using git and your own GitHub login.
 - An installed emx updates itself. Every 10 minutes it looks for a newer released version and gets it in the background; at a quiet moment (nobody attached, or no key pressed for 3 minutes, and nothing open in the panel) the panel switches over to it by itself. Your Claude sessions keep running untouched. After a switch the panel says "emx updated to X." with what's new.

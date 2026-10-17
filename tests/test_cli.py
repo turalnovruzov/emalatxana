@@ -855,8 +855,20 @@ class UpdateCommands(unittest.TestCase):
         self.addCleanup(running.stop)
         add_version(self.source, "2.3.2")
         self.assertEqual(self.run_main("update")[0], 0)
-        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "versions"))), ["2.3.1", "2.3.2"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "versions"))), ["2.3.0", "2.3.1", "2.3.2"])
         self.assertEqual(cli.install.current(self.root), "2.3.2")
+
+    def test_update_keeps_the_folder_a_lagging_panel_may_still_run_from(self):
+        self.installed(("2.3.0",))
+        for version in ("2.3.1", "2.3.2"):
+            add_version(self.source, version)
+            self.assertEqual(self.run_main("update")[0], 0)
+            running = mock.patch.object(emx, "RUNNING", version)
+            running.start()
+            self.addCleanup(running.stop)
+        add_version(self.source, "2.3.3")
+        self.assertEqual(self.run_main("update")[0], 0)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "versions"))), ["2.3.1", "2.3.2", "2.3.3"])
 
     def test_update_report_prints_one_parseable_line(self):
         self.assertEqual(self.report()["status"], "failed")
@@ -875,6 +887,21 @@ class UpdateCommands(unittest.TestCase):
         got = self.report()
         self.assertEqual((got["status"], got["before"]), ("failed", "2.3.2"))
         self.assertIn("couldn't fetch", got["reason"])
+
+    def test_update_report_carries_the_cause_of_an_ssh_failure(self):
+        self.installed()
+        stderr = (
+            "ssh: Could not resolve hostname no-such-host.invalid: nodename nor servname provided, or not known\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists.\n"
+        )
+        done = subprocess.CompletedProcess([], 128, stdout="", stderr=stderr)
+        with mock.patch.object(cli.install.subprocess, "run", return_value=done):
+            got = self.report()
+        self.assertEqual(got["status"], "failed")
+        self.assertIn("couldn't fetch updates", got["reason"])
+        self.assertIn("Could not resolve hostname", got["reason"])
+        self.assertNotIn("and the repository exists", got["reason"])
 
     def test_update_report_never_applies_a_major(self):
         self.installed()

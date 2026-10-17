@@ -121,6 +121,30 @@ class Install(InstallCase):
             self.assertEqual(fh.read(), b"mine\n")
         self.assertFalse(os.path.islink(emx))
 
+    def test_a_failed_first_install_leaves_no_root_behind(self):
+        version, error = install.install(os.path.join(self.tmp, "missing"), dict(os.environ), io.StringIO())
+        self.assertIsNone(version)
+        self.assertIn("couldn't clone", error)
+        self.assertFalse(os.path.lexists(self.root))
+
+    def test_a_failed_reinstall_keeps_the_existing_root(self):
+        self.install()
+        with mock.patch.object(install, "fetch", return_value=(None, "no network")):
+            version, error = install.install(self.source, dict(os.environ), io.StringIO())
+        self.assertEqual((version, error), (None, "no network"))
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "versions", "2.3.1")))
+
+    def test_install_over_an_existing_root_says_the_url_was_ignored(self):
+        self.install()
+        other = make_source(self.tmp, ["2.3.0"], name="other")
+        out = io.StringIO()
+        version, error = install.install(other, dict(os.environ), out)
+        self.assertEqual((version, error), ("2.3.1", None))
+        self.assertIn(f"emx is already installed from {self.source}; updating from there.", out.getvalue())
+        out = io.StringIO()
+        install.install(self.source, dict(os.environ), out)
+        self.assertNotIn("already installed", out.getvalue())
+
     def test_install_refuses_a_non_empty_foreign_emx_home(self):
         write(os.path.join(self.root, "notes.txt"), "his\n")
         (version, error), _ = self.install()
@@ -214,9 +238,24 @@ class Update(InstallCase):
         self.assertIsNone(value)
         self.assertIsInstance(error, str)
         self.assertEqual(len(error.splitlines()), 1)
+        self.assertIn("does not appear to be a git repository", error)
         value, error = install.update(self.root, "2.3.1", allow_major=False)
         self.assertIsNone(value)
         self.assertIn("couldn't fetch", error)
+        self.assertIn("does not appear to be a git repository", error)
+
+    def test_an_ssh_failure_keeps_its_cause_not_gits_closing_advice(self):
+        stderr = (
+            "ssh: Could not resolve hostname no-such-host.invalid: nodename nor servname provided, or not known\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists.\n"
+        )
+        done = subprocess.CompletedProcess([], 128, stdout="", stderr=stderr)
+        with mock.patch.object(install.subprocess, "run", return_value=done):
+            value, error = install.fetch(self.root)
+        self.assertIsNone(value)
+        self.assertIn("Could not resolve hostname", error)
+        self.assertNotIn("and the repository exists", error)
 
 
 def make_versions(root, names, current):
@@ -241,6 +280,12 @@ class Prune(unittest.TestCase):
             self.assertEqual(install.prune(self.root, "2.3.0"), (["2.4.0"], None))
         plan.assert_called_once_with(mock.ANY, "2.5.0", "2.3.0")
         self.assertEqual(self.on_disk(), ["2.3.0", "2.5.0"])
+
+    def test_keep_lagging_keeps_the_version_before_the_callers_own_and_everything_above(self):
+        self.assertEqual(install.prune(self.root, "2.4.0", keep_lagging=True), (["2.3.0"], None))
+        self.assertEqual(self.on_disk(), ["2.3.1", "2.4.0", "2.5.0"])
+        self.assertEqual(install.prune(self.root, "2.5.0", keep_lagging=True), (["2.3.1"], None))
+        self.assertEqual(self.on_disk(), ["2.4.0", "2.5.0"])
 
     def test_prune_skips_while_the_lock_is_held(self):
         with install.locked(self.root, wait=True) as busy:

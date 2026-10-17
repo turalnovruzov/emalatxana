@@ -33,6 +33,10 @@ BUSY = "another update is running"
 
 def _error_line(text: str, fallback: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    # git ends a transport failure with advice ("...and the repository exists."); the cause is the first diagnostic line.
+    for line in lines:
+        if line.startswith(("ssh:", "fatal:", "error:")):
+            return line
     return lines[-1] if lines else fallback
 
 
@@ -193,8 +197,12 @@ def locked(root, wait: bool):
             os.close(fd)
 
 
-def prune(root, running) -> tuple:
-    """Deletes the version folders `core.prune_plan` names; skipped while a prepare and its flip hold the lock."""
+def prune(root, running, keep_lagging: bool = False) -> tuple:
+    """Deletes the version folders `core.prune_plan` names; skipped while a prepare and its flip hold the lock.
+
+    With `keep_lagging`, nothing at or above the newest version below `running` goes: a panel that has not
+    switched yet may still run from the one before the CLI's own.
+    """
     try:
         with locked(root, wait=False) as busy:
             now = current(root)
@@ -202,7 +210,13 @@ def prune(root, running) -> tuple:
                 return [], None
             base = os.path.join(root, VERSIONS)
             gone = []
-            for version in core.prune_plan(os.listdir(base), now, running):
+            plan = core.prune_plan(os.listdir(base), now, running)
+            if keep_lagging:
+                run = core.parse_version(running)
+                older = [core.parse_version(v) for v in os.listdir(base) if core.parse_version(v) and core.parse_version(v) < run]
+                if older:
+                    plan = [v for v in plan if core.parse_version(v) < max(older)]
+            for version in plan:
                 shutil.rmtree(os.path.join(base, version))
                 gone.append(version)
             return gone, None
@@ -255,6 +269,18 @@ def _link_bin(bindir: str, root: str, out) -> tuple:
 
 def install(url: str, env, out) -> tuple:
     """Clone (or fetch) `url`, unpack its newest tag, point `current` at it and link `<bin>/emx`. Returns the version installed."""
+    root, _ = core.install_root(env)
+    made = root is not None and not os.path.lexists(str(root))
+    version, error = _install(url, env, out)
+    if error and made:
+        # A first install that failed leaves the folder it made holding only its lock.
+        with contextlib.suppress(OSError):
+            os.unlink(os.path.join(str(root), LOCK))
+            os.rmdir(str(root))
+    return version, error
+
+
+def _install(url: str, env, out) -> tuple:
     try:
         root, error = core.install_root(env)
         if error:
@@ -269,6 +295,9 @@ def install(url: str, env, out) -> tuple:
             if busy:
                 return None, busy
             if os.path.isdir(os.path.join(root, SOURCE)):
+                old, _ = git(root, "config", "--get", "remote.origin.url")
+                if old and old.strip() != url:
+                    print(f"emx is already installed from {old.strip()}; updating from there.", file=out)
                 _, error = fetch(root)
             else:
                 _, error = clone(root, url)
