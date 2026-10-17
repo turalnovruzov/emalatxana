@@ -257,6 +257,31 @@ class Update(InstallCase):
         self.assertIn("Could not resolve hostname", error)
         self.assertNotIn("and the repository exists", error)
 
+    def _fetch_failing_with(self, stderr):
+        done = subprocess.CompletedProcess([], 128, stdout="", stderr=stderr)
+        with mock.patch.object(install.subprocess, "run", return_value=done):
+            return install.fetch(self.root)
+
+    def test_a_github_auth_failure_keeps_its_cause(self):
+        value, error = self._fetch_failing_with(
+            "git@github.com: Permission denied (publickey).\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists.\n"
+        )
+        self.assertIsNone(value)
+        self.assertIn("Permission denied (publickey)", error)
+        self.assertNotIn("Could not read from remote", error)
+
+    def test_a_missing_repository_keeps_its_cause(self):
+        value, error = self._fetch_failing_with(
+            "ERROR: Repository not found.\n"
+            "fatal: Could not read from remote repository.\n\n"
+            "Please make sure you have the correct access rights\nand the repository exists.\n"
+        )
+        self.assertIsNone(value)
+        self.assertIn("Repository not found", error)
+        self.assertNotIn("Could not read from remote", error)
+
 
 def make_versions(root, names, current):
     for name in names:

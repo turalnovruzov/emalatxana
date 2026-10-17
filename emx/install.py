@@ -35,8 +35,9 @@ def _error_line(text: str, fallback: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     # git ends a transport failure with advice ("...and the repository exists."); the cause is the first diagnostic line.
     for line in lines:
-        if line.startswith(("ssh:", "fatal:", "error:")):
-            return line
+        if line.startswith(("warning:", "hint:", "Please make sure you have the correct access rights", "and the repository exists")):
+            continue
+        return line
     return lines[-1] if lines else fallback
 
 
