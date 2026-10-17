@@ -1019,10 +1019,10 @@ class DocsCommand(unittest.TestCase):
         raw = io.BytesIO()
         out = io.TextIOWrapper(raw, encoding="ascii", errors="strict")
         with redirect_stdout(out), redirect_stderr(io.StringIO()):
-            code = cli.main(["docs", "index"])
+            code = cli.main(["docs", "sessions"])
         out.flush()
         self.assertEqual(code, 0)
-        self.assertEqual(raw.getvalue().decode("ascii").count("\n"), docs_text("index").count("\n"))
+        self.assertEqual(raw.getvalue().decode("ascii").count("\n"), docs_text("sessions").count("\n"))
 
     def test_docs_accepts_the_md_suffix(self):
         self.assertEqual(self.run_main("docs", "reference.md"), self.run_main("docs", "reference"))
