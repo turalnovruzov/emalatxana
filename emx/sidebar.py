@@ -7,13 +7,15 @@ import locale
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import threading
 import time
 from pathlib import Path
 
-from emx import __version__, core, notify, remote
+import emx
+from emx import __version__, core, install, notify, remote
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, allowed_transcript, claude_home
 from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
@@ -46,6 +48,11 @@ COLLAPSE_KEY = "C-q"
 RESTORED_NOTICE_SECONDS = 4
 MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notification mode"}
 WHATS_NEW_SECONDS = 60
+UPDATER_TICK_SECONDS = 5
+UPDATE_FIRST_SECONDS = 30
+UPDATE_MIN_SECONDS = 5
+# A relaunch that did not take (the new tree failed to start) is tried again for the same version only after this long.
+RELAUNCH_RETRY_SECONDS = 300
 ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
 ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
 FOOTERS = (
@@ -1641,6 +1648,72 @@ class Poller(threading.Thread):
         return result
 
 
+def update_interval(env) -> float:
+    try:
+        seconds = int(env.get("EMX_UPDATE_SECONDS", ""))
+    except ValueError:
+        return core.UPDATE_CHECK_SECONDS
+    return seconds if seconds >= UPDATE_MIN_SECONDS else core.UPDATE_CHECK_SECONDS
+
+
+class Updater(threading.Thread):
+    """Checks the installed emx for a newer version off the curses thread and unpacks it; the panel decides when to switch to it.
+
+    `take()` hands (version `current` names, newest major waiting, last
+    error) whenever one of them changed, else None.
+    """
+
+    def __init__(self, interval: float | None = None):
+        super().__init__(daemon=True)
+        self.lock = threading.Lock()
+        self.interval = update_interval(os.environ) if interval is None else interval
+        self.next_check = time.monotonic() + UPDATE_FIRST_SECONDS
+        self.pruned = False
+        self.major = None
+        self.error = None
+        self.on_disk = None
+        self.published = None
+        self.result = None
+        self.stopping = threading.Event()
+
+    def step(self, now: float) -> None:
+        root, running = emx.ROOT, emx.RUNNING
+        self.on_disk = install.current(root)
+        if self.on_disk == running and not self.pruned:
+            self.pruned = True
+            install.prune(root, running)
+        if now >= self.next_check and install.updates_on(root):
+            self.next_check = now + self.interval
+            result, error = install.update(root, running, allow_major=False, apply_only_if_running_current=True, wait=False)
+            if error != install.BUSY:
+                self.error = error
+                if result:
+                    self.major = result[2]
+                self.on_disk = install.current(root)
+        self.publish()
+
+    def publish(self) -> None:
+        result = (self.on_disk, self.major, self.error)
+        if result != self.published:
+            self.published = result
+            with self.lock:
+                self.result = result
+
+    def run(self) -> None:
+        while not self.stopping.is_set():
+            try:
+                self.step(time.monotonic())
+            except Exception as exc:
+                self.error = f"checking for updates failed: {core.error_line(exc)}"
+                self.publish()
+            self.stopping.wait(UPDATER_TICK_SECONDS)
+
+    def take(self):
+        with self.lock:
+            result, self.result = self.result, None
+        return result
+
+
 class App:
     def __init__(self, scr, tmux: Tmux, claude: str):
         self.scr = scr
@@ -1707,6 +1780,11 @@ class App:
         self.peeking = False
         self.peek_wrapped = (None, [])
         self.whats_new = None
+        self.whats_new_waits = False
+        self.updater = Updater() if emx.ROOT else None
+        self.on_disk = None
+        self.majors_said = set()
+        self.relaunched = {}
         self.note_new_version()
 
     @property
@@ -1720,8 +1798,10 @@ class App:
             return
         text = core.whats_new_since(read_changelog(), self.prefs.get("last_version"), __version__) if due == core.SHOW_NEW else ""
         if text:
-            self.whats_new = text
-            self.say(self.whats_new, seconds=WHATS_NEW_SECONDS)
+            self.whats_new = core.updated_heading(__version__) + "\n" + text
+            # Its timer starts once someone is attached, so a server that updated alone still shows it when he comes back.
+            self.whats_new_waits = True
+            self.say(self.whats_new)
         self.prefs = {**self.prefs, "last_version": __version__}
         # Saved after the note, so a failure to save replaces it with the error.
         self.save_prefs()
@@ -1842,6 +1922,60 @@ class App:
         self.check_hush()
         self.check_relay()
         self.check_open()
+        self.time_whats_new()
+        self.check_update()
+
+    def time_whats_new(self) -> None:
+        if not self.whats_new_waits:
+            return
+        if self.notice != self.whats_new:
+            self.whats_new_waits = False
+            return
+        try:
+            attached = self.tmux.client_state()[0]
+        except TmuxError:
+            return
+        if attached > 0:
+            self.whats_new_waits = False
+            self.notice_until = time.monotonic() + WHATS_NEW_SECONDS
+
+    def update_busy(self) -> bool:
+        """Whether something open in the panel, or a worker it started, would be lost to a switch onto a new version now."""
+        held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view,
+                self.starter, self.closer, self.renamer, self.namer)
+        return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row()
+
+    def check_update(self) -> None:
+        """Announces a waiting major once, and once `current` has moved past this panel's code, starts the new code's relaunch at a quiet moment."""
+        if self.updater is None:
+            return
+        taken = self.updater.take()
+        if taken:
+            self.on_disk, major, _ = taken
+            if major and major not in self.majors_said:
+                self.majors_said.add(major)
+                self.say(f"emx {major} available: run emx update")
+        socket = getattr(self.tmux, "socket", None)
+        if not self.on_disk or self.on_disk == emx.RUNNING or not socket:
+            return
+        now = time.monotonic()
+        last = self.relaunched.get(self.on_disk)
+        if last is not None and now - last < RELAUNCH_RETRY_SECONDS:
+            return
+        try:
+            attached, _, _, idle = self.tmux.client_state()
+        except TmuxError:
+            return
+        if not core.update_quiet(attached, idle, self.update_busy()):
+            return
+        self.relaunched[self.on_disk] = now
+        try:
+            subprocess.Popen(
+                [sys.executable, emx.BIN, "relaunch", socket], start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            pass
 
     def check_hush(self) -> None:
         """`emx hush` from outside writes a fresh token to a session option; a change since the last read stops the voice. A failed read changes nothing."""
@@ -3163,6 +3297,8 @@ class App:
 
     def run(self) -> None:
         self.poller.start()
+        if self.updater is not None:
+            self.updater.start()
         while True:
             self.refresh()
             self.read_input()

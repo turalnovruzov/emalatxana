@@ -845,6 +845,19 @@ class UpdateCommands(unittest.TestCase):
         self.assertTrue(out.startswith("emx updated to 3.0.0. The running panel switches"), out)
         self.assertEqual(cli.install.current(self.root), "3.0.0")
 
+    def test_update_keeps_one_previous_version_on_disk(self):
+        self.installed(("2.3.0",))
+        add_version(self.source, "2.3.1")
+        self.assertEqual(self.run_main("update")[0], 0)
+        # Each `emx update` is a new process running through `current`.
+        running = mock.patch.object(emx, "RUNNING", "2.3.1")
+        running.start()
+        self.addCleanup(running.stop)
+        add_version(self.source, "2.3.2")
+        self.assertEqual(self.run_main("update")[0], 0)
+        self.assertEqual(sorted(os.listdir(os.path.join(self.root, "versions"))), ["2.3.1", "2.3.2"])
+        self.assertEqual(cli.install.current(self.root), "2.3.2")
+
     def test_update_report_prints_one_parseable_line(self):
         self.assertEqual(self.report()["status"], "failed")
         self.installed()
