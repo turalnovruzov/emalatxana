@@ -13,8 +13,12 @@ from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
+import emx
 from emx import __version__, cli, core
 from emx.tmux import OPEN_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_install import make_versions, temp_homes  # noqa: E402
 
 
 class Attached(Exception):
@@ -295,6 +299,16 @@ class OpenSession(unittest.TestCase):
         self.assertNotIn(SID, text)
         self.assertNotIn("s3cret", text)
         self.assertIn("export EMX_SOCKET=emx-test-x", lines)
+
+    def test_emx_command_goes_through_current(self):
+        root = os.path.join(self.state, "install")
+        make_versions(root, ["9.0.0"], "9.0.0")
+        _, _, bin_path = emx._layout(os.path.join(root, "versions", "9.0.0"))
+        with mock.patch.object(cli, "BIN", bin_path):
+            self.run_open(attached=0)
+        last = self.launch_file().read_text(encoding="utf-8").splitlines()[-1]
+        self.assertEqual(last, f"exec {shlex.quote(sys.executable)} {shlex.quote(os.path.join(root, 'current', 'bin', 'emx'))}")
+        self.assertNotIn("/versions/", last)
 
     def test_every_click_rewrites_the_one_launch_file_in_place(self):
         self.run_open(attached=0, terminal="com.googlecode.iterm2")
@@ -689,6 +703,60 @@ class Version(unittest.TestCase):
         with mock.patch.object(cli, "CHANGELOG", "/nonexistent/CHANGELOG.md"):
             self.assertEqual(cli.read_changelog(), "")
         self.assertIn(f"## {__version__}", cli.read_changelog())
+
+
+class InstalledBin(unittest.TestCase):
+    def setUp(self):
+        self.tmp, self.root, _ = temp_homes(self)
+
+    def test_a_versions_tree_gives_bin_through_current(self):
+        make_versions(self.root, ["9.0.0"], "9.0.0")
+        got = emx._layout(os.path.join(self.root, "versions", "9.0.0"))
+        self.assertEqual(got, (self.root, "9.0.0", os.path.join(self.root, "current", "bin", "emx")))
+
+    def test_running_is_the_folder_name_not___version__(self):
+        make_versions(self.root, ["9.0.0"], "9.0.0")
+        tree = os.path.join(self.root, "versions", "9.0.0")
+        with open(emx.__file__, encoding="utf-8") as fh:
+            source = fh.read().replace(f'__version__ = "{__version__}"', '__version__ = "2.3.0"')
+        os.makedirs(os.path.join(tree, "emx"))
+        with open(os.path.join(tree, "emx", "__init__.py"), "w", encoding="utf-8") as fh:
+            fh.write(source)
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import emx; "
+             "print(emx.__version__, emx.RUNNING, emx.ROOT, emx.BIN)", tree],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(done.stdout.split(), ["2.3.0", "9.0.0", self.root, os.path.join(self.root, "current", "bin", "emx")])
+
+    def test_a_checkout_keeps_its_own_bin(self):
+        code = os.path.join(self.tmp, "checkout")
+        self.assertEqual(emx._layout(code), (None, None, os.path.join(code, "bin", "emx")))
+        self.assertIsNone(emx.ROOT)
+        self.assertEqual(emx.BIN, os.path.join(emx.CODE, "bin", "emx"))
+
+    def test_a_versions_tree_without_current_or_source_is_dev(self):
+        code = os.path.join(self.root, "versions", "9.0.0")
+        dev = (None, None, os.path.join(code, "bin", "emx"))
+        os.makedirs(code)
+        self.assertEqual(emx._layout(code), dev)
+        os.symlink(os.path.join("versions", "9.0.0"), os.path.join(self.root, "current"))
+        self.assertEqual(emx._layout(code), dev)
+        os.unlink(os.path.join(self.root, "current"))
+        os.makedirs(os.path.join(self.root, "source.git"))
+        self.assertEqual(emx._layout(code), dev)
+        os.makedirs(os.path.join(self.root, "current"))
+        self.assertEqual(emx._layout(code), dev)
+
+    def test_the_code_stamp_of_a_checkout_is_unchanged(self):
+        root = os.path.dirname(cli.HERE)
+        files = []
+        for path in [emx.BIN] + [os.path.join(d, f) for d, _, names in os.walk(cli.HERE) for f in names]:
+            rel = os.path.relpath(path, root)
+            if core.counts_for_version(rel):
+                with open(path, "rb") as fh:
+                    files.append((rel, fh.read()))
+        self.assertEqual(cli.code_version(), core.code_version(files))
 
 
 class HookCommand(unittest.TestCase):

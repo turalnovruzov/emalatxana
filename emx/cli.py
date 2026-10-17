@@ -93,7 +93,7 @@ def create_workspace(tmux: Tmux) -> None:
 def code_version() -> str:
     root = os.path.dirname(HERE)
     files = []
-    for path in [BIN] + [os.path.join(d, f) for d, _, names in os.walk(HERE) for f in names]:
+    for path in [os.path.join(root, "bin", "emx")] + [os.path.join(d, f) for d, _, names in os.walk(HERE) for f in names]:
         rel = os.path.relpath(path, root).replace(os.sep, "/")
         if core.counts_for_version(rel):
             with open(path, "rb") as fh:

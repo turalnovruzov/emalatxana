@@ -5,12 +5,17 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import emx
 from emx import BIN, core, notify
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_install import make_versions  # noqa: E402
 
 
 def tool_ok(argv, **kwargs):
@@ -85,6 +90,17 @@ class Payload(unittest.TestCase):
         self.assertEqual(opener["env"]["EMX_SOCKET"], "emx-test-43")
         self.assertEqual(opener["env"]["PATH"], "/usr/bin:/bin:/opt/brew/bin")
         self.assertNotIn(body, json.dumps(opener))
+
+    def test_payload_bin_goes_through_current(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = os.path.join(os.path.realpath(tmp.name), "install")
+        make_versions(root, ["9.0.0"], "9.0.0")
+        _, _, bin_path = emx._layout(os.path.join(root, "versions", "9.0.0"))
+        with mock.patch.object(notify, "BIN", bin_path), mock.patch.object(notify.shutil, "which", return_value="/usr/bin/tmux"):
+            opener = notify.payload("t", "b", "n1", "sid", "emx-test-43", self.ENV)["open"]
+        self.assertEqual(opener["emx"], os.path.join(root, "current", "bin", "emx"))
+        self.assertNotIn("/versions/", opener["emx"])
 
     def test_the_remote_route_survives_into_the_clicks_environment(self):
         env = {**self.ENV, "EMX_REMOTE_HOST": "srv", "EMX_REMOTE_CONTROL": "/tmp/emx-ssh-1/2",
