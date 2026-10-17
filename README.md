@@ -30,6 +30,10 @@ After a prototype that switched sessions via `/resume`, which loaded another con
 
 > this doesn't have to be a mod [...] maybe this can be something else You know CLI tool, visual tool
 
+## Docs
+
+How to use emx is in [`user-docs/`](user-docs/index.md), also printed by `emx docs`.
+
 ## How this project runs
 
 See [`CLAUDE.md`](CLAUDE.md).

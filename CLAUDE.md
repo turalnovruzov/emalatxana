@@ -145,6 +145,10 @@ No deploy stage.
 
 **Versioning:** semantic versioning from 1.0.0 (Tural, 2026-10-08), held in `emx/__init__.py`. Each PR carries its own bump in `emx/__init__.py` and its plain-language lines in [`CHANGELOG.md`](CHANGELOG.md) under that version, in the PR before review, and the auditor checks them (Tural, 2026-10-08: "In the PR, before review"). The bump follows the change type (a feature the minor, a breaking change the major, a fix or anything else the patch). At merge you only re-check the number is still the next one on current `main`; if another merge took it, you renumber it (number and heading only, mechanical, no new review), then squash-merge. After the merge, tag the merge commit `vX.Y.Z` and push the tag; no GitHub Release.
 
+### Docs
+
+**Docs:** the user docs are in [`user-docs/`](user-docs/index.md), printed by `emx docs`. Tural (2026-10-17, #61): "the system in this project needs to be updated so that [...] documentation is always up to date". Each PR that changes what he would see (a CHANGELOG line describing a new or changed command, key, setting or behaviour) updates the affected `user-docs/` pages in the same PR, before review, and the auditor checks it; a PR whose CHANGELOG lines say nothing changes in how emx works need not. `tests/test_docs.py` fails when a public command in `emx --help`, a panel or emx key, or a public setting is missing from `user-docs/reference.md`. Internal commands and test-only settings stay out of the docs.
+
 ### Stack
 
 **The stack is tmux plus the Python standard library** ([ADR 0001](docs/adr/0001-tmux-and-python-standard-library.md)), so there is no manifest yet.
