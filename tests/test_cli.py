@@ -18,7 +18,7 @@ from emx import __version__, cli, core
 from emx.tmux import OPEN_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_install import make_versions, temp_homes  # noqa: E402
+from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
 
 
 class Attached(Exception):
@@ -757,6 +757,196 @@ class InstalledBin(unittest.TestCase):
                 with open(path, "rb") as fh:
                     files.append((rel, fh.read()))
         self.assertEqual(cli.code_version(), core.code_version(files))
+
+
+class RelaunchTmux:
+    def __init__(self, socket, config=None):
+        self.socket = socket
+        self.options = {VERSION_OPT: "old"}
+        self.respawned, self.sourced = [], 0
+
+    def has_session(self):
+        return True
+
+    def session_option(self, name):
+        return self.options.get(name, "")
+
+    def set_session_option(self, name, value):
+        self.options[name] = value
+
+    def panes(self):
+        return [
+            Pane("%1", "@1", False, "sidebar", "", 30, 200),
+            Pane("%2", "@1", False, "sidebar", SID, 170, 200),
+            Pane("%3", "@2", False, "", SID, 200, 200),
+        ]
+
+    def kill_pane(self, pane):
+        raise AssertionError(f"killed {pane}")
+
+    def respawn(self, pane, command):
+        self.respawned.append((pane, command))
+
+    def source_config(self):
+        self.sourced += 1
+
+
+class UpdateCommands(unittest.TestCase):
+    def setUp(self):
+        self.tmp, self.root, self.bin = temp_homes(self)
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def installed(self, versions=("2.3.0", "2.3.1")):
+        self.source = make_source(self.tmp, versions)
+        version, error = cli.install.install(self.source, dict(os.environ), io.StringIO())
+        self.assertIsNone(error)
+        for name, value in (("ROOT", self.root), ("RUNNING", version)):
+            patch = mock.patch.object(emx, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def report(self):
+        code, out, err = self.run_main("update", "--report")
+        self.assertEqual((code, err, len(out.splitlines())), (0, "", 1))
+        return core.parse_update_report(out)
+
+    def test_update_from_a_checkout_says_so_and_writes_nothing(self):
+        self.assertIsNone(emx.ROOT)
+        for args in ([], ["off"], ["on"]):
+            with self.subTest(args=args):
+                code, out, err = self.run_main("update", *args)
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn("runs from a checkout", err)
+                self.assertIn("never updates itself", err)
+        self.assertFalse(os.path.exists(self.root))
+        self.assertFalse(os.path.exists(self.bin))
+
+    def test_update_off_then_on_writes_and_removes_the_marker(self):
+        self.installed()
+        marker = os.path.join(self.root, "updates-off")
+        code, out, _ = self.run_main("update", "off")
+        self.assertEqual((code, out), (0, "Automatic updates are off; emx update still updates when you run it.\n"))
+        self.assertTrue(os.path.exists(marker))
+        code, out, _ = self.run_main("update", "on")
+        self.assertEqual((code, out), (0, "Automatic updates are on.\n"))
+        self.assertFalse(os.path.exists(marker))
+
+    def test_update_says_up_to_date_or_updated(self):
+        self.installed()
+        self.assertEqual(self.run_main("update"), (0, "emx is up to date (2.3.1).\n", ""))
+        add_version(self.source, "3.0.0")
+        code, out, _ = self.run_main("update")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.startswith("emx updated to 3.0.0. The running panel switches"), out)
+        self.assertEqual(cli.install.current(self.root), "3.0.0")
+
+    def test_update_report_prints_one_parseable_line(self):
+        self.assertEqual(self.report()["status"], "failed")
+        self.installed()
+        got = self.report()
+        self.assertEqual((got["status"], got["before"], got["after"]), ("current", "2.3.1", "2.3.1"))
+        add_version(self.source, "2.3.2")
+        got = self.report()
+        self.assertEqual((got["status"], got["before"], got["after"]), ("updated", "2.3.1", "2.3.2"))
+        cli.install.set_updates(self.root, False)
+        add_version(self.source, "2.3.3")
+        got = self.report()
+        self.assertEqual((got["status"], got["after"]), ("off", "2.3.2"))
+        cli.install.set_updates(self.root, True)
+        cli.install.git(self.root, "remote", "set-url", "origin", os.path.join(self.tmp, "missing"))
+        got = self.report()
+        self.assertEqual((got["status"], got["before"]), ("failed", "2.3.2"))
+        self.assertIn("couldn't fetch", got["reason"])
+
+    def test_update_report_never_applies_a_major(self):
+        self.installed()
+        add_version(self.source, "3.0.0")
+        got = self.report()
+        self.assertEqual((got["status"], got["after"], got["major"]), ("current", "2.3.1", "3.0.0"))
+        self.assertEqual(cli.install.current(self.root), "2.3.1")
+
+    def test_uninstall_from_a_checkout_refuses_and_installed_removes_the_install(self):
+        code, _, err = self.run_main("uninstall")
+        self.assertEqual(code, 1)
+        self.assertIn("checkout", err)
+        self.installed()
+        code, out, _ = self.run_main("uninstall")
+        self.assertEqual(code, 0)
+        self.assertTrue(out.endswith("Your prefs and emx's state are kept.\n"))
+        self.assertFalse(os.path.exists(self.root))
+        self.assertFalse(os.path.lexists(os.path.join(self.bin, "emx")))
+
+    def test_relaunch_refuses_default_and_empty_socket(self):
+        with mock.patch.object(cli, "Tmux", side_effect=AssertionError("tmux")):
+            for socket in ("", "default"):
+                with self.subTest(socket=socket):
+                    code, out, err = self.run_main("relaunch", socket)
+                    self.assertEqual((code, out, err), (2, "", cli.SOCKET_REFUSAL + "\n"))
+
+    def test_relaunch_respawns_the_sidebar_only_and_stamps(self):
+        made = []
+
+        def make(*args, **kwargs):
+            made.append(RelaunchTmux(*args, **kwargs))
+            return made[-1]
+
+        with mock.patch.object(cli, "Tmux", make):
+            self.assertEqual(self.run_main("relaunch", "emx-test-unit"), (0, "", ""))
+        (tmux,) = made
+        self.assertEqual([pane for pane, _ in tmux.respawned], ["%1"])
+        self.assertEqual(tmux.respawned[0][1], cli.self_command("sidebar", "emx-test-unit"))
+        self.assertEqual(tmux.sourced, 1)
+        self.assertEqual(tmux.options[VERSION_OPT], cli.code_version())
+
+    def test_relaunch_without_a_workspace_exits_1(self):
+        class Gone(RelaunchTmux):
+            def has_session(self):
+                return False
+
+        with mock.patch.object(cli, "Tmux", Gone):
+            self.assertEqual(self.run_main("relaunch", "emx-test-unit"), (1, "", ""))
+
+    def test_install_sh_runs_from_a_clone_into_temp_root(self):
+        here = os.path.dirname(cli.HERE)
+        fixture = os.path.join(self.tmp, "fixture")
+        os.makedirs(fixture)
+        shutil.copy2(os.path.join(here, "install.sh"), fixture)
+        shutil.copy2(os.path.join(here, "CHANGELOG.md"), fixture)
+        for name in ("bin", "emx"):
+            shutil.copytree(os.path.join(here, name), os.path.join(fixture, name), ignore=shutil.ignore_patterns("__pycache__"))
+        run_git(fixture, "init", "-q")
+        run_git(fixture, "add", "-A")
+        run_git(fixture, "commit", "-q", "-m", "fixture")
+        run_git(fixture, "tag", "v9.0.0")
+        clone = os.path.join(self.tmp, "clone")
+        run_git(self.tmp, "clone", "-q", fixture, clone)
+        path = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if os.path.normpath(p) != self.bin)
+        env = {**os.environ, **GIT_ENV, "EMX_HOME": self.root, "EMX_BIN_HOME": self.bin, "PATH": path}
+        done = subprocess.run(["sh", os.path.join(clone, "install.sh")], capture_output=True, text=True, timeout=120, env=env,
+                              stdin=subprocess.DEVNULL)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn(f'export PATH="{self.bin}:$PATH"', done.stdout)
+        self.assertEqual(os.readlink(os.path.join(self.root, "current")), os.path.join("versions", "9.0.0"))
+        emx_link = os.path.join(self.bin, "emx")
+        done = subprocess.run([emx_link, "--version"], capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(done.stdout, f"emx {__version__}\n")
+        current = os.path.join(self.root, "current")
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import emx; print(emx.BIN)", current],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+        self.assertEqual(done.stdout.strip(), os.path.join(self.root, "current", "bin", "emx"))
+
+    def test_usage_names_update_uninstall_and_the_internal_commands(self):
+        for words in ("update [off | on]", "uninstall", "emx install <url> is internal", "emx update --report is internal",
+                      "emx relaunch <socket> is internal", "EMX_HOME", "EMX_BIN_HOME", "EMX_UPDATE_SECONDS"):
+            with self.subTest(words=words):
+                self.assertIn(words, cli.USAGE)
 
 
 class HookCommand(unittest.TestCase):
