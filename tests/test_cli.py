@@ -957,7 +957,7 @@ class UpdateCommands(unittest.TestCase):
         os.makedirs(fixture)
         shutil.copy2(os.path.join(here, "install.sh"), fixture)
         shutil.copy2(os.path.join(here, "CHANGELOG.md"), fixture)
-        for name in ("bin", "emx"):
+        for name in ("bin", "emx", "user-docs"):
             shutil.copytree(os.path.join(here, name), os.path.join(fixture, name), ignore=shutil.ignore_patterns("__pycache__"))
         run_git(fixture, "init", "-q")
         run_git(fixture, "add", "-A")
@@ -975,6 +975,9 @@ class UpdateCommands(unittest.TestCase):
         emx_link = os.path.join(self.bin, "emx")
         done = subprocess.run([emx_link, "--version"], capture_output=True, text=True, timeout=30, env=env)
         self.assertEqual(done.stdout, f"emx {__version__}\n")
+        done = subprocess.run([emx_link, "docs"], capture_output=True, text=True, timeout=30, env=env)
+        with open(os.path.join(here, "user-docs", "index.md"), encoding="utf-8") as fh:
+            self.assertEqual((done.returncode, done.stdout), (0, fh.read()))
         current = os.path.join(self.root, "current")
         done = subprocess.run(
             [sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); import emx; print(emx.BIN)", current],
@@ -984,9 +987,68 @@ class UpdateCommands(unittest.TestCase):
 
     def test_usage_names_update_uninstall_and_the_internal_commands(self):
         for words in ("update [off | on]", "uninstall", "emx install <url> is internal", "emx update --report is internal",
-                      "emx relaunch <socket> is internal", "EMX_HOME", "EMX_BIN_HOME", "EMX_UPDATE_SECONDS"):
+                      "emx relaunch <socket> is internal", "docs [<page>]", "docs <page> prints one page", "EMX_HOME", "EMX_BIN_HOME", "EMX_UPDATE_SECONDS"):
             with self.subTest(words=words):
                 self.assertIn(words, cli.USAGE)
+
+
+def docs_text(page):
+    with open(os.path.join(cli.DOCS, page + ".md"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+class DocsCommand(unittest.TestCase):
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_docs_prints_the_index(self):
+        self.assertEqual(self.run_main("docs"), (0, docs_text("index"), ""))
+
+    def test_docs_prints_every_page(self):
+        pages = cli.docs_pages()
+        self.assertIn("index", pages)
+        self.assertIn("reference", pages)
+        for page in pages:
+            with self.subTest(page=page):
+                self.assertEqual(self.run_main("docs", page), (0, docs_text(page), ""))
+
+    def test_docs_accepts_the_md_suffix(self):
+        self.assertEqual(self.run_main("docs", "reference.md"), self.run_main("docs", "reference"))
+
+    def test_docs_unknown_page_exits_2(self):
+        code, out, err = self.run_main("docs", "nosuch")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("nosuch", err)
+        self.assertIn("reference", err)
+
+    def test_docs_does_not_leave_the_docs_folder(self):
+        for name in ("../CHANGELOG", "../README", "/etc/hosts", "../emx/cli.py"):
+            with self.subTest(name=name):
+                code, out, _ = self.run_main("docs", name)
+                self.assertEqual((code, out), (2, ""))
+
+    def test_docs_too_many_args_exits_2(self):
+        code, out, _ = self.run_main("docs", "a", "b")
+        self.assertEqual((code, out), (2, ""))
+
+    def test_the_real_launcher_prints_docs_with_no_tmux_on_path(self):
+        for args, page in (([], "index"), (["reference"], "reference")):
+            with self.subTest(args=args):
+                done = subprocess.run(
+                    [sys.executable, cli.BIN, "docs", *args], capture_output=True, text=True, timeout=30,
+                    env={**os.environ, "PATH": "/nonexistent"}, stdin=subprocess.DEVNULL,
+                )
+                self.assertEqual((done.returncode, done.stdout, done.stderr), (0, docs_text(page), ""))
+
+    def test_a_closed_pipe_exits_quietly(self):
+        done = subprocess.run(
+            f"{sys.executable} {cli.BIN} docs reference | head -c 10 >/dev/null", shell=True, capture_output=True, text=True,
+            timeout=30, env={**os.environ, "PATH": os.environ.get("PATH", "")},
+        )
+        self.assertEqual(done.stderr, "")
 
 
 class HookCommand(unittest.TestCase):

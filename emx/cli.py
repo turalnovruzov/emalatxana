@@ -19,6 +19,7 @@ from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OP
 HERE = os.path.dirname(os.path.realpath(__file__))
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
 CHANGELOG = os.path.join(os.path.dirname(HERE), "CHANGELOG.md")
+DOCS = os.path.join(os.path.dirname(HERE), "user-docs")
 
 PLACEHOLDER_TEXT = "Pick a session on the panel, or press n there to start one."
 FALLBACK_TERMINAL = "com.apple.Terminal"
@@ -26,7 +27,7 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | hush | remote <host> | update [off | on] | uninstall]
+USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | update [off | on] | uninstall]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
 emx install <url> is internal too: what install.sh runs to install emx from that repo's newest version tag.
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
@@ -38,6 +39,7 @@ terminal window with that session.)
 
 Opens the emx workspace in a private tmux server, or reattaches if it is running,
 first moving a running workspace onto this version of emx. --version prints the version.
+docs prints the emx docs index (start there); docs <page> prints one page.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
@@ -66,6 +68,40 @@ def read_changelog() -> str:
             return fh.read()
     except (OSError, ValueError):
         return ""
+
+
+def docs_pages() -> list:
+    try:
+        return sorted(name[:-3] for name in os.listdir(DOCS) if name.endswith(".md"))
+    except OSError:
+        return []
+
+
+def docs_command(args: list) -> int:
+    if len(args) > 1:
+        print(USAGE, file=sys.stderr)
+        return 2
+    pages = docs_pages()
+    page = "index"
+    if args:
+        page = args[0][:-3] if args[0].endswith(".md") else args[0]
+    # Matched against the folder's own listing, never joined into a path, so no argument can leave DOCS.
+    if page not in pages:
+        print(f'emx: no docs page "{args[0] if args else page}"; pages: {", ".join(pages)}', file=sys.stderr)
+        return 2
+    try:
+        with open(os.path.join(DOCS, page + ".md"), encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, ValueError):
+        print(f'emx: cannot read the docs page "{page}"', file=sys.stderr)
+        return 1
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # Point stdout at devnull so the interpreter's exit flush does not raise a second time.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    return 0
 
 
 def socket_name() -> str | None:
@@ -514,6 +550,8 @@ def main(argv: list) -> int:
         return launch()
     if argv[0] == "hook":
         return hook(argv[1:])
+    if argv[0] == "docs":
+        return docs_command(argv[1:])
     if argv[0] in ("-h", "--help", "help"):
         print(USAGE)
         return 0
