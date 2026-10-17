@@ -312,6 +312,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the guard checks name and location, not file type, so reads stay on a worker thread, never the curses thread.
 
+### Every public command, key and setting appears in `user-docs/reference.md` as its own code span
+
+1. **Rule**: every public command, panel key, root key and public `EMX_` setting is listed in `user-docs/reference.md` as its own backtick code span, and `tests/test_docs.py` fails when one is missing.
+2. **Why**: the docs are what Tural reads, and a drift test is the only thing that notices a key added without a line.
+3. **Minimal example**: ``| `^g` | Go somewhere. |``
+4. **Gotcha**: the test matches the exact backticked form, so `emx update` is not satisfied by `emx update off`. Keys handled only in `handle_key` or `prompt_key` (Tab, Esc, the folder list's `^t`, `,` and `.`) are not drift-tested and are kept by hand.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

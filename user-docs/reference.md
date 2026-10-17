@@ -1,0 +1,76 @@
+# Reference
+
+Every command, key and setting. Each is written as a code span so a test can check this page against emx itself.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `emx` | Opens the workspace, or reattaches if it is running, first moving a running workspace onto this version. |
+| `emx --help` | Prints the usage text. |
+| `emx --version` | Prints the version. |
+| `emx docs` | Prints the docs index. |
+| `emx docs <page>` | Prints one docs page, for example `emx docs reference`. |
+| `emx hush` | Stops the voice now, without muting later notices. |
+| `emx remote` | `emx remote <host>` opens the emx running on a server over ssh (host from your SSH config); closing it leaves the server's sessions running. |
+| `emx update` | Installs the newest version now, a new major version included. |
+| `emx update off` | Stops the automatic updates. |
+| `emx update on` | Starts the automatic updates again. |
+| `emx uninstall` | Removes the installed emx and its link; prefs and state are kept. |
+
+## Keys
+
+### Anywhere in emx
+
+| Key | What it does |
+| --- | --- |
+| `^\` | Jump to the session and back to the panel. |
+| `^q` | Hide the panel; press again to bring it back. |
+| `←` | From an empty prompt in a session, back to the panel. |
+
+### In the panel
+
+| Key | What it does |
+| --- | --- |
+| `→` `↵` | Open the session and go to it. |
+| `←` | Back here, from an empty prompt. |
+| `↑↓` `j` `k` | Move. |
+| `↵` `click` | Fold a group; a click opens a session. |
+| `space` | Peek at what the session asks or did; `↑↓` next, `space` or `Esc` closes. |
+| `n` | New session where the cursor is; `Tab` there picks another folder. |
+| `^x` | Interrupt a working session; twice closes it. On a project header, twice closes the group. |
+| `^f` `/` | Find a session by name or folder. |
+| `^t` | Pin to the top. In the folder list it stars a favourite instead. |
+| `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
+| `^s` | Switch between by project and by state. |
+| `N` | Notifications: the last 20; `↵` opens one. |
+| `m` | Switch between voice mode and notification mode. |
+| `h` | Stop the voice now (voice mode). |
+| `s` | Move the panel to the other side. |
+| `<` `>` | Narrower / wider panel (`,` and `.` do the same). |
+| `^\` | Jump to the session and back. |
+| `^q` | Hide the panel. |
+| `q` | Detach; sessions keep running. |
+| `?` | Show or close the key help. |
+
+## Settings
+
+Environment variables, set before running `emx`.
+
+| Setting | What it does |
+| --- | --- |
+| `EMX_SOCKET` | The tmux socket name (default `emx`). Not empty and not `default`. |
+| `EMX_CLAUDE` | The claude command (default `claude`). |
+| `EMX_SAY` | Replaces the `say` command that speaks. |
+| `EMX_NOTIFY` | Replaces the notification helper's command. |
+| `EMX_NOTIFY_HOME` | The folder the notification helper is built in. |
+| `EMX_OPEN` | Replaces the `open` command. |
+| `EMX_REMOTE_COMMAND` | emx's command on the server for `emx remote` (default `emx`, run through its login shell). |
+| `EMX_SSH` | Replaces `ssh` for `emx remote`. |
+| `EMX_HOME` | The folder emx installs into (default `$XDG_DATA_HOME/emx`, else `~/.local/share/emx`). |
+| `EMX_BIN_HOME` | The folder of the `emx` link (default `~/.local/bin`). |
+| `EMX_UPDATE_SECONDS` | How often a running panel checks for updates (default 600). |
+
+## The prefs file
+
+Your choices are saved in `prefs.json` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`: panel side and width, voice or notification mode, view, pinned sessions, and favourite and recent folders. Whether automatic updates are on is kept in the install folder instead (`emx update off` and `emx update on`). emx's own state is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
