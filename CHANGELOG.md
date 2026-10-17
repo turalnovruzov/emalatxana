@@ -2,6 +2,16 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.3.0 — 2026-10-17
+
+- emx installs as an app of its own with one line: clone this repo to a temporary folder and run its `install.sh`. It puts emx in `~/.local/share/emx`, apart from any project folder, and `emx` in `~/.local/bin`; if that folder isn't on your PATH, it prints the one line to add and changes none of your shell files. It works on a Mac and on Linux, using git and your own GitHub login.
+- An installed emx updates itself. Every 10 minutes it looks for a newer released version and gets it in the background; at a quiet moment (nobody attached, or no key pressed for 3 minutes, and nothing open in the panel) the panel switches over to it by itself. Your Claude sessions keep running untouched. After a switch the panel says "emx updated to X." with what's new.
+- A new major version (say 2.x to 3.0) is fetched but waits for you: the panel says "emx 3.0.0 available: run emx update", and `emx update` installs it.
+- `emx update` installs the newest version now. `emx update off` stops the automatic updates (`emx update` still works), `emx update on` starts them again. `emx uninstall` removes the installed emx and its link and keeps your prefs and emx's state.
+- `emx remote myserver` now asks the server's emx to update itself when it connects, and says so when it does. If it can't (for example, the server can't reach GitHub), you see the version note and why. A new major version on either machine is asked once, in your terminal, for both.
+- An emx run from a project folder (a checkout) never updates itself, and `emx update` there says so.
+- One previous version stays on disk next to the current one; older ones are deleted.
+
 ## 2.2.2 — 2026-10-16
 
 - Nothing changes in how emx works. The note on what a server needs was corrected: on a server set to end a user's programs at logout (`KillUserProcesses=yes`), `loginctl enable-linger` alone does not keep your sessions running; turning that setting off, or excluding your user from it, does. Ubuntu and Debian leave it off.

@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+import emx
 from emx import cli, core, sidebar
 from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
@@ -4029,11 +4030,11 @@ class WhatsNew(AppCase):
 
     LOG = "# Changelog\n\n## 1.1.0\n\n- Shiny thing.\n\n## 1.0.0\n\n- First.\n"
 
-    def start(self, recorded=None, version="1.1.0", log=LOG):
+    def start(self, recorded=None, version="1.1.0", log=LOG, tmux=None):
         if recorded is not None:
             core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": recorded})
         with mock.patch.object(sidebar, "__version__", version), mock.patch.object(sidebar, "read_changelog", return_value=log):
-            app = sidebar.App(FakeScr(), tmux=None, claude="claude")
+            app = sidebar.App(FakeScr(), tmux=tmux, claude="claude")
         app.housekeep = lambda fresh_list: None
         return app
 
@@ -4042,7 +4043,7 @@ class WhatsNew(AppCase):
 
     def test_a_newer_version_shows_its_lines_once_and_records_itself(self):
         app = self.start("1.0.0")
-        self.assertEqual(app.notice, "New in emx 1.1.0:\n· Shiny thing.")
+        self.assertEqual(app.notice, "emx updated to 1.1.0.\nNew in emx 1.1.0:\n· Shiny thing.")
         self.assertEqual(self.recorded(), "1.1.0")
         self.assertEqual(self.start().notice, "")
 
@@ -4077,7 +4078,7 @@ class WhatsNew(AppCase):
         app.poller.result = ([session("a", "/p/alpha"), session("b", "/p/beta")], None)
         app.refresh()
         app.handle_key(curses.KEY_RESIZE)
-        self.assertTrue(app.notice.startswith("New in emx"))
+        self.assertTrue(app.notice.startswith("emx updated to 1.1.0."))
         cursor = app.cursor
         app.handle_key("j")
         self.assertEqual(app.notice, "")
@@ -4090,7 +4091,8 @@ class WhatsNew(AppCase):
         self.assertEqual(app.notice, "Pinned x.")
 
     def test_it_goes_by_itself_after_a_while(self):
-        app = self.start("1.0.0")
+        app = self.start("1.0.0", tmux=ClientTmux((1, "", "", 0.0)))
+        app.time_whats_new()
         self.assertAlmostEqual(app.notice_until - time.monotonic(), sidebar.WHATS_NEW_SECONDS, delta=5)
         app.notice_until = time.monotonic() - 1
         app.refresh()
@@ -4098,7 +4100,7 @@ class WhatsNew(AppCase):
 
     def test_it_shows_under_the_list(self):
         app = self.start("1.0.0")
-        self.assertEqual([t for t, _ in app.bottom_lines(38)][:2], ["New in emx 1.1.0:", "· Shiny thing."])
+        self.assertEqual([t for t, _ in app.bottom_lines(38)][:3], ["emx updated to 1.1.0.", "New in emx 1.1.0:", "· Shiny thing."])
 
     def test_prefs_without_a_record_stay_quiet_and_record(self):
         core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "side": "left"})
@@ -4109,7 +4111,7 @@ class WhatsNew(AppCase):
     def test_a_skipped_version_s_lines_show_too(self):
         log = "# Changelog\n\n## 1.2.0\n\n- Newest.\n\n## 1.1.0\n\n- Middle.\n\n## 1.0.0\n\n- First.\n"
         app = self.start("1.0.0", version="1.2.0", log=log)
-        self.assertEqual(app.notice, "New in emx 1.2.0:\n· Newest.\nNew in emx 1.1.0:\n· Middle.")
+        self.assertEqual(app.notice, "emx updated to 1.2.0.\nNew in emx 1.2.0:\n· Newest.\nNew in emx 1.1.0:\n· Middle.")
 
     def test_the_shipped_1_0_0_note_is_whole_or_says_what_is_cut(self):
         log = cli.read_changelog()
@@ -4124,8 +4126,8 @@ class WhatsNew(AppCase):
         log = "# Changelog\n\n## 1.1.0\n\n" + "".join(f"- Line number {n}.\n" for n in range(30))
         app = self.start("1.0.0", log=log)
         lines = [t for t, _ in app.bottom_lines(39, 20)]
-        self.assertEqual(lines[:2], ["New in emx 1.1.0:", "· Line number 0."])
-        self.assertEqual(lines[9], "… 22 more in CHANGELOG.md")
+        self.assertEqual(lines[:3], ["emx updated to 1.1.0.", "New in emx 1.1.0:", "· Line number 0."])
+        self.assertEqual(lines[9], "… 23 more in CHANGELOG.md")
 
     def test_other_notices_keep_six_lines(self):
         app = self.start()
@@ -4139,6 +4141,262 @@ class WhatsNew(AppCase):
             app = self.start()
         self.assertTrue(app.notice_error)
         self.assertIn("read-only", app.notice)
+
+
+class UpdateTmux(ClientTmux):
+    socket = "emx-test-upd"
+
+
+class StubUpdater:
+    def __init__(self, *results):
+        self.results = list(results)
+
+    def take(self):
+        return self.results.pop(0) if self.results else None
+
+
+class PanelUpdates(AppCase):
+    """An installed panel moves onto a newer `current` at a quiet moment, through the new code's `relaunch`; a major is only announced."""
+
+    def setUp(self):
+        super().setUp()
+        for p in (
+            mock.patch.object(emx, "ROOT", "/tmp/emx-test-root"),
+            mock.patch.object(emx, "RUNNING", "9.0.0"),
+            mock.patch.object(emx, "BIN", "/tmp/emx-test-root/current/bin/emx"),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        popen = mock.patch.object(sidebar.subprocess, "Popen")
+        self.popen = popen.start()
+        self.addCleanup(popen.stop)
+        self.tmux = UpdateTmux((0, "", "", None))
+        self.app = sidebar.App(self.scr, tmux=self.tmux, claude="claude")
+        self.app.housekeep = lambda fresh_list: None
+
+    def moved(self, *results):
+        self.app.updater = StubUpdater(*(results or [("9.0.1", None, None)]))
+
+    def test_a_checkout_panel_has_no_updater(self):
+        self.assertIsInstance(self.app.updater, sidebar.Updater)
+        self.assertFalse(self.app.updater.is_alive())
+        with mock.patch.object(emx, "ROOT", None):
+            app = sidebar.App(self.scr, tmux=self.tmux, claude="claude")
+        self.assertIsNone(app.updater)
+        app.check_update()
+        self.popen.assert_not_called()
+
+    def test_relaunch_fires_once_when_current_moved_and_quiet(self):
+        self.moved()
+        self.app.check_update()
+        self.app.check_update()
+        self.assertEqual(self.popen.call_count, 1)
+        args, kwargs = self.popen.call_args
+        self.assertEqual(args[0], [sidebar.sys.executable, "/tmp/emx-test-root/current/bin/emx", "relaunch", "emx-test-upd"])
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_no_relaunch_while_attached_and_active(self):
+        self.tmux.state = (1, "1", "%1", 30.0)
+        self.moved()
+        self.app.check_update()
+        self.popen.assert_not_called()
+
+    def test_relaunch_after_idle(self):
+        self.tmux.state = (1, "1", "%1", 200.0)
+        self.moved()
+        self.app.check_update()
+        self.assertEqual(self.popen.call_count, 1)
+
+    def test_no_relaunch_when_current_is_this_panel(self):
+        self.moved(("9.0.0", None, None))
+        self.app.check_update()
+        self.popen.assert_not_called()
+
+    def test_a_tmux_error_skips_the_tick(self):
+        self.tmux.state = TmuxError("no server")
+        self.moved()
+        self.app.check_update()
+        self.popen.assert_not_called()
+        self.assertEqual(self.app.notice, "")
+        self.tmux.state = (0, "", "", None)
+        self.app.check_update()
+        self.assertEqual(self.popen.call_count, 1)
+
+    def test_no_relaunch_while_any_edit_or_worker_is_open(self):
+        opened = {
+            "prompt": {"folder": "/p"}, "find": "", "rename_edit": {"hint": ""}, "confirm": ("close", "a"),
+            "history_view": 0, "starter": object(), "closer": object(), "renamer": object(), "namer": object(),
+            "help": True, "peeking": True, "interrupters": {"a": object()},
+        }
+        for flag, value in opened.items():
+            with self.subTest(flag=flag):
+                was = getattr(self.app, flag)
+                setattr(self.app, flag, value)
+                self.moved()
+                self.app.check_update()
+                setattr(self.app, flag, was)
+                self.popen.assert_not_called()
+        with self.subTest(flag="awaiting_started_row"):
+            self.app.started = ("a", time.monotonic())
+            self.app.wanted_cursor = ("session", "a")
+            self.moved()
+            self.app.check_update()
+            self.popen.assert_not_called()
+
+    def test_a_major_is_announced_once_and_nothing_is_relaunched(self):
+        self.moved(("9.0.0", "10.0.0", None), ("9.0.0", "10.0.0", "couldn't fetch updates: x"))
+        self.app.check_update()
+        self.assertEqual(self.app.notice, "emx 10.0.0 available: run emx update")
+        self.assertIsNone(self.app.notice_until)
+        self.app.say("")
+        self.app.check_update()
+        self.assertEqual(self.app.notice, "")
+        self.popen.assert_not_called()
+
+    def start_on(self, version, recorded):
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": recorded})
+        log = f"# Changelog\n\n## {version}\n\n- Shiny thing.\n"
+        with mock.patch.object(sidebar, "__version__", version), mock.patch.object(sidebar, "read_changelog", return_value=log):
+            return sidebar.App(FakeScr(), tmux=self.tmux, claude="claude")
+
+    def test_whats_new_after_an_update_starts_with_updated_to(self):
+        app = self.start_on("9.0.1", "9.0.0")
+        self.assertEqual(app.notice.splitlines(), ["emx updated to 9.0.1.", "New in emx 9.0.1:", "· Shiny thing."])
+
+    def test_whats_new_timer_waits_for_a_client(self):
+        app = self.start_on("9.0.1", "9.0.0")
+        app.time_whats_new()
+        self.assertIsNone(app.notice_until)
+        self.tmux.state = TmuxError("no server")
+        app.time_whats_new()
+        self.assertIsNone(app.notice_until)
+        self.tmux.state = (1, "", "%1", 0.0)
+        app.time_whats_new()
+        self.assertAlmostEqual(app.notice_until - time.monotonic(), sidebar.WHATS_NEW_SECONDS, delta=5)
+        until = app.notice_until
+        app.time_whats_new()
+        self.assertEqual(app.notice_until, until)
+
+
+class UpdaterWorker(unittest.TestCase):
+    """The worker that fetches and unpacks updates for an installed panel."""
+
+    def setUp(self):
+        for p in (
+            mock.patch.object(emx, "ROOT", "/tmp/emx-test-root"),
+            mock.patch.object(emx, "RUNNING", "9.0.0"),
+            mock.patch.object(sidebar.install, "current", return_value="9.0.0"),
+            mock.patch.object(sidebar.install, "updates_on", return_value=True),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        prune = mock.patch.object(sidebar.install, "prune", return_value=([], None))
+        self.prune = prune.start()
+        self.addCleanup(prune.stop)
+
+    def test_the_interval_is_an_int_of_at_least_five_seconds(self):
+        for value, seconds in (("", 600), ("60", 60), ("5", 5), ("4", 600), ("x", 600), ("1.5", 600)):
+            with self.subTest(value=value):
+                self.assertEqual(sidebar.update_interval({"EMX_UPDATE_SECONDS": value}), seconds)
+        self.assertEqual(sidebar.update_interval({}), core.UPDATE_CHECK_SECONDS)
+
+    def test_the_first_check_waits_then_checks_each_interval_with_the_guard_and_no_wait(self):
+        with mock.patch.object(sidebar.install, "update", return_value=(("9.0.0", "9.0.0", None), None)) as update:
+            worker = sidebar.Updater(interval=10)
+            start = time.monotonic()
+            worker.step(start)
+            update.assert_not_called()
+            worker.step(start + sidebar.UPDATE_FIRST_SECONDS)
+            worker.step(start + sidebar.UPDATE_FIRST_SECONDS + 5)
+            worker.step(start + sidebar.UPDATE_FIRST_SECONDS + 10)
+        self.assertEqual(update.call_count, 2)
+        update.assert_called_with("/tmp/emx-test-root", "9.0.0", allow_major=False, apply_only_if_running_current=True, wait=False)
+
+    def test_it_prunes_once_while_on_current(self):
+        worker = sidebar.Updater(interval=10)
+        worker.step(time.monotonic())
+        worker.step(time.monotonic())
+        self.prune.assert_called_once_with("/tmp/emx-test-root", "9.0.0")
+
+    def test_updates_off_checks_nothing(self):
+        with mock.patch.object(sidebar.install, "updates_on", return_value=False), \
+                mock.patch.object(sidebar.install, "update") as update:
+            worker = sidebar.Updater(interval=10)
+            worker.step(time.monotonic() + 3600)
+        update.assert_not_called()
+
+    def test_a_held_lock_skips_the_cycle_and_is_not_an_error(self):
+        with mock.patch.object(sidebar.install, "update", return_value=(None, sidebar.install.BUSY)):
+            worker = sidebar.Updater(interval=10)
+            worker.step(time.monotonic() + 3600)
+        self.assertEqual(worker.take(), ("9.0.0", None, None))
+        self.assertIsNone(worker.take())
+
+    def test_take_hands_a_change_once(self):
+        with mock.patch.object(sidebar.install, "update", return_value=(("9.0.0", "9.0.1", "10.0.0"), None)), \
+                mock.patch.object(sidebar.install, "current", side_effect=["9.0.0", "9.0.1"]):
+            worker = sidebar.Updater(interval=10)
+            worker.step(time.monotonic() + 3600)
+        self.assertEqual(worker.take(), ("9.0.1", "10.0.0", None))
+        self.assertIsNone(worker.take())
+
+    def test_updater_thread_survives_a_failing_update(self):
+        calls = []
+
+        def fail(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("disk on fire")
+
+        with mock.patch.object(sidebar.install, "update", fail), mock.patch.object(sidebar, "UPDATER_TICK_SECONDS", 0.01), \
+                mock.patch.object(sidebar, "UPDATE_FIRST_SECONDS", 0):
+            worker = sidebar.Updater(interval=0)
+            worker.start()
+            try:
+                wait_until(self, lambda: len(calls) >= 3, "three failed checks")
+            finally:
+                worker.stopping.set()
+                worker.join(5)
+        taken = worker.take()
+        self.assertEqual(taken[0], "9.0.0")
+        self.assertIn("disk on fire", taken[2])
+        self.assertFalse(worker.is_alive())
+
+
+class UpdaterOffTheCursesThread(AppCase):
+    def test_the_curses_thread_never_calls_git(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        os.makedirs(os.path.join(tmp, "versions", "9.0.0", "bin"))
+        os.makedirs(os.path.join(tmp, "source.git"))
+        os.symlink("versions/9.0.0", os.path.join(tmp, "current"))
+        threads = []
+
+        def git(*args, **kwargs):
+            threads.append(threading.current_thread())
+            return None, "no git in tests"
+
+        for p in (
+            mock.patch.object(emx, "ROOT", tmp), mock.patch.object(emx, "RUNNING", "9.0.0"),
+            mock.patch.object(sidebar.install, "git", git), mock.patch.object(sidebar.subprocess, "Popen"),
+            mock.patch.object(sidebar, "UPDATER_TICK_SECONDS", 0.01), mock.patch.object(sidebar, "UPDATE_FIRST_SECONDS", 0),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        app = sidebar.App(self.scr, tmux=UpdateTmux(), claude="claude")
+        app.housekeep = lambda fresh_list: (app.time_whats_new(), app.check_update())
+        app.updater.interval = 0
+        app.updater.start()
+        try:
+            for _ in range(20):
+                app.last_housekeep = 0.0
+                app.refresh()
+            wait_until(self, lambda: threads, "the worker's fetch")
+        finally:
+            app.updater.stopping.set()
+            app.updater.join(5)
+        self.assertNotIn(threading.main_thread(), threads)
+        self.assertFalse(app.notice_error, app.notice)
 
 
 class AttrScr(RecordingScr):

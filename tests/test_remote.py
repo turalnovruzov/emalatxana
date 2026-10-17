@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
+import emx
 from emx import core, remote
 from emx.tmux import RELAY_OPT
 
@@ -253,7 +255,7 @@ class Recorded(remote.Delivery):
         self.records.append(record)
 
 
-class Connect(unittest.TestCase):
+class ConnectCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
@@ -274,18 +276,22 @@ class Connect(unittest.TestCase):
             mock.patch.object(remote, "Follower", Seen),
             mock.patch.object(remote, "control_dir", lambda: "/tmp/emx-test-ctl/1"),
             mock.patch.object(remote, "NOTE_SECONDS", 0),
+            # A test run from a terminal must never stop at the major question.
+            mock.patch.object(remote.sys, "stdin", io.StringIO()),
         ):
             patch.start()
             self.addCleanup(patch.stop)
 
-    def server(self, version="9.9.9", code=0, follow=True):
+    def server(self, version="9.9.9", code=0, follow=True, report=None, update="emx updated to 10.0.0."):
         notice = json.dumps(core.relay_notice("t · p", "Say [[slnc 9]] it.", "Plain.", SID, core.NOTIFICATION_MODE, 1.0))
         path = self.tmp / "fake-emx"
         shown = f'echo "emx {version}"' if version else "true"
+        report = f"emx-update current {version} {version} -" if report is None else report
         path.write_text(
             "#!/bin/sh\n"
             'case "$1" in\n'
             f"  --version) {shown};;\n"
+            f"  update) if [ \"$2\" = --report ]; then printf '%s\\n' {shlex.quote(report)}; else echo {shlex.quote(update)}; fi;;\n"
             f"  follow) {'printf \'%s\\n\' \'' + notice + '\'' if follow else 'true'}; exec sleep 5;;\n"
             f"  *) sleep 0.5; exit {code};;\n"
             "esac\n",
@@ -306,16 +312,20 @@ class Connect(unittest.TestCase):
             return []
         return [json.loads(l) for l in self.log.read_text().splitlines()]
 
+
+class Connect(ConnectCase):
     def test_the_exit_code_is_the_attaches_and_the_calls_come_in_order(self):
         self.server(code=0)
         code, err = self.run_connect()
         self.assertEqual(code, 0)
         calls = self.argvs()
-        self.assertEqual(len(calls), 5)
-        master, version, middle, exit_call = calls[0], calls[1], calls[2:4], calls[4]
+        self.assertEqual(len(calls), 6)
+        master, version, report, middle, exit_call = calls[0], calls[1], calls[2], calls[3:5], calls[5]
         self.assertTrue({"ControlMaster=yes", "-N", "-f"} <= set(master))
         self.assertTrue({"-n", "ControlMaster=no"} <= set(version))
         self.assertTrue(version[-1].endswith("--version'"))
+        self.assertTrue({"-n", "ControlMaster=no"} <= set(report))
+        self.assertTrue(report[-1].endswith(" update --report'"))
         follower = [c for c in middle if c[-1].endswith("follow'")]
         attach = [c for c in middle if "-t" in c]
         self.assertEqual((len(follower), len(attach)), (1, 1))
@@ -415,6 +425,139 @@ class Connect(unittest.TestCase):
         self.assertIsNotNone(self.followers[0].proc.poll())
         last = self.argvs()[-1]
         self.assertEqual(last[last.index("-O"):last.index("-O") + 2], ["-O", "exit"])
+
+
+class Tty(io.StringIO):
+    def isatty(self):
+        return True
+
+
+class ConnectUpdates(ConnectCase):
+    """`emx remote` asks the server to catch up within its major before attaching, and asks once about a major for both machines."""
+
+    def commands(self):
+        return [c[-1] for c in self.argvs()]
+
+    def answering(self, answer):
+        asked = []
+
+        def ask(prompt):
+            asked.append(prompt)
+            return answer
+
+        for patch in (mock.patch.object(remote.sys, "stdin", Tty()), mock.patch("builtins.input", ask)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        return asked
+
+    def major_waits(self):
+        version = remote.__version__
+        self.server(version=version, report=f"emx-update current {version} {version} 99.0.0")
+
+    def test_connect_asks_the_server_to_update_before_attaching(self):
+        self.server()
+        code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        commands = self.commands()
+        version = next(i for i, c in enumerate(commands) if c.endswith(" --version'"))
+        report = next(i for i, c in enumerate(commands) if c.endswith(" update --report'"))
+        follow = next(i for i, c in enumerate(commands) if c.endswith(" follow'"))
+        attach = next(i for i, c in enumerate(self.argvs()) if "-t" in c)
+        self.assertLess(version, report)
+        self.assertLess(report, min(follow, attach))
+        self.assertIn("Checking emx on emx-test-host for updates", err)
+        self.assertNotIn("couldn't update", err)
+
+    def test_a_server_update_is_said(self):
+        self.server(version="9.9.8", report="emx-update updated 9.9.8 9.9.9 -")
+        code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertIn("Updated emx on emx-test-host to 9.9.9.", err)
+        # The note compares the laptop with the version the server runs now.
+        self.assertIn("emx on emx-test-host is 9.9.9;", err)
+        self.assertNotIn("is 9.9.8;", err)
+
+    def test_updates_off_on_the_server_is_said(self):
+        self.server(report="emx-update off 9.9.9 9.9.9 -")
+        _, err = self.run_connect()
+        self.assertIn("Automatic updates are off on emx-test-host.", err)
+
+    def test_a_server_that_cannot_update_gets_the_note_and_why(self):
+        self.server(report="emx-update failed 9.9.9 couldn't fetch updates: Permission denied (publickey)")
+        code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertIn("emx on emx-test-host is 9.9.9; this laptop has", err)
+        self.assertIn("emx on emx-test-host couldn't update: couldn't fetch updates: Permission denied (publickey)", err)
+
+    def test_a_server_without_emx_update_is_explained_and_still_attached(self):
+        self.server(report="usage: emx [--version | hush | remote <host>]")
+        code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertIn("its emx (9.9.9) has no emx update; install it there with install.sh", err)
+        self.assertTrue([c for c in self.argvs() if "-t" in c])
+
+    def test_server_output_is_untrusted(self):
+        self.server(report="emx-update failed 9.9.9 bad\x1b[2Jthing\x07 here")
+        _, err = self.run_connect()
+        self.assertNotIn("\x1b", err)
+        self.assertNotIn("\x07", err)
+        self.assertIn("couldn't update: bad", err)
+
+    def test_a_major_is_asked_once_and_no_runs_nothing(self):
+        self.major_waits()
+        asked = self.answering("n")
+        code, _ = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertEqual(asked, ["Update emx on emx-test-host and this laptop to 99.0.0? [y/N] "])
+        self.assertFalse([c for c in self.commands() if c.endswith(" update'")])
+        self.assertTrue([c for c in self.argvs() if "-t" in c])
+
+    def test_yes_updates_server_and_laptop(self):
+        self.major_waits()
+        self.answering("y")
+        root = str(self.tmp / "root")
+        update = mock.Mock(return_value=((remote.__version__, "99.0.0", None), None))
+        for patch in (
+            mock.patch.object(emx, "ROOT", root), mock.patch.object(emx, "RUNNING", remote.__version__),
+            mock.patch.object(remote.install, "git", return_value=(None, "no git in tests")),
+            mock.patch.object(remote.install, "versions", return_value=([], None)),
+            mock.patch.object(remote.install, "update", update),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertEqual(len([c for c in self.commands() if c.endswith(" update'")]), 1)
+        self.assertIn("emx-test-host: emx updated to 10.0.0.", err)
+        update.assert_called_once_with(root, remote.__version__, allow_major=True)
+        self.assertIn("Updated this laptop's emx to 99.0.0.", err)
+
+    def test_yes_on_a_checkout_laptop_says_it_is_not_updated(self):
+        self.major_waits()
+        self.answering("yes")
+        _, err = self.run_connect()
+        self.assertIn("This laptop's emx runs from a checkout", err)
+
+    def test_the_laptop_s_own_major_is_asked_about(self):
+        self.server(version=remote.__version__)
+        asked = self.answering("n")
+        for patch in (
+            mock.patch.object(emx, "ROOT", str(self.tmp / "root")), mock.patch.object(emx, "RUNNING", remote.__version__),
+            mock.patch.object(remote.install, "git", return_value=(None, "offline")),
+            mock.patch.object(remote.install, "versions", return_value=(["98.0.0"], None)),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.run_connect()
+        self.assertEqual(asked, ["Update emx on emx-test-host and this laptop to 98.0.0? [y/N] "])
+
+    def test_without_a_tty_nothing_is_asked(self):
+        self.major_waits()
+        with mock.patch("builtins.input", side_effect=AssertionError("asked without a tty")):
+            code, err = self.run_connect()
+        self.assertEqual(code, 0)
+        self.assertNotIn("Traceback", err)
+        self.assertFalse([c for c in self.commands() if c.endswith(" update'")])
 
 
 class StaleSockets(unittest.TestCase):

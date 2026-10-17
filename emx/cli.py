@@ -11,7 +11,8 @@ import subprocess
 import sys
 import time
 
-from emx import BIN, __version__, core, remote
+import emx
+from emx import BIN, __version__, core, install, remote
 from emx.notify import OPEN_ENV
 from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
@@ -25,8 +26,11 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | hush | remote <host>]
+USAGE = """usage: emx [--version | hush | remote <host> | update [off | on] | uninstall]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
+emx install <url> is internal too: what install.sh runs to install emx from that repo's newest version tag.
+emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
+emx relaunch <socket> is internal too: what a running panel starts to move its workspace onto the version just installed.
 emx follow is internal too: it streams the notices of this emx to stdout, for a laptop's `emx remote` to read.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
 of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
@@ -36,11 +40,16 @@ Opens the emx workspace in a private tmux server, or reattaches if it is running
 first moving a running workspace onto this version of emx. --version prints the version.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
+update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
+update off stops the automatic updates (emx update still updates when you run it); update on starts them again.
+uninstall removes the installed emx and its link; your prefs and emx's state are kept.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
 EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
 EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell), EMX_SSH replaces ssh.
-EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command."""
+EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command.
+EMX_HOME is the folder emx installs into (default $XDG_DATA_HOME/emx, else ~/.local/share/emx), EMX_BIN_HOME the folder of the emx link
+(default ~/.local/bin); EMX_UPDATE_SECONDS is how often a running panel checks for updates (default 600)."""
 
 
 SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."
@@ -93,7 +102,7 @@ def create_workspace(tmux: Tmux) -> None:
 def code_version() -> str:
     root = os.path.dirname(HERE)
     files = []
-    for path in [BIN] + [os.path.join(d, f) for d, _, names in os.walk(HERE) for f in names]:
+    for path in [os.path.join(root, "bin", "emx")] + [os.path.join(d, f) for d, _, names in os.walk(HERE) for f in names]:
         rel = os.path.relpath(path, root).replace(os.sep, "/")
         if core.counts_for_version(rel):
             with open(path, "rb") as fh:
@@ -411,6 +420,95 @@ def hook(args: list) -> int:
     return 0
 
 
+CHECKOUT_UPDATE = "emx: this emx runs from a checkout ({}), which never updates itself; install it with install.sh to get updates."
+
+
+def install_command(url: str) -> int:
+    _, error = install.install(url, os.environ, sys.stdout)
+    if error:
+        print(f"emx: couldn't install: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def update_command(args: list) -> int:
+    root = emx.ROOT
+    if args == ["--report"]:
+        print(update_report(root))
+        return 0
+    if args not in ([], ["off"], ["on"]):
+        print(USAGE, file=sys.stderr)
+        return 2
+    if root is None:
+        print(CHECKOUT_UPDATE.format(emx.CODE), file=sys.stderr)
+        return 1
+    if args:
+        on, error = install.set_updates(root, args == ["on"])
+        if error:
+            print(f"emx: {error}", file=sys.stderr)
+            return 1
+        print("Automatic updates are on." if on else "Automatic updates are off; emx update still updates when you run it.")
+        return 0
+    result, error = install.update(root, emx.RUNNING, allow_major=True)
+    if error:
+        print(f"emx: couldn't update: {error}", file=sys.stderr)
+        return 1
+    before, after, _ = result
+    if after == before:
+        print(f"emx is up to date ({after}).")
+    else:
+        # The panel's updater prunes too, but a machine may run no panel; one previous version stays either way, and
+        # a panel still on the version before this process's own keeps its folder.
+        install.prune(root, emx.RUNNING, keep_lagging=True)
+        print(f"emx updated to {after}. The running panel switches to it at a quiet moment, or when you next run emx.")
+    return 0
+
+
+def update_report(root) -> str:
+    """The one line a laptop's `emx remote` reads: an update within this major, unless updates are off here."""
+    if root is None:
+        return core.update_report("failed", __version__, "runs from a checkout", None)
+    now = install.current(root)
+    if now is None:
+        return core.update_report("failed", __version__, "its install names no current version", None)
+    if not install.updates_on(root):
+        return core.update_report("off", now, now, None)
+    result, error = install.update(root, emx.RUNNING, allow_major=False)
+    if error:
+        return core.update_report("failed", now, error, None)
+    before, after, major = result
+    return core.update_report("updated" if after != before else "current", before, after, major)
+
+
+def uninstall_command() -> int:
+    if emx.ROOT is None:
+        print(f"emx: this emx runs from a checkout ({emx.CODE}); there is no installed emx to remove.", file=sys.stderr)
+        return 1
+    removed, error = install.uninstall(os.environ, emx.ROOT)
+    if error:
+        print(f"emx: {error}", file=sys.stderr)
+        return 1
+    for path in removed:
+        print(f"Removed {path}")
+    print("Your prefs and emx's state are kept.")
+    return 0
+
+
+def relaunch(socket: str) -> int:
+    """Moves a running workspace onto this code from outside it: a panel can't respawn its own pane, the respawn would kill the process asking for it."""
+    if private_socket(socket) is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    tmux = Tmux(socket, CONFIG)
+    try:
+        if not tmux.has_session():
+            return 1
+        refresh_workspace(tmux)
+    except (TmuxError, OSError):
+        return 1
+    return 0
+
+
 def main(argv: list) -> int:
     if not argv:
         return launch()
@@ -439,6 +537,14 @@ def main(argv: list) -> int:
         return remote.connect(argv[1])
     if argv[0] == "follow" and len(argv) == 1:
         return follow()
+    if argv[0] == "install" and len(argv) == 2:
+        return install_command(argv[1])
+    if argv[0] == "update":
+        return update_command(argv[1:])
+    if argv[0] == "uninstall" and len(argv) == 1:
+        return uninstall_command()
+    if argv[0] == "relaunch" and len(argv) == 2:
+        return relaunch(argv[1])
     if argv[0] == "left":
         return left_check(argv[1:])
     if argv[0] == "blank":

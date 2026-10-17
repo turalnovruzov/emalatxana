@@ -7,14 +7,19 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import emx
 from emx import cli, core, engine
 from emx.tmux import AGENT_OPT, SESSION_OPT, Pane, TmuxError
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_install import make_versions  # noqa: E402
 
 INTERRUPT = Path(__file__).parent / "fixtures" / "transcripts-interactive" / "interactive-interrupt.jsonl"
 KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
@@ -116,6 +121,19 @@ class EngineStore(StoreCase):
             words = shlex.split(command[: -len(" >/dev/null 2>&1; exit 0")])
             self.assertEqual(words[1], "-I", event)
             self.assertEqual(words[2:], [cli.BIN, "hook", self.state, session.id], event)
+
+    def test_installed_hook_goes_through_current(self):
+        root = os.path.join(self.dir, "install")
+        make_versions(root, ["9.0.0"], "9.0.0")
+        _, _, bin_path = emx._layout(os.path.join(root, "versions", "9.0.0"))
+        with mock.patch.object(engine, "BIN", bin_path):
+            _, (session, _) = self.start()
+        with open(os.path.join(self.key_dir(session.id), "settings.json"), encoding="utf-8") as fh:
+            hooks = json.load(fh)["hooks"]
+        for event, groups in hooks.items():
+            command = groups[0]["hooks"][0]["command"]
+            self.assertEqual(shlex.split(command)[2], os.path.join(root, "current", "bin", "emx"), event)
+            self.assertNotIn("/versions/", command, event)
 
     def test_a_hook_command_exits_0_silently_when_the_script_is_gone(self):
         with mock.patch.object(engine, "BIN", os.path.join(self.dir, "missing", "emx")):

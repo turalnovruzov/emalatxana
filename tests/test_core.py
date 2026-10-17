@@ -4812,5 +4812,113 @@ class NoticesForNewSessions(unittest.TestCase):
         self.assertEqual([(s.id, core.category(s)) for s in found], [("a", core.DONE)])
 
 
+class InstallDecisions(unittest.TestCase):
+    HOME = os.path.expanduser("~")
+
+    def test_install_root_prefers_emx_home_then_xdg_data_then_local_share(self):
+        self.assertEqual(core.install_root({"EMX_HOME": "/e", "XDG_DATA_HOME": "/x"}), (Path("/e"), None))
+        self.assertEqual(core.install_root({"XDG_DATA_HOME": "/x"}), (Path("/x/emx"), None))
+        default = (Path(self.HOME) / ".local" / "share" / "emx", None)
+        self.assertEqual(core.install_root({}), default)
+        self.assertEqual(core.install_root({"XDG_DATA_HOME": "rel/data"}), default)
+        self.assertEqual(core.install_root({"EMX_HOME": ""}), default)
+
+    def test_a_relative_emx_home_or_bin_home_is_an_error_not_the_default(self):
+        for fn, name in ((core.install_root, "EMX_HOME"), (core.bin_home, "EMX_BIN_HOME")):
+            with self.subTest(name=name):
+                root, error = fn({name: "rel/x"})
+                self.assertIsNone(root)
+                self.assertIn(name, error)
+
+    def test_bin_home_default_is_local_bin(self):
+        self.assertEqual(core.bin_home({}), (Path(self.HOME) / ".local" / "bin", None))
+        self.assertEqual(core.bin_home({"EMX_BIN_HOME": "/b"}), (Path("/b"), None))
+
+    def test_installed_layout_reads_root_and_version_and_rejects_others(self):
+        self.assertEqual(core.installed_layout("/r/versions/2.3.0"), ("/r", "2.3.0"))
+        for path in ("/r/versions/main", "/r/emx", "/r/versions/.tmp-2.3.0-1", "/r/other/2.3.0"):
+            with self.subTest(path=path):
+                self.assertIsNone(core.installed_layout(path))
+
+    def test_tag_version_is_strict(self):
+        self.assertEqual(core.tag_version("v2.3.0"), "2.3.0")
+        for name in ("2.3.0", "v2.3", "v2.3.0-rc1", "vx", "", None):
+            with self.subTest(name=name):
+                self.assertIsNone(core.tag_version(name))
+        self.assertEqual(core.tag_versions("v2.2.2\nv2.3.0\nv2.3.0-rc1\nnope\n"), ["2.2.2", "2.3.0"])
+
+    def test_pick_update_takes_newest_same_major_and_reports_newest_major(self):
+        tags = ["2.2.2", "2.3.1", "2.4.0", "3.0.0", "3.1.0"]
+        self.assertEqual(core.pick_update("2.3.0", tags), ("2.4.0", "3.1.0"))
+        self.assertEqual(core.pick_update("3.1.0", tags), (None, None))
+        self.assertEqual(core.newest(tags), "3.1.0")
+
+    def test_pick_update_never_goes_below_min_installable_or_down(self):
+        self.assertEqual(core.pick_update("2.2.0", ["2.2.1", "2.2.2", "2.1.0"]), (None, None))
+        self.assertEqual(core.pick_update("2.2.0", ["2.2.2", "2.3.0"]), ("2.3.0", None))
+        self.assertEqual(core.pick_update("2.5.0", ["2.4.0", "2.3.0"]), (None, None))
+        self.assertIsNone(core.newest(["2.2.2", "1.9.0"]))
+        self.assertIsNone(core.newest([]))
+
+    def test_prune_keeps_current_previous_and_running(self):
+        on_disk = ["2.3.0", "2.3.1", "2.4.0", "2.5.0", ".tmp-2.6.0-9", "junk"]
+        self.assertEqual(core.prune_plan(on_disk, "2.5.0", "2.3.0"), ["2.3.1"])
+        self.assertEqual(core.prune_plan(on_disk + ["2.6.0"], "2.5.0", "2.3.0"), ["2.3.1"])
+        self.assertEqual(core.prune_plan(on_disk, "2.5.0", "2.5.0"), ["2.3.0", "2.3.1"])
+
+    def test_update_quiet_with_no_client_or_long_idle_and_never_when_busy(self):
+        self.assertTrue(core.update_quiet(0, None, False))
+        self.assertTrue(core.update_quiet(0, 5, False))
+        self.assertFalse(core.update_quiet(1, 179, False))
+        self.assertTrue(core.update_quiet(1, 180, False))
+        self.assertFalse(core.update_quiet(1, None, False))
+        for attached, idle in ((0, None), (0, 500), (1, 180), (1, 179), (1, None)):
+            with self.subTest(attached=attached, idle=idle):
+                self.assertFalse(core.update_quiet(attached, idle, True))
+
+    def test_path_line_none_when_on_path_else_export_line(self):
+        self.assertIsNone(core.path_line("/usr/bin:/h/.local/bin/", "/h/.local/bin", home="/h"))
+        self.assertEqual(core.path_line("/usr/bin", "/h/.local/bin", home="/h"), 'export PATH="$HOME/.local/bin:$PATH"')
+        self.assertEqual(core.path_line("/usr/bin", "/opt/emx/bin", home="/h"), 'export PATH="/opt/emx/bin:$PATH"')
+        self.assertEqual(core.path_line("", "/hx/bin", home="/h"), 'export PATH="/hx/bin:$PATH"')
+
+    def test_update_report_round_trips_and_parse_takes_the_last_line(self):
+        cases = [
+            (("updated", "2.3.0", "2.3.1", None), {"status": "updated", "before": "2.3.0", "after": "2.3.1", "major": None}),
+            (("current", "2.3.0", "2.3.0", "3.0.0"), {"status": "current", "before": "2.3.0", "after": "2.3.0", "major": "3.0.0"}),
+            (("off", "2.3.0", "2.3.0", None), {"status": "off", "before": "2.3.0", "after": "2.3.0", "major": None}),
+            (("failed", "2.3.0", "fetch failed: no route", None), {"status": "failed", "before": "2.3.0", "reason": "fetch failed: no route"}),
+        ]
+        for args, want in cases:
+            with self.subTest(args=args):
+                line = core.update_report(*args)
+                self.assertEqual(len(line.splitlines()), 1)
+                got = core.parse_update_report("Welcome to the server\nemx-update current 1.0.0 1.0.0 -\n" + line + "\n")
+                self.assertEqual({k: got[k] for k in want}, want)
+
+    def test_parse_update_report_refuses_bad_versions_and_cleans_reason(self):
+        got = core.parse_update_report("emx-update failed 2.3.0 bad\x1b[31m thing\x07 " + "x" * 500)
+        self.assertNotIn("\x1b", got["reason"])
+        self.assertNotIn("\x07", got["reason"])
+        self.assertTrue(got["reason"].startswith("bad thing"))
+        self.assertLessEqual(len(got["reason"]), core.UPDATE_REASON_MAX)
+        for text in (
+            "emx-update updated x y -", "emx-update updated 2.3.0 2.3.1 nope", "emx-update weird 2.3.0 2.3.1 -",
+            "emx-update updated 2.3.0 2.3.1", "emx-update failed x why", "usage: emx [--version | hush | remote <host>]\nOpens the emx workspace", "",
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(core.parse_update_report(text))
+
+    def test_remote_update_ask(self):
+        self.assertIsNone(core.remote_update_ask("2.3.0", "2.4.0", None, None))
+        self.assertEqual(core.remote_update_ask("2.3.0", "2.4.0", "3.0.0", None), "3.0.0")
+        self.assertEqual(core.remote_update_ask("3.0.0", "2.4.0", None, None), "3.0.0")
+        self.assertEqual(core.remote_update_ask("2.3.0", "2.3.0", "3.0.0", "3.2.0"), "3.2.0")
+        self.assertEqual(core.remote_update_ask("2.3.0", "2.3.0", "4.0.0", "3.2.0"), "4.0.0")
+
+    def test_updated_heading(self):
+        self.assertEqual(core.updated_heading("2.3.1"), "emx updated to 2.3.1.")
+
+
 if __name__ == "__main__":
     unittest.main()

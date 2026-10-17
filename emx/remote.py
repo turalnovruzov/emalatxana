@@ -11,11 +11,14 @@ import threading
 import time
 from pathlib import Path
 
-from emx import __version__, core
+import emx
+from emx import __version__, core, install
 from emx.tmux import RELAY_OPT, TmuxError
 
 NOTE_SECONDS = 2
 VERSION_TIMEOUT = 30
+UPDATE_TIMEOUT = 120
+LAPTOP_FETCH_TIMEOUT = 10
 
 _append_lock = threading.Lock()
 
@@ -270,6 +273,62 @@ def _remote_version(ssh: str, host: str, control: str | None, base: str) -> tupl
     return None, "no answer"
 
 
+def _remote_update(ssh: str, host: str, control: str | None, base: str, *args: str) -> tuple:
+    """(output, why it didn't run) of the server's `emx update` with `args`. Never raises."""
+    argv = core.ssh_client_args(ssh, host, control, core.remote_shell(base, "update", *args))
+    try:
+        done = subprocess.run(argv, capture_output=True, encoding="utf-8", errors="replace", timeout=UPDATE_TIMEOUT)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return "", (str(exc).splitlines() or ["no answer"])[0]
+    return done.stdout + done.stderr, ""
+
+
+def _laptop_major() -> str | None:
+    """The newest major this laptop's install could move to, after a short fetch; a failed fetch still reads the tags it already has."""
+    root = emx.ROOT
+    if root is None:
+        return None
+    install.git(root, "fetch", "--quiet", "--tags", "origin", timeout=LAPTOP_FETCH_TIMEOUT)
+    found, error = install.versions(root)
+    if error:
+        return None
+    return core.pick_update(emx.RUNNING, found)[1]
+
+
+def _server_check(ssh: str, host: str, control: str | None, base: str, remote: str) -> tuple:
+    """Asks the server to update within its major and says what came of it. Returns (server's version now, the major it has waiting, why it couldn't update or None)."""
+    print(f"Checking emx on {host} for updates…", file=sys.stderr)
+    out, why = _remote_update(ssh, host, control, base, "--report")
+    report = core.parse_update_report(out)
+    if report is None:
+        reason = why or f"its emx ({remote}) has no emx update; install it there with install.sh"
+        return remote, None, f"emx on {host} couldn't update: {reason}"
+    if report["status"] == "failed":
+        return remote, None, f"emx on {host} couldn't update: {report['reason']}"
+    if report["status"] == "updated":
+        print(f"Updated emx on {host} to {report['after']}.", file=sys.stderr)
+    elif report["status"] == "off":
+        print(f"Automatic updates are off on {host}.", file=sys.stderr)
+    return report["after"], report["major"], None
+
+
+def _update_both(ssh: str, host: str, control: str | None, base: str) -> None:
+    out, why = _remote_update(ssh, host, control, base)
+    lines = [core.clean_notice(l)[:core.UPDATE_REASON_MAX] for l in out.splitlines() if l.strip()] or [why or "no answer"]
+    for line in lines:
+        print(f"{host}: {line}", file=sys.stderr)
+    if emx.ROOT is None:
+        print(f"This laptop's emx runs from a checkout ({emx.CODE}), which never updates itself.", file=sys.stderr)
+        return
+    result, error = install.update(emx.ROOT, emx.RUNNING, allow_major=True)
+    if error:
+        print(f"This laptop's emx couldn't update: {error}", file=sys.stderr)
+    elif result[1] == result[0]:
+        print(f"This laptop's emx is up to date ({result[1]}).", file=sys.stderr)
+    else:
+        print(f"Updated this laptop's emx to {result[1]}.", file=sys.stderr)
+
+
 def connect(host_arg: str, env=os.environ) -> int:
     """`emx remote <host>`: shows the server's emx in this terminal over ssh, and while it is open speaks or posts the server's notices here. Returns the attach's exit code."""
     host = core.remote_host(host_arg)
@@ -299,9 +358,22 @@ def connect(host_arg: str, env=os.environ) -> int:
                 file=sys.stderr,
             )
             return 1
+        remote, server_major, failed = _server_check(ssh, host, control, base, remote)
         note = core.version_note(host, __version__, remote)
-        if note:
-            print(note, file=sys.stderr)
+        for line in (note, failed):
+            if line:
+                print(line, file=sys.stderr)
+        ask = core.remote_update_ask(__version__, remote, _laptop_major(), server_major)
+        if ask and sys.stdin.isatty():
+            try:
+                answer = input(f"Update emx on {host} and this laptop to {ask}? [y/N] ")
+            except EOFError:
+                answer = ""
+            if answer.strip().lower() in ("y", "yes"):
+                _update_both(ssh, host, control, base)
+                # Both sides were just moved; the note from before would be stale after the attach.
+                note = None
+        elif note or failed:
             time.sleep(NOTE_SECONDS)
         os.environ["EMX_REMOTE_HOST"] = host
         if control:

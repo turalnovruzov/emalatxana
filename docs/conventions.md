@@ -292,6 +292,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `remote_shell` quotes the args but not `base` (`EMX_REMOTE_COMMAND` may carry `env X=Y`), so `base` must only come from the laptop's own environment, never from the server or a relay line.
 
+### A change that would stop an older and a newer emx working together over `emx remote` is a major version
+
+1. **Rule**: what one emx calls or reads of another emx is a contract between versions. Removing it, renaming it, or changing it so an older caller or reader breaks bumps the major version. Over `emx remote` that is every server subcommand the laptop runs and every line it reads back. On one machine it is everything an older emx left behind that the newer `current` runs: the `hook <state> <key>` argv in a session's `settings.json`, the `relaunch <socket>` an old panel starts, `emx.command`, a notification's `open` command and the `left` binding.
+2. **Why**: patch and minor updates land on each machine on their own, at different times (#60 Decided 4, 5, 7), so a laptop and a server one minor apart, or an old panel and the new tree it switches to, must always keep working together; only a major waits for his yes on both.
+3. **Minimal example**: the laptop runs `--version`, `follow`, `open --no-window <id>` and `update --report` on the server and reads `emx X.Y.Z`, the relay records through `parse_relay`, and one `emx-update …` line through `parse_update_report`.
+4. **Gotcha**: adding a subcommand, a line or a relay field that the older side ignores is not a major; dropping a field an older `parse_relay` requires, or changing the words of the `emx-update` line, is. A session's hook argv outlives the version that wrote it until the session is resumed, so the newest `current` must still accept every older form.
+
 ### A transcript path from a hook record goes through `engine.allowed_transcript` first
 
 1. **Rule**: a Claude transcript emx opens at a path taken from a hook record passes `engine.allowed_transcript(path)` first and is opened only at the real path it returns. (The older `Transcripts.locate` in `emx/sidebar.py` does its own equivalent check; new code uses the helper.)
