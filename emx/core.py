@@ -1321,6 +1321,7 @@ def row_lines(
     """
     first = row_layout(name, worktree, age, width)
     room = width - 1 - ROW_LEAD
+    detail = detail if detail.strip() else ""
     if stopped or not (word or detail) or room < 2:
         return [first]
     lines = [first] + _status_lines(word, detail, room)

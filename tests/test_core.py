@@ -657,6 +657,13 @@ class TwoLineRows(unittest.TestCase):
         self.assertTrue(rendered(lines[-1]).endswith("…"))
         self.assertEqual(len(core.row_lines("emx-test-a", "", "Working", "short", "1m", 20, False, 12)), 2)
 
+    def test_a_whitespace_only_detail_is_an_empty_detail(self):
+        for width in (14, 30, 40):
+            empty = core.row_lines("emx-test-a", "", "Working", "", "1m", width)
+            for detail in (" ", "\t", "\n", "   "):
+                with self.subTest(width=width, detail=detail):
+                    self.assertEqual(core.row_lines("emx-test-a", "", "Working", detail, "1m", width), empty)
+
     def test_a_narrow_pane_puts_the_detail_on_its_own_lines_under_the_word(self):
         _, word, *rest = self.lines(20, word="Needs input")
         self.assertEqual(word, [(3, "Needs input", "status")])
