@@ -12,6 +12,12 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - On a machine without systemd, such as a Mac, the view says there is nothing to read here.
 - Through `emx remote`, the view shows the server's routines.
 
+## 2.7.1 — 2026-10-18
+
+- The panel uses your terminal's own background again, as before 2.6.0.
+- A session's whole status shows under its name: a long one wraps onto as many lines as it needs instead of being cut off, and a status taller than the panel stops at the panel's height with `…`.
+- The bar over the selected row is blue again, as before 2.6.0.
+
 ## 2.7.0 — 2026-10-18
 
 - On `emx remote`, Ctrl+V in a session's pane pastes the image on your laptop's clipboard into that session as a file path, so Claude Code can read it. Your laptop sends the image to the server, which keeps it in a private folder for 7 days.
