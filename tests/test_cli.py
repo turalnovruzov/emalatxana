@@ -1503,6 +1503,9 @@ class MigratingTmux:
         where = {p.id: p.window for p in self.list}
         self.list = [replace(p, window=where[b] if p.id == a else where[a] if p.id == b else p.window) for p in self.list]
 
+    def swap_keeping_size(self, a, b):
+        self.swap(a, b)
+
     def link_agent(self, window, key, inert):
         self.ops.append(("link", window, key))
 

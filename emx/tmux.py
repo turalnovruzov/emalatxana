@@ -392,6 +392,18 @@ class Tmux:
     def swap(self, source: str, target: str) -> None:
         self.run("swap-pane", "-d", "-s", source, "-t", target)
 
+    def swap_keeping_size(self, source: str, target: str) -> None:
+        """Swap `source` into `target`'s window without resizing it: that window is first sized as `source` is, then left to follow its clients again.
+
+        A resize makes the program redraw at the new size and back, which
+        shows as a jolt in the session moved out of view.
+        """
+        width, height = self.run("display-message", "-p", "-t", source, "#{pane_width} #{pane_height}").split()
+        self.run("resize-window", "-t", target, "-x", width, "-y", height)
+        self.swap(source, target)
+        # resize-window pins the window's size; unset, it follows the latest client again, as every window does.
+        self.run("set-option", "-w", "-u", "-t", source, "window-size")
+
     def select(self, pane: str) -> None:
         self.run("select-pane", "-t", pane)
 

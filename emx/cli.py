@@ -171,7 +171,7 @@ def migrate(tmux: Tmux) -> None:
             made = tmux.new_hidden_window(self_command("blank", PLACEHOLDER_TEXT))
             tmux.set_pane_option(made, ROLE, "placeholder")
         elif op[0] == "swap":
-            tmux.swap(op[1], op[2] or made)
+            tmux.swap_keeping_size(op[1], op[2] or made)
         elif op[0] == "reopen":
             tmux.set_session_option(REOPEN_OPT, op[1])
         elif op[0] == "drop":

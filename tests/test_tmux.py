@@ -1313,6 +1313,12 @@ class MigratesA290Workspace(PrivateServer):
         self.assertEqual((slot.id, slot.role), (self.placeholder, "placeholder"))
         self.assertEqual(self.tmux.session_option(cli.REOPEN_OPT), self.a)
 
+    def test_the_session_moved_out_of_the_home_view_keeps_its_size_and_its_window_follows_clients_again(self):
+        size = self.show(self.main, "#{pane_width}x#{pane_height}")
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.show(self.main, "#{pane_width}x#{pane_height}"), size)
+        self.assertEqual(self.tmux.run("show-options", "-w", "-t", self.main, "window-size").strip(), "")
+
     def test_a_second_run_changes_nothing(self):
         cli.refresh_workspace(self.tmux)
         layout = self.tmux.run("list-panes", "-a", "-F", "#{session_name} #{window_id} #{pane_id} #{pane_pid}")
