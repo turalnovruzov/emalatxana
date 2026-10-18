@@ -4990,7 +4990,7 @@ class Routines(unittest.TestCase):
 
     def view(self, timer=None, service=None, runs=(), slots=(), **kwargs):
         return core.routine_view("backup-nightly", timer if timer is not None else self.timer(), service,
-                                 list(runs), list(slots), self.NOW, self.NOW - 86400, **kwargs)
+                                 list(runs), list(slots), self.NOW, **kwargs)
 
     def test_a_missing_timer_is_not_found(self):
         view = self.view(timer={"LoadState": "not-found", "Unit": ""})
@@ -5013,8 +5013,9 @@ class Routines(unittest.TestCase):
 
     def test_a_new_timer_misses_nothing_before_it_existed(self):
         slots = [self.NOW - 7200 + 60, self.NOW - 3600 + 60, self.NOW - 1200]
-        view = self.view(timer=self.timer(ActiveEnterTimestamp=f"@{int(self.NOW - 600)}"), slots=slots)
-        self.assertEqual(view.events, ())
+        view = self.view(timer=self.timer(ActiveEnterTimestamp=f"@{int(self.NOW - 600)}"),
+                         runs=[core.Run(self.NOW - 500, core.PASSED)], slots=slots)
+        self.assertEqual(view.events, ((self.NOW - 500, core.PASSED, ""),))
 
     def test_with_no_journal_runs_the_service_state_gives_the_latest_run(self):
         service = {"ExecMainStartTimestamp": f"@{int(self.NOW - 3000)}", "Result": "exit-code", "ExecMainStatus": "1"}
@@ -5028,8 +5029,28 @@ class Routines(unittest.TestCase):
     def test_a_calendar_list_that_hit_the_cap_names_no_missed_times(self):
         slots = [self.NOW - 86000 + i for i in range(core.CALENDAR_CAP)]
         slots[-1] = self.NOW - 3000
-        view = self.view(slots=slots)
-        self.assertEqual(view.events, ())
+        view = self.view(runs=[core.Run(slots[0], core.PASSED)], slots=slots)
+        self.assertEqual(view.events, ((slots[0], core.PASSED, ""),))
+
+    def test_an_unreadable_journal_names_no_missed_times_and_carries_its_error(self):
+        slots = self.slots()
+        service = {"ExecMainStartTimestamp": f"@{int(slots[-2])}", "Result": "success"}
+        view = self.view(service=service, slots=slots, journal_error="journal is broken")
+        self.assertEqual(view.events, ((slots[-2], core.PASSED, ""),))
+        self.assertEqual(view.error, "journal is broken")
+
+    def test_a_journal_with_no_runs_of_the_routine_names_no_missed_times(self):
+        slots = self.slots()
+        service = {"ExecMainStartTimestamp": f"@{int(slots[-2])}", "Result": "success"}
+        self.assertEqual(self.view(service=service, slots=slots).events, ((slots[-2], core.PASSED, ""),))
+        nothing = self.view(slots=slots)
+        self.assertEqual((nothing.events, nothing.tag), ((), "unknown"))
+
+    def test_an_unreadable_journal_still_flags_nothing_when_the_routine_ran(self):
+        slots = self.slots()
+        runs = [core.Run(t, core.PASSED) for t in slots[:-1]]
+        view = self.view(runs=runs, slots=slots, journal_error="x")
+        self.assertNotIn(core.MISSED, [e[1] for e in view.events])
 
     def test_a_stopped_timer_shows_its_runs_and_no_missed_times(self):
         slots = self.slots()
@@ -5061,6 +5082,14 @@ class Routines(unittest.TestCase):
         self.assertEqual([body.index(s) for s in stamps], sorted(body.index(s) for s in stamps))
         for token in ("✗2", "⚠ missed", "✓"):
             self.assertIn(token, body)
+
+    def test_lines_show_the_journal_error_under_the_name(self):
+        view = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),),
+                                self.NOW + 7200, error="Failed to open the journal: no such file or directory")
+        rows = self.lines(view)
+        self.assertEqual(rows[1], (core.fit("  Failed to open the journal: no such file or directory", 40), "error"))
+        for text, _ in rows:
+            self.assertLessEqual(core.display_width(text), 40, text)
 
     def test_no_row_is_wider_than_the_width(self):
         events = tuple((self.NOW - 600 * i, core.PASSED, "") for i in range(1, 30))

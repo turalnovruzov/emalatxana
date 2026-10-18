@@ -16,11 +16,13 @@ The file is read each time the view opens and again every minute while it is ope
 
 ## What each routine shows
 
-- A line with the routine's name and, on the right, the newest thing that happened: `passed`, `failed · exit 2`, `running`, `missed`, `not due`, `timer off` or `not found`.
+- A line with the routine's name and, on the right, the newest thing that happened: `passed`, `failed · exit 2`, `running`, `missed`, `unknown`, `not due`, `timer off` or `not found`.
 - Under it, every run in the past 24 hours, newest first, in the server's local time: `09:10 ✓` ran and succeeded, `07:10 ✗2` failed with exit status 2, `11:00 … running` still running, `03:10 ⚠ missed` was scheduled and no run started before the next scheduled time.
 - Last, `next` and when it is next due, shown as a day and time when that is more than a day away.
 
 `not due` means nothing was scheduled in the past 24 hours and nothing ran. A timer that is stopped, or one with no calendar schedule, shows its runs and no missed times.
+
+Missed times come from the journal. When the journal can't be read, each routine shows the journal's error in red under its name, its latest run from systemd's own record, and no missed times. When the journal holds nothing for a routine in the past 24 hours (it may have been rotated away), the routine shows no missed times either, and `unknown` if nothing ran that emx can see.
 
 ## On a machine without systemd
 

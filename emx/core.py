@@ -1830,6 +1830,7 @@ class RoutineView:
     events: tuple = ()
     next_at: float | None = None
     note: str = ""
+    error: str = ""
 
 
 def _status_word(run_status: str) -> str:
@@ -1837,12 +1838,15 @@ def _status_word(run_status: str) -> str:
 
 
 def routine_view(name: str, timer: dict | None, service: dict | None, runs: list, slots: list,
-                 now: float, since: float, capped: bool = False) -> RoutineView:
-    """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times."""
+                 now: float, capped: bool = False, journal_error: str = "") -> RoutineView:
+    """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times, `journal_error` why the journal couldn't be read.
+
+    Missed times are only judged against a journal that was read and holds this routine's runs: with none, a missed run can't be told from a rotated or unreadable journal."""
     if not timer or timer.get("LoadState") == "not-found":
         return RoutineView(name, "not found", "error")
     window = now - ROUTINES_WINDOW
     runs = [run for run in runs if run.start >= window]
+    judged = bool(runs) and not journal_error
     if not runs and service:
         started = show_time(service.get("ExecMainStartTimestamp", ""))
         if started is not None and started >= window:
@@ -1856,7 +1860,7 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
     note = "" if calendar else "no calendar schedule"
     slots = sorted(slots)
     capped = capped or (len(slots) >= CALENDAR_CAP and slots[-1] < now)
-    if calendar and on and not capped:
+    if calendar and on and not capped and judged:
         known = [t for t in (show_time(timer.get("ActiveEnterTimestamp", "")), min((r.start for r in runs), default=None)) if t is not None]
         floor = max(window, min(known)) if known else window
         starts = [run.start for run in runs]
@@ -1864,12 +1868,14 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
     events.sort(key=lambda event: event[0], reverse=True)
     next_at = show_time(timer.get("NextElapseUSecRealtime", ""))
     if not on:
-        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note)
+        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error)
     if events:
         _, kind, status = events[0]
         tag = {PASSED: "passed", RUNNING: "running", MISSED: "missed", UNKNOWN: "unknown"}.get(kind) or _status_word(status)
-        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note)
-    return RoutineView(name, "not due", "muted", (), next_at, note)
+        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error)
+    if not judged and any(window <= slot <= now for slot in slots):
+        return RoutineView(name, "unknown", "muted", (), next_at, note, journal_error)
+    return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
 
 
 def routine_lines(view: RoutineView, width: int, now: float, local: Callable = time.localtime) -> list:
@@ -1878,6 +1884,8 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     name = fit(view.name, max(0, width - display_width(tag) - 1))
     gap = max(1, width - display_width(name) - display_width(tag)) if name else max(0, width - display_width(tag))
     rows = [(name + " " * gap + tag, view.tone)]
+    if view.error:
+        rows.append(("  " + view.error, "error"))
     tokens = []
     for at, kind, status in view.events:
         stamp = time.strftime("%H:%M", local(at))

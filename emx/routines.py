@@ -86,14 +86,14 @@ def read(path, now: float) -> tuple:
                 return None, error
             timers = core.show_blocks(out)
         names_of = sorted({t["Unit"] for t in timers.values() if t.get("LoadState") != "not-found" and t.get("Unit")})
-        services, runs = {}, {}
+        services, runs, journal_error = {}, {}, None
         if names_of:
             out, error = _run(["systemctl", "--user", "show", "--timestamp=unix", "-p", SERVICE_PROPS, *names_of])
             if error:
                 return None, error
             services = core.show_blocks(out)
             active = frozenset(name for name, props in services.items() if _running(props))
-            log, _ = _run(["journalctl", "--user", "-o", "json", "--no-pager", "--since", f"@{int(now - core.ROUTINES_WINDOW)}",
+            log, journal_error = _run(["journalctl", "--user", "-o", "json", "--no-pager", "--since", f"@{int(now - core.ROUTINES_WINDOW)}",
                            f"--output-fields={JOURNAL_FIELDS}", *[arg for svc in names_of for arg in ("-u", svc)]])
             runs = core.journal_runs(log or "", active)
         cache, views = {}, []
@@ -103,7 +103,7 @@ def read(path, now: float) -> tuple:
             unit = timer.get("Unit", "") if loaded else ""
             slots, capped = _slots(timer, now, cache) if loaded else ([], False)
             views.append(core.routine_view(name, timer, services.get(unit), runs.get(unit, []), slots, now,
-                                           now - core.ROUTINES_WINDOW, capped=capped))
+                                           capped=capped, journal_error=journal_error or ""))
         return views, None
     except Exception as exc:
         return None, core.error_line(exc)

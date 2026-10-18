@@ -7028,6 +7028,15 @@ class Routines(AppCase):
         self.app.handle_key("R")
         self.assertIn(sidebar.ROUTINES_LOADING, self.drawn())
 
+    def test_a_journal_error_shows_on_its_routine(self):
+        self.answer = ([core.RoutineView("backup-nightly", "passed", "done", ((1_800_000_000.0, core.PASSED, ""),), None,
+                                         error="No journal files were found.")], None)
+        self.app.handle_key("R")
+        self.settle()
+        drawn = self.drawn()
+        self.assertIn("No journal files were found.", drawn)
+        self.assertTrue(any(t.startswith("backup-nightly") for t in drawn), drawn)
+
     def test_a_machine_without_systemd_gets_the_one_line(self):
         self.answer = (None, sidebar.routines.NO_SYSTEMD)
         self.app.handle_key("R")

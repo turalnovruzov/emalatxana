@@ -33,12 +33,17 @@ ANALYZE = (
     "   Next elapse: Sun 2027-01-17 07:00:00 UTC\n   Iteration #2: Sun 2027-01-17 08:00:00 UTC\n"
 )
 
+HOURS_BEFORE_NOW = "".join(
+    f"   {'Next elapse' if i == 0 else f'Iteration #{i + 1}'}: Fri 2027-01-15 0{hour}:00:00 UTC\n" for i, hour in enumerate(range(3, 8))
+)
+
 
 class FakeSystemd:
     """Answers each command by its program and records every argv."""
 
-    def __init__(self, timers=TIMERS, services=SERVICES, journal=JOURNAL, journal_code=0, systemctl_error=None):
+    def __init__(self, timers=TIMERS, services=SERVICES, journal=JOURNAL, journal_code=0, systemctl_error=None, analyze=ANALYZE):
         self.argvs = []
+        self.analyze = analyze
         self.timers, self.services, self.journal = timers, services, journal
         self.journal_code, self.systemctl_error = journal_code, systemctl_error
 
@@ -51,7 +56,7 @@ class FakeSystemd:
             return done(self.services if any(a.endswith(".service") for a in argv) else self.timers)
         if argv[0] == "journalctl":
             return done(self.journal, "no journal", self.journal_code) if self.journal_code else done(self.journal)
-        return done(ANALYZE)
+        return done(self.analyze)
 
     def count(self, program):
         return sum(1 for argv in self.argvs if argv[0] == program)
@@ -165,9 +170,22 @@ class Edges(ReaderCase):
 
     def test_a_failing_journal_still_gives_views_from_the_service_state(self):
         self.write("backup-nightly\n")
-        views, error = self.read(FakeSystemd(journal_code=1))
+        views, error = self.read(FakeSystemd(journal_code=1, analyze=HOURS_BEFORE_NOW))
         self.assertIsNone(error)
-        self.assertEqual([e for e in views[0].events if e[1] != core.MISSED], [(1799999000.0, core.PASSED, "")])
+        self.assertEqual(views[0].events, ((1799999000.0, core.PASSED, ""),))
+        self.assertEqual(views[0].error, "no journal")
+
+    def test_a_readable_journal_leaves_no_error_and_judges_missed_times(self):
+        self.write("backup-nightly\n")
+        views, _ = self.read(FakeSystemd(analyze=HOURS_BEFORE_NOW))
+        self.assertEqual(views[0].error, "")
+        self.assertEqual(sum(1 for e in views[0].events if e[1] == core.MISSED), 4)
+
+    def test_a_journal_with_nothing_for_the_routine_names_no_missed_times(self):
+        self.write("backup-nightly\n")
+        views, error = self.read(FakeSystemd(journal="", analyze=HOURS_BEFORE_NOW))
+        self.assertIsNone(error)
+        self.assertEqual(views[0].events, ((1799999000.0, core.PASSED, ""),))
 
 
 class Running(ReaderCase):
