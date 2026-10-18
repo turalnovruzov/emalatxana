@@ -1860,9 +1860,9 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
     note = "" if calendar else "no calendar schedule"
     slots = sorted(slots)
     capped = capped or (len(slots) >= CALENDAR_CAP and slots[-1] < now)
+    known = [t for t in (show_time(timer.get("ActiveEnterTimestamp", "")), min((r.start for r in runs), default=None)) if t is not None]
+    floor = max(window, min(known)) if known else window
     if calendar and on and not capped and judged:
-        known = [t for t in (show_time(timer.get("ActiveEnterTimestamp", "")), min((r.start for r in runs), default=None)) if t is not None]
-        floor = max(window, min(known)) if known else window
         starts = [run.start for run in runs]
         events += [(slot, MISSED, "") for slot in missed_times(slots, starts, floor, now)]
     events.sort(key=lambda event: event[0], reverse=True)
@@ -1873,7 +1873,7 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
         _, kind, status = events[0]
         tag = {PASSED: "passed", RUNNING: "running", MISSED: "missed", UNKNOWN: "unknown"}.get(kind) or _status_word(status)
         return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error)
-    if not judged and any(window <= slot <= now for slot in slots):
+    if not judged and any(floor <= slot <= now - MISSED_SLACK for slot in slots):
         return RoutineView(name, "unknown", "muted", (), next_at, note, journal_error)
     return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
 

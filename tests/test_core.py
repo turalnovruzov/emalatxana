@@ -5046,6 +5046,11 @@ class Routines(unittest.TestCase):
         nothing = self.view(slots=slots)
         self.assertEqual((nothing.events, nothing.tag), ((), "unknown"))
 
+    def test_a_new_timer_with_no_runs_yet_is_not_due_rather_than_unknown(self):
+        slots = [self.NOW - 7200, self.NOW - 3600, self.NOW - 60]
+        view = self.view(timer=self.timer(ActiveEnterTimestamp=f"@{int(self.NOW - 120)}"), slots=slots)
+        self.assertEqual((view.events, view.tag), ((), "not due"))
+
     def test_an_unreadable_journal_still_flags_nothing_when_the_routine_ran(self):
         slots = self.slots()
         runs = [core.Run(t, core.PASSED) for t in slots[:-1]]
