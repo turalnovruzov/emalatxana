@@ -6432,6 +6432,9 @@ class CollapseTmux(ClientTmux):
     def bind_collapse(self, key, main):
         self.calls.append(("bind_collapse", key, main))
 
+    def bind_paste(self, key, check):
+        self.calls.append(("bind_paste", key, check))
+
     def resize_width(self, pane, width):
         self.calls.append(("resize_width", pane, width))
 
@@ -6463,6 +6466,13 @@ class CollapseWiring(AppCase):
         self.assertEqual(len(self.app.tmux.of("bind_collapse")), 1)
         self.tick(main_id="%3")
         self.assertEqual(self.app.tmux.of("bind_collapse")[1:], [("bind_collapse", sidebar.COLLAPSE_KEY, "%3")])
+
+    def test_binds_paste_once_with_the_relay_file(self):
+        self.tick()
+        self.tick()
+        (call,) = self.app.tmux.of("bind_paste")
+        self.assertEqual(call[1], sidebar.PASTE_KEY)
+        self.assertTrue(call[2].endswith(f"paste {self.app.tmux.socket} {shlex.quote(str(self.app.relay_file))}"), call[2])
 
     def test_hiding_is_saved_and_showing_is_saved(self):
         self.tick(zoomed=True)
