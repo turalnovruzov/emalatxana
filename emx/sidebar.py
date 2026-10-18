@@ -2000,6 +2000,7 @@ class App:
         try:
             host = self.tmux.session_option(RELAY_HOST_OPT)
         except TmuxError:
+            self.relay_host = None
             return
         self.relay_host = core.relay_host(host, now)
 

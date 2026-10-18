@@ -6395,7 +6395,6 @@ class AppRelay(AppCase):
         sidebar.App.housekeep(self.app, False)
         self.assertTrue(any("notifications unavailable" in t for t in self.top_line()))
 
-
     def test_a_connected_laptop_puts_its_host_on_the_top_line(self):
         now = time.time()
         self.app.tmux.options[RELAY_OPT] = str(now)
