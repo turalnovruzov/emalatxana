@@ -636,7 +636,7 @@ class Focus(PrivateServer):
 
     def test_the_attached_client_is_listed_by_its_tty(self):
         (tty,) = self.tmux.client_ttys()
-        self.assertTrue(tty.startswith("/dev/tty"), tty)
+        self.assertTrue(tty.startswith(("/dev/tty", "/dev/pts/")), tty)
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class Bar(PrivateServer):

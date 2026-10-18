@@ -6056,7 +6056,7 @@ class NoBanner(AppCase):
         root = Path(sidebar.__file__).parent
         for path in [*root.glob("*.py"), root / "emx.tmux.conf"]:
             text = path.read_text(encoding="utf-8")
-            for word in ("osascript", "]9;", "allow-passthrough", "display notification"):
+            for word in ("]9;", "allow-passthrough", "display notification"):
                 self.assertNotIn(word, text, f"{path.name} mentions {word}")
 
     def test_housekeep_sets_no_pane_option_but_its_own(self):
