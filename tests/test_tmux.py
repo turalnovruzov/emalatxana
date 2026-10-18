@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, engine
-from emx.tmux import AGENT_OPT, BACK_OPT, HUSH_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, BACK_OPT, HUSH_OPT, PASTE_OPT, RELAY_PASTE_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
@@ -34,6 +34,8 @@ LEFT = b"\x1b[D"
 class PrivateServer(unittest.TestCase):
     """A private tmux server with main and the panel side by side, each running the recorder, and a client attached."""
 
+    recorder_source = RECORDER
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -44,7 +46,7 @@ class PrivateServer(unittest.TestCase):
         self.addCleanup(env.stop)
         recorder = os.path.join(self.dir, "recorder.py")
         with open(recorder, "w", encoding="utf-8") as fh:
-            fh.write(RECORDER)
+            fh.write(self.recorder_source)
         self.tmux = Tmux(f"emx-test-{uuid.uuid4().hex[:8]}", os.devnull)
         self.addCleanup(self.kill_server)
         self.main = self.tmux.run(
@@ -876,6 +878,145 @@ class EngineLive(unittest.TestCase):
         resumed = self.wait_for_state(session.id, "working")
         self.assertEqual((resumed.status, resumed.turned, resumed.session_id), ("idle", False, session.id))
         self.assertTrue(core.idle(resumed))
+
+
+BRACKETED_RECORDER = RECORDER.replace('os.write(1, "\\u276f ".encode())', 'os.write(1, b"\\x1b[?2004h" + "\\u276f ".encode())')
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class PasteBinding(PrivateServer):
+    """Ctrl+V as bound on a private tmux server, pressed through an attached client so tmux's key table runs."""
+
+    KEY = "C-v"
+    CTRL_V = b"\x16"
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.set_pane_option(self.main, SESSION_OPT, str(uuid.uuid4()))
+        self.tmux.run("set-option", "-g", RELAY_PASTE_OPT, str(time.time()))
+
+    def press(self):
+        self.tmux.run("send-keys", "-K", "-c", self.client, self.KEY)
+
+    def marker_check(self):
+        marker = os.path.join(self.dir, "ran")
+        script = os.path.join(self.dir, "check.sh")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(f"#!/bin/sh\ntouch {marker}\nexit 1\n")
+        os.chmod(script, 0o755)
+        return script, marker
+
+    def test_the_paste_binding_parses(self):
+        self.tmux.bind_paste(self.KEY, "true")
+        (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " C-v " in line]
+        listed = os.path.join(self.dir, "listed.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+        self.tmux.run("source-file", "-n", listed)
+
+    def test_a_check_exiting_0_sends_nothing(self):
+        self.tmux.bind_paste(self.KEY, "true")
+        self.press()
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_a_check_exiting_1_passes_the_key(self):
+        self.tmux.bind_paste(self.KEY, "false")
+        self.press()
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        self.assertEqual(self.typed("main"), self.CTRL_V)
+
+    def test_a_check_that_cannot_run_passes_the_key(self):
+        self.tmux.bind_paste(self.KEY, os.path.join(self.dir, "no-such-check"))
+        self.press()
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        self.assertEqual(self.typed("main"), self.CTRL_V)
+
+    def test_no_stamp_never_runs_the_check(self):
+        script, marker = self.marker_check()
+        self.tmux.run("set-option", "-g", "-u", RELAY_PASTE_OPT)
+        self.tmux.bind_paste(self.KEY, script)
+        self.press()
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        self.assertEqual(self.typed("main"), self.CTRL_V)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_a_pane_without_the_agent_tag_passes_the_key(self):
+        script, marker = self.marker_check()
+        self.tmux.run("set-option", "-p", "-u", "-t", self.main, AGENT_OPT)
+        self.tmux.bind_paste(self.KEY, script)
+        self.press()
+        self.wait_for(lambda: self.typed("main"), "the key in main")
+        self.assertEqual(self.typed("main"), self.CTRL_V)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_the_raw_ctrl_v_byte_is_caught(self):
+        self.tmux.run("set-option", "-s", "extended-keys", "always")
+        self.tmux.run("set-option", "-s", "extended-keys-format", "csi-u")
+        self.tmux.bind_paste(self.KEY, "true")
+        os.write(self.client_fd, self.CTRL_V)
+        time.sleep(0.5)
+        self.assertEqual(self.typed("main"), b"")
+        self.tmux.bind_paste(self.KEY, "false")
+        os.write(self.client_fd, self.CTRL_V)
+        self.wait_for(lambda: self.typed("main"), "the raw byte in main")
+        self.assertEqual(self.typed("main"), self.CTRL_V)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class PasteIf(PrivateServer):
+    recorder_source = BRACKETED_RECORDER
+
+    def setUp(self):
+        super().setUp()
+        self.sid = str(uuid.uuid4())
+        self.tmux.set_pane_option(self.main, SESSION_OPT, self.sid)
+        self.wait_for(lambda: self.show(self.main, "#{cursor_x}") == "2", "the recorder's prompt")
+
+    def buffers(self):
+        return self.tmux.run("list-buffers", "-F", "#{buffer_name}").split()
+
+    def test_it_pastes_bracketed_into_the_matching_session(self):
+        self.assertTrue(self.tmux.paste_if(self.main, self.sid, "emx-paste-a", "/tmp/a b.png"))
+        self.wait_for(lambda: self.typed("main"), "the paste in main")
+        self.assertEqual(self.typed("main"), b"\x1b[200~/tmp/a b.png\x1b[201~")
+        self.assertEqual(self.buffers(), [])
+
+    def test_another_session_gets_nothing(self):
+        self.assertFalse(self.tmux.paste_if(self.main, str(uuid.uuid4()), "emx-paste-a", "/tmp/a.png"))
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        self.assertNotIn("emx-paste-a", self.buffers())
+
+    def test_copy_mode_gets_nothing(self):
+        self.tmux.run("copy-mode", "-t", self.main)
+        self.assertFalse(self.tmux.paste_if(self.main, self.sid, "emx-paste-a", "/tmp/a.png"))
+        time.sleep(0.3)
+        self.assertEqual(self.typed("main"), b"")
+        self.assertNotIn("emx-paste-a", self.buffers())
+
+    def test_show_message_reaches_the_client(self):
+        self.tmux.run("set-option", "-g", "status", "off")
+        self.tmux.show_message(self.main, "no image in clipboard")
+        seen = b""
+        deadline = time.monotonic() + 5
+        while b"no image in clipboard" not in seen and time.monotonic() < deadline:
+            try:
+                seen += os.read(self.client_fd, 65536)
+            except OSError:
+                break
+        self.assertIn(b"no image in clipboard", seen)
+
+
+class PasteIfTarget(unittest.TestCase):
+    def test_a_bad_pane_or_name_runs_no_tmux_command(self):
+        tmux = Tmux("emx-test-none", os.devnull)
+        with mock.patch.object(Tmux, "run") as run:
+            for pane, name in [("12", "ok"), ("%1;x", "ok"), ("%1", "a b"), ("%1", "a;b"), ("%1", "")]:
+                with self.assertRaises(TmuxError):
+                    tmux.paste_if(pane, "s1", name, "x")
+        run.assert_not_called()
+
 
 
 if __name__ == "__main__":

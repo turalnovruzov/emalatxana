@@ -20,9 +20,12 @@ OPEN_OPT = "@emx_open"
 TERMINAL_OPT = "@emx_terminal"
 RELAY_OPT = "@emx_relay"
 RELAY_HOST_OPT = "@emx_relay_host"
+PASTE_OPT = "@emx_paste"
+RELAY_PASTE_OPT = "@emx_relay_paste"
 
 
 _PANE_ID = re.compile(r"%\d+")
+_BUFFER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 KEYS_SENT = ("Escape",)
 
 
@@ -230,6 +233,45 @@ class Tmux:
             f"#{{&&:#{{cursor_flag}},{sidebar_here}}}}}}}"
         )
         self.run("bind-key", "-n", "Left", "if-shell", "-F", held, decide, "send-keys Left")
+
+    def bind_paste(self, key: str, check: str) -> None:
+        """Bind `key` (no prefix) so that in a pane holding one of emx's sessions, while a laptop on `emx remote` is listening, it asks the laptop for its clipboard image instead of reaching the pane.
+
+        `check` is a shell command that exits 0 only after it asked the laptop;
+        the key then goes nowhere, since the image's path arrives on its own.
+        This binding fails open, the opposite of bind_left's: any other
+        outcome, a crash or a check that can't run included, sends the key to
+        the pane as it would go without emx. The listening stamp is read in the
+        format gate, so on a machine with no laptop no process starts per press.
+        """
+        self.run("set-option", "-g", PASTE_OPT, check)
+        decide = f'if-shell "#{{{PASTE_OPT}}} #{{pane_id}} #{{{SESSION_OPT}}}" "" "send-keys {key}"'
+        held = f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{{AGENT_OPT}}},#{{{RELAY_PASTE_OPT}}}}}}}"
+        self.run("bind-key", "-n", key, "if-shell", "-F", held, decide, f"send-keys {key}")
+
+    def paste_if(self, pane: str, sid: str, name: str, text: str) -> bool:
+        """Paste `text`, bracketed when the program asked for it, into the pane only while it still holds session `sid` and is not in a mode; True when it pasted.
+
+        The text goes into a named buffer as an argument, so tmux never parses
+        it, and the check and the paste are one tmux command, so a session
+        switch between them cannot land the text in another session. `sid` is
+        a checked session id: no quote or `#` reaches the format.
+        """
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        if not _BUFFER_NAME.fullmatch(name):
+            raise TmuxError(f"not a buffer name: {name!r}")
+        self.run("set-buffer", "-b", name, "--", text)
+        gate = f"#{{&&:#{{==:#{{{SESSION_OPT}}},{sid}}},#{{&&:#{{{AGENT_OPT}}},#{{?pane_in_mode,,1}}}}}}"
+        out = self.run(
+            "if-shell", "-F", "-t", pane, gate,
+            f"paste-buffer -p -d -b {name} -t {pane} ; display-message -p pasted",
+            f"delete-buffer -b {name} ; display-message -p skipped",
+        )
+        return out.strip() == "pasted"
+
+    def show_message(self, pane: str, text: str, ms: int = 3000) -> None:
+        self.run("display-message", "-d", str(ms), "-t", pane, text)
 
     def clear_back(self, pane: str) -> None:
         self.run("set-option", "-p", "-u", "-t", pane, BACK_OPT)
