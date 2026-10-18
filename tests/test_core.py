@@ -5039,12 +5039,36 @@ class Routines(unittest.TestCase):
         self.assertEqual(view.events, ((slots[-2], core.PASSED, ""),))
         self.assertEqual(view.error, "journal is broken")
 
-    def test_a_journal_with_no_runs_of_the_routine_names_no_missed_times(self):
+    def test_a_journal_missing_a_run_systemd_recorded_names_no_missed_times(self):
         slots = self.slots()
         service = {"ExecMainStartTimestamp": f"@{int(slots[-2])}", "Result": "success"}
         self.assertEqual(self.view(service=service, slots=slots).events, ((slots[-2], core.PASSED, ""),))
-        nothing = self.view(slots=slots)
-        self.assertEqual((nothing.events, nothing.tag), ((), "unknown"))
+
+    def test_an_hourly_routine_that_never_ran_has_every_due_slot_missed(self):
+        slots = self.slots()
+        for service in (None, {"ExecMainStartTimestamp": "", "Result": "success"},
+                        {"ExecMainStartTimestamp": f"@{int(self.NOW - 90000)}", "Result": "success"}):
+            view = self.view(service=service, slots=slots)
+            self.assertEqual((view.tag, view.tone), ("missed", "needs"), service)
+            self.assertEqual(view.events, tuple((slot, core.MISSED, "") for slot in reversed(slots)), service)
+
+    def test_a_daily_routine_that_never_ran_is_missed_once(self):
+        slot = self.NOW - 20000
+        timer = self.timer(TimersCalendar="{ OnCalendar=daily ; next_elapse=@1 }")
+        view = self.view(timer=timer, service={"ExecMainStartTimestamp": "", "Result": "success"}, slots=[slot])
+        self.assertEqual((view.tag, view.tone), ("missed", "needs"))
+        self.assertEqual(view.events, ((slot, core.MISSED, ""),))
+
+    def test_an_unreadable_journal_with_no_run_in_sight_is_unknown_not_missed(self):
+        view = self.view(slots=self.slots(), journal_error="journal is broken")
+        self.assertEqual((view.events, view.tag, view.error), ((), "unknown", "journal is broken"))
+
+    def test_an_unreadable_journal_shows_a_service_still_going_as_running(self):
+        started = self.NOW - 600
+        service = {"ActiveState": "active", "Result": "success",
+                   "ExecMainStartTimestamp": f"@{int(started)}", "ExecMainExitTimestamp": ""}
+        view = self.view(service=service, slots=self.slots(), journal_error="x")
+        self.assertEqual((view.tag, view.events), ("running", ((started, core.RUNNING, ""),)))
 
     def test_a_new_timer_with_no_runs_yet_is_not_due_rather_than_unknown(self):
         slots = [self.NOW - 7200, self.NOW - 3600, self.NOW - 60]
@@ -5092,7 +5116,8 @@ class Routines(unittest.TestCase):
         view = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),),
                                 self.NOW + 7200, error="Failed to open the journal: no such file or directory")
         rows = self.lines(view)
-        self.assertEqual(rows[1], (core.fit("  Failed to open the journal: no such file or directory", 40), "error"))
+        errors = [text for text, tone in rows if tone == "error"]
+        self.assertEqual(errors, ["  Failed to open the journal: no such", "  file or directory"])
         for text, _ in rows:
             self.assertLessEqual(core.display_width(text), 40, text)
 

@@ -10,7 +10,6 @@ from emx import core
 
 NO_SYSTEMD = "Routines are read from systemd user timers, and this machine has none."
 TIMEOUT = 10
-ACTIVE_WHILE_RUNNING = ("activating", "deactivating", "reloading")
 TIMER_PROPS = "Id,Unit,TimersCalendar,NextElapseUSecRealtime,ActiveState,LoadState,ActiveEnterTimestamp"
 SERVICE_PROPS = "Id,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp"
 JOURNAL_FIELDS = "MESSAGE_ID,JOB_TYPE,JOB_RESULT,UNIT_RESULT,EXIT_CODE,EXIT_STATUS,USER_UNIT,USER_INVOCATION_ID"
@@ -29,7 +28,7 @@ def _run(argv: list) -> tuple:
             timeout=TIMEOUT, start_new_session=True, env=env,
         )
     except FileNotFoundError:
-        return None, NO_SYSTEMD
+        return None, NO_SYSTEMD if argv[0] == "systemctl" else f"{argv[0]} isn't installed on this machine"
     except subprocess.TimeoutExpired:
         return None, f"{argv[0]} took longer than {TIMEOUT} seconds"
     except Exception as exc:
@@ -37,17 +36,6 @@ def _run(argv: list) -> tuple:
     if done.returncode != 0:
         return None, _first_line(done.stderr, f"{argv[0]} exited with {done.returncode}")
     return done.stdout, None
-
-
-def _running(service: dict) -> bool:
-    state = service.get("ActiveState")
-    if state in ACTIVE_WHILE_RUNNING:
-        return True
-    if state != "active":
-        return False
-    started = core.show_time(service.get("ExecMainStartTimestamp", ""))
-    exited = core.show_time(service.get("ExecMainExitTimestamp", ""))
-    return exited is None or (started is not None and exited < started)
 
 
 def _slots(timer: dict, now: float, cache: dict) -> tuple:
@@ -92,7 +80,7 @@ def read(path, now: float) -> tuple:
             if error:
                 return None, error
             services = core.show_blocks(out)
-            active = frozenset(name for name, props in services.items() if _running(props))
+            active = frozenset(name for name, props in services.items() if core.service_running(props))
             log, journal_error = _run(["journalctl", "--user", "-o", "json", "--no-pager", "--since", f"@{int(now - core.ROUTINES_WINDOW)}",
                            f"--output-fields={JOURNAL_FIELDS}", *[arg for svc in names_of for arg in ("-u", svc)]])
             runs = core.journal_runs(log or "", active)

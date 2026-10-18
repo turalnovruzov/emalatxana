@@ -181,10 +181,35 @@ class Edges(ReaderCase):
         self.assertEqual(views[0].error, "")
         self.assertEqual(sum(1 for e in views[0].events if e[1] == core.MISSED), 4)
 
-    def test_a_journal_with_nothing_for_the_routine_names_no_missed_times(self):
+    def test_a_journal_missing_a_run_systemd_recorded_names_no_missed_times(self):
         self.write("backup-nightly\n")
         views, error = self.read(FakeSystemd(journal="", analyze=HOURS_BEFORE_NOW))
         self.assertIsNone(error)
+        self.assertEqual(views[0].events, ((1799999000.0, core.PASSED, ""),))
+
+    def test_a_routine_that_never_ran_has_its_due_times_missed(self):
+        self.write("backup-nightly\n")
+        never = SERVICES.replace("ExecMainStartTimestamp=@1799999000\nExecMainExitTimestamp=@1799999002",
+                                 "ExecMainStartTimestamp=\nExecMainExitTimestamp=")
+        views, error = self.read(FakeSystemd(services=never, journal="", analyze=HOURS_BEFORE_NOW))
+        self.assertIsNone(error)
+        self.assertEqual(views[0].tag, "missed")
+        self.assertEqual(views[0].error, "")
+        self.assertTrue(views[0].events)
+        self.assertTrue(all(kind == core.MISSED for _, kind, _ in views[0].events))
+
+    def test_no_journalctl_is_named_as_that_not_as_no_systemd(self):
+        self.write("backup-nightly\n")
+        fake = FakeSystemd(analyze=HOURS_BEFORE_NOW)
+
+        def run(argv, **kwargs):
+            if argv[0] == "journalctl":
+                raise FileNotFoundError(2, "No such file or directory", "journalctl")
+            return fake(argv, **kwargs)
+
+        views, error = self.read(run)
+        self.assertIsNone(error)
+        self.assertEqual(views[0].error, "journalctl isn't installed on this machine")
         self.assertEqual(views[0].events, ((1799999000.0, core.PASSED, ""),))
 
 

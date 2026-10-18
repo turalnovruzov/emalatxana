@@ -1833,6 +1833,20 @@ class RoutineView:
     error: str = ""
 
 
+ACTIVE_WHILE_RUNNING = ("activating", "deactivating", "reloading")
+
+
+def service_running(service: dict) -> bool:
+    state = service.get("ActiveState")
+    if state in ACTIVE_WHILE_RUNNING:
+        return True
+    if state != "active":
+        return False
+    started = show_time(service.get("ExecMainStartTimestamp", ""))
+    exited = show_time(service.get("ExecMainExitTimestamp", ""))
+    return exited is None or (started is not None and exited < started)
+
+
 def _status_word(run_status: str) -> str:
     return f"failed · exit {run_status}" if run_status else "failed"
 
@@ -1841,19 +1855,21 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
                  now: float, capped: bool = False, journal_error: str = "") -> RoutineView:
     """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times, `journal_error` why the journal couldn't be read.
 
-    Missed times are only judged against a journal that was read and holds this routine's runs: with none, a missed run can't be told from a rotated or unreadable journal."""
+    Missed times are judged against a journal that was read. When it holds no run of this routine in the window, systemd's own record of the last start decides: none in the window agrees nothing ran, so the times are judged; a start in the window means the journal lost it (rotated, say), so they are not."""
     if not timer or timer.get("LoadState") == "not-found":
         return RoutineView(name, "not found", "error")
     window = now - ROUTINES_WINDOW
     runs = [run for run in runs if run.start >= window]
-    judged = bool(runs) and not journal_error
-    if not runs and service:
-        started = show_time(service.get("ExecMainStartTimestamp", ""))
-        if started is not None and started >= window:
-            if service.get("Result") == "success":
-                runs = [Run(started, PASSED)]
-            else:
-                runs = [Run(started, FAILED, service.get("ExecMainStatus", ""))]
+    started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
+    systemd_ran = started is not None and started >= window
+    judged = not journal_error and (bool(runs) or not systemd_ran)
+    if not runs and systemd_ran:
+        if service_running(service):
+            runs = [Run(started, RUNNING)]
+        elif service.get("Result") == "success":
+            runs = [Run(started, PASSED)]
+        else:
+            runs = [Run(started, FAILED, service.get("ExecMainStatus", ""))]
     events = [(run.start, run.result, run.status) for run in runs]
     calendar = bool(calendar_specs(timer.get("TimersCalendar", "")))
     on = timer.get("ActiveState") == "active"
@@ -1885,7 +1901,7 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     gap = max(1, width - display_width(name) - display_width(tag)) if name else max(0, width - display_width(tag))
     rows = [(name + " " * gap + tag, view.tone)]
     if view.error:
-        rows.append(("  " + view.error, "error"))
+        rows += [("  " + line, "error") for line in wrap_words(view.error, max(1, width - 2))]
     tokens = []
     for at, kind, status in view.events:
         stamp = time.strftime("%H:%M", local(at))

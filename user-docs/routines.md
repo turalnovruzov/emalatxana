@@ -22,7 +22,9 @@ The file is read each time the view opens and again every minute while it is ope
 
 `not due` means nothing was scheduled in the past 24 hours and nothing ran. A timer that is stopped, or one with no calendar schedule, shows its runs and no missed times.
 
-Missed times come from the journal. When the journal can't be read, each routine shows the journal's error in red under its name, its latest run from systemd's own record, and no missed times. When the journal holds nothing for a routine in the past 24 hours (it may have been rotated away), the routine shows no missed times either, and `unknown` if nothing ran that emx can see.
+Missed times come from the journal, checked against systemd's own record of the routine's last start. A routine that was scheduled and has no run in the past 24 hours shows each of those times as `⚠ missed`. When the journal holds nothing for a routine but systemd says it started in the past 24 hours (the journal may have been rotated away), the routine shows that run and no missed times.
+
+When the journal can't be read, each routine shows the journal's error in red under its name, its latest run from systemd's own record, and no missed times; `unknown` if it was due and emx can see no run at all.
 
 ## On a machine without systemd
 
