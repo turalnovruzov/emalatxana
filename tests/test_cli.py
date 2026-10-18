@@ -565,9 +565,11 @@ class PasteImage(unittest.TestCase):
         self.images = self.state / "emx" / "images"
         paste = mock.patch.object(Tmux, "paste_if", return_value=True)
         message = mock.patch.object(Tmux, "show_message")
-        self.paste, self.message = paste.start(), message.start()
+        holds = mock.patch.object(Tmux, "holds_session", return_value=True)
+        self.paste, self.message, self.holds = paste.start(), message.start(), holds.start()
         self.addCleanup(paste.stop)
         self.addCleanup(message.stop)
+        self.addCleanup(holds.stop)
 
     def run_with(self, data, args=("%3", PASTE_SID, PASTE_ID)):
         stdin = mock.Mock(buffer=io.BytesIO(data))
@@ -582,6 +584,27 @@ class PasteImage(unittest.TestCase):
         self.assertEqual(self.images.stat().st_mode & 0o777, 0o700)
         self.paste.assert_called_once_with("%3", PASTE_SID, "emx-paste-" + PASTE_ID, str(target))
         self.message.assert_not_called()
+
+    def test_a_pane_that_does_not_hold_the_session_gets_no_file_and_no_message(self):
+        self.holds.return_value = False
+        self.assertEqual(self.run_with(PNG), 0)
+        self.holds.assert_called_once_with("%3", PASTE_SID)
+        self.assertEqual(list(self.images.glob("*")) if self.images.exists() else [], [])
+        self.paste.assert_not_called()
+        self.message.assert_not_called()
+        self.assertEqual(self.run_with(b""), 0)
+        self.message.assert_not_called()
+
+    def test_a_stdin_that_cannot_be_read_is_one_line_not_a_traceback(self):
+        class Broken:
+            def read(self, n=-1):
+                raise OSError("broken pipe")
+
+        err = io.StringIO()
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=Broken())), redirect_stderr(err):
+            self.assertEqual(cli.main(["paste-image", "%3", PASTE_SID, PASTE_ID]), 1)
+        self.assertEqual(len(err.getvalue().strip().splitlines()), 1)
+        self.assertIn("couldn't paste the image", err.getvalue())
 
     def test_nothing_on_stdin_says_so_and_saves_nothing(self):
         self.assertEqual(self.run_with(b""), 0)

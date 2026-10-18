@@ -852,3 +852,27 @@ class PasterJobs(unittest.TestCase):
         started = time.time()
         paster.wait(0.2)
         self.assertLess(time.time() - started, 2)
+
+
+class PasterCleanup(unittest.TestCase):
+    def paster(self):
+        return remote.Paster("true", "emx-test-host", None, "emx", {"EMX_CLIPBOARD_IMAGE": "true"})
+
+    def test_close_removes_the_scratch_folder_even_with_a_job_still_running(self):
+        paster = self.paster()
+        folder = paster._scratch()
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertTrue(os.path.isdir(folder))
+        paster.close()
+        self.assertFalse(os.path.exists(folder))
+        self.assertIsNone(paster._scratch())
+
+    def test_a_finished_request_leaves_nothing_in_the_folder(self):
+        paster = self.paster()
+        paster.request("%1", SID, PASTE_ID)
+        paster.wait(10)
+        folder = paster.folder
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertEqual(os.listdir(folder), [])
+        paster.close()
+        self.assertFalse(os.path.exists(folder))

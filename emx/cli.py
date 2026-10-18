@@ -480,10 +480,13 @@ def paste_image(args: list) -> int:
     if socket is None:
         print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
-    data = sys.stdin.buffer.read(core.PASTE_MAX_BYTES + 1)
-    while sys.stdin.buffer.read(1 << 20):
-        pass
     try:
+        data = sys.stdin.buffer.read(core.PASTE_MAX_BYTES + 1)
+        while sys.stdin.buffer.read(1 << 20):
+            pass
+        tmux = Tmux(socket)
+        if not tmux.holds_session(pane, sid):
+            return 0
         folder = _images_folder()
         if folder is None:
             print("emx: the images folder is not private.", file=sys.stderr)
@@ -495,7 +498,6 @@ def paste_image(args: list) -> int:
                 os.unlink(folder / name)
             except OSError:
                 pass
-        tmux = Tmux(socket)
         target = folder / f"{paste_id}.png"
         if len(data) > core.PASTE_MAX_BYTES:
             tmux.show_message(pane, "image too large to paste (over 32 MB)")

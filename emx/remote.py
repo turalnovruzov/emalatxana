@@ -136,6 +136,9 @@ class Paster:
     def __init__(self, ssh: str, host: str, control: str | None, base: str, env=os.environ):
         self.ssh, self.host, self.control, self.base, self.env = ssh, host, control, base, env
         self.jobs: queue.Queue = queue.Queue()
+        self.folder: str | None = None
+        self.closed = False
+        self.lock = threading.Lock()
         threading.Thread(target=self._work, daemon=True).start()
 
     def request(self, pane: str, sid: str, paste_id: str) -> None:
@@ -146,6 +149,21 @@ class Paster:
         waiter = threading.Thread(target=self.jobs.join, daemon=True)
         waiter.start()
         waiter.join(timeout)
+
+    def close(self) -> None:
+        """Removes the scratch folder; the worker is a daemon thread, so a job still running when the process exits would never clean up after itself."""
+        with self.lock:
+            self.closed = True
+            if self.folder is not None:
+                shutil.rmtree(self.folder, ignore_errors=True)
+
+    def _scratch(self) -> str | None:
+        with self.lock:
+            if self.closed:
+                return None
+            if self.folder is None:
+                self.folder = tempfile.mkdtemp(prefix="emx-clip-")
+            return self.folder
 
     def _work(self) -> None:
         while True:
@@ -170,22 +188,26 @@ class Paster:
         argv = core.clipboard_command(self.env)
         if not argv:
             return b""
-        folder = tempfile.mkdtemp(prefix="emx-clip-")
-        try:
-            path = os.path.join(folder, "image.png")
-            try:
-                done = subprocess.run(
-                    [*argv, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=CLIPBOARD_TIMEOUT,
-                )
-                if done.returncode == 0:
-                    with open(path, "rb") as fh:
-                        return fh.read(core.PASTE_MAX_BYTES + 1)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                pass
+        folder = self._scratch()
+        if folder is None:
             return b""
+        path = os.path.join(folder, f"image-{threading.get_ident()}-{time.monotonic_ns()}.png")
+        try:
+            done = subprocess.run(
+                [*argv, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=CLIPBOARD_TIMEOUT,
+            )
+            if done.returncode == 0:
+                with open(path, "rb") as fh:
+                    return fh.read(core.PASTE_MAX_BYTES + 1)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
         finally:
-            shutil.rmtree(folder, ignore_errors=True)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return b""
 
 
 class Delivery:
@@ -501,6 +523,7 @@ def connect(host_arg: str, env=os.environ) -> int:
             follower.stop()
         if paster is not None:
             paster.wait(5)
+            paster.close()
         if titled:
             _put_title_back()
         if master:

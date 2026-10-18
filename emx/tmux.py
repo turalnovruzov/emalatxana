@@ -249,6 +249,16 @@ class Tmux:
         held = f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{{AGENT_OPT}}},#{{{RELAY_PASTE_OPT}}}}}}}"
         self.run("bind-key", "-n", key, "if-shell", "-F", held, decide, f"send-keys {key}")
 
+    def holds_session(self, pane: str, sid: str) -> bool:
+        """True when the pane exists and holds session `sid` with an agent in it; `sid` is a checked session id."""
+        if not _PANE_ID.fullmatch(pane):
+            return False
+        try:
+            out = self.run("display-message", "-p", "-t", pane, f"#{{&&:#{{==:#{{{SESSION_OPT}}},{sid}}},#{{{AGENT_OPT}}}}}")
+        except TmuxError:
+            return False
+        return out.strip() == "1"
+
     def paste_if(self, pane: str, sid: str, name: str, text: str) -> bool:
         """Paste `text`, bracketed when the program asked for it, into the pane only while it still holds session `sid` and is not in a mode; True when it pasted.
 

@@ -982,6 +982,11 @@ class PasteIf(PrivateServer):
         self.assertEqual(self.typed("main"), b"\x1b[200~/tmp/a b.png\x1b[201~")
         self.assertEqual(self.buffers(), [])
 
+    def test_holds_session_is_true_only_for_the_pane_and_session_that_match(self):
+        self.assertTrue(self.tmux.holds_session(self.main, self.sid))
+        self.assertFalse(self.tmux.holds_session(self.main, str(uuid.uuid4())))
+        self.assertFalse(self.tmux.holds_session("%9999", self.sid))
+
     def test_another_session_gets_nothing(self):
         self.assertFalse(self.tmux.paste_if(self.main, str(uuid.uuid4()), "emx-paste-a", "/tmp/a.png"))
         time.sleep(0.3)
