@@ -104,7 +104,6 @@ ROUTINES_TITLE = "Routines · past 24 hours"
 ROUTINES_EMPTY = "No routines listed. Put one timer name per line in this file:"
 ROUTINES_LOADING = "Reading routines…"
 OPEN_GONE = "That session isn't listed any more."
-PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
 PEEK_NO_ROOM = "Too short to peek."
@@ -2945,7 +2944,7 @@ class App:
         if self.confirm is not None:
             return (CONFIRM_FOOTER,)
         if self.peeking:
-            return PEEK_FOOTERS
+            return core.hint_variants(core.PEEK_HINTS)
         if self.history_view is not None:
             return (HISTORY_HINT, "Esc back")
         if self.routines_view is not None:
@@ -2954,7 +2953,27 @@ class App:
             return ("? close",)
         if self.prompt is not None or self.find is not None or self.rename_edit is not None:
             return ()
-        return ("N notifications  ? keys", "? keys")
+        if not self.loaded:
+            return core.hint_variants(core.LOADING_HINTS)
+        if not self.sessions:
+            return core.hint_variants(core.EMPTY_HINTS)
+        if self.focused is False or self.cursor not in self.items():
+            return core.hint_variants(core.REST_HINTS)
+        if self.cursor[0] == "group":
+            return core.hint_variants(core.header_hints(self.view(), self.cursor[1], self.cursor[1] in self.collapsed()))
+        s = self.session(self.cursor[1])
+        if s is None:
+            return core.hint_variants(core.REST_HINTS)
+        if s.id in self.closing:
+            return core.hint_variants(core.CLOSING_HINTS)
+        return core.hint_variants(core.session_hints(s, s.id in core.pinned_ids(self.prefs)))
+
+    def notice_key_live(self) -> bool:
+        """Whether `N` opens the notifications now: not while a prompt, find, rename, help or the history itself has the keys."""
+        return (
+            self.history_view is None and not self.help
+            and self.prompt is None and self.find is None and self.rename_edit is None
+        )
 
     def update_bar(self) -> None:
         if not self.window_width:
@@ -2962,7 +2981,7 @@ class App:
         tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         parts = core.bar_parts(
             __version__, core.bar_counts(self.sessions), self.history[0] if self.history else None,
-            time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded,
+            time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded, self.notice_key_live(),
         )
         self.bar.push(bar_format(parts))
 
@@ -3026,8 +3045,10 @@ class App:
             if not self.list_error:
                 self.put(list_top, 1, "Loading sessions…", curses.A_DIM)
         elif not self.sessions:
-            self.put(list_top, 1, "No sessions.", curses.A_DIM)
-            self.put(list_top + 1, 1, "Press n to start one.", curses.A_DIM)
+            self.put(list_top + 1, 1, "No sessions yet.", curses.A_DIM)
+            self.put(list_top + 2, 1, "Press ", curses.A_DIM)
+            self.put(list_top + 2, 7, "n", curses.A_BOLD)
+            self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
             self.put(list_top, 1, "No session matches.", curses.A_DIM)
         else:
@@ -3067,7 +3088,13 @@ class App:
             self.put(y + 1 + i, box - 1, "│", muted)
             if i < len(lines):
                 self.put(y + 1 + i, 2, lines[i][0], lines[i][1])
-        self.put(bottom - 1, 0, "╰" + "─" * max(0, box - 2) + "╯", muted)
+        keys_at = 3 + core.display_width(core.PEEK_EDGE) + 1
+        if box - keys_at - 1 >= 1:
+            self.put(bottom - 1, 0, "╰─ ", muted)
+            self.put(bottom - 1, 3, core.PEEK_EDGE, muted | curses.A_DIM)
+            self.put(bottom - 1, keys_at - 1, " " + "─" * (box - keys_at - 1) + "╯", muted)
+        else:
+            self.put(bottom - 1, 0, "╰" + "─" * max(0, box - 2) + "╯", muted)
         return rows
 
     def draw_history(self, top: int, bottom: int, width: int) -> None:
@@ -3145,7 +3172,8 @@ class App:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
                 armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
-                rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height)
+                inline = core.session_inline(session) if line == self.cursor and self.focused is not False else None
+                rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height, inline)
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
 
     def cursor_rows(self, layout: tuple) -> int:
@@ -3188,12 +3216,17 @@ class App:
             return
         view = self.view()
         name_tone = CATEGORY_TONE[group.key] if core.state_group(view, group.key) else "plain"
-        tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted"}
+        tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted", "hint": "muted"}
         collapsed = group.key in self.collapsed()
-        for x, text, part in core.header_layout(view, group.key, len(group.sessions), collapsed, width):
+        parts = core.header_layout(view, group.key, len(group.sessions), collapsed, width)
+        if selected and self.focused is not False:
+            parts = core.place_inline(parts, core.header_inline(collapsed), width)
+        for x, text, part in parts:
             attr = self.palette.attr(tones[part], selected)
             if part == "name" and bold:
                 attr |= curses.A_BOLD
+            elif part == "hint":
+                attr |= curses.A_DIM
             self.put(y, x, text, attr)
 
     def worktree(self, s) -> str:
@@ -3201,9 +3234,9 @@ class App:
 
     def session_lines(
         self, s, width: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
-        max_lines: int = 0,
+        max_lines: int = 0, inline: str | None = None,
     ) -> list:
-        """The row's lines as `core.row_lines` gives them, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
+        """The row's lines as `core.row_lines` gives them, with `inline` placed on the last one when it fits, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) and not core.idle(s) else core.state_word(s)
         age = core.session_age(s, now_ms)
         detail = core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
@@ -3215,6 +3248,8 @@ class App:
         if self.rename_edit is not None and self.rename_edit["id"] == s.id:
             edit = (core.ROW_LEAD, core.fit_left(self.rename_edit["text"] + "▏", width - 1 - core.ROW_LEAD), "rename")
             return [[edit]] + [[] for _ in lines[1:]]
+        if inline:
+            lines[-1] = core.place_inline(lines[-1], inline, width)
         return lines
 
     def draw_session(
@@ -3231,7 +3266,7 @@ class App:
             return pal.attr(tone, selected) | extra
 
         glyph_tone = "idle" if core.idle(s) else "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
-        tones = {"name": "plain", "extra": "path", "status": session_tone(s), "sep": "muted", "detail": "muted", "age": "muted"}
+        tones = {"name": "plain", "extra": "path", "status": session_tone(s), "sep": "muted", "detail": "muted", "age": "muted", "hint": "muted"}
         for i, parts in enumerate(rows):
             if y + i not in shown:
                 continue
@@ -3245,6 +3280,8 @@ class App:
                     self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
                     continue
                 emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
+                if part == "hint":
+                    emphasis = curses.A_DIM
                 self.put(y + i, x, text, attr(tones[part], emphasis))
 
     def take_poll(self) -> bool:
