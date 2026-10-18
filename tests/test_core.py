@@ -403,7 +403,8 @@ class BarCounts(unittest.TestCase):
 class BarParts(unittest.TestCase):
     COUNTS = [("needs_input", 1), ("working", 2), ("done", 1), ("idle", 1)]
     ENTRY = core.Entry("s1", core.NOTICE_NEEDS, "t-fix · proj", "test-fix wants to run Bash for a long while", 100.0)
-    HINTS = ("N notifications  ? keys", "? keys")
+    HINTS = core.hint_variants(core.REST_HINTS)
+    REST = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
 
     def bar(self, width, **kw):
         args = dict(version="2.6.0", counts=self.COUNTS, latest=self.ENTRY, now=220.0, tag=None, remote=None, hints=self.HINTS, width=width)
@@ -413,12 +414,12 @@ class BarParts(unittest.TestCase):
     def text(self, parts):
         return "".join(t for t, _, _ in parts)
 
-    def test_the_full_bar_at_120(self):
-        parts = self.bar(120)
+    def test_the_full_bar_at_140(self):
+        parts = self.bar(140)
         text = self.text(parts)
         self.assertTrue(text.startswith(" ⚒ emx 2.6.0"), text)
-        self.assertTrue(text.endswith("N notifications  ? keys "), text)
-        self.assertEqual(core.display_width(text), 120)
+        self.assertTrue(text.endswith(self.REST + " "), text)
+        self.assertEqual(core.display_width(text), 140)
         self.assertIn("✻ 2m test-fix wants to run Bash for a long while", text)
 
     def test_the_counts_are_four_parts_in_their_tones(self):
@@ -428,15 +429,25 @@ class BarParts(unittest.TestCase):
     def test_the_width_is_exact_and_the_mark_stays_from_120_down_to_8(self):
         for tag, remote in ((None, None), ("voice", "myserver")):
             for width in range(120, 7, -1):
-                text = self.text(self.bar(width, tag=tag, remote=remote))
-                self.assertEqual(core.display_width(text), width, (width, text))
-                self.assertIn("⚒", text)
+                for notice_key in (False, True):
+                    text = self.text(self.bar(width, tag=tag, remote=remote, notice_key=notice_key))
+                    self.assertEqual(core.display_width(text), width, (width, text))
+                    self.assertIn("⚒", text)
 
     def test_room_runs_out_in_the_stated_order(self):
+        for notice_key in (False, True):
+            with self.subTest(notice_key=notice_key):
+                self.assertEqual(self.order_of_loss(notice_key), self.ORDER)
+
+    ORDER = ["long hints", "notice", "any hints", "version", "tag", "host", "mark", "name"]
+
+    def order_of_loss(self, notice_key):
         def stage(width):
-            text = self.text(self.bar(width, tag="voice", remote="myserver-host"))
+            text = self.text(self.bar(width, tag="voice", remote="myserver-host", notice_key=notice_key))
+            if notice_key:
+                self.assertEqual("N all" in text, "test-fix" in text, (width, text))
             return (
-                bool(re.search(r"✻ 2m [^│]*…", text)), "test-fix" in text, "N notifications" in text,
+                bool(re.search(r"✻ 2m [^│]*…", text)), "test-fix" in text, "^x close" in text,
                 "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
                 "⇄" in text, "emx" in text,
             )
@@ -450,8 +461,7 @@ class BarParts(unittest.TestCase):
         for before, after in zip(seen, seen[1:]):
             gone.append([n for n, b, a in zip(names, before, after) if b != a])
         self.assertEqual(seen[0], (False,) + (True,) * 8)
-        order = [n for step in gone for n in step if n != "notice cut"]
-        self.assertEqual(order, ["long hints", "notice", "any hints", "version", "tag", "host", "mark", "name"])
+        return [n for step in gone for n in step if n != "notice cut"]
 
     def test_the_notice_is_cut_with_an_ellipsis_before_anything_else_goes(self):
         text = ""
@@ -460,13 +470,13 @@ class BarParts(unittest.TestCase):
             if "…" in text:
                 break
         self.assertRegex(text, r"✻ 2m [^│]*…")
-        self.assertIn("N notifications  ? keys", text)
+        self.assertIn(self.REST, text)
         self.assertIn("2.6.0", text)
 
     def test_the_short_hint_shows_after_the_long_one(self):
         for width in range(120, 20, -1):
             text = self.text(self.bar(width))
-            if "N notifications" not in text:
+            if "^x close" not in text:
                 break
         self.assertIn("? keys", text)
         self.assertRegex(text, r"✻ 2m test-fix w[^│]*…")
@@ -487,13 +497,13 @@ class BarParts(unittest.TestCase):
 
     def test_a_read_entry_is_muted_throughout(self):
         read = replace(self.ENTRY, read=True)
-        parts = self.bar(120, latest=read)
+        parts = self.bar(140, latest=read)
         self.assertIn(("✻", "muted", False), parts)
         self.assertIn((" 2m ", "muted", False), parts)
         self.assertIn(("test-fix wants to run Bash for a long while", "muted", False), parts)
 
     def test_an_unread_needs_entry_has_a_needs_mark_and_plain_text(self):
-        parts = self.bar(120)
+        parts = self.bar(140)
         self.assertIn(("✻", "needs", False), parts)
         self.assertIn(("test-fix wants to run Bash for a long while", "plain", False), parts)
 
@@ -505,7 +515,145 @@ class BarParts(unittest.TestCase):
     def test_no_notification_still_fills_the_width(self):
         text = self.text(self.bar(80, latest=None))
         self.assertEqual(core.display_width(text), 80)
-        self.assertTrue(text.endswith("N notifications  ? keys "))
+        self.assertTrue(text.endswith(self.REST + " "))
+
+    def test_the_rest_bar_at_200_ends_with_the_rest_hints(self):
+        self.assertTrue(self.text(self.bar(200)).endswith("→ open  ␣ peek  n new  ^f find  ^x close  ? keys "))
+
+    def test_a_hint_key_is_bold_and_its_label_muted(self):
+        parts = self.bar(200)
+        self.assertIn(("→", "muted", True), parts)
+        self.assertIn((" open", "muted", False), parts)
+        self.assertIn(("  ␣", "muted", True), parts)
+
+    def test_a_string_hint_is_one_muted_part(self):
+        self.assertIn(("^x to confirm", "muted", False), self.bar(120, hints=("^x to confirm",)))
+
+    def test_n_all_follows_the_notice_only_when_asked(self):
+        self.assertIn("a long while  N all", self.text(self.bar(200, notice_key=True)))
+        self.assertNotIn("N all", self.text(self.bar(200, notice_key=False)))
+        self.assertNotIn("N all", self.text(self.bar(200, latest=None, notice_key=True)))
+
+    def test_n_all_shows_exactly_when_the_notice_does(self):
+        for width in range(200, 7, -1):
+            text = self.text(self.bar(width, notice_key=True))
+            self.assertEqual("N all" in text, "test-fix" in text, (width, text))
+
+
+class HintVariants(unittest.TestCase):
+    def test_the_rest_hints_step_down_to_the_last_pair(self):
+        variants = core.hint_variants(core.REST_HINTS)
+        self.assertEqual(len(variants), 6)
+        self.assertEqual(variants[0], core.REST_HINTS)
+        self.assertEqual(variants[-1], (("?", "keys"),))
+        for before, after in zip(variants, variants[1:]):
+            self.assertEqual(after[-1], ("?", "keys"))
+            self.assertEqual(after[:-1], before[:len(after) - 1])
+        self.assertEqual(variants[0][-1], ("?", "keys"))
+
+    def test_the_peek_hints_keep_close_last(self):
+        a, b, c = core.PEEK_HINTS
+        self.assertEqual(core.hint_variants(core.PEEK_HINTS), ((a, b, c), (a, c), (c,)))
+
+    def test_no_pairs_gives_no_variants(self):
+        self.assertEqual(core.hint_variants(()), ())
+
+
+class HintText(unittest.TestCase):
+    def test_pairs_read_key_label_with_two_spaces_between(self):
+        self.assertEqual(core.hint_text(core.REST_HINTS), "→ open  ␣ peek  n new  ^f find  ^x close  ? keys")
+        self.assertEqual(
+            core.hint_text(core.header_hints(core.PROJECT, "/p/alpha", False)),
+            "Enter fold  n new here  ^x ^x close group  ? keys",
+        )
+
+
+class SessionHints(unittest.TestCase):
+    def text(self, s, pinned=False):
+        return core.hint_text(core.session_hints(s, pinned))
+
+    def test_the_lists_equal_the_board(self):
+        self.assertEqual(self.text(mk(state="blocked")), "→ answer  ␣ peek  ^r rename  ^x close  ? keys")
+        self.assertEqual(self.text(mk(state="working", status="")), "→ open  ␣ peek  ^x interrupt  ? keys")
+        self.assertEqual(self.text(mk(state="done")), "→ open  ␣ peek  ^t pin  ^x close  ? keys")
+        self.assertEqual(self.text(mk(state="done"), pinned=True), "→ open  ␣ peek  ^t unpin  ^x close  ? keys")
+
+    def test_idle_and_stopped_rows_get_the_rest_hints(self):
+        self.assertEqual(core.session_hints(mk(state="working", status="idle"), False), core.REST_HINTS)
+        self.assertEqual(core.session_hints(mk(state="stopped", running=False), False), core.REST_HINTS)
+
+    STATES = ("blocked", "working", "done", "stopped", "starting", "unknown")
+
+    def sessions(self):
+        for state in self.STATES:
+            for running in (True, False):
+                for status in ("", "idle", core.BACKGROUND):
+                    yield mk(state=state, running=running, status=status)
+
+    def test_interrupt_is_offered_exactly_when_interruptible(self):
+        for s in self.sessions():
+            with self.subTest(state=s.state, running=s.running, status=s.status):
+                self.assertEqual(("^x", "interrupt") in core.session_hints(s, False), core.interruptible(s))
+                self.assertEqual(core.session_inline(s) == "^x interrupt", core.interruptible(s))
+
+    def test_rename_is_offered_only_where_it_works(self):
+        for s in self.sessions():
+            with self.subTest(state=s.state, running=s.running, status=s.status):
+                if ("^r", "rename") in core.session_hints(s, False):
+                    self.assertIsNone(core.rename_blocked(False, None, s))
+
+    def test_the_inline_hint_follows_the_state(self):
+        self.assertEqual(core.session_inline(mk(state="blocked")), "→ answer")
+        self.assertEqual(core.session_inline(mk(state="done")), "→ open")
+        self.assertIsNone(core.session_inline(mk(state="working", status="idle")))
+        self.assertIsNone(core.session_inline(mk(state="stopped", running=False)))
+
+
+class HeaderHints(unittest.TestCase):
+    def test_new_here_matches_where_n_starts(self):
+        sessions = [mk(id="a", cwd="/p/alpha")]
+        for view in (core.PROJECT, core.BY_STATE):
+            for key in ("/p/alpha", core.PINNED, core.NEEDS_INPUT):
+                with self.subTest(view=view, key=key):
+                    labels = [label for _, label in core.header_hints(view, key, False)]
+                    starts_here = core.default_folder(("group", key), [], sessions, view, "/last") == key
+                    self.assertEqual("new here" in labels, starts_here)
+
+    def test_close_group_is_offered_exactly_when_it_arms(self):
+        for view in (core.PROJECT, core.BY_STATE):
+            for key in ("/p/alpha", core.PINNED, core.NEEDS_INPUT):
+                with self.subTest(view=view, key=key):
+                    group = core.Group(key, (mk(id="a"),))
+                    armed = core.press_close(None, ("group", key), group, 0.0, view)[0]
+                    self.assertEqual(
+                        ("^x ^x", "close group") in core.header_hints(view, key, False),
+                        isinstance(armed, core.GroupConfirm),
+                    )
+
+    def test_a_folded_header_offers_unfold(self):
+        self.assertEqual(core.header_inline(False), "Enter fold")
+        self.assertEqual(core.header_inline(True), "Enter unfold")
+        self.assertEqual(core.header_hints(core.PROJECT, "/p/alpha", True)[0], ("Enter", "unfold"))
+
+
+class PlaceInline(unittest.TestCase):
+    def test_it_sits_right_aligned_when_it_fits(self):
+        line = [(core.ROW_LEAD, "Needs input", "status")]
+        placed = core.place_inline(line, "→ answer", 40)
+        self.assertEqual(placed[-1], (40 - 1 - len("→ answer"), "→ answer", "hint"))
+        self.assertEqual(placed[-1][0] + core.display_width("→ answer"), 39)
+
+    def test_it_stays_out_when_the_line_comes_within_the_gap(self):
+        end = 39 - len("→ answer") - core.HINT_GAP + 1
+        line = [(core.ROW_LEAD, "x" * (end - core.ROW_LEAD), "detail")]
+        self.assertEqual(core.place_inline(line, "→ answer", 40), line)
+
+    def test_a_first_line_with_its_age_is_unchanged(self):
+        line = core.row_layout("name", "", "2m", 40)
+        self.assertEqual(core.place_inline(line, "→ open", 40), line)
+
+    def test_an_empty_line_gets_it(self):
+        self.assertEqual(core.place_inline([], "→ open", 40), [(33, "→ open", "hint")])
 
 
 class FitParts(unittest.TestCase):
