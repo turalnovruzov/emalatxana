@@ -601,7 +601,7 @@ class RowLayout(unittest.TestCase):
 
 
 class TwoLineRows(unittest.TestCase):
-    """A live row is two lines, the name over what it is doing; a stopped one is one line."""
+    """A live row is the name over its whole status, however many lines that takes; a stopped one is one line."""
 
     DETAIL = "approve Bash: touch made-by-test.txt"
 
@@ -622,8 +622,8 @@ class TwoLineRows(unittest.TestCase):
         self.assertEqual(rendered(rest[0]), "   Working · approve Bash: touch")
         self.assertEqual(rest[1], [(3, "made-by-test.txt", "detail")])
         self.assertNotIn("…", text)
+        self.assertEqual([parts[0][0] for parts in rest], [3, 3])
         for parts in rest:
-            self.assertEqual(parts[0][0] if len(parts) == 1 else 3, 3)
             self.assertLessEqual(core.display_width(rendered(parts)), 39)
 
     def test_a_wrapped_detail_loses_no_word_at_any_width(self):
@@ -631,6 +631,31 @@ class TwoLineRows(unittest.TestCase):
             _, *rest = self.lines(width, word="Needs input")
             words = " ".join(rendered(p).strip() for p in rest).split()
             self.assertEqual(words, ("Needs input · " + self.DETAIL).split(), width)
+
+    def test_no_character_of_the_status_is_lost_at_any_width_or_first_word_length(self):
+        rest_of_detail = " was edited to wrap"
+        for word in ("Needs input", "Working", "Done", "Idle"):
+            for width in range(14, 61):
+                if len(word) >= width - 1 - core.ROW_LEAD:
+                    continue
+                for k in range(1, 61):
+                    detail = "ab/" * (k // 3) + "x" * (k % 3) + rest_of_detail
+                    with self.subTest(word=word, width=width, first_word_length=k):
+                        _, *rest = self.lines(width, word=word, detail=detail)
+                        got = "".join(text for parts in rest for _, text, part in parts if part != "sep")
+                        self.assertEqual("".join(got.split()), "".join((word + detail).split()))
+
+    def test_a_first_word_too_long_beside_the_word_moves_down_whole(self):
+        detail = "src/emx/sidebar_drawing.py was edited to wrap"
+        first, *rest = self.lines(32, word="Needs input", detail=detail)[1:]
+        self.assertEqual(rendered(first).rstrip(), "   Needs input ·")
+        self.assertEqual(" ".join(rendered(p).strip() for p in rest), detail)
+
+    def test_a_row_taller_than_the_cap_ends_in_an_ellipsis_at_the_cap(self):
+        lines = core.row_lines("emx-test-a", "", "Working", "word " * 60, "1m", 20, False, 12)
+        self.assertEqual(len(lines), 12)
+        self.assertTrue(rendered(lines[-1]).endswith("…"))
+        self.assertEqual(len(core.row_lines("emx-test-a", "", "Working", "short", "1m", 20, False, 12)), 2)
 
     def test_a_narrow_pane_puts_the_detail_on_its_own_lines_under_the_word(self):
         _, word, *rest = self.lines(20, word="Needs input")
@@ -659,7 +684,7 @@ class TwoLineRows(unittest.TestCase):
 
     def test_a_pane_too_narrow_for_a_second_line_gets_one(self):
         self.assertEqual(len(self.lines(4)), 1)
-        self.assertGreaterEqual(len(self.lines(6)), 2)
+        self.assertEqual(len(self.lines(6, detail="")), 2)
 
     def test_no_line_is_wider_than_the_pane_less_one(self):
         for width in range(0, 71):

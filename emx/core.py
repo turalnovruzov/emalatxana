@@ -1305,7 +1305,9 @@ def _row(name: str, extra: str, age: str, age_x: int) -> list:
     return parts
 
 
-def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False) -> list:
+def row_lines(
+    name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False, max_lines: int = 0,
+) -> list:
     """A session row as lines of (x, text, part).
 
     The first line is the name (and a worktree's branch) with the age at the
@@ -1313,12 +1315,20 @@ def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width:
     `word` ("status"), " · " ("sep") and the `detail`, word-wrapped by display
     width onto as many lines as it needs, every one from ROW_LEAD; nothing is
     cut. A stopped row, or one with neither, stays the one line.
+
+    A row taller than `max_lines` (when given) can never be shown whole, so it
+    ends there with the last line cut short by an ellipsis.
     """
     first = row_layout(name, worktree, age, width)
     room = width - 1 - ROW_LEAD
     if stopped or not (word or detail) or room < 2:
         return [first]
-    return [first] + _status_lines(word, detail, room)
+    lines = [first] + _status_lines(word, detail, room)
+    if 1 < max_lines < len(lines):
+        lines = lines[:max_lines]
+        x, text, part = lines[-1][-1]
+        lines[-1][-1] = (x, fit(text + "…", display_width(text)), part)
+    return lines
 
 
 def _status_lines(word: str, detail: str, room: int) -> list:
@@ -1330,11 +1340,13 @@ def _status_lines(word: str, detail: str, room: int) -> list:
         return lines + ([[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)] if detail else [])
     if lead + min(display_width(detail), DETAIL_MIN) > room:
         return [[(ROW_LEAD, word, "status")]] + [[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)]
-    wrapped = wrap_words(" " * lead + detail, room)
-    head = wrapped[0][lead:]
+    detail = detail.lstrip()
     first = [(ROW_LEAD, word, "status"), (ROW_LEAD + display_width(word), " · ", "sep")]
-    if head:
-        first.append((ROW_LEAD + lead, head, "detail"))
+    if display_width(detail.split(None, 1)[0]) > room - lead:
+        return [first] + [[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)]
+    # Placeholder dots, not spaces: textwrap drops leading spaces when the first word crowds them.
+    wrapped = wrap_words("." * lead + detail, room)
+    first.append((ROW_LEAD + lead, wrapped[0][lead:], "detail"))
     return [first] + [[(ROW_LEAD, text, "detail")] for text in wrapped[1:]]
 
 
