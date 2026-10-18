@@ -334,7 +334,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 1. **Rule**: anything shown in a tmux format string (the bar) is built by `sidebar.bar_format`, which doubles every `#` and `%` in the text; styles are only emx's own `#[...]` tags that `bar_format` adds.
 2. **Why**: the text is untrusted (session, folder and tool names, Haiku output). In a tmux format `#(...)` runs a shell command, `#[...]` restyles, and `%` goes through strftime.
-3. **Minimal example**: ``sidebar.bar_format([(session_name, "dim", False)])``
+3. **Minimal example**: ``sidebar.bar_format([(session_name, "muted", False)])``
 4. **Gotcha**: escape after cutting with `fit()`, never before, or a cut can split a doubled `##` and leave a lone `#`. Set the option on the session (`-t =emx:`), not globally.
 
 ## The contract for this file
