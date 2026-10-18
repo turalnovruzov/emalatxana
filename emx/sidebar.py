@@ -55,20 +55,6 @@ UPDATE_MIN_SECONDS = 5
 RELAUNCH_RETRY_SECONDS = 300
 ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
 ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
-FOOTERS = (
-    "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^r rename  ^x close  ^s view  ? keys",
-    "→ open ← back ␣ peek n new ^f find ^t pin ^r rename ^x close ^s view ? keys",
-    "→ open  ← back  ␣ peek  n new  ^f find  ^t pin  ^x close  ^s view  ? keys",
-    "→ open ← back ␣ peek n new ^f find ^t pin ^x close ^s view ? keys",
-    "→ open ← back n new ^f find ^t pin ^x close ^s view ? keys",
-    "→ open ← back ␣ peek n new ^x close ^s view ? keys",
-    "→ open  ← back  n new  ^x close  ^s view  ? keys",
-    "→ open ← back n new ^x close ^s view ? keys",
-    "→ open ← back n new ^x close ? keys",
-    "→ open ← back ? keys",
-    "→ open ? keys",
-    "? keys",
-)
 HELP = (
     ("→ ↵", "open the session and go to it"),
     ("←", "back here, from an empty prompt"),
@@ -103,7 +89,7 @@ CTRL_F = "\x06"
 CTRL_T = "\x14"
 CTRL_R = "\x12"
 CTRL_U = "\x15"
-CONFIRM_FOOTER = "ctrl+x to confirm"
+CONFIRM_FOOTER = "^x to confirm"
 RENAME_FOOTER = "tab suggest · enter save · esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
@@ -118,6 +104,7 @@ PEEK_NO_ROOM = "Too short to peek."
 FORGET_TRIES = 3
 FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
+REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
@@ -141,6 +128,35 @@ CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "d
 
 def session_tone(s) -> str:
     return "idle" if core.idle(s) else CATEGORY_TONE[core.category(s)]
+
+
+def bar_format(parts: list) -> str:
+    """The bar's tmux status-format: every `#` and `%` in a part is doubled, so text from a session can never run a command, style the bar or be read as a time."""
+    out = []
+    for text, tone, bold in parts:
+        colour = TONES[tone][0]
+        fg = "default" if colour < 0 else f"colour{colour}"
+        out.append(f"#[fg={fg},{'bold' if bold else 'nobold'}]" + text.replace("#", "##").replace("%", "%%"))
+    return "".join(out) + "#[default]"
+
+
+class StatusBar:
+    """Writes the bar into the tmux status line, only when its text changes, and again after `REPUSH_SECONDS` because sourcing the config blanks the line."""
+
+    def __init__(self, tmux):
+        self.tmux = tmux
+        self.last = None
+        self.at = 0.0
+
+    def push(self, text: str) -> None:
+        now = time.monotonic()
+        if self.tmux is None or (text == self.last and now - self.at < REPUSH_SECONDS):
+            return
+        try:
+            self.tmux.set_bar(text)
+        except TmuxError:
+            return
+        self.last, self.at = text, now
 
 
 def fetch_sessions(engine: Engine) -> tuple:
@@ -1732,6 +1748,8 @@ class App:
         self.relay_host = None
         self.legacy_cleared = False
         self.ground_painted = False
+        self.window_width = 0
+        self.bar = StatusBar(tmux)
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
         self.prefs = core.load_prefs(self.prefs_file)
@@ -1917,6 +1935,7 @@ class App:
                 self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
+                self.window_width = sidebar.window_width
                 self.paint_ground(sidebar)
                 self.take_focus(sidebar)
                 followed = core.follow_zoom(self.prefs, sidebar.zoomed)
@@ -2834,7 +2853,7 @@ class App:
                 pass
 
     def bottom_lines(self, width: int, height: int | None = None) -> list:
-        """(text, attr) lines for the area under the list: notice, prompt, the notifications strip, footer. With the pane's `height`, the picker's rows fit under the panel's top two lines."""
+        """(text, attr) lines for the area under the list: list error, notice, and the prompt, rename or find lines with their hints. With the pane's `height`, the picker's rows fit above the bottom."""
         lines = []
         if self.list_error:
             lines += [(t, self.color("error")) for t in core.wrap_words(f"! {self.list_error}", width)[:3]]
@@ -2847,8 +2866,7 @@ class App:
                 shown = shown[:6]
             lines += [(t, attr) for t in shown]
         if self.prompt is not None:
-            # The prompt's own hint line stands in for the footer, whose keys don't apply while typing.
-            room = None if height is None else height - 2 - len(lines)
+            room = None if height is None else height - len(lines)
             return lines + self.prompt_lines(width, room)
         if self.rename_edit is not None:
             hint = self.rename_edit["hint"] or (NAME_ASKING if self.rename_edit.get("asking") else "")
@@ -2858,14 +2876,31 @@ class App:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
-        if self.history_view is not None:
-            return lines + [(t, curses.A_DIM) for t in core.wrap_words(HISTORY_HINT, width)[:2]]
-        footers = (CONFIRM_FOOTER,) if self.confirm is not None else PEEK_FOOTERS if self.peeking else FOOTERS
-        footer = next((f for f in footers if core.display_width(f) <= width - 1), footers[-1])
-        shown = core.history_strip(self.history, time.monotonic(), width, core.history_room(height, len(lines) + 1))
-        lines += [(t, curses.A_BOLD if i == 0 else curses.A_DIM if read else 0) for i, (t, read) in enumerate(shown)]
-        lines.append((footer, curses.A_DIM))
         return lines
+
+    def bar_hints(self) -> tuple:
+        """The key hints the bar offers now, longest first; none while typing, when the panel's own prompt carries them."""
+        if self.confirm is not None:
+            return (CONFIRM_FOOTER,)
+        if self.peeking:
+            return PEEK_FOOTERS
+        if self.history_view is not None:
+            return (HISTORY_HINT, "Esc back")
+        if self.help:
+            return ("? close",)
+        if self.prompt is not None or self.find is not None or self.rename_edit is not None:
+            return ()
+        return ("N notifications  ? keys", "? keys")
+
+    def update_bar(self) -> None:
+        if not self.window_width:
+            return
+        tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
+        parts = core.bar_parts(
+            __version__, core.bar_counts(self.sessions), self.history[0] if self.history else None,
+            time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded,
+        )
+        self.bar.push(bar_format(parts))
 
     def prompt_lines(self, width: int, room: int | None = None) -> list:
         """The prompt's lines; the picker's suggestions get only what `room` leaves after the title, input and hints."""
@@ -2915,10 +2950,8 @@ class App:
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
-        self.draw_top_line(w)
-        self.put(1, 0, "─" * w, self.palette.attr("muted"))
         bottom = self.bottom_lines(max(1, w - 1), h)
-        list_top, list_bottom = 2, h - len(bottom)
+        list_top, list_bottom = 0, h - len(bottom)
         if self.history_view is not None:
             self.draw_history(list_top, list_bottom, w)
         elif self.help:
@@ -2970,20 +3003,6 @@ class App:
                 self.put(y + 1 + i, 2, lines[i][0], lines[i][1])
         self.put(bottom - 1, 0, "╰" + "─" * max(0, box - 2) + "╯", muted)
         return rows
-
-    def draw_top_line(self, width: int) -> None:
-        style = curses.A_BOLD if core.title_style(self.focused is not False) == "bold" else curses.A_DIM
-        label = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
-        warn = label in (core.BLOCKED_TAG, core.UNAVAILABLE_TAG)
-        logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM,
-                "mode": self.palette.attr("error") if warn else curses.A_DIM,
-                "remote": self.palette.attr("remote") | curses.A_BOLD}
-        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, label, self.relay_host):
-            if tag in logo:
-                attr = logo[tag]
-            else:
-                attr = self.palette.attr("muted" if tag in (None, core.STOPPED) else CATEGORY_TONE[tag]) | style
-            self.put(0, 1 + x, text, attr)
 
     def draw_history(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, core.HISTORY_TITLE, curses.A_BOLD)
@@ -3267,6 +3286,7 @@ class App:
                 # Lines under the list squeezed the box to nothing; the pane is not too short, so no notice says it is.
                 self.peeking = False
             self.draw()
+            self.update_bar()
         except Exception as exc:
             self.say(f"emx error: {core.error_line(exc)}", error=True)
 

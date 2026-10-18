@@ -104,7 +104,6 @@ NEEDS_INPUT, WORKING, DONE, STOPPED = "needs_input", "working", "done", "stopped
 CATEGORIES = (NEEDS_INPUT, WORKING, DONE, STOPPED)
 CATEGORY_LABELS = {NEEDS_INPUT: "Needs input", WORKING: "Working", DONE: "Done", STOPPED: "Stopped"}
 SUMMARY_WORDS = {NEEDS_INPUT: "waiting", WORKING: "working", DONE: "done", STOPPED: "stopped"}
-SUMMARY_SHORT = {NEEDS_INPUT: "wait", WORKING: "work", DONE: "done", STOPPED: "stop"}
 _STATE_CATEGORY = {"blocked": NEEDS_INPUT, "working": WORKING, "done": DONE, "starting": NEEDS_INPUT}
 WORKING_FRAMES = "·✢✳✶✻✶✳✢"
 GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
@@ -943,21 +942,11 @@ def cursor_group(cursor, groups) -> str | None:
     return next((g.key for g in groups if any(s.id == cursor[1] for s in g.sessions)), None)
 
 
-def summary(sessions, words: Mapping = SUMMARY_WORDS) -> list:
-    """(text, category) pairs for the line at the top of the panel, nonzero counts only."""
-    counts = {c: 0 for c in CATEGORIES}
-    for s in sessions:
-        counts[category(s)] += 1
-    return [(f"{counts[c]} {words[c]}", c) for c in CATEGORIES if counts[c]]
-
-
 LOGO = "⚒"
-NAME = "emalatxana"
 VOICE_TAG = "voice"
 BLOCKED_TAG = "notifications blocked"
 UNAVAILABLE_TAG = "notifications unavailable"
 HELPER_STATES = (HELPER_OK, HELPER_PENDING, HELPER_BLOCKED, HELPER_UNAVAILABLE) = ("ok", "pending", "blocked", "unavailable")
-TOP_GAP = 2
 REMOTE_MARK = "⇄"
 REMOTE_HOST_MAX = 20
 
@@ -969,98 +958,6 @@ def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
     if relayed:
         return ""
     return {HELPER_BLOCKED: BLOCKED_TAG, HELPER_UNAVAILABLE: UNAVAILABLE_TAG}.get(helper, "")
-
-
-def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str | None = None, remote: str | None = None) -> list:
-    """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
-
-    Room runs out in this order: the counts switch to short words, the name
-    goes, then the counts are cut; when not even one cut count fits beside
-    the logo and the version, the counts go and the version stays. Only when
-    the version itself does not fit does it go, and a cut count takes its place.
-    A `tag` (see `mode_tag`) follows the version, and is kept ahead of the counts.
-
-    With `remote` (the host a laptop is connected from), a mark "⇄ host"
-    follows the version, ahead of the tag. Room then runs out in this
-    order: short words, the name, the counts cut, the tag, the counts, the
-    host cut with an ellipsis, the mark, the version.
-    """
-    if width <= 0:
-        return []
-    if remote:
-        return _remote_top_line(sessions, version, width, loaded, tag, remote)
-    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")]
-    nameless = [(LOGO, "logo"), (version, "version")]
-    bare = [(LOGO, "logo")]
-    tagged = [(LOGO, "logo"), (NAME, "name"), (version, "version"), (tag, "mode")]
-    tagged_nameless = [(LOGO, "logo"), (version, "version"), (tag, "mode")]
-    if not loaded:
-        counts = [[("…", None)]]
-    elif sessions:
-        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
-    else:
-        counts = [[("no sessions", None)]]
-    shown = [(whole, counts[0])] + [(logo, counts[-1]) for logo in (whole, nameless)]
-    if tag:
-        shown = [(tagged, counts[0])] + [(logo, counts[-1]) for logo in (tagged, tagged_nameless)]
-    for logo, parts in shown:
-        logo_width = display_width(" ".join(t for t, _ in logo))
-        parts_width = display_width(" · ".join(t for t, _ in parts))
-        if logo_width + TOP_GAP + parts_width <= width:
-            return _logo(logo) + [(width - parts_width + x, t, tag) for x, t, tag in fit_parts(parts, parts_width)]
-    # The tag is kept over the counts, which are cut to make room; only when even one cut count won't fit beside the tag does it go.
-    variants = (tagged_nameless, nameless) if tag else (nameless,)
-    kept = next((v for v in variants if display_width(" ".join(t for t, _ in v)) + TOP_GAP + 1 <= width), bare)
-    if kept is bare:
-        fits = next((v for v in variants if display_width(" ".join(t for t, _ in v)) <= width), None)
-        if fits:
-            return _logo(fits)
-    start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
-    return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
-
-
-def _remote_top_line(sessions, version: str, width: int, loaded: bool, tag: str | None, remote: str) -> list:
-    mark = (f"{REMOTE_MARK} {fit(remote, REMOTE_HOST_MAX)}", "remote")
-    tagged_tail = [mark] + ([(tag, "mode")] if tag else [])
-    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")] + tagged_tail
-    nameless = [(LOGO, "logo"), (version, "version")] + tagged_tail
-    marked = [(LOGO, "logo"), (version, "version"), mark]
-    if not loaded:
-        counts = [[("…", None)]]
-    elif sessions:
-        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
-    else:
-        counts = [[("no sessions", None)]]
-
-    def head_width(head: list) -> int:
-        return display_width(" ".join(t for t, _ in head))
-
-    for head, parts in ((whole, counts[0]), (whole, counts[-1]), (nameless, counts[-1])):
-        parts_width = display_width(" · ".join(t for t, _ in parts))
-        if head_width(head) + TOP_GAP + parts_width <= width:
-            return _logo(head) + [(width - parts_width + x, t, c) for x, t, c in fit_parts(parts, parts_width)]
-    variants = (nameless, marked) if tag else (marked,)
-    for head in variants:
-        if head_width(head) + TOP_GAP + 1 <= width:
-            start = head_width(head) + TOP_GAP
-            return _logo(head) + [(start + x, t, c) for x, t, c in fit_parts(counts[-1], width - start)]
-    for head in variants:
-        if head_width(head) <= width:
-            return _logo(head)
-    prefix = display_width(f"{LOGO} {version} {REMOTE_MARK} ")
-    room = min(width - prefix, REMOTE_HOST_MAX)
-    if room >= 2:
-        cut = [(LOGO, "logo"), (version, "version"), (f"{REMOTE_MARK} {fit(remote, room)}", "remote")]
-        return _logo(cut)
-    return top_line(sessions, version, width, loaded)
-
-
-def _logo(parts: list) -> list:
-    placed, x = [], 0
-    for text, tag in parts:
-        placed.append((x, text, tag))
-        x += display_width(text) + 1
-    return placed
 
 
 BAR_NAME = "emx"
@@ -1136,7 +1033,7 @@ def _bar_count_parts(counts: list, loaded: bool) -> list:
 
 
 def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width):
-    left = [(" ", "plain", False), ("⚒", "copper", False)]
+    left = [(" ", "plain", False), (LOGO, "copper", False)]
     if name:
         left.append((f" {BAR_NAME}", "plain", True))
     if version:
@@ -1179,7 +1076,7 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
 
 
 def _bar_cut_counts(count_parts: list, width: int) -> list:
-    left = [(" ", "plain", False), ("⚒", "copper", False)]
+    left = [(" ", "plain", False), (LOGO, "copper", False)]
     room = width - 2 - 1 - 1
     kept, used = [], 0
     for text, tone, bold in count_parts:
@@ -2546,11 +2443,6 @@ def selection_bar(selected: bool, focused: bool) -> str | None:
     return "focused" if focused else "unfocused"
 
 
-def title_style(focused: bool) -> str:
-    """The panel's top line is bold while the panel has focus and dim otherwise."""
-    return "bold" if focused else "dim"
-
-
 def notice_expired(until: float | None, now: float) -> bool:
     """Whether a notice shown only for a while (`until` is when it ends, None for one that stays) is due to go."""
     return until is not None and now >= until
@@ -3274,12 +3166,12 @@ def cut_lines(lines: list, rows: int) -> list:
 
 
 def peek_room(height: int, width: int, bottom_count: int) -> int:
-    """Rows the peek box and the list share in a pane `height` by `width`, under the panel's two top lines and above its `bottom_count` lines; 0 when the box is too narrow to hold text."""
-    return max(0, height - 2 - bottom_count) if width - 5 > 0 else 0
+    """Rows the peek box and the list share in a pane `height` by `width`, above its `bottom_count` lines; 0 when the box is too narrow to hold text."""
+    return max(0, height - bottom_count) if width - 5 > 0 else 0
 
 
 def peek_height(available: int, body: int, cursor_rows: int = 1) -> int:
-    """Rows the peek box takes from the `available` rows under the panel's top lines: two borders, its title and at most PEEK_BODY_LINES of body.
+    """Rows the peek box takes from the `available` rows above the panel's bottom lines: two borders, its title and at most PEEK_BODY_LINES of body.
 
     It leaves the list at least PEEK_MIN_LIST_ROWS and at least the
     `cursor_rows` the cursor's row takes, so that row stays whole in view;
@@ -3660,9 +3552,7 @@ def hush_due(seen: str | None, value: str) -> tuple:
     return value, value != seen
 
 
-HISTORY_SHOWN = 3
 HISTORY_KEPT = 20
-HISTORY_MIN_LIST_ROWS = 6
 HISTORY_TITLE = "Notifications"
 HISTORY_MARKS = {NOTICE_NEEDS: "●", NOTICE_DONE: "✓"}
 HISTORY_BODY_LINES = 2
@@ -3699,33 +3589,6 @@ def history_prune(history: list, live_ids, misses: dict) -> tuple:
     """(history, misses) with the entries of sessions gone from `STALE_AFTER_MISSES` listings in a row dropped, judged like a viewer's."""
     misses, gone = stale_viewers([e.id for e in history], live_ids, misses)
     return [e for e in history if e.id not in gone], misses
-
-
-def history_room(height: int | None, used: int) -> int:
-    """The rows the strip may take on a pane of `height` that already has `used` other bottom rows (footer included), leaving the session list `HISTORY_MIN_LIST_ROWS` rows and the panel's two top lines."""
-    room = HISTORY_SHOWN + 2
-    if height is None:
-        return room
-    return max(0, min(room, height - 2 - used - HISTORY_MIN_LIST_ROWS))
-
-
-def history_strip(history: list, now: float, width: int, room: int) -> list:
-    """(text, read) rows of the strip in at most `room` rows: the title with the unread count, one row per entry cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest shows alone."""
-    if not history or room < 2:
-        return []
-    unread = history_unread(history)
-    title = f"{HISTORY_TITLE} ({unread})" if unread else HISTORY_TITLE
-    cap = min(HISTORY_SHOWN, room - 1)
-    if len(history) <= cap:
-        shown = history
-    elif room == 2:
-        shown = history[:1]
-    else:
-        shown = history[:min(cap, room - 2)]
-    rows = [(title, False)] + [(fit(f"{format_age(now - e.at)} {e.text}", width), e.read) for e in shown]
-    if room > 2 and len(shown) < len(history):
-        rows.append((fit(f"… {len(history) - len(shown)} more", width), False))
-    return rows
 
 
 def history_rows(history: list, now: float, width: int) -> list:

@@ -278,7 +278,25 @@ class ClientTmux:
         return self.state
 
 
+class FakeBar:
+    def __init__(self, tmux):
+        self.pushed = []
+
+    def push(self, text):
+        self.pushed.append(text)
+
+
+def plain_bar(text):
+    return re.sub(r"#\[[^\]]*\]", "", text).replace("##", "#").replace("%%", "%")
+
+
 class AppCase(unittest.TestCase):
+    def bar(self, width=100):
+        """The bar's text as the panel pushes it for a window `width` wide, without its style tags."""
+        self.app.window_width = width
+        self.app.update_bar()
+        return plain_bar(self.app.bar.pushed[-1])
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -286,6 +304,7 @@ class AppCase(unittest.TestCase):
             mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp.name, "XDG_STATE_HOME": tmp.name, "TMUX_PANE": "%1",
                                          "EMX_NOTIFY_HOME": os.path.join(tmp.name, "notify")}),
             mock.patch.object(sidebar, "Palette", FakePalette),
+            mock.patch.object(sidebar, "StatusBar", FakeBar),
             # No test may build the helper or post a real notification.
             mock.patch.object(sidebar, "Notifier", FakeNotifier),
             mock.patch.object(sidebar.curses, "doupdate", lambda: None),
@@ -774,11 +793,10 @@ class ArrowKeys(AppCase):
         self.assertEqual(self.opened, [])
         self.assertNotIn("/p/alpha", self.app.collapsed())
 
-    def test_footer_and_help_show_the_arrows(self):
+    def test_help_shows_the_arrows(self):
         help_keys = " ".join(key for key, _ in sidebar.HELP)
         for arrow in ("←", "→"):
             with self.subTest(arrow=arrow):
-                self.assertIn(arrow, sidebar.FOOTERS[0])
                 self.assertIn(arrow, help_keys)
 
 
@@ -1081,7 +1099,9 @@ class CloseSession(AppCase):
         self.press(sidebar.CTRL_X)
         self.assertEqual(self.app.confirm.id, "a")
         self.assertEqual(self.app.interrupters, {})
-        self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
+        self.assertEqual(self.app.bar_hints(), (sidebar.CONFIRM_FOOTER,))
+        self.assertEqual(self.app.bottom_lines(39), [])
+        self.assertIn("^x to confirm", self.bar())
         self.assertEqual(self.log, [])
         self.press(sidebar.CTRL_X)
         self.assertEqual(self.app.notice, "Closing emx-test-a…")
@@ -1355,15 +1375,13 @@ class CloseSession(AppCase):
         self.settle()
         self.assertEqual(self.log, [("swap", "%4", "%2"), ("kill", "%2"), ("forget", "a"), ("kill", "%3"), ("forget", "b")])
 
-    def test_a_footer_and_the_help_show_ctrl_x(self):
-        self.assertTrue(any("^x" in footer for footer in sidebar.FOOTERS))
+    def test_the_help_shows_ctrl_x(self):
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
 
     def test_help_names_interrupt_and_close(self):
         self.assertEqual(dict(sidebar.HELP)["^x"], "interrupt a working session; twice closes it")
         at = [key for key, _ in sidebar.HELP].index("^x")
         self.assertEqual(sidebar.HELP[at + 1], ("", "on a project header, twice closes the group"))
-        self.assertIn("^x close", sidebar.FOOTERS[0])
         scr = RecordingScr(30, 60)
         self.app.scr = scr
         self.press("?")
@@ -1372,9 +1390,9 @@ class CloseSession(AppCase):
         self.assertIn("interrupt a working session; twice closes it", shown)
         self.assertIn("on a project header, twice closes the group", shown)
 
-    def test_the_help_and_footers_name_no_viewer_and_no_r_key(self):
+    def test_the_help_and_bar_hints_name_no_viewer_and_no_r_key(self):
         self.assertNotIn("r", [key for key, _ in sidebar.HELP])
-        for text in [*sidebar.FOOTERS, *(f"{key} {what}" for key, what in sidebar.HELP)]:
+        for text in [*self.app.bar_hints(), *(f"{key} {what}" for key, what in sidebar.HELP)]:
             with self.subTest(text=text):
                 self.assertNotIn("viewer", text)
                 self.assertNotIn("stop, then remove", text)
@@ -1458,7 +1476,7 @@ class NewSession(AppCase):
         drawn = [text for text, _ in self.app.bottom_lines(39)]
         self.assertIn("New session in /p/alpha/sub", drawn)
         self.assertIn("Tab folder", drawn[-1])
-        self.assertFalse(any(line in sidebar.FOOTERS for line in drawn), drawn)
+        self.assertEqual(self.app.bar_hints(), ())
 
     def test_a_by_state_header_uses_the_last_folder_else_opens_the_picker(self):
         self.app.toggle_view()
@@ -1733,8 +1751,8 @@ class NewSession(AppCase):
             self.keys(curses.KEY_DOWN)
         picked = self.app.prompt["picked"]
         self.assertEqual(picked, "/h/me/dir3")
-        drawn = [text for text, _ in self.app.bottom_lines(39, 9)]
-        self.assertLessEqual(len(drawn), 9 - 2)
+        drawn = [text for text, _ in self.app.bottom_lines(39, 7)]
+        self.assertLessEqual(len(drawn), 7)
         self.assertEqual(drawn[0], "New session · pick a folder:")
         self.assertTrue(drawn[1].startswith("> ~/"), drawn)
         self.assertTrue(any("more" in line for line in drawn), drawn)
@@ -1896,12 +1914,12 @@ class FindSessions(AppCase):
         self.keys(*["\x7f"] * 4, *"docs")
         self.assertEqual(self.shown(), ["c"])
 
-    def test_slash_opens_find_too_and_its_line_replaces_the_footer(self):
+    def test_slash_opens_find_too_and_its_hint_stays_in_the_panel_while_the_bar_has_none(self):
         self.keys("/", *"alp")
         texts = [t for t, _ in self.app.bottom_lines(39)]
         self.assertIn("> alp▏", texts)
         self.assertIn(sidebar.FIND_HINT, texts)
-        self.assertFalse(any(f in texts for f in sidebar.FOOTERS))
+        self.assertEqual(self.app.bar_hints(), ())
 
     def test_esc_clears_the_filter(self):
         self.keys(sidebar.CTRL_F, *"beta", "\x1b")
@@ -2573,9 +2591,7 @@ class RenameSession(AppCase):
         self.settle()
         self.assertIn("doesn't show a new name yet", self.app.notice)
 
-    def test_the_footer_and_help_offer_rename(self):
-        self.assertIn("^r rename", sidebar.FOOTERS[0])
-        self.assertIn("␣ peek", sidebar.FOOTERS[0])
+    def test_the_help_offers_rename(self):
         self.assertIn("/rename", dict(sidebar.HELP)["^r"])
 
 
@@ -3787,7 +3803,7 @@ class Peek(AppCase):
         self.assertTrue(self.app.peeking)
         self.app.draw()
         text = "\n".join(self.screen())
-        for want in ("╭─ emx-test-a", "Needs input · for", "Run the tests", "$ npm test", "permission prompt", "╰", "␣ Esc close"):
+        for want in ("╭─ emx-test-a", "Needs input · for", "Run the tests", "$ npm test", "permission prompt", "╰"):
             self.assertIn(want, text)
         self.assertTrue(any(line.startswith(" ✻ emx-test-a") for line in self.screen()))
 
@@ -3839,7 +3855,7 @@ class Peek(AppCase):
 
     def test_space_in_a_pane_too_short_for_the_box_says_so_instead_of_peeking(self):
         self.app.cursor = ("session", "a")
-        self.scr.size = (8, 40)
+        self.scr.size = (5, 40)
         self.app.handle_key(" ")
         self.assertFalse(self.app.peeking)
         self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
@@ -3851,7 +3867,7 @@ class Peek(AppCase):
     def test_shrinking_the_pane_closes_the_peek_with_the_notice(self):
         self.app.cursor = ("session", "a")
         self.app.handle_key(" ")
-        self.scr.size = (8, 40)
+        self.scr.size = (5, 40)
         self.app.handle_key(curses.KEY_RESIZE)
         self.assertFalse(self.app.peeking)
         self.assertEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
@@ -3863,7 +3879,7 @@ class Peek(AppCase):
 
     def test_an_error_line_draws_the_peek_shorter_and_leaves_it_open(self):
         self.app.cursor = ("session", "a")
-        self.scr.size = (11, 40)
+        self.scr.size = (8, 40)
         self.app.handle_key(" ")
         self.app.draw()
         before = self.box_rows()
@@ -3874,7 +3890,7 @@ class Peek(AppCase):
 
     def test_an_error_squeezing_the_box_to_nothing_closes_it_without_calling_the_pane_short(self):
         self.app.cursor = ("session", "a")
-        self.scr.size = (11, 40)
+        self.scr.size = (8, 40)
         self.app.handle_key(" ")
         self.app.list_error = "listing broken " * 6
         self.app.refresh()
@@ -3882,7 +3898,7 @@ class Peek(AppCase):
         self.assertNotEqual(self.app.notice, sidebar.PEEK_NO_ROOM)
         screen = self.screen()
         self.assertFalse(any(line.startswith("╭") for line in screen))
-        self.assertFalse(any("␣ Esc close" in line for line in screen))
+        self.assertNotIn("␣ Esc close", self.bar())
 
     def test_a_long_body_is_wrapped_once_per_change_not_per_draw(self):
         self.app.cursor = ("session", "a")
@@ -3895,9 +3911,11 @@ class Peek(AppCase):
             self.app.draw()
             self.assertEqual(wraps.call_count, 2)
 
-    def test_the_footer_and_help_mention_it(self):
-        self.assertIn("␣ peek", sidebar.FOOTERS[0])
+    def test_the_help_mentions_it_and_the_bar_offers_its_keys_while_it_is_open(self):
         self.assertIn("space", dict(sidebar.HELP))
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.assertIn("␣ Esc close", self.bar())
 
 
 LONG_WAIT = "approve Bash: python3 -m unittest discover -s tests -v"
@@ -4116,7 +4134,7 @@ class WhatsNew(AppCase):
     def test_the_shipped_1_0_0_note_is_whole_or_says_what_is_cut(self):
         log = cli.read_changelog()
         app = self.start("0.9.0", version="1.0.0", log=log)
-        note = [t for t, _ in app.bottom_lines(39, 40)][:-1]
+        note = [t for t, _ in app.bottom_lines(39, 40)]
         self.assertLessEqual(len(note), max(6, 40 // 2))
         joined = " ".join(note)
         whole = all(line in joined for line in core.changelog_entry(log, "1.0.0"))
@@ -4497,38 +4515,121 @@ class PanelGround(AppCase):
         self.assertEqual([c for c in calls if c[0] == "set_pane_option"], [("set_pane_option", ("%1", "window-style", "bg=colour235"))])
 
 
-class TopLine(AppCase):
-    def drawn_top_line(self, focused, host=None):
-        scr = AttrScr()
-        app = sidebar.App(scr, tmux=None, claude="claude")
-        app.palette = TonePalette()
-        app.focused = focused
-        app.relay_host = host
-        app.draw_top_line(38)
-        return {text: attr for y, x, text, attr in scr.drawn if y == 0}
+class BarFormat(unittest.TestCase):
+    def test_hash_and_percent_in_text_are_doubled_so_nothing_runs_or_styles(self):
+        for text, want in (
+            ("tests #12 failed", "tests ##12 failed"),
+            ("#(touch x)", "##(touch x)"),
+            ("#[fg=red]", "##[fg=red]"),
+            ("50% %H", "50%% %%H"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(sidebar.bar_format([(text, "plain", False)]), f"#[fg=default,nobold]{want}#[default]")
 
-    def test_the_logo_is_copper_the_name_bold_the_version_dim(self):
-        drawn = self.drawn_top_line(True)
-        self.assertEqual(drawn["⚒"], TonePalette().attr("copper"))
-        self.assertEqual(drawn["emalatxana"], curses.A_BOLD)
-        self.assertEqual(drawn[sidebar.__version__], curses.A_DIM)
+    def test_tones_become_their_256_colours_and_bold_is_explicit(self):
+        out = sidebar.bar_format([("✻1", "needs", True), ("✻1", "idle", True), ("⇄ host", "remote", True), ("x", "muted", False)])
+        self.assertIn("#[fg=colour221,bold]✻1", out)
+        self.assertIn("#[fg=colour103,bold]✻1", out)
+        self.assertIn("#[fg=colour141,bold]⇄ host", out)
+        self.assertIn("#[fg=colour245,nobold]x", out)
+        self.assertTrue(out.endswith("#[default]"))
 
-    def test_the_name_dims_when_the_panel_loses_focus(self):
-        self.assertEqual(self.drawn_top_line(False)["emalatxana"], curses.A_DIM)
 
-    def test_the_remote_mark_is_bold_violet_focused_or_not(self):
-        for focused in (True, False):
-            with self.subTest(focused=focused):
-                drawn = self.drawn_top_line(focused, "myserver")
-                self.assertEqual(drawn["⇄ myserver"], TonePalette().attr("remote") | curses.A_BOLD)
+class StatusBarPush(unittest.TestCase):
+    def test_the_same_text_twice_is_one_call(self):
+        tmux = mock.Mock()
+        bar = sidebar.StatusBar(tmux)
+        bar.push("a")
+        bar.push("a")
+        bar.push("b")
+        self.assertEqual([c.args for c in tmux.set_bar.call_args_list], [("a",), ("b",)])
 
-    def test_the_top_line_draws_the_logo_then_the_counts(self):
-        scr = RecordingScr()
-        app = sidebar.App(scr, tmux=None, claude="claude")
-        app.housekeep = lambda fresh_list: None
-        app.poller.result = ([session("a", "/p/alpha")], None)
-        app.refresh()
-        self.assertEqual(scr.cells[0], f" ⚒ emalatxana {sidebar.__version__}".ljust(30) + "1 working")
+    def test_the_same_text_is_pushed_again_after_the_repush_interval(self):
+        tmux = mock.Mock()
+        bar = sidebar.StatusBar(tmux)
+        with mock.patch.object(sidebar.time, "monotonic", side_effect=[100.0, 100.0 + sidebar.REPUSH_SECONDS + 1]):
+            bar.push("a")
+            bar.push("a")
+        self.assertEqual(tmux.set_bar.call_count, 2)
+
+    def test_a_tmux_error_is_swallowed_and_the_text_is_tried_again(self):
+        tmux = mock.Mock()
+        tmux.set_bar.side_effect = [sidebar.TmuxError("gone"), None]
+        bar = sidebar.StatusBar(tmux)
+        bar.push("a")
+        bar.push("a")
+        self.assertEqual(tmux.set_bar.call_count, 2)
+
+    def test_no_tmux_pushes_nothing(self):
+        sidebar.StatusBar(None).push("a")
+
+
+class AppBar(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.poll(blocked("a", "/p/alpha"), idle_row("b", "/p/alpha"))
+        self.app.refresh()
+
+    def test_it_holds_the_mark_name_version_and_a_count_per_state(self):
+        text = self.bar()
+        self.assertIn("⚒", text)
+        self.assertIn(f" emx {sidebar.__version__}", text)
+        self.assertEqual(text.count("✻1"), 2)
+        self.assertIn("N notifications", text)
+        self.assertEqual(core.display_width(text), 100)
+
+    def test_refresh_pushes_it_once_the_width_is_known(self):
+        self.assertEqual(self.app.bar.pushed, [])
+        self.app.window_width = 100
+        self.app.refresh()
+        self.assertEqual(len(self.app.bar.pushed), 1)
+        self.assertIn("⚒", plain_bar(self.app.bar.pushed[0]))
+
+    def test_the_idle_count_is_lavender(self):
+        self.app.window_width = 100
+        self.app.update_bar()
+        self.assertIn("#[fg=colour103,bold]✻1", self.app.bar.pushed[-1])
+
+    def test_a_remote_host_shows_after_the_version(self):
+        self.app.relay_host = "myserver"
+        self.assertIn(f"{sidebar.__version__} ⇄ myserver", self.bar())
+
+    def test_voice_mode_shows_the_word(self):
+        self.app.handle_key("m")
+        self.assertIn("voice", self.bar())
+
+    def test_the_hints_follow_the_context(self):
+        self.assertIn("N notifications  ? keys", self.bar())
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.assertIn("␣ Esc close", self.bar())
+        self.app.handle_key(" ")
+        self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
+        self.assertIn("^x to confirm", self.bar())
+        self.app.confirm = None
+        self.app.handle_key("?")
+        self.assertIn("? close", self.bar())
+        self.app.handle_key("x")
+        self.app.handle_key("/")
+        self.assertNotIn("? keys", self.bar())
+
+    def test_the_notifications_view_shows_its_hint(self):
+        self.app.handle_key("N")
+        self.assertIn(sidebar.HISTORY_HINT, self.bar())
+
+    def test_the_newest_notification_shows(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        self.assertIn("✻ 1m Alpha finished the tax fix.", self.bar())
+
+    def test_the_list_starts_on_the_first_row_with_nothing_above_or_below_it(self):
+        scr = RecordingScr(20, 40)
+        self.app.scr = scr
+        self.app.draw()
+        self.assertTrue(scr.cells[0].startswith("▾ /p/alpha"), scr.cells[0])
+        everything = "\n".join(scr.cells.values())
+        for gone in ("⚒", "─", "Notifications (", "? keys", "emalatxana"):
+            self.assertNotIn(gone, everything)
+        self.assertEqual(self.app.bottom_lines(39, 20), [])
 
 
 class InterruptTmux(RenameTmux):
@@ -4658,7 +4759,7 @@ class InterruptSession(AppCase):
         self.press(sidebar.CTRL_X)
         self.assertIsInstance(self.app.confirm, core.Confirm)
         self.assertEqual(self.app.confirm.id, "working")
-        self.assertIn(sidebar.CONFIRM_FOOTER, [t for t, _ in self.app.bottom_lines(39)])
+        self.assertEqual(self.app.bar_hints(), (sidebar.CONFIRM_FOOTER,))
         self.settle()
 
     def test_a_draft_in_the_prompt_still_interrupts(self):
@@ -6028,20 +6129,17 @@ class HistoryWiring(AppCase):
         self.poll(*[session(sid, "/p/alpha") for sid in sids])
         self.app.refresh()
 
-    def test_a_taken_notice_shows_in_the_bottom_lines_above_the_footer(self):
+    def test_a_taken_notice_shows_in_the_bar_and_not_in_the_panel(self):
         self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
-        lines = self.bottom()
-        self.assertEqual(lines[-3], "Notifications (1)")
-        self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
-        self.assertIn(lines[-1], sidebar.FOOTERS)
+        self.assertEqual(self.bottom(), [])
+        self.assertRegex(self.bar(), r"✻ \ds Alpha is done\.")
 
-    def test_a_short_pane_shows_the_newest_notice_with_the_count_in_the_title(self):
+    def test_the_bar_shows_the_newest_of_several_notices(self):
         self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("s2", "Beta is done.", time.monotonic() - 9),
                      entry("s3", "Gamma is done.", time.monotonic() - 9))
-        lines = self.bottom(11)
-        self.assertEqual(lines[-3], "Notifications (3)")
-        self.assertTrue(lines[-2].endswith("Alpha is done."), lines)
-        self.assertFalse(any("more" in t for t in lines), lines)
+        bar = self.bar()
+        self.assertIn("Alpha is done.", bar)
+        self.assertNotIn("Beta is done.", bar)
 
     def test_a_taken_notice_lands_in_the_history_in_both_modes(self):
         for mode in core.MODES:
@@ -6107,21 +6205,17 @@ class HistoryWiring(AppCase):
         self.deliver(entry("s1", "Alpha is done.", before))
         self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", True)])
 
-    def test_the_area_hides_while_the_prompt_find_or_rename_is_open(self):
+    def test_the_bar_has_no_hints_while_the_prompt_find_or_rename_is_open(self):
         self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
-        self.assertIn("Notifications (1)", self.bottom())
+        self.assertIn("? keys", self.bar())
         self.app.handle_key("/")
-        self.assertNotIn("Notifications (1)", self.bottom())
+        self.assertNotIn("? keys", self.bar())
         self.app.find = None
         self.app.rename_edit = {"id": "s1", "old": "x", "hint": "", "text": ""}
-        self.assertNotIn("Notifications (1)", self.bottom())
+        self.assertNotIn("? keys", self.bar())
         self.app.rename_edit = None
         self.app.prompt = {"stage": "message", "folder": "/p", "text": "", "hint": ""}
-        self.assertNotIn("Notifications (1)", self.bottom())
-
-    def test_the_area_gives_way_on_a_short_pane(self):
-        self.deliver(entry("s1", "Alpha is done.", time.monotonic()))
-        self.assertFalse(any(t.startswith("Notifications") for t in self.bottom(height=9)))
+        self.assertNotIn("? keys", self.bar())
 
     def test_an_in_front_skip_adds_nothing_to_the_history(self):
         self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
@@ -6133,14 +6227,14 @@ class HistoryWiring(AppCase):
         self.assertEqual(self.app.poller.notices.pending, [])
         self.assertEqual(self.app.history, [])
 
-    def test_the_strip_dims_read_rows_and_counts_unread(self):
-        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("other", "Beta is done.", time.monotonic() - 4))
+    def test_the_bar_dims_a_read_newest_notice(self):
+        self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
+        self.app.window_width = 100
+        self.app.update_bar()
+        self.assertIn("#[fg=default,nobold]Alpha is done.", self.app.bar.pushed[-1])
         self.open_s1()
-        lines = self.app.bottom_lines(39, 20)
-        strip = lines[-4:-1]
-        self.assertEqual(strip[0], ("Notifications (1)", curses.A_BOLD))
-        self.assertTrue(strip[1][0].endswith("Beta is done.") and strip[1][1] == 0, strip)
-        self.assertTrue(strip[2][0].endswith("Alpha is done.") and strip[2][1] == curses.A_DIM, strip)
+        self.app.update_bar()
+        self.assertIn("#[fg=colour245,nobold]Alpha is done.", self.app.bar.pushed[-1])
 
     def test_the_history_is_empty_in_a_new_app(self):
         self.assertEqual(self.app.history, [])
@@ -6184,7 +6278,7 @@ class HistoryView(AppCase):
         self.assertTrue(any(t.startswith("✓ ") and t.endswith("Alpha · alpha") for t in drawn), drawn)
         self.assertIn("  Beta needs your yes on a library.", drawn)
         self.assertIn("  Alpha finished the tax fix.", drawn)
-        self.assertIn(sidebar.HISTORY_HINT, [t.strip() for t in drawn])
+        self.assertEqual(self.app.bar_hints(), (sidebar.HISTORY_HINT, "Esc back"))
         self.assertFalse(any(t.startswith("Notifications (") for t in drawn), drawn)
 
     def test_down_and_enter_open_the_second_entrys_session_and_mark_it_read(self):
@@ -6450,36 +6544,30 @@ class AppRelay(AppCase):
         self.app.handle_key("m")
         self.assertEqual([core.parse_relay(l) for l in self.lines()], [{"kind": "hush"}])
 
-    def top_line(self):
-        drawn = []
-        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
-        self.app.draw_top_line(60)
-        return drawn
-
-    def test_a_connected_laptop_takes_the_unavailable_tag_off_the_top_line(self):
+    def test_a_connected_laptop_takes_the_unavailable_tag_off_the_bar(self):
         self.app.poller.notifier.state = core.HELPER_UNAVAILABLE
         self.app.tmux.options[RELAY_OPT] = str(time.time())
         sidebar.App.housekeep(self.app, False)
-        self.assertFalse(any("notifications unavailable" in t for t in self.top_line()))
+        self.assertNotIn("notifications unavailable", self.bar())
         self.app.tmux.options[RELAY_OPT] = str(time.time() - 60)
         sidebar.App.housekeep(self.app, False)
-        self.assertTrue(any("notifications unavailable" in t for t in self.top_line()))
+        self.assertIn("notifications unavailable", self.bar())
 
-    def test_a_connected_laptop_puts_its_host_on_the_top_line(self):
+    def test_a_connected_laptop_puts_its_host_on_the_bar(self):
         now = time.time()
         self.app.tmux.options[RELAY_OPT] = str(now)
         self.app.tmux.options[RELAY_HOST_OPT] = core.relay_host_value("myserver", now)
         sidebar.App.housekeep(self.app, False)
-        self.assertIn("⇄ myserver", self.top_line())
+        self.assertIn("⇄ myserver", self.bar())
         self.app.tmux.options[RELAY_OPT] = str(now - 60)
         self.app.tmux.options[RELAY_HOST_OPT] = core.relay_host_value("myserver", now - 60)
         sidebar.App.housekeep(self.app, False)
-        self.assertFalse(any("⇄" in t for t in self.top_line()))
+        self.assertNotIn("⇄", self.bar())
 
     def test_no_host_option_no_mark(self):
         self.app.tmux.options[RELAY_OPT] = str(time.time())
         sidebar.App.housekeep(self.app, False)
-        self.assertFalse(any("⇄" in t for t in self.top_line()))
+        self.assertNotIn("⇄", self.bar())
 
 
 class ModeKey(AppCase):
@@ -6545,32 +6633,28 @@ class ModeKey(AppCase):
         self.app.handle_key("m")
         self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
 
-    def top_line(self):
-        drawn = []
-        self.app.put = lambda y, x, text, attr=0: drawn.append(text)
-        self.app.draw_top_line(60)
-        return drawn
-
-    def test_the_top_line_shows_the_mode_word_only_in_voice_mode(self):
-        plain = self.top_line()
+    def test_the_bar_shows_the_mode_word_only_in_voice_mode(self):
+        plain = self.bar()
         self.assertNotIn("voice", plain)
-        self.assertFalse(any("notification" in t for t in plain), plain)
+        self.assertNotIn("notifications blocked", plain)
+        self.assertNotIn("notifications unavailable", plain)
         self.app.handle_key("m")
-        self.assertIn("voice", self.top_line())
+        self.assertIn("voice", self.bar())
         self.app.handle_key("m")
-        self.assertEqual(self.top_line(), plain)
+        self.assertEqual(self.bar(), plain)
 
-    def test_the_top_line_shows_blocked_or_unavailable_only_in_notification_mode(self):
+    def test_the_bar_shows_blocked_or_unavailable_only_in_notification_mode(self):
         for state, label in ((core.HELPER_BLOCKED, "notifications blocked"), (core.HELPER_UNAVAILABLE, "notifications unavailable")):
             with self.subTest(state=state):
                 self.app.poller.notifier.state = state
-                self.assertIn(label, self.top_line())
+                self.assertIn(label, self.bar())
                 self.app.handle_key("m")
-                self.assertNotIn(label, self.top_line())
-                self.assertIn("voice", self.top_line())
+                self.assertNotIn(label, self.bar())
+                self.assertIn("voice", self.bar())
                 self.app.handle_key("m")
         self.app.poller.notifier.state = core.HELPER_PENDING
-        self.assertFalse(any("notification" in t for t in self.top_line()))
+        self.assertNotIn("notifications blocked", self.bar())
+        self.assertNotIn("notifications unavailable", self.bar())
 
 
 class OpenTmux(HushTmux):

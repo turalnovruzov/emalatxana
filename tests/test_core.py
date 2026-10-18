@@ -507,84 +507,7 @@ class BarParts(unittest.TestCase):
         self.assertTrue(text.endswith("N notifications  ? keys "))
 
 
-class Summary(unittest.TestCase):
-    SESSIONS = [
-        mk(state="blocked"), mk(state="working"), mk(state="working"), mk(state="done"), mk(state="stopped", running=False),
-    ]
-
-    def test_counts_nonzero_only_in_order(self):
-        self.assertEqual(core.summary(self.SESSIONS), [
-            ("1 waiting", core.NEEDS_INPUT), ("2 working", core.WORKING), ("1 done", core.DONE), ("1 stopped", core.STOPPED),
-        ])
-        self.assertEqual(core.summary([mk(state="done")]), [("1 done", core.DONE)])
-        self.assertEqual(core.summary([]), [])
-
-    def text(self, placed):
-        line = ""
-        for x, text, _ in placed:
-            line = line.ljust(x) + text
-        return line
-
-    def test_the_top_line_gives_up_words_then_name_then_counts(self):
-        cases = {
-            62: "⚒ emalatxana 1.0.0  1 waiting · 2 working · 1 done · 1 stopped",
-            61: "⚒ emalatxana 1.0.0          1 wait · 2 work · 1 done · 1 stop",
-            53: "⚒ emalatxana 1.0.0  1 wait · 2 work · 1 done · 1 stop",
-            52: "⚒ 1.0.0            1 wait · 2 work · 1 done · 1 stop",
-            42: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 stop",
-            41: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 st…",
-            38: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1…",
-            30: "⚒ 1.0.0  1 wait · 2 work · 1…",
-            10: "⚒ 1.0.0  …",
-            9: "⚒ 1.0.0",
-            7: "⚒ 1.0.0",
-            6: "⚒  1…",
-            4: "⚒  …",
-            3: "⚒",
-            1: "⚒",
-            0: "",
-        }
-        for width, want in cases.items():
-            with self.subTest(width=width):
-                self.assertEqual(self.text(core.top_line(self.SESSIONS, "1.0.0", width)), want)
-
-    def test_the_version_stays_at_the_default_width(self):
-        for count in range(1, 5):
-            with self.subTest(categories=count):
-                sessions = [mk(state=state) for state in ("blocked", "working", "done", "stopped")[:count]]
-                placed = core.top_line(sessions, "1.0.0", 38)
-                self.assertIn(("1.0.0", "version"), [(t, tag) for _, t, tag in placed])
-
-    def test_the_name_goes_before_the_version(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                tags = [tag for _, _, tag in core.top_line(self.SESSIONS, "1.0.0", width)]
-                if "name" in tags:
-                    self.assertIn("version", tags)
-
-    def test_one_count_fits_beside_the_whole_logo_in_a_default_panel(self):
-        placed = core.top_line([mk(state="working"), mk(state="working")], "1.0.0", 38)
-        self.assertEqual(self.text(placed), "⚒ emalatxana 1.0.0           2 working")
-        self.assertEqual([tag for _, _, tag in placed], ["logo", "name", "version", core.WORKING])
-
-    def test_the_top_line_before_the_first_listing_and_with_no_sessions(self):
-        self.assertEqual(self.text(core.top_line([], "1.0.0", 38, loaded=False)), "⚒ emalatxana 1.0.0                   …")
-        self.assertEqual(self.text(core.top_line([], "1.0.0", 38)), "⚒ emalatxana 1.0.0         no sessions")
-
-    def test_the_top_line_never_overflows_and_always_keeps_the_logo(self):
-        self.assertEqual(core.display_width(core.LOGO), 1)
-        for sessions in ([], self.SESSIONS):
-            for loaded in (True, False):
-                for width in range(0, 81):
-                    with self.subTest(sessions=len(sessions), loaded=loaded, width=width):
-                        placed = core.top_line(sessions, "10.20.30", width, loaded)
-                        end = max((x + core.display_width(t) for x, t, _ in placed), default=0)
-                        self.assertLessEqual(end, width)
-                        if width:
-                            self.assertEqual(placed[0], (0, core.LOGO, "logo"))
-                        xs = [x for x, _, _ in placed]
-                        self.assertEqual(xs, sorted(xs))
-
+class FitParts(unittest.TestCase):
     def test_fit_parts_never_exceeds_width(self):
         parts = [("1 waiting", 1), ("22 working", 2), ("3 done", 3)]
         for width in range(0, 40):
@@ -592,6 +515,8 @@ class Summary(unittest.TestCase):
                 placed = core.fit_parts(parts, width)
                 end = max((x + core.display_width(t) for x, t, _ in placed), default=0)
                 self.assertLessEqual(end, width)
+
+
 
 
 class Paths(unittest.TestCase):
@@ -2031,12 +1956,11 @@ class NoticeExpiry(unittest.TestCase):
 
 
 class FocusStyle(unittest.TestCase):
-    def test_selection_bar_and_title_follow_focus(self):
+    def test_selection_bar_follows_focus(self):
         self.assertIsNone(core.selection_bar(False, True))
         self.assertIsNone(core.selection_bar(False, False))
         self.assertEqual(core.selection_bar(True, True), "focused")
         self.assertEqual(core.selection_bar(True, False), "unfocused")
-        self.assertEqual((core.title_style(True), core.title_style(False)), ("bold", "dim"))
 
 
 class ListingChecks(unittest.TestCase):
@@ -3519,13 +3443,13 @@ class CutLines(unittest.TestCase):
 
 
 class PeekRoom(unittest.TestCase):
-    def test_the_rows_between_the_top_lines_and_the_bottom_lines_or_none_when_too_narrow(self):
-        self.assertEqual(core.peek_room(20, 40, 1), 17)
-        self.assertEqual(core.peek_room(20, 6, 1), 17)
+    def test_the_rows_above_the_bottom_lines_or_none_when_too_narrow(self):
+        self.assertEqual(core.peek_room(20, 40, 1), 19)
+        self.assertEqual(core.peek_room(20, 6, 1), 19)
         self.assertEqual(core.peek_room(20, 5, 1), 0)
-        self.assertEqual(core.peek_room(5, 40, 4), 0)
-        self.assertEqual(core.peek_height(core.peek_room(10, 40, 1), 1), 4)
-        self.assertEqual(core.peek_height(core.peek_room(10, 40, 2), 1), 0)
+        self.assertEqual(core.peek_room(5, 40, 6), 0)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 3), 1), 4)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 4), 1), 0)
 
 
 class PeekHeight(unittest.TestCase):
@@ -3960,34 +3884,7 @@ class Voices(unittest.TestCase):
         self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
 
 
-class TopLineTag(unittest.TestCase):
-    SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="done"), mk(state="stopped")]
-
-    def test_no_tag_matches_the_old_output_at_every_width(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                for none in (None, ""):
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, none), core.top_line(self.SESSIONS, "1.0.0", width))
-
-    def test_a_tag_follows_the_version_when_wide(self):
-        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, core.VOICE_TAG)
-        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("voice", "mode")])
-
-    def test_the_tag_stays_beside_cut_counts_in_a_default_panel(self):
-        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, core.VOICE_TAG)
-        self.assertIn("mode", [tag for _, _, tag in placed])
-        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
-
-    def test_the_longest_tag_never_overflows_and_never_costs_the_version(self):
-        for label in (core.VOICE_TAG, core.BLOCKED_TAG, core.UNAVAILABLE_TAG):
-            for width in range(0, 81):
-                with self.subTest(label=label, width=width):
-                    placed = core.top_line(self.SESSIONS, "10.20.30", width, True, label)
-                    self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                    plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
-                    if "version" in plain:
-                        self.assertIn("version", [tag for _, _, tag in placed])
-
+class ModeTagAndRemote(unittest.TestCase):
     def test_mode_tag_per_mode_and_helper_state(self):
         for helper in core.HELPER_STATES:
             with self.subTest(helper=helper):
@@ -4001,72 +3898,6 @@ class TopLineTag(unittest.TestCase):
         self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
 
 
-class TopLineRemote(unittest.TestCase):
-    SESSIONS = TopLineTag.SESSIONS
-
-    def placed(self, width, remote="myserver", tag=None, version="1.0.0", sessions=None, loaded=True):
-        return core.top_line(self.SESSIONS if sessions is None else sessions, version, width, loaded, tag, remote)
-
-    def text(self, placed):
-        line = ""
-        for x, text, _ in placed:
-            line = line.ljust(x) + text
-        return line
-
-    def test_no_remote_matches_the_old_output_at_every_width(self):
-        for tag in (None, core.VOICE_TAG):
-            for width in range(0, 81):
-                with self.subTest(tag=tag, width=width):
-                    plain = core.top_line(self.SESSIONS, "1.0.0", width, True, tag)
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, None), plain)
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, ""), plain)
-
-    def test_the_mark_follows_the_version_when_wide(self):
-        placed = self.placed(80)
-        self.assertEqual([tag for _, _, tag in placed][:4], ["logo", "name", "version", "remote"])
-        self.assertEqual(placed[3][1], "⇄ myserver")
-        placed = self.placed(80, tag=core.VOICE_TAG)
-        self.assertEqual([tag for _, _, tag in placed][:5], ["logo", "name", "version", "remote", "mode"])
-
-    def test_the_mark_at_the_board_width(self):
-        placed = self.placed(36, version="2.4.0")
-        self.assertTrue(self.text(placed).startswith("⚒ 2.4.0 ⇄ myserver  "))
-        self.assertEqual([tag for _, _, tag in placed][:3], ["logo", "version", "remote"])
-        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
-
-    def test_the_mark_beside_short_counts(self):
-        self.assertEqual(self.text(self.placed(60, sessions=Summary.SESSIONS)), "⚒ 1.0.0 ⇄ myserver         1 wait · 2 work · 1 done · 1 stop")
-
-    def test_the_host_is_cut_before_the_mark_goes(self):
-        placed = self.placed(14)
-        self.assertIn("remote", [tag for _, _, tag in placed])
-        self.assertEqual([t for _, t, tag in placed if tag == "remote"], ["⇄ mys…"])
-        self.assertEqual(self.placed(11), core.top_line(self.SESSIONS, "1.0.0", 11))
-
-    def test_a_long_host_is_capped(self):
-        text = next(t for _, t, tag in self.placed(80, remote="h" * 253) if tag == "remote")
-        self.assertEqual(core.display_width(text), 2 + core.REMOTE_HOST_MAX)
-
-    def test_the_mark_never_overflows_and_never_costs_the_version(self):
-        for remote in ("myserver", "h" * 253):
-            for tag in (None, core.VOICE_TAG):
-                for loaded in (True, False):
-                    for width in range(0, 81):
-                        with self.subTest(remote=remote[:3], tag=tag, loaded=loaded, width=width):
-                            placed = self.placed(width, remote, tag, "10.20.30", loaded=loaded)
-                            self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                            tags = [t for _, _, t in placed]
-                            if width > 0:
-                                self.assertEqual(placed[0], (0, core.LOGO, "logo"))
-                            xs = [x for x, _, _ in placed]
-                            self.assertEqual(xs, sorted(xs))
-                            plain = [t for _, _, t in core.top_line(self.SESSIONS, "10.20.30", width, loaded)]
-                            if "version" in plain:
-                                self.assertIn("version", tags)
-                            if "mode" in tags:
-                                self.assertIn("remote", tags)
-                            if "remote" in tags:
-                                self.assertEqual(tags.index("remote"), tags.index("version") + 1)
 
     def test_relay_host(self):
         self.assertEqual(core.relay_host(core.relay_host_value("myserver", 100.0), 105.0), "myserver")
@@ -4315,46 +4146,6 @@ class History(unittest.TestCase):
         for _ in range(core.STALE_AFTER_MISSES - 1):
             history, misses = core.history_prune(history, ["s2"], misses)
         self.assertEqual([e.id for e in history], ["s2"])
-
-    def test_the_strip_shows_the_newest_three_one_line_each_with_unread_count(self):
-        history = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(4)])
-        history = core.history_read(core.history_read(history, "s0"), "s1")
-        got = core.history_strip(history, 10, 40, 5)
-        self.assertEqual([t for t, _ in got], ["Notifications (2)", "7s t3", "8s t2", "9s t1", "… 1 more"])
-
-    def test_the_strip_title_has_no_count_when_all_are_read(self):
-        history = core.history_read(self.added(self.item("s1", 1)), "s1")
-        self.assertEqual(core.history_strip(history, 10, 40, 5)[0][0], "Notifications")
-
-    def test_the_strip_marks_read_rows(self):
-        history = core.history_read(self.added(self.item("s1", 1, "a"), self.item("s2", 2, "b")), "s1")
-        self.assertEqual(core.history_strip(history, 10, 40, 5), [("Notifications (1)", False), ("8s b", False), ("9s a", True)])
-
-    def test_a_two_row_strip_shows_the_newest_under_the_title(self):
-        three = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(3)])
-        self.assertEqual([t for t, _ in core.history_strip(three, 10, 40, 2)], ["Notifications (3)", "8s t2"])
-        self.assertEqual([t for t, _ in core.history_strip(three[:1], 10, 40, 2)], ["Notifications (1)", "8s t2"])
-
-    def test_strip_rows_are_one_row_each_and_fit_the_width(self):
-        history = [core.Entry("s1", core.NOTICE_DONE, "s1 · p", " ".join(["word"] * 28), 0.0)]
-        (title, _), (line, _) = core.history_strip(history, 125, 30, 5)
-        self.assertEqual(title, "Notifications (1)")
-        self.assertLessEqual(core.display_width(line), 30)
-        self.assertTrue(line.endswith("…"))
-        self.assertTrue(line.startswith("2m "))
-
-    def test_room_below_two_or_empty_shows_nothing(self):
-        history = [self.item("s1", 0.0)]
-        self.assertEqual(core.history_strip(history, 1, 40, 1), [])
-        self.assertEqual(core.history_strip(history, 1, 40, 0), [])
-        self.assertEqual(core.history_strip([], 1, 40, 5), [])
-
-    def test_room_leaves_the_list_its_minimum(self):
-        self.assertEqual(core.history_room(12, 1), 3)
-        self.assertEqual(core.history_room(9, 1), 0)
-        self.assertEqual(core.history_room(11, 1), 2)
-        self.assertEqual(core.history_room(40, 1), core.HISTORY_SHOWN + 2)
-        self.assertEqual(core.history_room(None, 1), core.HISTORY_SHOWN + 2)
 
     def test_a_full_view_row_is_a_header_and_at_most_two_wrapped_lines(self):
         long = " ".join(f"w{i}" for i in range(60))
