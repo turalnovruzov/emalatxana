@@ -84,25 +84,49 @@ class FailingUpgrade(unittest.TestCase):
 class LeftCheck(unittest.TestCase):
     """`emx left` answers tmux's if-shell with an exit code, 0 only for ← to reach Claude Code; anything wrong means ← goes to the panel, silently, since Claude Code forks the conversation on a ← at an empty prompt."""
 
-    def run_check(self, args, lines=None, error=None):
+    KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+    def run_check(self, args, lines=None, error=None, shows=KEY, agents=None, cursor=(2, 5)):
+        """`args` name the slot; the check reads the prompt from the agent pane holding the key the slot shows."""
+        read = []
+        if agents is None:
+            agents = [Pane("%9", "@3", False, "", self.KEY, 30, 30, agent="claude")]
+
         def cursor_lines(tmux, pane, y):
+            read.append((pane, y))
             if error:
                 raise error
             return lines
 
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(cli.Tmux, "cursor_lines", cursor_lines), redirect_stdout(out), redirect_stderr(err):
+        with mock.patch.object(cli.Tmux, "cursor_lines", cursor_lines), \
+                mock.patch.object(cli.Tmux, "pane_view", lambda tmux, pane: shows), \
+                mock.patch.object(cli.Tmux, "panes", lambda tmux: agents), \
+                mock.patch.object(cli.Tmux, "prompt_probe", lambda tmux, pane: (cursor[0], cursor[1], True, 30, False)), \
+                redirect_stdout(out), redirect_stderr(err):
             code = cli.main(["left", *args])
         self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+        self.read = read
         return code
 
     def test_an_empty_prompt_answers_1_and_typed_text_0(self):
         lines = ["❯\xa0", "─" * 30]
         self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], lines), 1)
         self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], ["❯ typed", "─" * 30]), 0)
+        self.assertEqual(self.read, [("%9", 5)])
 
     def test_an_empty_prompt_a_column_over_answers_1(self):
-        self.assertEqual(self.run_check(["emx-test-unit", "%2", "3", "5", "1", "30"], [" ❯\xa0", "─" * 30]), 1)
+        self.assertEqual(self.run_check(["emx-test-unit", "%2", "3", "5", "1", "30"], [" ❯\xa0", "─" * 30], cursor=(3, 5)), 1)
+
+    def test_a_slot_showing_no_live_session_answers_1_without_reading_a_screen(self):
+        typed = ["❯ typed", "─" * 30]
+        args = ["emx-test-unit", "%2", "2", "5", "1", "30"]
+        dead = [Pane("%9", "@3", True, "", self.KEY, 30, 30, agent="claude")]
+        viewer_only = [Pane("%9", "@3", False, "", self.KEY, 30, 30)]
+        for kwargs in ({"shows": ""}, {"shows": "s1"}, {"agents": []}, {"agents": dead}, {"agents": viewer_only}):
+            with self.subTest(**{k: repr(v) for k, v in kwargs.items()}):
+                self.assertEqual(self.run_check(args, typed, **kwargs), 1)
+                self.assertEqual(self.read, [])
 
     def test_anything_wrong_answers_1(self):
         good = ["%2", "2", "5", "1", "30"]
@@ -520,13 +544,13 @@ class PasteCheck(unittest.TestCase):
         return cli.main(["paste", socket, str(self.relay) if path is None else path, pane, sid])
 
     def test_a_fresh_stamp_writes_the_record_and_exits_0(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time()))
         self.assertEqual(self.check(pane="%7"), 0)
         record = core.parse_relay(self.relay.read_text().splitlines()[-1])
         self.assertEqual((record["kind"], record["pane"], record["sid"]), ("paste", "%7", PASTE_SID))
 
     def test_a_stale_stamp_exits_1_and_writes_nothing(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time() - 20))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time() - 20))
         self.assertEqual(self.check(), 1)
         self.assertFalse(self.relay.exists())
 
@@ -535,7 +559,7 @@ class PasteCheck(unittest.TestCase):
         self.assertFalse(self.relay.exists())
 
     def test_bad_arguments_exit_1_and_write_nothing(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time()))
         for kwargs in ({"socket": "default"}, {"socket": ""}, {"path": "relay.jsonl"}, {"pane": "12"}, {"sid": "x"}):
             with self.subTest(kwargs=kwargs):
                 self.assertEqual(self.check(**kwargs), 1)

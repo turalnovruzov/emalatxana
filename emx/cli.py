@@ -419,17 +419,26 @@ def blank(message: str) -> int:
 def left_check(args: list) -> int:
     """Exit 0 when ← in a session's pane should reach Claude Code, 1 when it should move focus to the panel. Prints nothing.
 
-    `args` are the socket, then the pane, cursor x and y, cursor shown flag
-    and pane width as tmux formats them. Any failure answers 1: Claude Code
-    forks the conversation on a ← it gets at an empty prompt, so a broken
-    check costs him ← in typed text, never a fork.
+    `args` are the socket, then the view's slot, its cursor x and y, cursor
+    shown flag and width as tmux formats them. The slot only shows the
+    session, so the prompt is read from the session's own pane, the live
+    agent pane holding the key the slot shows, with that pane's own cursor.
+    Any failure answers 1, a slot showing no live session included: Claude
+    Code forks the conversation on a ← it gets at an empty prompt, so a
+    broken check costs him ← in typed text, never a fork.
     """
     try:
-        socket, pane, x, y, shown, width = args
-        if private_socket(socket) is None:
+        socket, slot, _x, _y, _shown, _width = args
+        if private_socket(socket) is None or not core.is_pane_id(slot):
             return 1
-        line, below = (Tmux(socket).cursor_lines(pane, int(y)) + ["", ""])[:2]
-        return 1 if core.empty_prompt(line, below, int(x), shown == "1", int(width)) else 0
+        tmux = Tmux(socket)
+        key = tmux.pane_view(slot)
+        agent = core.live_viewer(tmux.panes(), key) if core.is_session_id(key) else None
+        if agent is None:
+            return 1
+        x, y, shown, width, _ = tmux.prompt_probe(agent.id)
+        line, below = (tmux.cursor_lines(agent.id, y) + ["", ""])[:2]
+        return 1 if core.empty_prompt(line, below, x, shown, width) else 0
     except Exception:
         return 1
 
@@ -447,7 +456,7 @@ def paste_check(args: list) -> int:
         if not core.is_pane_id(pane) or not core.is_session_id(sid):
             return 1
         now = time.time()
-        if not core.relay_live(Tmux(socket).session_option(RELAY_PASTE_OPT), now):
+        if not core.relay_live(Tmux(socket).global_option(RELAY_PASTE_OPT), now):
             return 1
         remote.append_relay(Path(path), core.relay_paste(pane, sid, core.paste_id(now, secrets.token_hex(4)), now))
         return 0

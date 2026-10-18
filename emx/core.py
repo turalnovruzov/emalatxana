@@ -608,12 +608,14 @@ def type_gate(
     the check and the typing. It holds while the viewer is not in a mode,
     alive, still opened on `sid`, its cursor still where the checks saw it
     (`cursor_x` is the empty prompt's place unless given), and his focus is on the
-    panel: the panel is the active pane of the active window. tmux falls
+    panel: the panel is the active pane of the active window of its view.
+    The loop runs over every session, since the viewer's window is linked
+    into more than one and the panel may be in a view of its own. tmux falls
     back to another pane when the target is gone, hence the pane id test.
     """
     if not (_PANE_ID.fullmatch(viewer) and _PANE_ID.fullmatch(panel) and _PLAIN_ID.fullmatch(sid)):
         return None
-    panel_focused = f"#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}"
+    panel_focused = f"#{{S:#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}}}"
     tests = [
         f"#{{==:#{{pane_id}},{viewer}}}",
         "#{==:#{pane_in_mode},0}",
