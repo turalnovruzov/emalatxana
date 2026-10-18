@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 import emx
-from emx import __version__, core, install, notify, remote
+from emx import __version__, core, install, notify, remote, routines
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, allowed_transcript, claude_home
 from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
@@ -71,6 +71,7 @@ HELP = (
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
     ("N", "notifications: the last 20; Enter opens one"),
+    ("R", "routines: what ran in the past 24 hours; R or Esc back"),
     ("m", "voice mode or notification mode"),
     ("h", "stop the voice now (voice mode)"),
     ("s", "panel to the other side"),
@@ -97,6 +98,11 @@ NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a mo
 FIND_HINT = "↑↓ move · Enter open · Esc clear"
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
+ROUTINES_SECONDS = 60
+ROUTINES_HINT = "↑↓ scroll · R or Esc back"
+ROUTINES_TITLE = "Routines · past 24 hours"
+ROUTINES_EMPTY = "No routines listed. Put one timer name per line in this file:"
+ROUTINES_LOADING = "Reading routines…"
 OPEN_GONE = "That session isn't listed any more."
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
@@ -616,6 +622,20 @@ class Starter(threading.Thread):
         except Exception as exc:
             session, error = None, f"starting a session failed: {core.error_line(exc)}"
         self.result = (session, error)
+
+
+class RoutinesReader(threading.Thread):
+    """Reads the routines off the main thread: the answer comes from three systemd tools, each of which can be slow."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.result = None
+
+    def run(self) -> None:
+        try:
+            self.result = routines.read(core.routines_path(), time.time())
+        except Exception as exc:
+            self.result = (None, core.error_line(exc))
 
 
 class Resolver(threading.Thread):
@@ -1785,6 +1805,11 @@ class App:
         self.history_misses = {}
         self.history_view = None
         self.history_scroll = 0
+        self.routines_view = None
+        self.routine_views = None
+        self.routines_error = None
+        self.routines_reader = None
+        self.routines_read_at = 0.0
         self.opened = {}
         self.listings = Listings()
         self.home = os.path.expanduser("~")
@@ -1979,7 +2004,7 @@ class App:
 
     def update_busy(self) -> bool:
         """Whether something open in the panel, or a worker it started, would be lost to a switch onto a new version now."""
-        held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view,
+        held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view, self.routines_view,
                 self.starter, self.closer, self.renamer, self.namer)
         return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row()
 
@@ -2716,6 +2741,8 @@ class App:
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
         item = self.row_map.get(y)
+        if self.routines_view is not None:
+            return
         if self.history_view is not None:
             if item and item[0] == "entry":
                 self.history_view = item[1]
@@ -2753,6 +2780,8 @@ class App:
             self.find_key(key)
         elif self.history_view is not None:
             self.history_key(key)
+        elif self.routines_view is not None:
+            self.routines_key(key)
         elif self.help or key == "?":
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
@@ -2784,6 +2813,8 @@ class App:
             self.open_prompt()
         elif key == "N":
             self.open_history()
+        elif key == "R":
+            self.open_routines()
         elif key == "m":
             self.toggle_mode()
         elif key == "h":
@@ -2811,6 +2842,35 @@ class App:
             self.history_view = max(0, min(len(self.history) - 1, self.history_view + 1))
         elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
             self.open_entry()
+
+    def open_routines(self) -> None:
+        self.routines_view = 0
+        self.peeking = False
+        if self.routines_reader is None:
+            self.start_routines()
+
+    def start_routines(self) -> None:
+        self.routines_reader = RoutinesReader()
+        self.routines_read_at = time.monotonic()
+        self.routines_reader.start()
+
+    def routines_key(self, key) -> None:
+        if key in ("\x1b", "R"):
+            self.routines_view = None
+        elif key in (curses.KEY_UP, "k"):
+            self.routines_view = max(0, self.routines_view - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            self.routines_view += 1
+
+    def finish_routines(self) -> None:
+        reader = self.routines_reader
+        if reader is not None and not reader.is_alive():
+            self.routines_reader = None
+            if self.routines_view is not None and reader.result is not None:
+                self.routine_views, self.routines_error = reader.result
+        if (self.routines_view is not None and self.routines_reader is None
+                and time.monotonic() - self.routines_read_at >= ROUTINES_SECONDS):
+            self.start_routines()
 
     def open_entry(self) -> None:
         if not 0 <= self.history_view < len(self.history):
@@ -2889,6 +2949,8 @@ class App:
             return PEEK_FOOTERS
         if self.history_view is not None:
             return (HISTORY_HINT, "Esc back")
+        if self.routines_view is not None:
+            return (ROUTINES_HINT, "Esc back")
         if self.help:
             return ("? close",)
         if self.prompt is not None or self.find is not None or self.rename_edit is not None:
@@ -2957,6 +3019,8 @@ class App:
         list_top, list_bottom = 0, h - len(bottom)
         if self.history_view is not None:
             self.draw_history(list_top, list_bottom, w)
+        elif self.routines_view is not None:
+            self.draw_routines(list_top, list_bottom, w)
         elif self.help:
             self.draw_help(list_top, list_bottom, w)
         elif not self.loaded:
@@ -3034,6 +3098,31 @@ class App:
                         attr = self.palette.attr("plain", selected)
                     self.put(y, 1, text, attr)
                 y += 1
+
+    def routine_rows(self, width: int) -> list:
+        """(text, tone) for each row of the view, or the one message that stands in for them."""
+        inner = max(1, width - 2)
+        if self.routine_views is None and self.routines_error is None:
+            return [(ROUTINES_LOADING, "muted")]
+        if self.routines_error:
+            return [(t, "error") for t in core.wrap_words(self.routines_error, inner)]
+        if not self.routine_views:
+            path = core.short_path(str(core.routines_path()), inner, self.home)
+            return [(t, "muted") for t in core.wrap_words(ROUTINES_EMPTY, inner)] + [(path, "plain")]
+        rows, now = [], time.time()
+        for view in self.routine_views:
+            if rows:
+                rows.append(("", "plain"))
+            rows += core.routine_lines(view, inner, now)
+        return rows
+
+    def draw_routines(self, top: int, bottom: int, width: int) -> None:
+        self.put(top, 1, ROUTINES_TITLE, curses.A_BOLD)
+        rows = self.routine_rows(width)
+        top, height = top + 1, max(1, bottom - top - 1)
+        self.routines_view = core.list_window([1] * len(rows), -1, self.routines_view, height)
+        for y, (text, tone) in enumerate(rows[self.routines_view:self.routines_view + height], start=top):
+            self.put(y, 1, text, self.palette.attr(tone))
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, "Keys", curses.A_BOLD)
@@ -3261,6 +3350,7 @@ class App:
             self.finish_interrupt()
             self.finish_rename()
             self.finish_name()
+            self.finish_routines()
             peeked = self.peeked()
             fresh_list = self.take_poll()
             self.take_placements()

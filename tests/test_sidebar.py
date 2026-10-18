@@ -4533,7 +4533,7 @@ class KeyWording(AppCase):
         self.app.refresh()
         self.app.cursor = ("session", "a")
         texts = [*(f"{key} {what}" for key, what in sidebar.HELP), sidebar.CONFIRM_FOOTER, sidebar.RENAME_FOOTER,
-                 sidebar.FIND_HINT, sidebar.HISTORY_HINT, *sidebar.PEEK_FOOTERS,
+                 sidebar.FIND_HINT, sidebar.HISTORY_HINT, sidebar.ROUTINES_HINT, *sidebar.PEEK_FOOTERS,
                  core.confirm_label(core.Confirm("a", "n", True, 0.0)), core.group_confirm_label(1), core.group_confirm_label(3),
                  core.GROUP_CLOSE_REFUSAL, core.PINNED_CLOSE_REFUSAL]
         for key in ("n", "\t"):
@@ -6940,6 +6940,133 @@ class AppBuildsNoHelper(unittest.TestCase):
         popen.assert_not_called()
         built.assert_not_called()
         self.assertFalse(os.path.exists(os.path.join(tmp, "notify")))
+
+
+class Routines(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = TallScr()
+        self.app.scr = self.scr
+        self.reads = []
+        self.gate = threading.Event()
+        self.gate.set()
+        self.answer = ([core.RoutineView("backup-nightly", "passed", "done", ((1_800_000_000.0, core.PASSED, ""),), None)], None)
+
+        def read(path, now):
+            self.reads.append(path)
+            self.gate.wait(5)
+            return self.answer
+
+        patch = mock.patch.object(sidebar.routines, "read", read)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(self.gate.set)
+
+    def settle(self):
+        reader = self.app.routines_reader
+        if reader is not None:
+            reader.join(5)
+        self.app.refresh()
+
+    def drawn(self):
+        self.app.draw()
+        return [t.strip() for t in self.scr.text()]
+
+    def test_R_opens_the_view_and_starts_one_reader_and_R_or_Esc_closes_it(self):
+        self.app.handle_key("R")
+        self.assertEqual(self.app.routines_view, 0)
+        self.settle()
+        self.assertEqual(len(self.reads), 1)
+        self.app.handle_key("R")
+        self.assertIsNone(self.app.routines_view)
+        self.app.handle_key("R")
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.routines_view)
+
+    def test_open_close_open_with_the_first_reader_alive_starts_no_second_reader(self):
+        self.gate.clear()
+        self.app.handle_key("R")
+        self.app.handle_key("R")
+        self.app.handle_key("R")
+        self.gate.set()
+        self.settle()
+        self.assertEqual(len(self.reads), 1)
+
+    def test_enter_right_and_clicks_open_no_session_behind_the_view(self):
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "a"))
+        activated = []
+        self.app.activate = activated.append
+        self.app.handle_key("R")
+        for key in ("\n", curses.KEY_RIGHT):
+            self.app.handle_key(key)
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual((self.opened, activated), ([], []))
+        self.assertEqual(self.app.routines_view, 0)
+
+    def test_the_panel_is_busy_while_the_view_is_open(self):
+        self.assertFalse(self.app.update_busy())
+        self.app.handle_key("R")
+        self.assertTrue(self.app.update_busy())
+
+    def test_the_frame_shows_the_title_and_routine_names_but_no_session(self):
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.handle_key("R")
+        self.settle()
+        drawn = self.drawn()
+        self.assertIn(sidebar.ROUTINES_TITLE, drawn)
+        self.assertTrue(any(t.startswith("backup-nightly") for t in drawn), drawn)
+        self.assertFalse(any("alpha" in t for t in drawn), drawn)
+        self.assertNotIn(sidebar.ROUTINES_HINT, drawn)
+        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
+
+    def test_it_says_reading_until_the_first_answer(self):
+        self.gate.clear()
+        self.app.handle_key("R")
+        self.assertIn(sidebar.ROUTINES_LOADING, self.drawn())
+
+    def test_a_machine_without_systemd_gets_the_one_line(self):
+        self.answer = (None, sidebar.routines.NO_SYSTEMD)
+        self.app.handle_key("R")
+        self.settle()
+        drawn = " ".join(self.drawn())
+        self.assertIn("Routines are read from systemd user timers", drawn)
+
+    def test_an_empty_list_names_the_file_to_fill(self):
+        self.answer = ([], None)
+        self.app.scr = self.scr = TallScr(width=300)
+        self.app.handle_key("R")
+        self.settle()
+        drawn = self.drawn()
+        self.assertIn(str(core.routines_path()), drawn)
+        self.assertTrue(str(core.routines_path()).startswith(os.environ["XDG_CONFIG_HOME"]))
+
+    def test_the_view_rereads_after_the_interval_and_only_while_open(self):
+        self.app.handle_key("R")
+        self.settle()
+        self.assertEqual(len(self.reads), 1)
+        with mock.patch.object(sidebar.time, "monotonic", return_value=time.monotonic() + sidebar.ROUTINES_SECONDS + 1):
+            self.app.refresh()
+            self.settle()
+            self.assertEqual(len(self.reads), 2)
+            self.app.handle_key("R")
+            self.app.refresh()
+            self.settle()
+        self.assertEqual(len(self.reads), 2)
+
+    def test_an_answer_that_lands_after_the_view_closed_is_dropped(self):
+        self.gate.clear()
+        self.app.handle_key("R")
+        self.app.handle_key("R")
+        self.gate.set()
+        self.settle()
+        self.assertIsNone(self.app.routine_views)
+
+    def test_the_help_has_the_R_line(self):
+        self.assertTrue(any(key == "R" for key, _ in sidebar.HELP))
 
 
 if __name__ == "__main__":
