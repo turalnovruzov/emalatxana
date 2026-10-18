@@ -3314,6 +3314,10 @@ def paste_id(now: float, token: str) -> str:
     return time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + token
 
 
+def is_pane_id(value) -> bool:
+    return isinstance(value, str) and _PANE.fullmatch(value) is not None
+
+
 def is_paste_id(value: str) -> bool:
     return isinstance(value, str) and _PASTE_ID.fullmatch(value) is not None
 

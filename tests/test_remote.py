@@ -14,7 +14,7 @@ from unittest import mock
 
 import emx
 from emx import core, remote
-from emx.tmux import RELAY_HOST_OPT, RELAY_OPT
+from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT
 
 SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 FAKE_SSH = str(Path(__file__).resolve().parent / "fake_ssh.py")
@@ -102,10 +102,10 @@ class Follow(unittest.TestCase):
         self.thread = None
         self.addCleanup(self.finish)
 
-    def start(self, host=None):
+    def start(self, host=None, paste=False):
         self.thread = threading.Thread(
             target=remote.follow, args=(self.path, self.out, self.tmux),
-            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop, "host": host}, daemon=True,
+            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop, "host": host, "paste": paste}, daemon=True,
         )
         self.thread.start()
         time.sleep(0.1)
@@ -188,6 +188,36 @@ class Follow(unittest.TestCase):
         time.sleep(0.2)
         self.assertTrue(self.tmux.set)
         self.assertNotIn(RELAY_HOST_OPT, [n for n, _ in self.tmux.set])
+
+    def test_beats_stamp_the_paste_option_when_asked(self):
+        self.start(paste=True)
+        time.sleep(0.2)
+        values = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        self.assertTrue(values)
+        float(values[0])
+
+    def test_no_paste_no_paste_stamp(self):
+        self.start()
+        time.sleep(0.2)
+        self.assertTrue(self.tmux.set)
+        self.assertNotIn(RELAY_PASTE_OPT, [n for n, _ in self.tmux.set])
+
+    def test_a_paste_record_is_streamed(self):
+        self.start(paste=True)
+        self.put(core.relay_paste("%3", SID, "20261018-120000-0a1b2c3d", 1.0))
+        time.sleep(0.3)
+        self.assertEqual(
+            [r for r in self.out.records() if r["kind"] == "paste"],
+            [{"kind": "paste", "pane": "%3", "sid": SID, "id": "20261018-120000-0a1b2c3d"}],
+        )
+
+    def test_ending_clears_the_paste_stamp(self):
+        self.start(paste=True)
+        time.sleep(0.2)
+        self.finish()
+        stamps = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        self.assertEqual(stamps[-1], "")
+        self.assertNotEqual(stamps[0], "")
 
     def test_no_session_no_stamp(self):
         self.tmux.has = False

@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import emx
 from emx import BIN, __version__, core, install, remote
 from emx.notify import OPEN_ENV
-from emx.tmux import HUSH_OPT, OPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
+from emx.tmux import HUSH_OPT, OPEN_OPT, RELAY_PASTE_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
@@ -33,6 +36,8 @@ emx install <url> is internal too: what install.sh runs to install emx from that
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
 emx relaunch <socket> is internal too: what a running panel starts to move its workspace onto the version just installed.
 emx follow is internal too: it streams the notices of this emx to stdout, for a laptop's `emx remote` to read.
+emx paste <socket> <relay file> <pane> <session id> is internal too: what Ctrl+V in a session runs on a server; it asks the laptop on emx remote for its clipboard image.
+emx paste-image <pane> <session id> <id> is internal too: what emx remote runs on the server to save that image and paste its path.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
 of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
 terminal window with that session.)
@@ -257,7 +262,7 @@ def follow() -> int:
         print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
     host = core.remote_host(os.environ.get(core.RELAY_HOST_ENV, ""))
-    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket), host=host)
+    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket), host=host, paste=os.environ.get(core.RELAY_PASTE_ENV) == "1")
 
 
 def open_command() -> str:
@@ -428,6 +433,89 @@ def left_check(args: list) -> int:
         return 1
 
 
+def paste_check(args: list) -> int:
+    """Exit 0 only after asking the laptop for its clipboard image, 1 when Ctrl+V should reach the pane as usual. Prints nothing.
+
+    `args` are the socket, the relay file, the pane and the session id. Any
+    failure answers 1, so a broken check costs the paste, never the key.
+    """
+    try:
+        socket, path, pane, sid = args
+        if private_socket(socket) is None or not os.path.isabs(path):
+            return 1
+        if not core.is_pane_id(pane) or not core.is_session_id(sid):
+            return 1
+        now = time.time()
+        if not core.relay_live(Tmux(socket).session_option(RELAY_PASTE_OPT), now):
+            return 1
+        remote.append_relay(Path(path), core.relay_paste(pane, sid, core.paste_id(now, secrets.token_hex(4)), now))
+        return 0
+    except Exception:
+        return 1
+
+
+def _images_folder() -> Path | None:
+    folder = core.state_path() / "images"
+    try:
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        info = os.lstat(folder)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        return None
+    return folder
+
+
+def paste_image(args: list) -> int:
+    """Save the PNG on stdin under the images folder and paste its path into the pane; the server half of a laptop's answer to Ctrl+V.
+
+    An empty or non-PNG stdin says "no image in clipboard" on the pane's
+    screen. Returns 2 for bad arguments, 1 when it could not save or paste.
+    """
+    pane, sid, paste_id = args
+    if not core.is_pane_id(pane) or not core.is_session_id(sid) or not core.is_paste_id(paste_id):
+        return 2
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    data = sys.stdin.buffer.read(core.PASTE_MAX_BYTES + 1)
+    while sys.stdin.buffer.read(1 << 20):
+        pass
+    try:
+        folder = _images_folder()
+        if folder is None:
+            print("emx: the images folder is not private.", file=sys.stderr)
+            return 1
+        now = time.time()
+        entries = [(e.name, e.stat(follow_symlinks=False).st_mtime) for e in os.scandir(folder)]
+        for name in core.paste_expired(entries, now):
+            try:
+                os.unlink(folder / name)
+            except OSError:
+                pass
+        tmux = Tmux(socket)
+        target = folder / f"{paste_id}.png"
+        if len(data) > core.PASTE_MAX_BYTES:
+            tmux.show_message(pane, "image too large to paste (over 32 MB)")
+            return 0
+        if not core.is_png(data):
+            if not target.exists():
+                tmux.show_message(pane, "no image in clipboard")
+            return 0
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        except FileExistsError:
+            return 0
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        tmux.paste_if(pane, sid, "emx-paste-" + paste_id, str(target))
+    except (TmuxError, OSError) as error:
+        print(f"emx: couldn't paste the image: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 HOOK_STDIN_BYTES = 32 * 1024 * 1024
 
 
@@ -588,6 +676,10 @@ def main(argv: list) -> int:
         return relaunch(argv[1])
     if argv[0] == "left":
         return left_check(argv[1:])
+    if argv[0] == "paste" and len(argv) == 5:
+        return paste_check(argv[1:])
+    if argv[0] == "paste-image" and len(argv) == 4:
+        return paste_image(argv[1:])
     if argv[0] == "blank":
         return blank(argv[1] if len(argv) > 1 else "")
     print(USAGE, file=sys.stderr)

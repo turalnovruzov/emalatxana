@@ -13,7 +13,7 @@ from pathlib import Path
 
 import emx
 from emx import __version__, core, install
-from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, TmuxError
+from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT, TmuxError
 
 NOTE_SECONDS = 2
 VERSION_TIMEOUT = 30
@@ -43,8 +43,8 @@ def append_relay(path: Path, record: dict) -> None:
         pass
 
 
-def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: float = 0.5, stop: threading.Event | None = None, clock=time.time, host: str | None = None) -> int:
-    """Stream the relay file from its end to `out`, one JSON line per valid record, plus a beat line every `beat` seconds that also stamps `RELAY_OPT` so the panel knows a laptop is listening, and `RELAY_HOST_OPT` with the laptop's `host` when given. Returns 0 when `out` is gone or `stop` is set."""
+def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: float = 0.5, stop: threading.Event | None = None, clock=time.time, host: str | None = None, paste: bool = False) -> int:
+    """Stream the relay file from its end to `out`, one JSON line per valid record, plus a beat line every `beat` seconds that also stamps `RELAY_OPT` so the panel knows a laptop is listening, `RELAY_HOST_OPT` with the laptop's `host` when given, and `RELAY_PASTE_OPT` when the laptop can answer a paste (`paste`), which is cleared when this ends. Returns 0 when `out` is gone or `stop` is set."""
     handle = None
     pending = b""
     try:
@@ -77,7 +77,7 @@ def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: f
                 next_beat = time.monotonic() + beat
                 out.write(json.dumps(core.RELAY_BEAT) + "\n")
                 out.flush()
-                _stamp(tmux, clock, host)
+                _stamp(tmux, clock, host, paste)
             if stop is not None:
                 stop.wait(tick)
             else:
@@ -87,6 +87,11 @@ def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: f
     finally:
         if handle is not None:
             handle.close()
+        if paste:
+            try:
+                tmux.set_session_option(RELAY_PASTE_OPT, "")
+            except (TmuxError, OSError):
+                pass
     return 0
 
 
@@ -102,12 +107,14 @@ def _emit(data: bytes, pending: bytes, out) -> bytes:
     return tail
 
 
-def _stamp(tmux, clock, host: str | None = None) -> None:
+def _stamp(tmux, clock, host: str | None = None, paste: bool = False) -> None:
     try:
         if tmux.has_session():
             tmux.set_session_option(RELAY_OPT, str(clock()))
             if host:
                 tmux.set_session_option(RELAY_HOST_OPT, core.relay_host_value(host, clock()))
+            if paste:
+                tmux.set_session_option(RELAY_PASTE_OPT, str(clock()))
     except (TmuxError, OSError):
         pass
 

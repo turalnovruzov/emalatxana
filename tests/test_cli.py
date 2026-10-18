@@ -15,7 +15,7 @@ from unittest import mock
 
 import emx
 from emx import __version__, cli, core
-from emx.tmux import OPEN_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
@@ -480,6 +480,167 @@ class FollowCommand(unittest.TestCase):
 
     def test_the_usage_names_it_as_internal(self):
         self.assertIn("emx follow is internal", cli.USAGE)
+
+    def test_the_paste_flag_in_the_environment_is_handed_on(self):
+        from emx import remote
+
+        for flag, expected in (("1", True), ("", False)):
+            env = {"EMX_SOCKET": "emx-test-x", "XDG_STATE_HOME": "/x/state", core.RELAY_PASTE_ENV: flag}
+            with mock.patch.dict(os.environ, env), mock.patch.object(remote, "follow", return_value=0) as follow:
+                cli.main(["follow"])
+            self.assertEqual(follow.call_args.kwargs.get("paste"), expected)
+
+
+PASTE_SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
+PASTE_ID = "20261018-120000-0a1b2c3d"
+PNG = core.PNG_SIGNATURE + b"rest of a picture"
+
+
+class PasteCheck(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        self.tmux = Tmux(f"emx-test-{uuid.uuid4().hex[:8]}", os.devnull)
+        self.addCleanup(self.kill)
+        self.tmux.run("new-session", "-d", "-s", SESSION, "sleep 60")
+        self.relay = self.dir / "relay.jsonl"
+
+    def kill(self):
+        try:
+            self.tmux.run("kill-server")
+        except TmuxError:
+            pass
+
+    def check(self, socket=None, path=None, pane="%0", sid=PASTE_SID):
+        socket = self.tmux.socket if socket is None else socket
+        return cli.main(["paste", socket, str(self.relay) if path is None else path, pane, sid])
+
+    def test_a_fresh_stamp_writes_the_record_and_exits_0(self):
+        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        self.assertEqual(self.check(pane="%7"), 0)
+        record = core.parse_relay(self.relay.read_text().splitlines()[-1])
+        self.assertEqual((record["kind"], record["pane"], record["sid"]), ("paste", "%7", PASTE_SID))
+
+    def test_a_stale_stamp_exits_1_and_writes_nothing(self):
+        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time() - 20))
+        self.assertEqual(self.check(), 1)
+        self.assertFalse(self.relay.exists())
+
+    def test_no_stamp_exits_1(self):
+        self.assertEqual(self.check(), 1)
+        self.assertFalse(self.relay.exists())
+
+    def test_bad_arguments_exit_1_and_write_nothing(self):
+        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        for kwargs in ({"socket": "default"}, {"socket": ""}, {"path": "relay.jsonl"}, {"pane": "12"}, {"sid": "x"}):
+            with self.subTest(kwargs=kwargs):
+                self.assertEqual(self.check(**kwargs), 1)
+        self.assertFalse(self.relay.exists())
+        self.assertFalse((Path.cwd() / "relay.jsonl").exists())
+
+    def test_a_tmux_that_is_not_running_exits_1(self):
+        self.kill()
+        self.assertEqual(self.check(), 1)
+        self.assertFalse(self.relay.exists())
+
+    def test_it_prints_nothing(self):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.check()
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+
+class PasteImage(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = Path(tmp.name)
+        env = mock.patch.dict(os.environ, {"XDG_STATE_HOME": tmp.name, "EMX_SOCKET": "emx-test-x"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.images = self.state / "emx" / "images"
+        paste = mock.patch.object(Tmux, "paste_if", return_value=True)
+        message = mock.patch.object(Tmux, "show_message")
+        self.paste, self.message = paste.start(), message.start()
+        self.addCleanup(paste.stop)
+        self.addCleanup(message.stop)
+
+    def run_with(self, data, args=("%3", PASTE_SID, PASTE_ID)):
+        stdin = mock.Mock(buffer=io.BytesIO(data))
+        with mock.patch.object(sys, "stdin", stdin):
+            return cli.main(["paste-image", *args])
+
+    def test_a_png_is_saved_private_and_its_path_pasted(self):
+        self.assertEqual(self.run_with(PNG), 0)
+        target = self.images / f"{PASTE_ID}.png"
+        self.assertEqual(target.read_bytes(), PNG)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.images.stat().st_mode & 0o777, 0o700)
+        self.paste.assert_called_once_with("%3", PASTE_SID, "emx-paste-" + PASTE_ID, str(target))
+        self.message.assert_not_called()
+
+    def test_nothing_on_stdin_says_so_and_saves_nothing(self):
+        self.assertEqual(self.run_with(b""), 0)
+        self.message.assert_called_once_with("%3", "no image in clipboard")
+        self.assertEqual(list(self.images.glob("*.png")), [])
+        self.paste.assert_not_called()
+
+    def test_something_that_is_not_a_png_says_so_too(self):
+        self.assertEqual(self.run_with(b"GIF89a....."), 0)
+        self.message.assert_called_once_with("%3", "no image in clipboard")
+        self.assertEqual(list(self.images.glob("*.png")), [])
+
+    def test_too_large_says_so_and_saves_nothing(self):
+        with mock.patch.object(core, "PASTE_MAX_BYTES", 10):
+            self.assertEqual(self.run_with(PNG), 0)
+        self.message.assert_called_once_with("%3", "image too large to paste (over 32 MB)")
+        self.assertEqual(list(self.images.glob("*.png")), [])
+        self.paste.assert_not_called()
+
+    def test_the_same_id_twice_pastes_once(self):
+        self.run_with(PNG)
+        self.assertEqual(self.run_with(PNG + b"other"), 0)
+        self.paste.assert_called_once()
+        self.assertEqual((self.images / f"{PASTE_ID}.png").read_bytes(), PNG)
+
+    def test_an_empty_answer_after_the_image_says_nothing(self):
+        self.run_with(PNG)
+        self.assertEqual(self.run_with(b""), 0)
+        self.message.assert_not_called()
+
+    def test_images_older_than_7_days_are_deleted_and_newer_stay(self):
+        self.images.mkdir(parents=True, mode=0o700)
+        old, new = self.images / "20260101-000000-aaaaaaaa.png", self.images / "20261017-000000-bbbbbbbb.png"
+        for path, days in ((old, 8), (new, 1)):
+            path.write_bytes(PNG)
+            stamp = time.time() - days * 86400
+            os.utime(path, (stamp, stamp))
+        self.run_with(PNG)
+        self.assertFalse(old.exists())
+        self.assertTrue(new.exists())
+
+    def test_a_folder_others_can_read_is_refused(self):
+        self.images.mkdir(parents=True)
+        os.chmod(self.images, 0o755)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_with(PNG), 1)
+        self.assertEqual(list(self.images.glob("*.png")), [])
+        self.paste.assert_not_called()
+
+    def test_bad_arguments_exit_2(self):
+        for args in (("12", PASTE_SID, PASTE_ID), ("%3", "x", PASTE_ID), ("%3", PASTE_SID, "../x")):
+            with self.subTest(args=args):
+                self.assertEqual(self.run_with(PNG, args), 2)
+        self.assertFalse(self.images.exists())
+
+    def test_a_tmux_error_exits_1(self):
+        self.paste.side_effect = TmuxError("gone")
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(self.run_with(PNG), 1)
 
 
 class OpenRemote(unittest.TestCase):
