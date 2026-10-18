@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.5.1 — 2026-10-18
+
+- A session that published an artifact no longer stays on Working after it finishes: Claude Code's watch on the artifact isn't counted as background work any more.
+
 ## 2.5.0 — 2026-10-18
 
 - While you're in a server through `emx remote myserver`, the panel's top line shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`.
