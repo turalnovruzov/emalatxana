@@ -2938,7 +2938,7 @@ def peek_content(session: Session, transcript: Transcript | None, now_ms: float)
     elif t.reply and (t.answered or cat == STOPPED):
         lines = [(t.reply, "body")]
         since = t.reply_at if cat == DONE else None
-    title = CATEGORY_LABELS[cat]
+    title = "Idle" if idle(session) else CATEGORY_LABELS[cat]
     if since is not None:
         age = format_age((now_ms - since) / 1000)
         title += f" · {age} ago" if cat == DONE else f" · for {age}"

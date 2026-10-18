@@ -27,7 +27,7 @@ The panel lists your sessions, grouped by project. Each shows on two lines: its 
 
 The colours say the state at a glance: Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is lavender, and Stopped is dim.
 
-One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state in that state's colour, and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on a slightly darker ground than the session next to it.
+One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on a slightly lighter ground than the session next to it.
 
 ## Start your first session
 

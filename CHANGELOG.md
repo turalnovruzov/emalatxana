@@ -4,7 +4,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 
 ## 2.6.0 — 2026-10-18
 
-- A new look. The panel sits on its own, slightly darker ground, and the bar over the selected row is calmer.
+- A new look. The panel sits on its own, slightly lighter ground, and the bar over the selected row is calmer.
 - One bar now runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count per state in that state's colour, and the key hints. The panel is just your sessions: no title line, no rule, no notifications strip and no key footer.
 - Each session shows on two lines: its name and age, and under the name what it is doing.
 - Idle sessions have their own lavender colour, and their own count in the bar.

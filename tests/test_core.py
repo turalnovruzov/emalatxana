@@ -3251,6 +3251,9 @@ class PeekContent(unittest.TestCase):
         self.assertEqual(core.peek_content(st("working"), None, self.NOW), core.Peek("Working", (("Nothing to show yet.", "dim"),)))
         self.assertEqual(core.peek_content(st("blocked", "input needed"), None, self.NOW).lines, (("input needed", "dim"),))
 
+    def test_an_idle_session_is_titled_idle_like_its_row(self):
+        self.assertEqual(core.peek_content(mk(state="working", status="idle"), None, self.NOW).title, "Idle")
+
     def test_a_stopped_session_shows_its_last_reply_with_no_time(self):
         p = self.peek("done", st("stopped"))
         self.assertEqual((p.title, p.lines[0][0][:11]), ("Stopped", "Alpha done."))

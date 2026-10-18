@@ -141,7 +141,7 @@ def bar_format(parts: list) -> str:
 
 
 class StatusBar:
-    """Writes the bar into the tmux status line, only when its text changes, and again after `REPUSH_SECONDS` because sourcing the config blanks the line."""
+    """Writes the bar into the tmux status line, only when its text changes, and again after `REPUSH_SECONDS` as a safety net in case a push was lost."""
 
     def __init__(self, tmux):
         self.tmux = tmux
@@ -155,6 +155,7 @@ class StatusBar:
         try:
             self.tmux.set_bar(text)
         except TmuxError:
+            # Runs every frame: reporting each failure would put an error line up every 200 ms.
             return
         self.last, self.at = text, now
 
