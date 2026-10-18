@@ -31,6 +31,7 @@ When **not** to write one:
 | [0006](./0006-emx-notify-helper.md) | emx shows its notifications through a small helper app of its own, emx-notify.app | Accepted |
 | [0007](./0007-emx-reaches-a-server-over-ssh.md) | emx reaches the emx on a server over plain ssh | Accepted |
 | [0008](./0008-emx-installs-and-updates-itself-from-git.md) | emx installs and updates itself from the repo's version tags, with git | Accepted |
+| [0009](./0009-routines-read-from-systemd.md) | The routines view reads systemd user timers with systemd's own tools, read-only | Accepted |
 
 ---
 

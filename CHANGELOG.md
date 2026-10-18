@@ -2,6 +2,14 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.8.0 — 2026-10-18
+
+- `R` in the panel opens a separate Routines view, for the routines your server runs as systemd user timers. `R` or `Esc` goes back.
+- For each routine you listed it shows every run in the past 24 hours with a check or a cross by its exit code, a warning for each scheduled time that had no run, and "not due" when nothing was scheduled. It only reads; it never starts, stops or changes a routine.
+- You list the routines once, one timer name per line, in a file called `routines` beside `prefs.json`. `emx docs routines` says how.
+- On a machine without systemd, such as a Mac, the view says there is nothing to read here.
+- Through `emx remote`, the view shows the server's routines.
+
 ## 2.7.0 — 2026-10-18
 
 - On `emx remote`, Ctrl+V in a session's pane pastes the image on your laptop's clipboard into that session as a file path, so Claude Code can read it. Your laptop sends the image to the server, which keeps it in a private folder for 7 days.
