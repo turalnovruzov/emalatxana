@@ -1063,6 +1063,137 @@ def _logo(parts: list) -> list:
     return placed
 
 
+BAR_NAME = "emx"
+BAR_SEP = "  │  "
+BAR_NOTICE_MIN = 12
+BAR_COUNT_ORDER = (NEEDS_INPUT, WORKING, DONE, "idle")
+
+
+def bar_counts(sessions) -> list:
+    """(key, count) per state in the bar's order, nonzero only. An interrupted session counts as idle and never as working; stopped ones are not counted."""
+    counts = {key: 0 for key in BAR_COUNT_ORDER}
+    for s in sessions:
+        if idle(s):
+            counts["idle"] += 1
+        elif category(s) != STOPPED:
+            counts[category(s)] += 1
+    return [(key, counts[key]) for key in BAR_COUNT_ORDER if counts[key]]
+
+
+_BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
+_BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
+
+
+def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True) -> list:
+    """(text, tone, bold) parts of the bar across the window's bottom, exactly `width` columns wide.
+
+    Left: the mark, the name, the version, the remote host and the mode tag, then the newest notification (`latest`, an Entry or None).
+    Right: a count per state, then the first of `hints` that fits. A fill of spaces sits between.
+    Room runs out in this order: the notification text is cut (down to `BAR_NOTICE_MIN`), the hints step
+    through their variants, the notification goes, the hints go, then the version, the tag, the host
+    (cut, then the mark), the name; the counts are cut from the right last, and the mark stays.
+    """
+    if width <= 0:
+        return []
+    if width < 3:
+        return [("⚒"[:width] if width == 1 else " ⚒", "copper", False)]
+    count_parts = _bar_count_parts(counts, loaded)
+    variants = list(hints)
+    last = len(variants) - 1 if variants else None
+    if latest is not None:
+        stages = [("flex", i) for i in range(len(variants))] or [("flex", None)]
+        stages += [("off", last)] if variants else []
+        stages.append(("off", None))
+    else:
+        stages = [("off", i) for i in range(len(variants))] + [("off", None)]
+    # (name, version, tag, host) kept at each step once the hints are gone.
+    shrinking = [
+        (True, False, True, "full"), (True, False, False, "full"),
+        (True, False, False, "cut"), (True, False, False, None), (False, False, False, None),
+    ]
+    attempts = [((True, True, True, "full"), notice, hint) for notice, hint in stages]
+    attempts += [(head, "off", None) for head in shrinking]
+    for (name, show_version, show_tag, host), notice, hint in attempts:
+        built = _bar_try(
+            version if show_version else None, count_parts, latest if notice == "flex" else None, now,
+            tag if show_tag else None, remote if host else None, host, name,
+            variants[hint] if hint is not None else "", width,
+        )
+        if built:
+            return built
+    return _bar_cut_counts(count_parts, width)
+
+
+def _bar_count_parts(counts: list, loaded: bool) -> list:
+    if not loaded:
+        return [("…", "muted", False)]
+    parts = []
+    for key, number in counts:
+        if parts:
+            parts.append((" ", "plain", False))
+        parts.append((f"✻{number}", _BAR_COUNT_TONES[key], True))
+    return parts
+
+
+def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width):
+    left = [(" ", "plain", False), ("⚒", "copper", False)]
+    if name:
+        left.append((f" {BAR_NAME}", "plain", True))
+    if version:
+        left.append((f" {version}", "muted", False))
+    host_at = None
+    if remote:
+        left.append((f" {REMOTE_MARK} ", "remote", True))
+        host_at = len(left)
+        left.append((fit(remote, REMOTE_HOST_MAX), "remote", True))
+    if tag:
+        left.append((f" {tag}", "error" if tag in (BLOCKED_TAG, UNAVAILABLE_TAG) else "muted", False))
+    right = list(count_parts)
+    if hint:
+        right += ([(BAR_SEP, "muted", False)] if count_parts else []) + [(hint, "muted", False)]
+    right.append((" ", "plain", False))
+
+    def size(parts):
+        return sum(display_width(t) for t, _, _ in parts)
+
+    if latest is not None:
+        age = format_age(now - latest.at)
+        tone = "muted" if latest.read else "plain"
+        left.append((BAR_SEP, "muted", False))
+        left.append(("✻", "muted" if latest.read else _BAR_MARK_TONES.get(latest.kind, "plain"), False))
+        left.append((f" {age} ", tone, False))
+        left.append((latest.text, tone, False))
+        room = width - 1 - size(left[:-1]) - size(right)
+        if room < BAR_NOTICE_MIN:
+            return None
+        left[-1] = (fit(latest.text, room), tone, False)
+    elif host_at is not None and host == "cut":
+        room = width - 1 - size(left[:host_at]) - size(left[host_at + 1:]) - size(right)
+        if room < 2:
+            return None
+        left[host_at] = (fit(remote, min(REMOTE_HOST_MAX, room)), "remote", True)
+    fill = width - size(left) - size(right)
+    if fill < 1:
+        return None
+    return left + [(" " * fill, "plain", False)] + right
+
+
+def _bar_cut_counts(count_parts: list, width: int) -> list:
+    left = [(" ", "plain", False), ("⚒", "copper", False)]
+    room = width - 2 - 1 - 1
+    kept, used = [], 0
+    for text, tone, bold in count_parts:
+        if used + display_width(text) > room:
+            break
+        kept.append((text, tone, bold))
+        used += display_width(text)
+    while kept and kept[-1][0] == " ":
+        kept.pop()
+    used = sum(display_width(t) for t, _, _ in kept)
+    fill = width - 2 - used - (1 if kept else 0)
+    return left + [(" " * fill, "plain", False)] + kept + ([(" ", "plain", False)] if kept else [])
+
+
 def parse_version(text) -> tuple | None:
     """(major, minor, patch) for a plain "X.Y.Z" semantic version, None for anything else."""
     if not isinstance(text, str) or not re.fullmatch(r"\d+\.\d+\.\d+", text):
