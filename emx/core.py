@@ -3742,7 +3742,7 @@ def hook_record(payload_text: str, now_ms: float) -> dict | None:
 
     Only these fields are kept: whatever else a payload carries (a tool's
     input, a prompt) is dropped here, so the record file never holds it. A
-    `Stop` also keeps how many background tasks still run (`background`) and
+    `Stop` also keeps how many background tasks still run, artifact watches aside (`background`), and
     the end of Claude's last reply (`reply`), which stays in emx's own state
     folder; a prompt Claude Code submitted itself is marked `synthetic`, its
     text still dropped. `at` is the time the hook ran, since the interrupt
