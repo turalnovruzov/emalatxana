@@ -13,7 +13,7 @@ import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -1683,6 +1683,258 @@ def prefs_path(env: Mapping | None = None) -> Path:
     if not base or not os.path.isabs(base):
         base = os.path.join(os.path.expanduser("~"), ".config")
     return Path(base) / "emx" / "prefs.json"
+
+
+ROUTINES_WINDOW = 86400
+MISSED_SLACK = 300
+CALENDAR_CAP = 1500
+
+MSG_START = "7d4958e842da4a758f6c1cdc7b36dcc5"
+MSG_DONE = "39f53479d3a045ac8e11786248231fbf"
+MSG_EXITED = "98e322203f7a4ed290d09fe03c09fe15"
+MSG_UNIT_FAILED = "d9b373ed55a64feb8242e02dbe79a49c"
+MSG_JOB_FAILED = "be02cf6855d2428ba40df7e9d022f03d"
+MSG_CLEAN_END = "7ad2d189f7e94e70a38c781354912448"
+RUN_MESSAGES = (MSG_START, MSG_DONE, MSG_EXITED, MSG_UNIT_FAILED, MSG_JOB_FAILED, MSG_CLEAN_END)
+
+PASSED, FAILED, RUNNING, UNKNOWN, MISSED = "PASSED", "FAILED", "RUNNING", "UNKNOWN", "MISSED"
+RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?", MISSED: "⚠ missed"}
+EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted"}
+
+
+def routines_path(env: Mapping | None = None) -> Path:
+    return prefs_path(env).parent / "routines"
+
+
+def routine_names(text: str) -> list:
+    names = []
+    for line in text.splitlines():
+        name = line.strip()
+        if not name or name.startswith("#"):
+            continue
+        for suffix in (".timer", ".service"):
+            if name.endswith(suffix):
+                name = name[: -len(suffix)]
+                break
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def show_blocks(text: str) -> dict:
+    """`systemctl show` output for several units as `Id -> {key: value}`; its blocks come in systemd's order, not the order asked for."""
+    blocks = {}
+    for chunk in re.split(r"\n\s*\n", text):
+        props = {}
+        for line in chunk.splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                props[key] = value
+        if props.get("Id"):
+            blocks[props["Id"]] = props
+    return blocks
+
+
+def show_time(value: str) -> float | None:
+    match = re.fullmatch(r"@(\d+)", (value or "").strip())
+    return float(match.group(1)) if match else None
+
+
+def calendar_specs(value: str) -> list:
+    return [spec.strip() for spec in re.findall(r"OnCalendar=(.*?)\s;", value or "")]
+
+
+_UTC_LINE = re.compile(r"\(in UTC\):\s*(?:\w+\s+)?(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+_ITERATION_LINE = re.compile(r"^\s*(?:Next elapse|Iteration #\d+):\s*(?:\w+\s+)?(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) UTC\s*$")
+
+
+def _utc_epoch(stamp: str) -> float:
+    return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+
+
+def calendar_times(text: str) -> list:
+    """Epoch seconds of each iteration `systemd-analyze calendar` printed; in a UTC zone it prints no `(in UTC):` line, so the iteration's own line counts."""
+    times = []
+    pending = None
+    for line in text.splitlines():
+        if re.match(r"^\s*(Next elapse|Iteration #\d+):", line):
+            if pending is not None:
+                times.append(pending)
+            pending = None
+            own = _ITERATION_LINE.match(line)
+            if own:
+                pending = _utc_epoch(own.group(1))
+            continue
+        utc = _UTC_LINE.search(line)
+        if utc:
+            pending = _utc_epoch(utc.group(1))
+    if pending is not None:
+        times.append(pending)
+    return times
+
+
+@dataclass(frozen=True)
+class Run:
+    start: float
+    result: str
+    status: str = ""
+
+
+def journal_runs(text: str, active: frozenset) -> dict:
+    """Each unit's runs, oldest first, from `journalctl -o json` lines. Only systemd's own lifecycle messages count, picked by message id; what a script printed is never read."""
+    groups = {}
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+            stamp = float(entry["__REALTIME_TIMESTAMP"]) / 1e6
+        except (ValueError, TypeError, KeyError):
+            continue
+        if not isinstance(entry, dict) or entry.get("MESSAGE_ID") not in RUN_MESSAGES:
+            continue
+        unit, invocation = entry.get("USER_UNIT"), entry.get("USER_INVOCATION_ID")
+        if not unit or not invocation:
+            continue
+        groups.setdefault(unit, {}).setdefault(invocation, []).append((stamp, entry))
+    runs = {}
+    for unit, invocations in groups.items():
+        found = []
+        for lines in invocations.values():
+            found.append(_run_of(lines))
+        found.sort(key=lambda run: run.start)
+        if found and unit in active and found[-1].result != FAILED:
+            found[-1] = replace(found[-1], result=RUNNING)
+        runs[unit] = found
+    return runs
+
+
+def _run_of(lines: list) -> Run:
+    start = min(stamp for stamp, _ in lines)
+    failed, passed, status = False, False, ""
+    for _, entry in lines:
+        message, job = entry["MESSAGE_ID"], entry.get("JOB_RESULT")
+        if message in (MSG_EXITED, MSG_UNIT_FAILED):
+            failed = True
+        elif message in (MSG_DONE, MSG_JOB_FAILED):
+            if job is None and message == MSG_JOB_FAILED or job is not None and job != "done":
+                failed = True
+            else:
+                passed = True
+        elif message == MSG_CLEAN_END:
+            passed = True
+        if entry.get("EXIT_STATUS") and not status:
+            status = str(entry["EXIT_STATUS"])
+    if failed:
+        return Run(start, FAILED, status)
+    return Run(start, PASSED if passed else UNKNOWN)
+
+
+def missed_times(slots: list, starts: list, since: float, now: float) -> list:
+    """Scheduled times with no run starting between them and the next one. systemd never fires early, so a start before the slot doesn't count."""
+    slots = sorted(slots)
+    missed = []
+    for i, slot in enumerate(slots):
+        if not since <= slot <= now - MISSED_SLACK:
+            continue
+        following = slots[i + 1] if i + 1 < len(slots) else now
+        if not any(slot <= start < following for start in starts):
+            missed.append(slot)
+    return missed
+
+
+@dataclass(frozen=True)
+class RoutineView:
+    name: str
+    tag: str
+    tone: str
+    events: tuple = ()
+    next_at: float | None = None
+    note: str = ""
+    error: str = ""
+
+
+ACTIVE_WHILE_RUNNING = ("activating", "deactivating", "reloading")
+
+
+def service_running(service: dict) -> bool:
+    state = service.get("ActiveState")
+    if state in ACTIVE_WHILE_RUNNING:
+        return True
+    if state != "active":
+        return False
+    started = show_time(service.get("ExecMainStartTimestamp", ""))
+    exited = show_time(service.get("ExecMainExitTimestamp", ""))
+    return exited is None or (started is not None and exited < started)
+
+
+def _status_word(run_status: str) -> str:
+    return f"failed · exit {run_status}" if run_status else "failed"
+
+
+def routine_view(name: str, timer: dict | None, service: dict | None, runs: list, slots: list,
+                 now: float, capped: bool = False, journal_error: str = "") -> RoutineView:
+    """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times, `journal_error` why the journal couldn't be read.
+
+    Missed times are judged against a journal that was read. When it holds no run of this routine in the window, systemd's own record of the last start decides: none in the window agrees nothing ran, so the times are judged; a start in the window means the journal lost it (rotated, say), so they are not."""
+    if not timer or timer.get("LoadState") == "not-found":
+        return RoutineView(name, "not found", "error")
+    window = now - ROUTINES_WINDOW
+    runs = [run for run in runs if run.start >= window]
+    started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
+    systemd_ran = started is not None and started >= window
+    judged = not journal_error and (bool(runs) or not systemd_ran)
+    if not runs and systemd_ran:
+        if service_running(service):
+            runs = [Run(started, RUNNING)]
+        elif service.get("Result") == "success":
+            runs = [Run(started, PASSED)]
+        else:
+            runs = [Run(started, FAILED, service.get("ExecMainStatus", ""))]
+    events = [(run.start, run.result, run.status) for run in runs]
+    calendar = bool(calendar_specs(timer.get("TimersCalendar", "")))
+    on = timer.get("ActiveState") == "active"
+    note = "" if calendar else "no calendar schedule"
+    slots = sorted(slots)
+    capped = capped or (len(slots) >= CALENDAR_CAP and slots[-1] < now)
+    known = [t for t in (show_time(timer.get("ActiveEnterTimestamp", "")), min((r.start for r in runs), default=None)) if t is not None]
+    floor = max(window, min(known)) if known else window
+    if calendar and on and not capped and judged:
+        starts = [run.start for run in runs]
+        events += [(slot, MISSED, "") for slot in missed_times(slots, starts, floor, now)]
+    events.sort(key=lambda event: event[0], reverse=True)
+    next_at = show_time(timer.get("NextElapseUSecRealtime", ""))
+    if not on:
+        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error)
+    if events:
+        _, kind, status = events[0]
+        tag = {PASSED: "passed", RUNNING: "running", MISSED: "missed", UNKNOWN: "unknown"}.get(kind) or _status_word(status)
+        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error)
+    if not judged and any(floor <= slot <= now - MISSED_SLACK for slot in slots):
+        return RoutineView(name, "unknown", "muted", (), next_at, note, journal_error)
+    return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
+
+
+def routine_lines(view: RoutineView, width: int, now: float, local: Callable = time.localtime) -> list:
+    """(text, tone) rows for one routine: name and tag, its runs newest first, then when it is next due."""
+    tag = fit(view.tag, width)
+    name = fit(view.name, max(0, width - display_width(tag) - 1))
+    gap = max(1, width - display_width(name) - display_width(tag)) if name else max(0, width - display_width(tag))
+    rows = [(name + " " * gap + tag, view.tone)]
+    if view.error:
+        rows += [("  " + line, "error") for line in wrap_words(view.error, max(1, width - 2))]
+    tokens = []
+    for at, kind, status in view.events:
+        stamp = time.strftime("%H:%M", local(at))
+        mark = RUN_MARKS[kind] + (status if kind == FAILED else "")
+        tokens.append(f"{stamp}\xa0{mark}".replace(" ", "\xa0"))
+    if tokens:
+        for line in wrap_words("  ".join(tokens), max(1, width - 2)):
+            rows.append(("  " + line.replace("\xa0", " "), "muted"))
+    if view.next_at is not None:
+        pattern = "%H:%M" if abs(view.next_at - now) < ROUTINES_WINDOW else "%a %H:%M"
+        rows.append((fit("  next " + time.strftime(pattern, local(view.next_at)), width), "muted"))
+    elif view.note:
+        rows.append((fit("  " + view.note, width), "muted"))
+    return [(fit(text, width), tone) for text, tone in rows]
 
 
 def _clamp(value: int, low: int, high: int) -> int:

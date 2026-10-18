@@ -45,6 +45,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
 | `^s` | Switch between by project and by state. |
 | `N` | Notifications: the last 20; `Enter` opens one. |
+| `R` | Routines: what ran in the past 24 hours; `R` or `Esc` goes back. |
 | `m` | Switch between voice mode and notification mode. |
 | `h` | Stop the voice now (voice mode). |
 | `s` | Move the panel to the other side. |
@@ -75,4 +76,4 @@ Environment variables, set before running `emx`.
 
 ## The prefs file
 
-Your choices are saved in `prefs.json` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`: panel side and width, voice or notification mode, view, pinned sessions, and favourite and recent folders. Whether automatic updates are on is kept in the install folder instead (`emx update off` and `emx update on`). emx's own state is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
+Your choices are saved in `prefs.json` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`: panel side and width, voice or notification mode, view, pinned sessions, and favourite and recent folders. The routines you want to see (`emx docs routines`) are listed in a file called `routines` beside it. Whether automatic updates are on is kept in the install folder instead (`emx update off` and `emx update on`). emx's own state is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.

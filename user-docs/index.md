@@ -13,6 +13,7 @@ Read a page with `emx docs <page>`, using the page name in brackets below. `emx 
 - [sessions](sessions.md): start, switch, find, pin, rename and close sessions; hide the panel.
 - [voice-and-notifications](voice-and-notifications.md): how emx tells you a session is done or needs you.
 - [remote](remote.md): use the emx running on a server from your laptop.
+- [routines](routines.md): see what your server's scheduled routines ran in the past 24 hours.
 - [update-and-uninstall](update-and-uninstall.md): how emx updates itself, and how to remove it.
 
 ## Concepts

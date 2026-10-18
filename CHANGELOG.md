@@ -2,6 +2,16 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.8.0 — 2026-10-18
+
+- `R` in the panel opens a separate Routines view, for the routines your server runs as systemd user timers. `R` or `Esc` goes back.
+- For each routine you listed it shows every run in the past 24 hours with a check or a cross by its exit code, a warning for each scheduled time that had no run, and "not due" when nothing was scheduled. It only reads; it never starts, stops or changes a routine.
+- You list the routines once, one timer name per line, in a file called `routines` beside `prefs.json`. `emx docs routines` says how.
+- A routine that was scheduled and didn't run at all in the past 24 hours shows each of those times as missed.
+- When the journal can't be read, the routines show its error and no missed times, rather than warning about runs that may well have happened, and `unknown` when emx can see no run at all. A run systemd recorded but the journal no longer holds shows, with no missed times.
+- On a machine without systemd, such as a Mac, the view says there is nothing to read here.
+- Through `emx remote`, the view shows the server's routines.
+
 ## 2.7.1 — 2026-10-18
 
 - The panel uses your terminal's own background again, as before 2.6.0.
