@@ -4545,6 +4545,10 @@ class KeyWording(AppCase):
             with self.subTest(text=text):
                 self.assertNotRegex(text, r"[Cc]trl\+|↵|\besc\b|\benter\b")
 
+    def test_every_help_key_fits_its_column(self):
+        for key, _ in sidebar.HELP:
+            self.assertLess(core.display_width(key), sidebar.HELP_KEY_WIDTH, key)
+
     def test_the_hints_use_the_spelled_keys(self):
         self.assertIn(("→ Enter", "open the session and go to it"), sidebar.HELP)
         self.assertEqual(sidebar.RENAME_FOOTER, "Tab suggest · Enter save · Esc cancel")

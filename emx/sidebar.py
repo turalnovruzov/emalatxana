@@ -79,7 +79,7 @@ HELP = (
     ("q", "detach; sessions keep running"),
     ("?", "close this help"),
 )
-HELP_KEY_WIDTH = 9
+HELP_KEY_WIDTH = 13
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 FOCUS_REPORTS_ON, FOCUS_REPORTS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)

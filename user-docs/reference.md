@@ -32,10 +32,10 @@ Every command, key and setting. Each is written as a code span so a test can che
 
 | Key | What it does |
 | --- | --- |
-| `→` `↵` | Open the session and go to it. |
+| `→` `Enter` | Open the session and go to it. |
 | `←` | Back here, from an empty prompt. |
 | `↑↓` `j` `k` | Move. |
-| `↵` `click` | Fold a group; a click opens a session. |
+| `Enter` `click` | Fold a group; a click opens a session. |
 | `space` | Peek at what the session asks or did; `↑↓` next, `space` or `Esc` closes. |
 | `n` | New session where the cursor is; `Tab` there picks another folder. |
 | `^x` | Interrupt a working session; twice closes it. On a project header, twice closes the group. |
@@ -43,7 +43,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `^t` | Pin to the top. In the folder list it stars a favourite instead. |
 | `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
 | `^s` | Switch between by project and by state. |
-| `N` | Notifications: the last 20; `↵` opens one. |
+| `N` | Notifications: the last 20; `Enter` opens one. |
 | `m` | Switch between voice mode and notification mode. |
 | `h` | Stop the voice now (voice mode). |
 | `s` | Move the panel to the other side. |
