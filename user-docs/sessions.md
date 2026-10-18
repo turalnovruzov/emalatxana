@@ -18,7 +18,7 @@ To start in another folder, press `Tab` and pick one. Type to filter; `↑` and 
 
 ## Peek
 
-Press `space` on a session to see what it asks or did last, without opening it. `↑` and `↓` go to the next one; `space` or `Esc` closes the peek.
+Press `space` on a session to see what it asks or did last, without opening it. `↑` and `↓` go to the next one; `space` or `Esc` closes the peek, and `→` opens the session. The peek's bottom edge reads `→ open · ␣ close`.
 
 ## Find
 

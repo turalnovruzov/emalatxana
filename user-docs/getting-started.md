@@ -27,7 +27,7 @@ The panel lists your sessions, grouped by project. Each shows its name and age, 
 
 The colours say the state at a glance: Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is lavender, and Stopped is dim.
 
-One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on your terminal's own background.
+One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints. The hints follow the cursor: they list the keys that act on the session or header it is on, and they change with the session's state. `N all` next to the notification opens all of them, and `?` shows every key. The selected row also repeats its likeliest key, dimmed, at the right end of its last line. The panel itself is just your sessions, on your terminal's own background.
 
 ## Start your first session
 
