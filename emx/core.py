@@ -965,6 +965,14 @@ BAR_NAME = "emx"
 BAR_SEP = "  │  "
 BAR_NOTICE_MIN = 12
 BAR_COUNT_ORDER = (NEEDS_INPUT, WORKING, DONE, "idle")
+NOTICE_KEY = "N all"
+HINT_GAP = 2
+PEEK_EDGE = "→ open · ␣ close"
+REST_HINTS = (("→", "open"), ("␣", "peek"), ("n", "new"), ("^f", "find"), ("^x", "close"), ("?", "keys"))
+EMPTY_HINTS = (("n", "new session"), ("?", "keys"))
+PEEK_HINTS = (("→", "open"), ("↑↓", "next"), ("␣ Esc", "close"))
+CLOSING_HINTS = (("␣", "peek"), ("?", "keys"))
+LOADING_HINTS = (("?", "keys"),)
 
 
 def bar_counts(sessions) -> list:
@@ -982,11 +990,13 @@ _BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle"
 _BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
 
 
-def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True) -> list:
+def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True, notice_key: bool = False) -> list:
     """(text, tone, bold) parts of the bar across the window's bottom, exactly `width` columns wide.
 
     Left: the mark, the name, the version, the remote host and the mode tag, then the newest notification (`latest`, an Entry or None).
     Right: a count per state, then the first of `hints` that fits. A fill of spaces sits between.
+    A hint variant is a string (drawn as one muted part) or a tuple of (key, label) pairs
+    (keys bold, labels muted). With `notice_key`, `N all` follows the notification and goes with it.
     Room runs out in this order: the notification text is cut (down to `BAR_NOTICE_MIN`), the hints step
     through their variants, the notification goes, the hints go, then the version, the tag, the host
     (cut, then the mark), the name; the counts are cut from the right last, and the mark stays.
@@ -1015,11 +1025,79 @@ def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, r
         built = _bar_try(
             version if show_version else None, count_parts, latest if notice == "flex" else None, now,
             tag if show_tag else None, remote if host else None, host, name,
-            variants[hint] if hint is not None else "", width,
+            variants[hint] if hint is not None else "", width, notice_key,
         )
         if built:
             return built
     return _bar_cut_counts(count_parts, width)
+
+
+def hint_text(pairs: tuple) -> str:
+    return "  ".join(f"{key} {label}" for key, label in pairs)
+
+
+def hint_variants(pairs: tuple) -> tuple:
+    """`pairs` and then shorter lists, longest first, each dropping one more pair from the right but the last: the bar keeps `? keys` (in a peek, `␣ Esc close`) to the end."""
+    if not pairs:
+        return ()
+    middle = [pairs[:n] + pairs[-1:] for n in range(len(pairs) - 2, 0, -1)]
+    return (pairs, *middle, pairs[-1:]) if len(pairs) > 1 else (pairs,)
+
+
+def rest_hints(listing: bool = True) -> tuple:
+    return REST_HINTS if listing else tuple(p for p in REST_HINTS if p[0] != "^x")
+
+
+def session_hints(s: Session, pinned: bool, listing: bool = True) -> tuple:
+    """The keys that act on session `s` under the cursor, each only where its key handler really does that.
+
+    While `listing` is false (sessions can't be listed) `^x` and `^r` are refused, so they are left out.
+    """
+    cat = category(s)
+    if cat == NEEDS_INPUT:
+        return (
+            (("→", "answer"), ("␣", "peek"))
+            + ((("^r", "rename"),) if s.running and listing else ())
+            + ((("^x", "close"),) if listing else ()) + (("?", "keys"),)
+        )
+    if interruptible(s):
+        return (("→", "open"), ("␣", "peek")) + ((("^x", "interrupt"),) if listing else ()) + (("?", "keys"),)
+    if cat == DONE:
+        return (("→", "open"), ("␣", "peek"), ("^t", "unpin" if pinned else "pin")) + ((("^x", "close"),) if listing else ()) + (("?", "keys"),)
+    return rest_hints(listing)
+
+
+def session_inline(s: Session, listing: bool = True) -> str | None:
+    """The key a selected row repeats at the end of its last line, dimmed."""
+    if category(s) == NEEDS_INPUT:
+        return "→ answer"
+    if interruptible(s):
+        return "^x interrupt" if listing else None
+    if category(s) == DONE:
+        return "→ open"
+    return None
+
+
+def header_hints(view: str, key: str, collapsed: bool, listing: bool = True) -> tuple:
+    new_here = view == PROJECT and bool(key) and key != PINNED
+    return (
+        (("Enter", "unfold" if collapsed else "fold"), ("n", "new here" if new_here else "new"))
+        + ((("^x ^x", "close group"),) if listing and group_closable(view, key) else ())
+        + (("?", "keys"),)
+    )
+
+
+def header_inline(collapsed: bool) -> str:
+    return "Enter unfold" if collapsed else "Enter fold"
+
+
+def place_inline(line: list, hint: str, width: int) -> list:
+    """`line` (one row's (x, text, part) list) with `hint` right-aligned as a "hint" part, or unchanged when it would come within HINT_GAP columns of the text. Never adds a line."""
+    x = width - 1 - display_width(hint)
+    end = max((px + display_width(text) for px, text, _ in line), default=0)
+    if x - end >= HINT_GAP:
+        return line + [(x, hint, "hint")]
+    return line
 
 
 def _bar_count_parts(counts: list, loaded: bool) -> list:
@@ -1033,7 +1111,7 @@ def _bar_count_parts(counts: list, loaded: bool) -> list:
     return parts
 
 
-def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width):
+def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width, notice_key=False):
     left = [(" ", "plain", False), (LOGO, "copper", False)]
     if name:
         left.append((f" {BAR_NAME}", "plain", True))
@@ -1048,7 +1126,7 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
         left.append((f" {tag}", "error" if tag in (BLOCKED_TAG, UNAVAILABLE_TAG) else "muted", False))
     right = list(count_parts)
     if hint:
-        right += ([(BAR_SEP, "muted", False)] if count_parts else []) + [(hint, "muted", False)]
+        right += ([(BAR_SEP, "muted", False)] if count_parts else []) + _hint_parts(hint)
     right.append((" ", "plain", False))
 
     def size(parts):
@@ -1060,11 +1138,16 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
         left.append((BAR_SEP, "muted", False))
         left.append(("✻", "muted" if latest.read else _BAR_MARK_TONES.get(latest.kind, "plain"), False))
         left.append((f" {age} ", tone, False))
+        notice_at = len(left)
         left.append((latest.text, tone, False))
-        room = width - 1 - size(left[:-1]) - size(right)
+        if notice_key:
+            left.append(("  " + NOTICE_KEY, "muted", False))
+        room = width - 1 - size(left[:notice_at]) - size(left[notice_at + 1:]) - size(right)
+        if notice_key:
+            room -= 1
         if room < BAR_NOTICE_MIN:
             return None
-        left[-1] = (fit(latest.text, room), tone, False)
+        left[notice_at] = (fit(latest.text, room), tone, False)
     elif host_at is not None and host == "cut":
         room = width - 1 - size(left[:host_at]) - size(left[host_at + 1:]) - size(right)
         if room < 2:
@@ -1074,6 +1157,15 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
     if fill < 1:
         return None
     return left + [(" " * fill, "plain", False)] + right
+
+
+def _hint_parts(hint) -> list:
+    if isinstance(hint, str):
+        return [(hint, "muted", False)]
+    parts = []
+    for i, (key, label) in enumerate(hint):
+        parts += [(("  " if i else "") + key, "muted", True), (" " + label, "muted", False)]
+    return parts
 
 
 def _bar_cut_counts(count_parts: list, width: int) -> list:

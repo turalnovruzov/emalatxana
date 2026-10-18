@@ -2,6 +2,14 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.9.0 — 2026-10-18
+
+- The bar shows the keys for whatever the cursor is on: the rest keys when nothing is selected or the panel is not in focus, a session's own keys by its state (answer when it needs input, interrupt while it works, pin when it is done), a project header's keys (fold, new here, close group), the peek's keys, and `n new session` when there are no sessions. A key shows only when it really does that now.
+- The selected session and header repeat their likeliest key, dimmed, at the right end of their last line (`→ answer`, `^x interrupt`, `→ open`, `Enter fold`) when it fits.
+- The peek's bottom edge reads `→ open · ␣ close`.
+- `N all` sits next to the latest notification in the bar.
+- With no sessions, the panel reads "No sessions yet." and "Press n to start one in a folder."
+
 ## 2.8.0 — 2026-10-18
 
 - `R` in the panel opens a separate Routines view, for the routines your server runs as systemd user timers. `R` or `Esc` goes back.

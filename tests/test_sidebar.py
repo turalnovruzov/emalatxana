@@ -286,6 +286,9 @@ class FakeBar:
         self.pushed.append(text)
 
 
+REST_BAR = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
+
+
 def plain_bar(text):
     return re.sub(r"#\[[^\]]*\]", "", text).replace("##", "#").replace("%%", "%")
 
@@ -1392,7 +1395,9 @@ class CloseSession(AppCase):
 
     def test_the_help_and_bar_hints_name_no_viewer_and_no_r_key(self):
         self.assertNotIn("r", [key for key, _ in sidebar.HELP])
-        for text in [*self.app.bar_hints(), *(f"{key} {what}" for key, what in sidebar.HELP)]:
+        hints = [v if isinstance(v, str) else core.hint_text(v) for v in self.app.bar_hints()]
+        self.assertTrue(hints)
+        for text in [*hints, *(f"{key} {what}" for key, what in sidebar.HELP)]:
             with self.subTest(text=text):
                 self.assertNotIn("viewer", text)
                 self.assertNotIn("stop, then remove", text)
@@ -3807,6 +3812,20 @@ class Peek(AppCase):
             self.assertIn(want, text)
         self.assertTrue(any(line.startswith(" ✻ emx-test-a") for line in self.screen()))
 
+    def test_the_peek_edge_carries_its_keys(self):
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.app.draw()
+        edge = next(line for line in self.screen() if line.startswith("╰"))
+        self.assertEqual(core.display_width(edge), 39)
+        self.assertTrue(edge.startswith("╰─ → open · ␣ close ─"), edge)
+        self.assertTrue(edge.endswith("─╯"))
+        self.assertEqual(edge.strip("╰╯").strip("─ ").replace("→ open · ␣ close", "").strip("─ "), "")
+        self.scr.size = (20, 21)
+        self.app.draw()
+        edge = next(line for line in self.screen() if line.startswith("╰"))
+        self.assertEqual(edge, "╰" + "─" * 18 + "╯")
+
     def test_space_on_a_header_does_nothing(self):
         self.app.cursor = ("group", "/p/alpha")
         self.app.handle_key(" ")
@@ -4532,12 +4551,23 @@ class PanelGround(AppCase):
 class KeyWording(AppCase):
     """Keys are written ^x, Esc and Enter wherever a hint shows them."""
 
+    def hint_texts(self):
+        lists = [core.REST_HINTS, core.EMPTY_HINTS, core.PEEK_HINTS, core.CLOSING_HINTS, core.LOADING_HINTS]
+        for state, status in (("blocked", ""), ("working", ""), ("working", "idle"), ("done", ""), ("stopped", "")):
+            for pinned in (False, True):
+                lists.append(core.session_hints(core.Session("i", "n", "", state, status, "", None, True), pinned))
+        for view in (core.PROJECT, core.BY_STATE):
+            for collapsed in (False, True):
+                lists.append(core.header_hints(view, "/p/alpha", collapsed))
+        return [core.hint_text(pairs) for pairs in lists] + [core.header_inline(True), "→ answer", "^x interrupt"]
+
     def test_no_hint_says_ctrl_or_a_return_arrow(self):
         self.poll(session("a", "/p/alpha"))
         self.app.refresh()
         self.app.cursor = ("session", "a")
         texts = [*(f"{key} {what}" for key, what in sidebar.HELP), sidebar.CONFIRM_FOOTER, sidebar.RENAME_FOOTER,
-                 sidebar.FIND_HINT, sidebar.HISTORY_HINT, sidebar.ROUTINES_HINT, *sidebar.PEEK_FOOTERS,
+                 sidebar.FIND_HINT, sidebar.HISTORY_HINT, sidebar.ROUTINES_HINT,
+                 core.PEEK_EDGE, core.NOTICE_KEY, *self.hint_texts(),
                  core.confirm_label(core.Confirm("a", "n", True, 0.0)), core.group_confirm_label(1), core.group_confirm_label(3),
                  core.GROUP_CLOSE_REFUSAL, core.PINNED_CLOSE_REFUSAL]
         for key in ("n", "\t"):
@@ -4620,7 +4650,7 @@ class AppBar(AppCase):
         self.assertIn("⚒", text)
         self.assertIn(f" emx {sidebar.__version__}", text)
         self.assertEqual(text.count("✻1"), 2)
-        self.assertIn("N notifications", text)
+        self.assertIn("Enter fold", text)
         self.assertEqual(core.display_width(text), 100)
 
     def test_refresh_pushes_it_once_the_width_is_known(self):
@@ -4644,10 +4674,11 @@ class AppBar(AppCase):
         self.assertIn("voice", self.bar())
 
     def test_the_hints_follow_the_context(self):
-        self.assertIn("N notifications  ? keys", self.bar())
+        self.app.cursor = ("session", "b")
+        self.assertIn(REST_BAR, self.bar(200))
         self.app.cursor = ("session", "a")
         self.app.handle_key(" ")
-        self.assertIn("␣ Esc close", self.bar())
+        self.assertIn("→ open  ↑↓ next  ␣ Esc close", self.bar())
         self.app.handle_key(" ")
         self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
         self.assertIn("^x to confirm", self.bar())
@@ -4675,6 +4706,233 @@ class AppBar(AppCase):
         for gone in ("⚒", "─", "Notifications (", "? keys", "emalatxana"):
             self.assertNotIn(gone, everything)
         self.assertEqual(self.app.bottom_lines(39, 20), [])
+
+
+class HintsInTheBar(AppCase):
+    """The bar offers the keys that act on what the cursor is on."""
+
+    def setUp(self):
+        super().setUp()
+        self.poll(blocked("a", "/p/alpha"), session("w", "/p/alpha"), session("d", "/p/alpha", state="done"),
+                  idle_row("b", "/p/alpha"), session("e", "/p/beta"))
+        self.app.refresh()
+
+    def test_the_bar_shows_rest_hints_when_the_panel_is_unfocused(self):
+        self.app.cursor = ("session", "a")
+        self.app.focused = False
+        self.assertIn(REST_BAR, self.bar(200))
+
+    def test_the_bar_shows_the_needs_input_rows_actions(self):
+        self.app.cursor = ("session", "a")
+        self.app.focused = True
+        self.assertIn("→ answer  ␣ peek  ^r rename  ^x close  ? keys", self.bar(200))
+
+    def test_the_bar_shows_interrupt_for_a_working_row(self):
+        self.app.cursor = ("session", "w")
+        self.app.focused = True
+        self.assertIn("→ open  ␣ peek  ^x interrupt  ? keys", self.bar(200))
+
+    def test_the_bar_shows_pin_then_unpin_for_a_done_row(self):
+        self.app.cursor = ("session", "d")
+        self.app.focused = True
+        self.assertIn("^t pin  ^x close", self.bar(200))
+        self.app.handle_key(sidebar.CTRL_T)
+        self.assertIn("^t unpin", self.bar(200))
+
+    def test_an_idle_row_gets_the_rest_hints(self):
+        self.app.cursor = ("session", "b")
+        self.app.focused = True
+        self.assertIn(REST_BAR, self.bar(200))
+
+    def test_a_header_shows_fold_new_here_and_close_group(self):
+        self.app.focused = True
+        self.app.cursor = ("group", "/p/alpha")
+        self.assertIn("Enter fold  n new here  ^x ^x close group  ? keys", self.bar(200))
+        self.app.handle_key("\n")
+        self.assertIn("Enter unfold", self.bar(200))
+        self.app.handle_key("\n")
+        self.app.handle_key(sidebar.CTRL_S)
+        self.app.cursor = ("group", core.NEEDS_INPUT)
+        text = self.bar(200)
+        self.assertIn("Enter fold  n new  ? keys", text)
+        self.assertNotIn("close group", text)
+
+    def test_n_on_a_header_starts_in_that_folder(self):
+        self.app.focused = True
+        self.app.cursor = ("group", "/p/alpha")
+        self.app.handle_key("n")
+        self.assertEqual(self.app.prompt["folder"], "/p/alpha")
+        self.assertEqual(self.app.prompt["stage"], "message")
+
+    def test_the_bar_offers_peek_and_keys_for_a_closing_row(self):
+        self.app.cursor = ("session", "w")
+        self.app.focused = True
+        self.app.closing = {"w": object()}
+        self.assertIn("␣ peek  ? keys", self.bar(200))
+        self.assertNotIn("^x", self.bar(200).split("│")[-1])
+
+    def test_right_arrow_in_the_peek_opens_the_session(self):
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.app.handle_key(curses.KEY_RIGHT)
+        self.assertFalse(self.app.peeking)
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+
+    def test_n_all_sits_next_to_the_notification(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        self.assertIn("Alpha finished the tax fix.  N all", self.bar(200))
+        self.app.handle_key("N")
+        self.assertNotIn("N all", self.bar(200))
+        self.app.handle_key("\x1b")
+        self.app.handle_key("?")
+        self.assertNotIn("N all", self.bar(200))
+        self.app.handle_key("x")
+        self.app.history = []
+        self.assertNotIn("N all", self.bar(200))
+
+    def test_n_all_is_gone_while_the_routines_view_has_the_keys(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        self.app.handle_key("R")
+        self.assertIsNotNone(self.app.routines_view)
+        self.assertNotIn("N all", self.bar(200))
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.routines_view)
+        self.assertIn("N all", self.bar(200))
+
+    def test_the_routines_view_bar_names_only_keys_it_handles(self):
+        self.app.handle_key("R")
+        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
+        self.assertNotRegex(self.bar(200), r"\^x|\^r|\^f|peek|new|close")
+
+    def test_n_all_keeps_two_spaces_from_the_counts_at_every_width(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        seen = 0
+        for width in range(40, 140):
+            text = self.bar(width)
+            if "N all" in text:
+                seen += 1
+                self.assertNotRegex(text, r"N all \S", msg=f"width {width}: {text!r}")
+        self.assertGreater(seen, 0)
+
+    def test_close_and_rename_hints_go_while_sessions_cannot_be_listed(self):
+        self.app.list_error = "listing broken"
+        for hints in (
+            core.session_hints(core.Session("i", "n", "", "blocked", "", "", None, True), False, False),
+            core.session_hints(core.Session("i", "n", "", "done", "", "", None, True), False, False),
+            core.session_hints(core.Session("i", "n", "", "working", "", "", None, True), False, False),
+            core.header_hints(core.PROJECT, "/p/alpha", False, False),
+            core.rest_hints(False),
+        ):
+            with self.subTest(hints=hints):
+                self.assertFalse([k for k, _ in hints if k in ("^x", "^r", "^x ^x")])
+        self.assertIsNone(core.session_inline(core.Session("i", "n", "", "working", "", "", None, True), False))
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.list_error = "listing broken"
+        for cursor in (("session", "a"), ("group", "/p/alpha")):
+            self.app.cursor = cursor
+            for variants in (self.app.bar_hints(),):
+                for variant in variants:
+                    self.assertFalse([k for k, _ in variant if k.startswith("^x") or k == "^r"])
+        self.app.list_error = ""
+        self.app.cursor = ("session", "a")
+        self.assertTrue(any(k == "^x" for variant in self.app.bar_hints() for k, _ in variant))
+
+
+class HintsOnEmptyPanel(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(20, 40)
+        self.app.scr = self.scr
+        self.poll()
+        self.app.refresh()
+
+    def test_the_empty_bar_offers_new_session(self):
+        self.assertIn("n new session  ? keys", self.bar(200))
+
+    def test_the_empty_panel_says_press_n_in_a_folder(self):
+        drawn = []
+        put = self.app.put
+        self.app.put = lambda y, x, text, attr=0: (drawn.append((text, attr)), put(y, x, text, attr))[1]
+        self.app.draw()
+        self.assertEqual(self.scr.cells[1].rstrip(), " No sessions yet.")
+        self.assertEqual(self.scr.cells[2].rstrip(), " Press n to start one in a folder.")
+        self.assertIn(("n", curses.A_BOLD), drawn)
+
+
+class HintsOnRows(AppCase):
+    """The selected row and header repeat their likeliest key at the right end of their last line, without moving anything."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(20, 40)
+        self.app.scr = self.scr
+        self.poll(blocked("a", "/p/alpha", waiting=LONG_WAIT), session("b", "/p/alpha"), session("d", "/p/beta", state="done"))
+        self.app.refresh()
+        self.app.focused = True
+
+    def screen(self):
+        return [self.scr.cells.get(y, "") for y in range(self.scr.size[0])]
+
+    def rows_of(self, sid):
+        return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
+
+    def test_the_selected_row_repeats_its_action_on_its_last_line(self):
+        self.poll(blocked("a", "/p/alpha", waiting=LONG_WAIT + " and then run it"), session("b", "/p/alpha"))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        ys = self.rows_of("a")
+        self.assertGreaterEqual(len(ys), 3)
+        last = self.screen()[ys[-1]].rstrip()
+        self.assertTrue(last.endswith("→ answer"), last)
+        self.assertLessEqual(core.display_width(last), 39)
+        for y in ys[:-1]:
+            self.assertNotIn("→ answer", self.screen()[y])
+
+    def test_no_inline_hint_when_unfocused_armed_or_closing(self):
+        self.app.cursor = ("session", "a")
+        self.app.focused = False
+        self.app.draw()
+        self.assertNotIn("→ answer", "\n".join(self.screen()))
+        self.app.focused = True
+        self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
+        self.app.draw()
+        self.assertNotIn("→ answer", "\n".join(self.screen()))
+        self.app.confirm = None
+        self.app.closing = {"a": object()}
+        self.app.draw()
+        self.assertNotIn("→ answer", "\n".join(self.screen()))
+
+    def test_the_inline_hint_never_changes_row_heights(self):
+        self.poll(blocked("a", "/p/alpha", waiting=LONG_WAIT), blocked("n", "/p/alpha", waiting="ok"),
+                  session("d", "/p/beta", state="done"), blocked("c", "/p/gamma", waiting=LONG_WAIT * 6))
+        self.app.refresh()
+        for sid in ("a", "n", "d", "c"):
+            with self.subTest(sid=sid):
+                self.app.cursor = ("session", sid)
+                on = self.app.list_layout(40, 6)[2]
+                self.app.cursor = next(line for line in self.app.items() if line[0] == "group")
+                off = self.app.list_layout(40, 6)[2]
+                self.assertEqual(on, off)
+
+    def test_a_done_row_with_no_detail_carries_it_on_the_state_line(self):
+        self.app.cursor = ("session", "d")
+        self.app.draw()
+        ys = self.rows_of("d")
+        self.assertEqual(len(ys), 2)
+        self.assertTrue(self.screen()[ys[-1]].rstrip().endswith("→ open"), self.screen()[ys[-1]])
+
+    def test_the_selected_header_shows_enter_fold(self):
+        self.app.cursor = ("group", "/p/alpha")
+        self.app.draw()
+        y = next(y for y, item in self.app.row_map.items() if item == ("group", "/p/alpha"))
+        self.assertTrue(self.screen()[y].rstrip().endswith("Enter fold"), self.screen()[y])
+        self.app.focused = False
+        self.app.draw()
+        self.assertNotIn("Enter fold", self.screen()[y])
 
 
 class InterruptTmux(RenameTmux):
@@ -6275,7 +6533,7 @@ class HistoryWiring(AppCase):
 
     def test_the_bar_dims_a_read_newest_notice(self):
         self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
-        self.app.window_width = 100
+        self.app.window_width = 140
         self.app.update_bar()
         self.assertIn("#[fg=default,nobold]Alpha is done.", self.app.bar.pushed[-1])
         self.open_s1()
