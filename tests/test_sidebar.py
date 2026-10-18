@@ -4421,6 +4421,82 @@ def nearest_256(r, g, b):
     return min(colours, key=lambda c: sum((a - b) ** 2 for a, b in zip(colours[c], (r, g, b))))
 
 
+class Tones(unittest.TestCase):
+    def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
+        self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
+
+    def test_remote_is_the_nearest_256_colour_to_af87ff(self):
+        self.assertEqual(sidebar.TONES["remote"][0], nearest_256(0xAF, 0x87, 0xFF))
+
+    def test_idle_is_the_nearest_256_colour_to_8787af(self):
+        self.assertEqual(sidebar.TONES["idle"][0], nearest_256(0x87, 0x87, 0xAF))
+        self.assertEqual(sidebar.TONES["idle"][0], 103)
+
+    def test_the_selection_bar_is_237_focused_236_not(self):
+        self.assertEqual(sidebar.BAR_BG, {"focused": 237, "unfocused": 236})
+
+    def test_the_panel_ground_is_235(self):
+        self.assertEqual(sidebar.PANEL_GROUND, 235)
+
+
+class IdleRows(AppCase):
+    def drawn(self, *sessions, width=60):
+        scr = AttrScr(20, width)
+        self.app.scr = scr
+        self.app.palette = TonePalette()
+        self.poll(*sessions)
+        self.app.refresh()
+        return scr.drawn
+
+    def test_an_idle_row_draws_glyph_and_word_in_idle(self):
+        drawn = self.drawn(idle_row("a", "/p/alpha"))
+        idle = TonePalette().attr("idle")
+        glyph = [d for d in drawn if d[1] == 1 and d[2] == "✻"]
+        word = [d for d in drawn if d[2] == "Idle"]
+        self.assertEqual([d[3] for d in glyph], [idle])
+        self.assertEqual([d[3] for d in word], [idle])
+
+    def test_a_working_row_keeps_a_muted_glyph_and_plain_word(self):
+        drawn = self.drawn(session("a", "/p/alpha"))
+        glyph = next(d for d in drawn if d[1] == 1 and d[2] in core.WORKING_FRAMES)
+        word = next(d for d in drawn if d[2] == "Working")
+        self.assertEqual(glyph[3], TonePalette().attr("muted"))
+        self.assertEqual(word[3], TonePalette().attr("plain"))
+
+    def test_the_peek_title_of_an_idle_session_is_idle(self):
+        scr = AttrScr(20, 60)
+        self.app.scr = scr
+        self.app.palette = TonePalette()
+        self.poll(idle_row("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+        self.app.handle_key(" ")
+        scr.drawn.clear()
+        self.app.draw()
+        title = next(d for d in scr.drawn if d[1] == 2 and d[3] & curses.A_BOLD)
+        self.assertEqual(title[3], TonePalette().attr("idle") | curses.A_BOLD)
+
+
+class PanelGround(AppCase):
+    def test_housekeep_paints_the_panel_once(self):
+        calls = []
+
+        class Housekeeping(ClientTmux):
+            socket = "emx-test-ground"
+
+            def panes(self):
+                return [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "", "", 100, 141)]
+
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: calls.append((name, args))
+
+        self.app.tmux = Housekeeping()
+        self.app.me = "%1"
+        for _ in range(2):
+            sidebar.App.housekeep(self.app, False)
+        self.assertEqual([c for c in calls if c[0] == "set_pane_option"], [("set_pane_option", ("%1", "window-style", "bg=colour235"))])
+
+
 class TopLine(AppCase):
     def drawn_top_line(self, focused, host=None):
         scr = AttrScr()
@@ -4439,12 +4515,6 @@ class TopLine(AppCase):
 
     def test_the_name_dims_when_the_panel_loses_focus(self):
         self.assertEqual(self.drawn_top_line(False)["emalatxana"], curses.A_DIM)
-
-    def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
-        self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
-
-    def test_remote_is_the_nearest_256_colour_to_af87ff(self):
-        self.assertEqual(sidebar.TONES["remote"][0], nearest_256(0xAF, 0x87, 0xFF))
 
     def test_the_remote_mark_is_bold_violet_focused_or_not(self):
         for focused in (True, False):

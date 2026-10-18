@@ -131,10 +131,16 @@ TONES = {
     "error": (203, curses.COLOR_RED),
     "copper": (173, curses.COLOR_YELLOW),
     "remote": (141, curses.COLOR_MAGENTA),
+    "idle": (103, curses.COLOR_BLUE),
     "plain": (-1, -1),
 }
-BAR_BG = {"focused": 24, "unfocused": 236}
+BAR_BG = {"focused": 237, "unfocused": 236}
+PANEL_GROUND = 235
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
+
+
+def session_tone(s) -> str:
+    return "idle" if core.idle(s) else CATEGORY_TONE[core.category(s)]
 
 
 def fetch_sessions(engine: Engine) -> tuple:
@@ -1725,6 +1731,7 @@ class App:
         self.relayed = False
         self.relay_host = None
         self.legacy_cleared = False
+        self.ground_painted = False
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
         self.prefs = core.load_prefs(self.prefs_file)
@@ -1910,6 +1917,7 @@ class App:
                 self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
                 self.bound = (sidebar.id, main.id)
             if sidebar:
+                self.paint_ground(sidebar)
                 self.take_focus(sidebar)
                 followed = core.follow_zoom(self.prefs, sidebar.zoomed)
                 if followed is not self.prefs:
@@ -1926,6 +1934,12 @@ class App:
         self.check_open()
         self.time_whats_new()
         self.check_update()
+
+    def paint_ground(self, sidebar) -> None:
+        """The panel sits a step apart from the sessions: the pane's own background, so default-background cells show it too."""
+        if not self.ground_painted:
+            self.tmux.set_pane_option(sidebar.id, "window-style", f"bg=colour{PANEL_GROUND}")
+            self.ground_painted = True
 
     def time_whats_new(self) -> None:
         if not self.whats_new_waits:
@@ -2946,7 +2960,7 @@ class App:
         muted = self.palette.attr("muted")
         label = core.fit(session.name, box - 6)
         self.put(y, 0, "╭─ " + label + " " + "─" * max(0, box - 5 - core.display_width(label)) + "╮", muted)
-        tone = "muted" if core.category(session) == core.STOPPED else CATEGORY_TONE[core.category(session)]
+        tone = "muted" if core.category(session) == core.STOPPED else session_tone(session)
         lines = [(core.fit(peek.title, inner), self.palette.attr(tone) | curses.A_BOLD)]
         lines += [(text, curses.A_DIM if style == "dim" else self.palette.attr(PEEK_TONES[style])) for text, style in body]
         for i in range(rows - 2):
@@ -3110,8 +3124,8 @@ class App:
                 return pal.attr("stopped", selected) | curses.A_DIM | extra
             return pal.attr(tone, selected) | extra
 
-        glyph_tone = "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
-        tones = {"name": "plain", "extra": "path", "status": CATEGORY_TONE[cat], "age": "muted"}
+        glyph_tone = "idle" if core.idle(s) else "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
+        tones = {"name": "plain", "extra": "path", "status": session_tone(s), "age": "muted"}
         for i, parts in enumerate(rows):
             if y + i not in shown:
                 continue
