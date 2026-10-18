@@ -4408,6 +4408,23 @@ class HookRecord(unittest.TestCase):
         self.assertEqual(core.hook_record(self.payload(background_tasks=[]), 1)["background"], 0)
         self.assertNotIn("background", core.hook_record(self.payload(), 1))
 
+    def test_the_watch_on_a_published_artifact_is_not_background_work(self):
+        watch = {"id": "sovb95bkg", "type": "monitor", "status": "running",
+                 "description": "live updates for artifact https://claude.ai/artifact/abc (auto-armed on publish)"}
+        stop = core.hook_record(self.payload(background_tasks=[watch]), 1)
+        self.assertEqual(stop["background"], 0)
+        prompt = core.hook_record(self.payload(hook_event_name="UserPromptSubmit", prompt="hi"), 0)
+        self.assertEqual(core.fold_events([prompt, stop]).state, "done")
+
+    def test_the_artifact_watch_beside_a_running_subagent_counts_one(self):
+        watch = {"type": "monitor", "status": "running", "description": "live updates for artifact https://x (auto-armed on publish)"}
+        agent = {"type": "local_agent", "status": "running", "description": "review"}
+        self.assertEqual(core.hook_record(self.payload(background_tasks=[watch, agent]), 1)["background"], 1)
+
+    def test_a_monitor_with_another_description_still_counts(self):
+        monitor = {"type": "monitor", "status": "running", "description": "watch CI"}
+        self.assertEqual(core.hook_record(self.payload(background_tasks=[monitor]), 1)["background"], 1)
+
     def test_a_stop_keeps_the_end_of_the_last_reply(self):
         message = ("word\n" * 1000)[:5000]
         record = core.hook_record(self.payload(last_assistant_message=message), 1)

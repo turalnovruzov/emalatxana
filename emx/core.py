@@ -3728,12 +3728,21 @@ def _leading_fields(text: str) -> dict:
     return found
 
 
+def _counts_as_background(task) -> bool:
+    """Claude Code arms a monitor on every artifact a session publishes and lists it as running in every later Stop, so it is not work."""
+    if not isinstance(task, dict) or task.get("status") != "running":
+        return False
+    description = task.get("description")
+    watch = task.get("type") == "monitor" and isinstance(description, str) and description.startswith("live updates for artifact")
+    return not watch
+
+
 def hook_record(payload_text: str, now_ms: float) -> dict | None:
     """The one line a hook leaves behind, from the JSON Claude Code gave it on stdin, or None when the payload is not usable. Never raises.
 
     Only these fields are kept: whatever else a payload carries (a tool's
     input, a prompt) is dropped here, so the record file never holds it. A
-    `Stop` also keeps how many background tasks still run (`background`) and
+    `Stop` also keeps how many background tasks still run, artifact watches aside (`background`), and
     the end of Claude's last reply (`reply`), which stays in emx's own state
     folder; a prompt Claude Code submitted itself is marked `synthetic`, its
     text still dropped. `at` is the time the hook ran, since the interrupt
@@ -3766,7 +3775,7 @@ def hook_record(payload_text: str, now_ms: float) -> dict | None:
         if event == "Stop":
             tasks = payload.get("background_tasks")
             if isinstance(tasks, list):
-                record["background"] = sum(1 for t in tasks if isinstance(t, dict) and t.get("status") == "running")
+                record["background"] = sum(1 for t in tasks if _counts_as_background(t))
             if isinstance(payload.get("last_assistant_message"), str):
                 record["reply"] = _one_line(payload["last_assistant_message"])[-STOP_REPLY_CHARS:]
         if event == "UserPromptSubmit" and isinstance(payload.get("prompt"), str):
