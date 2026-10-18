@@ -121,6 +121,9 @@ class Tmux:
     def source_config(self) -> None:
         self.run("source-file", self.config)
 
+    def set_bar(self, text: str) -> None:
+        self.run("set-option", "-t", f"={SESSION}:", "status-format[0]", text)
+
     def set_pane_option(self, pane: str, name: str, value: str) -> None:
         self.run("set-option", "-p", "-t", pane, name, value)
 

@@ -1,6 +1,7 @@
 import json
 import os
 import pty
+import select
 import shutil
 import subprocess
 import sys
@@ -546,6 +547,10 @@ class TypeIfTarget(unittest.TestCase):
 
 CONF = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "emx", "emx.tmux.conf")
 SHELL_CONF = open(CONF, encoding="utf-8").read()
+STATUS_KEYS = (
+    "MouseDown1Status", "C-MouseDown1Status", "MouseDown3Status", "M-MouseDown3Status",
+    "MouseDown3StatusLeft", "M-MouseDown3StatusLeft", "WheelUpStatus", "WheelDownStatus",
+)
 
 
 class ClientStateParse(unittest.TestCase):
@@ -596,6 +601,15 @@ class ShippedConf(unittest.TestCase):
         self.assertIn("set-hook -g client-focus-out 'set-option -t \"=emx:\" @emx_focus 0'", SHELL_CONF)
         self.assertNotIn("allow-passthrough", SHELL_CONF)
 
+    def test_the_status_line_is_on_at_the_bottom(self):
+        for line in ("set -g status on", "set -g status-position bottom", "set -g status-style 'bg=colour236", "set -g status-format[0] ''"):
+            self.assertIn(line, SHELL_CONF)
+        self.assertNotIn("status off", SHELL_CONF)
+
+    def test_the_status_line_mouse_keys_are_unbound(self):
+        for key in STATUS_KEYS:
+            self.assertIn(f"unbind -q -n {key}\n", SHELL_CONF)
+
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class Focus(PrivateServer):
@@ -621,6 +635,45 @@ class Focus(PrivateServer):
     def test_the_attached_client_is_listed_by_its_tty(self):
         (tty,) = self.tmux.client_ttys()
         self.assertTrue(tty.startswith("/dev/tty"), tty)
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class Bar(PrivateServer):
+    def setUp(self):
+        super().setUp()
+        self.tmux.config = CONF
+        self.tmux.source_config()
+
+    def test_the_bar_text_reaches_the_attached_client(self):
+        self.tmux.set_bar("emx-bar-probe")
+        self.read_client_until(b"emx-bar-probe")
+
+    def test_the_panel_ground_reaches_the_attached_client(self):
+        self.tmux.select(self.sidebar)
+        self.tmux.set_pane_option(self.sidebar, "window-style", "bg=colour235")
+        self.read_client_until(b"48;5;235")
+
+    def test_set_bar_targets_the_emx_session(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            tmux.set_bar("x")
+        self.assertEqual(run.call_args.args, ("set-option", "-t", "=emx:", "status-format[0]", "x"))
+
+    def test_no_status_mouse_key_is_bound_after_sourcing_twice(self):
+        self.tmux.source_config()
+        keys = self.tmux.run("list-keys", "-T", "root")
+        self.assertNotIn("Status", keys)
+
+    def read_client_until(self, needle):
+        seen = bytearray()
+
+        def has_it():
+            ready, _, _ = select.select([self.client_fd], [], [], 0)
+            if ready:
+                seen.extend(os.read(self.client_fd, 65536))
+            return needle in seen
+
+        self.wait_for(has_it, repr(needle))
+
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
 class ClearSessionOptionIf(PrivateServer):
