@@ -25,6 +25,8 @@ A click on a laptop banner for a server session runs `emx open <sid>` with `EMX_
 
 ssh is a system tool like tmux and `say`: no library, no new service.
 
+2026-10-18 (#69): Ctrl+V pastes the laptop's clipboard image into a server session. `emx follow` started with `EMX_RELAY_PASTE=1` (the laptop's `follow_shell` sets it) stamps `@emx_relay_paste` on every beat and clears it when it ends; the server's Ctrl+V binding takes the key only while that stamp is fresh and the pane holds an emx session, so with no laptop, an older laptop or a local emx the key goes through untouched. The binding runs `emx paste`, which appends a `paste` record (pane, session id, image id) to the relay file; the laptop reads the clipboard with `EMX_CLIPBOARD_IMAGE` (default `osascript`) and runs `emx paste-image <pane> <sid> <id>` on the server over the same connection with the PNG on stdin. That saves `<state>/images/<id>.png` (folder 0700, file 0600, deleted after 7 days) and pastes its path, bracketed, into the pane only while it still holds that session; an empty answer shows "no image in clipboard".
+
 ## Consequences
 
 - A Linux server gets no banners or voice of its own (ADR 0006); the laptop shows them.

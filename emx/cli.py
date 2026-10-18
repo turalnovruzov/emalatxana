@@ -54,6 +54,7 @@ Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
 EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
 EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell), EMX_SSH replaces ssh.
+EMX_CLIPBOARD_IMAGE is the command emx remote reads the laptop clipboard's image with (default osascript); it is given a file path to write a PNG to.
 EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command.
 EMX_HOME is the folder emx installs into (default $XDG_DATA_HOME/emx, else ~/.local/share/emx), EMX_BIN_HOME the folder of the emx link
 (default ~/.local/bin); EMX_UPDATE_SECONDS is how often a running panel checks for updates (default 600)."""

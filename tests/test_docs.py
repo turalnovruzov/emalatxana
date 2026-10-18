@@ -47,7 +47,7 @@ def panel_key_tokens():
 
 
 def root_keys():
-    return {"^" + key[2:] for key in (sidebar.BACK_KEY, sidebar.COLLAPSE_KEY)} | {"←"}
+    return {"^" + key[2:] for key in (sidebar.BACK_KEY, sidebar.COLLAPSE_KEY, sidebar.PASTE_KEY)} | {"←"}
 
 
 def public_settings():
@@ -67,7 +67,7 @@ class DocsMatchEmx(unittest.TestCase):
                 self.assert_in_reference(command, "emx --help")
 
     def test_no_internal_command_is_parsed_as_public(self):
-        internal = {f"emx {w}" for w in ("hook", "install", "relaunch", "follow", "open", "sidebar", "left", "blank")}
+        internal = {f"emx {w}" for w in ("hook", "install", "relaunch", "follow", "open", "sidebar", "left", "blank", "paste", "paste-image")}
         self.assertEqual(public_commands() & internal, set())
 
     def test_every_panel_key_is_in_the_reference(self):
