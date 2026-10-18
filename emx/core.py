@@ -1606,6 +1606,73 @@ def needs_upgrade(stamp: str, current: str) -> bool:
     return not stamp or stamp != current
 
 
+NARROW_BELOW = 70
+
+
+def pick_view(views, cols: int, narrow_below: int = NARROW_BELOW) -> str:
+    """Which view session a client `cols` wide attaches to: `emx` itself for a wide one while no client has it, else the view no client has that was used last, else "new".
+
+    `views` are `tmux.View`s. A narrow client never gets `emx`: its panel
+    width and hidden panel are the laptop's.
+    """
+    if cols >= narrow_below and any(v.name == "emx" and not v.attached for v in views):
+        return "emx"
+    free = [v for v in views if v.name != "emx" and not v.attached]
+    return max(free, key=lambda v: v.used).name if free else "new"
+
+
+def new_view_name(names) -> str:
+    """The first `emx-view-<n>` no session has."""
+    taken = set(names)
+    n = 1
+    while f"emx-view-{n}" in taken:
+        n += 1
+    return f"emx-view-{n}"
+
+
+def open_target(views, narrow_below: int = NARROW_BELOW) -> str:
+    """The view a notification click opens its session in: the wide view with a client used most recently, else `emx`."""
+    wide = [v for v in views if v.attached and v.width >= narrow_below and v.activity is not None]
+    return max(wide, key=lambda v: v.activity).name if wide else "emx"
+
+
+def migration_plan(panes, linked) -> list:
+    """What moves a running workspace onto views, in order, with no session's pane ever killed: ops for `cli.refresh_workspace`.
+
+    `panes` are the panes of `emx`, `linked` the keys that already have their
+    own `emx-a-<key>` session. The window holding the panel is the home
+    view; a session's pane in it (2.9.0 swapped the open one in) goes back to
+    a hidden window in exchange for the placeholder, making one first when
+    none is left, and its key is noted to show again (`("reopen", key)`).
+    A spacer in a window with a session's pane is dropped, since linking
+    links the whole window. Then each session's pane gets its own session
+    (`("link", pane, key)`). Ops: ("placeholder",), ("swap", pane, other or
+    None for the one just made), ("reopen", key), ("drop", pane), ("link",
+    pane, key). An already moved workspace gives no ops.
+    """
+    panes = list(panes)
+    ops = []
+    home = {p.window for p in panes if p.role == "sidebar" and not p.session}
+    slot = next((p for p in panes if p.window in home and p.role != "sidebar"), None)
+    moving = slot is not None and bool(slot.agent and slot.session)
+    placeholder = next((p for p in panes if p.role == "placeholder" and p.window not in home and not p.session), None)
+    if moving:
+        if placeholder is None:
+            ops.append(("placeholder",))
+        ops.append(("swap", slot.id, placeholder.id if placeholder else None))
+        ops.append(("reopen", slot.session))
+    agent_windows = {p.window for p in panes if p.agent and p.session and p.window not in home}
+    if moving and placeholder is not None:
+        agent_windows.add(placeholder.window)
+    for p in panes:
+        if p.role == "spacer" and not p.session and p.window in agent_windows:
+            ops.append(("drop", p.id))
+    for p in panes:
+        if p.agent and p.session and p.session not in linked and is_session_id(p.session):
+            ops.append(("link", p.id, p.session))
+    return ops
+
+
 def relaunch_plan(panes, upgrade: bool) -> tuple:
     """What the launcher does to a running workspace: (sidebar_ids_to_respawn, spacer_ids_to_kill).
 

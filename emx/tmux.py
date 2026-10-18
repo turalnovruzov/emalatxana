@@ -71,6 +71,7 @@ class View:
     shows: str
     slot_active: bool
     slot: str = ""
+    used: float = 0.0
 
 
 _PANE_FORMAT = "\t".join(
@@ -109,6 +110,13 @@ def _parse_panes(out: str) -> list:
             )
         )
     return panes
+
+
+def _seconds(text: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
 
 
 def agent_session(key: str) -> str:
@@ -169,7 +177,7 @@ class Tmux:
 
     def views(self) -> list:
         """Every view session as a `View`: its client count, last focus report, its most recent client's activity and width, and its slot."""
-        sessions = self.run("list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{" + FOCUS_OPT + "}")
+        sessions = self.run("list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{" + FOCUS_OPT + "}\t#{session_activity}")
         clients = self.run("list-clients", "-F", "#{client_session}\t#{client_activity}\t#{client_width}")
         panes = self.run(
             "list-panes", "-a", "-F",
@@ -187,7 +195,7 @@ class Tmux:
         rows = [(line.split("\t") + [""] * 6)[:6] for line in panes.splitlines()]
         views = []
         for line in sessions.splitlines():
-            name, attached, focus = (line.split("\t") + ["", "", ""])[:3]
+            name, attached, focus, used = (line.split("\t") + ["", "", "", ""])[:4]
             if not is_view_session(name):
                 continue
             mine = [r for r in rows if r[0] == name]
@@ -196,7 +204,7 @@ class Tmux:
             at, cols = latest.get(name, (None, 0))
             views.append(View(
                 name, int(attached) if attached.isdigit() else 0, focus, at, cols,
-                slot[4] if slot else "", bool(slot) and slot[5] == "1", slot[2] if slot else "",
+                slot[4] if slot else "", bool(slot) and slot[5] == "1", slot[2] if slot else "", _seconds(used),
             ))
         return views
 
@@ -211,6 +219,16 @@ class Tmux:
 
     def set_global_option(self, name: str, value: str) -> None:
         self.run("set-option", "-g", name, value)
+
+    def agent_keys(self) -> set:
+        """The keys that have their own `emx-a-<key>` session."""
+        out = self.run("list-sessions", "-F", "#{session_name}")
+        return {n[len(AGENT_SESSION_PREFIX):] for n in out.split() if n.startswith(AGENT_SESSION_PREFIX)}
+
+    def window_of(self, pane: str) -> str:
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        return self.run("display-message", "-p", "-t", pane, "#{window_id}").strip()
 
     def has_agent_session(self, key: str) -> bool:
         try:
@@ -237,14 +255,24 @@ class Tmux:
             windows = None
         if windows is not None and window in windows:
             return
+        made = False
         if windows is None:
             try:
                 self.run("new-session", "-d", "-s", name, inert)
+                made = True
             except TmuxError:
                 # Another panel made it first.
                 if not self.has_agent_session(key):
                     raise
-        self.run("link-window", "-k", "-s", window, "-t", f"={name}:0")
+        try:
+            self.run("link-window", "-k", "-s", window, "-t", f"={name}:0")
+        except TmuxError:
+            if made:
+                try:
+                    self.run("kill-session", "-t", target)
+                except TmuxError:
+                    pass
+            raise
         self.run("set-option", "-t", target, "status", "off")
         self.run("set-option", "-t", target, "detach-on-destroy", "on")
         self.run("set-environment", "-t", target, AGENT_KEY_ENV, key)

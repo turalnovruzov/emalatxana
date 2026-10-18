@@ -1276,5 +1276,58 @@ class Views(PrivateServer):
         self.assertIsNotNone(views[SESSION].activity)
 
 
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class MigratesA290Workspace(PrivateServer):
+    """`refresh_workspace` on a real server holding 2.9.0's shape: session A's pane swapped into the home view, the placeholder and session B's pane hidden."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.run("set-option", "-g", "remain-on-exit", "on")
+        self.a, self.b = str(uuid.uuid4()), str(uuid.uuid4())
+        self.tmux.unset_pane_option(self.main, VIEW_OPT)
+        self.tmux.set_pane_option(self.main, SESSION_OPT, self.a)
+        self.placeholder = self.tmux.new_hidden_window("cat")
+        self.tmux.set_pane_option(self.placeholder, ROLE, "placeholder")
+        self.other = self.tmux.new_hidden_window("cat")
+        self.tmux.set_pane_option(self.other, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(self.other, SESSION_OPT, self.b)
+        self.tmux.set_session_option(cli.VERSION_OPT, cli.code_version())
+        self.before = self.processes()
+
+    def processes(self):
+        return {p.id: (p.pid, p.dead) for p in self.tmux.panes() if p.agent}
+
+    def slot(self):
+        window = self.show(self.sidebar, "#{window_id}")
+        return next(p for p in self.tmux.panes() if p.window == window and p.id != self.sidebar)
+
+    def test_every_sessions_pane_keeps_its_id_and_process_and_gets_its_own_session(self):
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.processes(), self.before)
+        self.assertEqual(sorted(self.before), sorted([self.main, self.other]))
+        for pane, key in ((self.main, self.a), (self.other, self.b)):
+            with self.subTest(key=key):
+                (linked,) = self.tmux.panes(f"emx-a-{key}")
+                self.assertEqual((linked.id, linked.pid, linked.dead), (pane, self.before[pane][0], False))
+        slot = self.slot()
+        self.assertEqual((slot.id, slot.role), (self.placeholder, "placeholder"))
+        self.assertEqual(self.tmux.session_option(cli.REOPEN_OPT), self.a)
+
+    def test_a_second_run_changes_nothing(self):
+        cli.refresh_workspace(self.tmux)
+        layout = self.tmux.run("list-panes", "-a", "-F", "#{session_name} #{window_id} #{pane_id} #{pane_pid}")
+        sessions = self.tmux.run("list-sessions", "-F", "#{session_name}")
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.tmux.run("list-panes", "-a", "-F", "#{session_name} #{window_id} #{pane_id} #{pane_pid}"), layout)
+        self.assertEqual(self.tmux.run("list-sessions", "-F", "#{session_name}"), sessions)
+
+    def test_the_session_that_was_in_the_home_view_shows_there_again_through_a_viewer(self):
+        cli.refresh_workspace(self.tmux)
+        slot = self.slot()
+        self.tmux.respawn(slot.id, self.tmux.viewer_command(self.a))
+        self.wait_for(lambda: "❯" in self.tmux.capture(slot.id), "the session's screen in the slot")
+        self.assertEqual(self.processes(), self.before)
+
+
 if __name__ == "__main__":
     unittest.main()

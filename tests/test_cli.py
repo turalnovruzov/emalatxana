@@ -9,13 +9,14 @@ import tempfile
 import time
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import emx
 from emx import __version__, cli, core
-from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError, View
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
@@ -26,7 +27,7 @@ class Attached(Exception):
 
 
 class FakeTmux:
-    """A running workspace on old code whose config no longer sources."""
+    """A running workspace on old code whose config no longer sources; its one view, `emx`, has no client."""
 
     def __init__(self, socket, config=None):
         self.socket = socket
@@ -44,8 +45,17 @@ class FakeTmux:
     def set_session_option(self, name, value):
         self.options[name] = value
 
-    def panes(self):
+    def panes(self, session=SESSION):
         return [Pane("%1", "@1", False, "sidebar", "", 30, 200)]
+
+    def agent_keys(self):
+        return set()
+
+    def view_names(self):
+        return [SESSION]
+
+    def views(self):
+        return [View(SESSION, 0, "", None, 0, "", False, "%2")]
 
     def kill_pane(self, pane):
         pass
@@ -782,11 +792,18 @@ class OpenRemote(unittest.TestCase):
 class OpenNoWindowTmux:
     instances = []
 
-    def __init__(self, socket, config=None):
+    def __init__(self, socket, config=None, view=SESSION):
         self.socket = socket
+        self.view = view
         self.options = {}
         self.exists = True
         OpenNoWindowTmux.instances.append(self)
+
+    def views(self):
+        return [View(SESSION, 0, "", None, 0, "", False, "%2")]
+
+    def set_view_option(self, name, value):
+        self.options[name] = value
 
     def has_session(self):
         return self.exists
@@ -826,7 +843,8 @@ class OpenNoWindow(unittest.TestCase):
     def test_it_sets_the_open_option_prints_nothing_and_opens_no_window(self):
         code, out, _ = self.run_main()
         self.assertEqual((code, out), (0, ""))
-        self.assertEqual(OpenNoWindowTmux.instances[0].options, {OPEN_OPT: SID})
+        written = [(t.view, t.options) for t in OpenNoWindowTmux.instances if t.options]
+        self.assertEqual(written, [(SESSION, {OPEN_OPT: SID})])
 
     def test_with_no_session_it_says_so_and_opens_no_window(self):
         code, out, err = self.run_main(exists=False)
@@ -1037,12 +1055,18 @@ class RelaunchTmux:
     def set_session_option(self, name, value):
         self.options[name] = value
 
-    def panes(self):
+    def panes(self, session=SESSION):
         return [
             Pane("%1", "@1", False, "sidebar", "", 30, 200),
             Pane("%2", "@1", False, "sidebar", SID, 170, 200),
             Pane("%3", "@2", False, "", SID, 200, 200),
         ]
+
+    def agent_keys(self):
+        return set()
+
+    def view_names(self):
+        return [SESSION]
 
     def kill_pane(self, pane):
         raise AssertionError(f"killed {pane}")
@@ -1422,6 +1446,135 @@ class HookCommand(unittest.TestCase):
     def test_usage_names_it_as_internal(self):
         self.assertIn("emx hook", cli.USAGE)
         self.assertIn("internal", cli.USAGE)
+
+
+MIG_A, MIG_B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+class MigratingTmux:
+    """A 2.9.0 workspace on this version's code (no upgrade due): session MIG_A's pane in the home view, MIG_B's hidden, the placeholder hidden, and `attached` clients on `emx`. Records what changes it."""
+
+    made = []
+
+    def __init__(self, socket, config=None, view=SESSION):
+        self.socket = socket
+        self.view = view
+        self.options = {VERSION_OPT: cli.code_version()}
+        self.ops = []
+        self.attached = 0
+        self.list = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%5", "@1", False, "", MIG_A, 160, 200, agent="claude"),
+            Pane("%2", "@2", False, "placeholder", "", 160, 160),
+            Pane("%6", "@3", False, "", MIG_B, 160, 160, agent="claude"),
+        ]
+        MigratingTmux.made.append(self)
+
+    def argv(self, *args):
+        return ["tmux", "-L", self.socket, *args]
+
+    def has_session(self):
+        return True
+
+    def session_option(self, name):
+        return self.options.get(name, "")
+
+    def set_session_option(self, name, value):
+        self.ops.append(("set", name, value))
+        self.options[name] = value
+
+    def panes(self, session=SESSION):
+        return list(self.list) if session == SESSION else []
+
+    def agent_keys(self):
+        return {key for op, *rest in self.ops if op == "link" for key in rest[1:]}
+
+    def view_names(self):
+        return [SESSION]
+
+    def views(self):
+        return [View(SESSION, self.attached, "", None, 200, "", False, "%2")]
+
+    def window_of(self, pane):
+        return next(p.window for p in self.list if p.id == pane)
+
+    def swap(self, a, b):
+        self.ops.append(("swap", a, b))
+        where = {p.id: p.window for p in self.list}
+        self.list = [replace(p, window=where[b] if p.id == a else where[a] if p.id == b else p.window) for p in self.list]
+
+    def link_agent(self, window, key, inert):
+        self.ops.append(("link", window, key))
+
+    def kill_pane(self, pane):
+        self.ops.append(("kill", pane))
+
+    def respawn(self, pane, command):
+        self.ops.append(("respawn", pane))
+
+    def run(self, *args):
+        self.ops.append(("run",) + args[:3])
+        return "emx\n" if args[0] == "list-sessions" else "%9\n"
+
+    def set_pane_option(self, pane, name, value):
+        pass
+
+    def source_config(self):
+        self.ops.append(("source",))
+
+
+class Migration(unittest.TestCase):
+    """`emx` and the auto update's `emx relaunch` move a running 2.9.0 workspace onto views the same way."""
+
+    def setUp(self):
+        MigratingTmux.made = []
+        for patch in (
+            mock.patch.object(cli, "Tmux", MigratingTmux),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+            mock.patch.dict(cli.os.environ, {"EMX_SOCKET": "emx-test-unit"}),
+            mock.patch.object(cli, "record_terminal", lambda tmux: None),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def launched(self, cols=200, attached=0):
+        original = MigratingTmux.views
+        MigratingTmux.views = lambda self: [View(SESSION, attached, "", None, 200, "", False, "%2")]
+        self.addCleanup(setattr, MigratingTmux, "views", original)
+        with mock.patch.object(cli.shutil, "get_terminal_size", return_value=os.terminal_size((cols, 22))), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached) as execvpe:
+            with self.assertRaises(Attached):
+                cli.launch()
+        return MigratingTmux.made[0].ops, execvpe.call_args.args[1]
+
+    def migration(self, ops):
+        return [op for op in ops if op[0] in ("swap", "link", "kill", "set")]
+
+    def test_relaunch_runs_the_same_migration_as_launch(self):
+        ops, argv = self.launched()
+        self.assertEqual(cli.relaunch("emx-test-unit"), 0)
+        relaunched = MigratingTmux.made[-1].ops
+        expected = [("swap", "%5", "%2"), ("set", "@emx_reopen", MIG_A), ("link", "@2", MIG_A), ("link", "@3", MIG_B)]
+        self.assertEqual(self.migration(ops), expected)
+        self.assertEqual(self.migration(relaunched), expected)
+        self.assertEqual(argv[-2:], ["-t", "=emx:"])
+
+    def test_a_second_run_finds_nothing_to_do(self):
+        tmux = MigratingTmux("emx-test-unit")
+        cli.refresh_workspace(tmux)
+        first = len(tmux.ops)
+        cli.refresh_workspace(tmux)
+        self.assertEqual(self.migration(tmux.ops[first:]), [])
+
+    def test_a_narrow_terminal_gets_a_new_view_of_its_own(self):
+        ops, argv = self.launched(cols=48, attached=1)
+        made = [op for op in ops if op[:3] == ("run", "new-session", "-d")]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
+
+    def test_a_second_wide_terminal_gets_a_view_of_its_own(self):
+        _, argv = self.launched(cols=200, attached=1)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
 
 
 if __name__ == "__main__":

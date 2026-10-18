@@ -5416,5 +5416,100 @@ class SummariesFile(unittest.TestCase):
                 self.assertEqual(core.summaries_from(raw), {})
 
 
+MIG_A, MIG_B, MIG_C = (f"{c * 8}-{c * 4}-4{c * 3}-8{c * 3}-{c * 12}" for c in "abc")
+
+
+class MigrationPlan(unittest.TestCase):
+    """How a 2.9.0 workspace moves onto views without any session's pane being killed."""
+
+    def shape_2_9_0(self):
+        return [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%5", "@1", False, "", MIG_A, 160, 200, agent="claude"),
+            Pane("%2", "@2", False, "placeholder", "", 160, 160),
+            Pane("%6", "@3", False, "", MIG_B, 160, 160, agent="claude"),
+            Pane("%7", "@4", True, "", MIG_C, 160, 160, agent="claude"),
+        ]
+
+    def test_the_2_9_0_shape_is_one_swap_of_those_two_panes_then_three_links_and_no_kill(self):
+        ops = core.migration_plan(self.shape_2_9_0(), set())
+        self.assertEqual(ops, [
+            ("swap", "%5", "%2"), ("reopen", MIG_A),
+            ("link", "%5", MIG_A), ("link", "%6", MIG_B), ("link", "%7", MIG_C),
+        ])
+        self.assertNotIn("drop", [op[0] for op in ops])
+
+    def test_an_already_moved_workspace_gives_no_ops(self):
+        moved = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%2", "@1", False, "viewer", "", 160, 200, view=MIG_A),
+            Pane("%5", "@2", False, "", MIG_A, 160, 160, agent="claude"),
+            Pane("%6", "@3", False, "", MIG_B, 160, 160, agent="claude"),
+        ]
+        self.assertEqual(core.migration_plan(moved, {MIG_A, MIG_B}), [])
+
+    def test_with_no_placeholder_one_is_made_before_the_swap(self):
+        panes = [p for p in self.shape_2_9_0() if p.role != "placeholder"]
+        ops = core.migration_plan(panes, {MIG_B, MIG_C})
+        self.assertEqual(ops, [("placeholder",), ("swap", "%5", None), ("reopen", MIG_A), ("link", "%5", MIG_A)])
+
+    def test_a_leftover_spacer_beside_a_sessions_pane_is_dropped_before_any_link(self):
+        panes = self.shape_2_9_0() + [Pane("%9", "@3", False, "spacer", "", 10, 160)]
+        ops = core.migration_plan(panes, set())
+        self.assertIn(("drop", "%9"), ops)
+        self.assertLess(ops.index(("drop", "%9")), min(i for i, op in enumerate(ops) if op[0] == "link"))
+        self.assertEqual([op for op in ops if op[0] == "drop"], [("drop", "%9")])
+
+    def test_a_spacer_in_the_placeholders_window_that_the_session_moves_into_is_dropped_too(self):
+        panes = self.shape_2_9_0() + [Pane("%9", "@2", False, "spacer", "", 10, 160)]
+        self.assertIn(("drop", "%9"), core.migration_plan(panes, set()))
+
+    def test_the_placeholder_or_nothing_in_the_home_view_moves_nothing(self):
+        panes = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%2", "@1", False, "placeholder", "", 160, 200),
+            Pane("%6", "@3", False, "", MIG_B, 160, 160, agent="claude"),
+        ]
+        self.assertEqual(core.migration_plan(panes, set()), [("link", "%6", MIG_B)])
+
+    def test_an_old_viewer_with_no_agent_tag_is_never_linked_or_swapped(self):
+        panes = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%3", "@1", False, "", MIG_A, 160, 200),
+            Pane("%2", "@2", False, "placeholder", "", 160, 160),
+        ]
+        self.assertEqual(core.migration_plan(panes, set()), [])
+
+
+class PickView(unittest.TestCase):
+    def view(self, name, attached=0, used=0.0, width=0, activity=None):
+        return View(name, attached, "", activity, width, "", False, "", used)
+
+    def test_a_wide_client_gets_emx_while_no_client_has_it(self):
+        self.assertEqual(core.pick_view([self.view("emx"), self.view("emx-view-1", used=9.0)], 200), "emx")
+
+    def test_a_wide_client_with_emx_taken_gets_the_free_view_used_last(self):
+        views = [self.view("emx", 1), self.view("emx-view-1", used=5.0), self.view("emx-view-2", used=9.0), self.view("emx-view-3", 1, 10.0)]
+        self.assertEqual(core.pick_view(views, 200), "emx-view-2")
+
+    def test_a_narrow_client_never_gets_emx(self):
+        self.assertEqual(core.pick_view([self.view("emx")], 48), "new")
+        self.assertEqual(core.pick_view([self.view("emx"), self.view("emx-view-1")], core.NARROW_BELOW - 1), "emx-view-1")
+
+    def test_nothing_free_is_a_new_view(self):
+        self.assertEqual(core.pick_view([self.view("emx", 1), self.view("emx-view-1", 1)], 200), "new")
+
+    def test_a_new_view_takes_the_first_free_number(self):
+        self.assertEqual(core.new_view_name(["emx", "emx-a-x", "emx-view-1", "emx-view-3"]), "emx-view-2")
+        self.assertEqual(core.new_view_name(["emx"]), "emx-view-1")
+
+    def test_a_click_opens_in_the_wide_view_used_last_else_emx(self):
+        views = [self.view("emx", 1, width=200, activity=5.0), self.view("emx-view-1", 1, width=210, activity=9.0),
+                 self.view("emx-view-2", 1, width=48, activity=20.0)]
+        self.assertEqual(core.open_target(views), "emx-view-1")
+        self.assertEqual(core.open_target([self.view("emx-view-2", 1, width=48, activity=20.0)]), "emx")
+        self.assertEqual(core.open_target([]), "emx")
+
+
 if __name__ == "__main__":
     unittest.main()

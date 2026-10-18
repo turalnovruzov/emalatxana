@@ -7609,5 +7609,38 @@ class PrefsAcrossViews(AppCase):
         self.assertEqual((core.pinned_ids(self.app.prefs), self.app.prefs["side"]), ({KEY_A}, "left"))
 
 
+class StampTmux(ClientTmux):
+    def __init__(self, session_stamp):
+        super().__init__()
+        self.stamps = {"session": session_stamp, "global": ""}
+
+    def session_option(self, name):
+        return self.stamps["session"] if name == sidebar.RELAY_PASTE_OPT else ""
+
+    def global_option(self, name):
+        return self.stamps["global"]
+
+    def set_global_option(self, name, value):
+        self.stamps["global"] = value
+
+
+class PasteStampCarried(AppCase):
+    """An `emx follow` from before 2.10.0 keeps stamping its paste offer on `emx` until he reconnects; the primary panel copies it to the global option a viewer's Ctrl+V reads."""
+
+    def test_a_live_stamp_on_emx_is_copied_to_the_global_option(self):
+        now = time.time()
+        self.app.tmux = StampTmux(str(now))
+        self.app.carry_paste_stamp(now)
+        self.assertEqual(self.app.tmux.stamps["global"], str(now))
+
+    def test_a_stale_or_missing_stamp_is_not(self):
+        now = time.time()
+        for stamp in (str(now - 60), ""):
+            with self.subTest(stamp=stamp):
+                self.app.tmux = StampTmux(stamp)
+                self.app.carry_paste_stamp(now)
+                self.assertEqual(self.app.tmux.stamps["global"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,9 @@ from pathlib import Path
 import emx
 from emx import BIN, __version__, core, install, remote
 from emx.notify import OPEN_ENV
-from emx.tmux import AGENT_KEY_ENV, HUSH_OPT, OPEN_OPT, RELAY_PASTE_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
+from emx.tmux import (
+    AGENT_KEY_ENV, HUSH_OPT, OPEN_OPT, RELAY_PASTE_OPT, REOPEN_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError,
+)
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
@@ -121,22 +123,28 @@ def self_command(*args: str) -> str:
     return "exec " + " ".join(shlex.quote(a) for a in [sys.executable, BIN, *args])
 
 
-def create_workspace(tmux: Tmux) -> None:
-    cols, lines = shutil.get_terminal_size((200, 50))
+def new_view(tmux: Tmux, name: str, cols: int, lines: int) -> str:
+    """Make view session `name`: the placeholder in its slot and a panel beside it, on the side prefs say. Returns the slot's pane."""
     prefs = core.load_prefs(core.prefs_path())
-    side = prefs["side"]
     main = tmux.run(
-        "new-session", "-d", "-s", SESSION, "-n", SESSION, "-x", str(cols), "-y", str(lines),
+        "new-session", "-d", "-s", name, "-n", SESSION, "-x", str(cols), "-y", str(lines),
         "-P", "-F", "#{pane_id}", self_command("blank", PLACEHOLDER_TEXT),
     ).strip()
     tmux.set_pane_option(main, ROLE, "placeholder")
-    toward_sidebar = [] if side == "right" else ["-b"]
+    toward_sidebar = [] if prefs["side"] == "right" else ["-b"]
     sidebar = tmux.run(
         "split-window", "-h", *toward_sidebar, "-t", main, "-P", "-F", "#{pane_id}",
         self_command("sidebar", tmux.socket),
     ).strip()
     tmux.set_pane_option(sidebar, ROLE, "sidebar")
-    if core.panel_collapsed(prefs):
+    return main
+
+
+def create_workspace(tmux: Tmux) -> None:
+    cols, lines = shutil.get_terminal_size((200, 50))
+    main = new_view(tmux, SESSION, cols, lines)
+    # The hidden panel saved in prefs is the laptop's, and `emx` itself is the laptop's view.
+    if core.panel_collapsed(core.load_prefs(core.prefs_path())):
         tmux.toggle_zoom(main)
     tmux.set_session_option(VERSION_OPT, code_version())
     wanted = take_pending_open()
@@ -155,11 +163,34 @@ def code_version() -> str:
     return core.code_version(files)
 
 
+def migrate(tmux: Tmux) -> None:
+    """Move a running workspace onto views (`core.migration_plan`): every session's pane keeps its id and its process."""
+    made = None
+    for op in core.migration_plan(tmux.panes(), tmux.agent_keys()):
+        if op[0] == "placeholder":
+            made = tmux.new_hidden_window(self_command("blank", PLACEHOLDER_TEXT))
+            tmux.set_pane_option(made, ROLE, "placeholder")
+        elif op[0] == "swap":
+            tmux.swap(op[1], op[2] or made)
+        elif op[0] == "reopen":
+            tmux.set_session_option(REOPEN_OPT, op[1])
+        elif op[0] == "drop":
+            tmux.kill_pane(op[1])
+        elif op[0] == "link":
+            tmux.link_agent(tmux.window_of(op[1]), op[2], self_command("blank", ""))
+
+
 def refresh_workspace(tmux: Tmux) -> None:
-    """Bring a running workspace onto this code: a sidebar process keeps running the code it started with until respawned."""
+    """Bring a running workspace onto this code: a sidebar process keeps running the code it started with until respawned.
+
+    The move onto views runs first, so the panels it respawns find their
+    session's pane out of the home view and the session to show again noted.
+    """
     version = code_version()
     upgrade = core.needs_upgrade(tmux.session_option(VERSION_OPT), version)
-    respawn, drop = core.relaunch_plan(tmux.panes(), upgrade)
+    migrate(tmux)
+    panes = [p for name in tmux.view_names() for p in tmux.panes(name)]
+    respawn, drop = core.relaunch_plan(panes, upgrade)
     # Spacers go first: a sidebar takes any other pane in its window as the main pane.
     for pane in drop:
         tmux.kill_pane(pane)
@@ -182,6 +213,7 @@ def launch() -> int:
         print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
     tmux = Tmux(socket, CONFIG)
+    view = SESSION
     try:
         running = tmux.has_session()
         if not running:
@@ -195,10 +227,24 @@ def launch() -> int:
             refresh_workspace(tmux)
         except (TmuxError, OSError) as exc:
             print(f"emx: couldn't update the running workspace: {' '.join(str(exc).split())}", file=sys.stderr)
+        try:
+            view = attach_view(tmux)
+        except (TmuxError, OSError) as exc:
+            print(f"emx: couldn't open a view of its own: {' '.join(str(exc).split())}", file=sys.stderr)
     record_terminal(tmux)
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
+    os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={view}:"), env)
     return 1
+
+
+def attach_view(tmux: Tmux) -> str:
+    """The view this terminal attaches to (`core.pick_view`), made when there is none free."""
+    cols, lines = shutil.get_terminal_size((200, 50))
+    view = core.pick_view(tmux.views(), cols)
+    if view == "new":
+        view = core.new_view_name(tmux.run("list-sessions", "-F", "#{session_name}").split())
+        new_view(tmux, view, cols, lines)
+    return view
 
 
 def hush() -> int:
@@ -296,15 +342,20 @@ def open_session(sid: str, window: bool = True) -> int:
             print("emx isn't running.", file=sys.stderr)
             return 1
         return open_window("", sid)
+    try:
+        tmux = Tmux(socket, view=core.open_target(tmux.views()))
+    except TmuxError as exc:
+        print(f"emx: {exc}", file=sys.stderr)
+        return 1
     if not window:
         try:
-            tmux.set_session_option(OPEN_OPT, sid)
+            tmux.set_view_option(OPEN_OPT, sid)
         except TmuxError as exc:
             print(f"emx: {exc}", file=sys.stderr)
             return 1
         return 0
     try:
-        tmux.set_session_option(OPEN_OPT, sid)
+        tmux.set_view_option(OPEN_OPT, sid)
         attached, *_ = tmux.client_state()
         bundle = tmux.session_option(TERMINAL_OPT)
     except TmuxError as exc:
