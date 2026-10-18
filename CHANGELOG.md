@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.5.0 — 2026-10-18
+
+- While you're in a server through `emx remote myserver`, the panel's top line shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`.
+- Both go when you leave. Someone looking at the server's own screen sees the mark too.
+- An emx older than this one, on either machine, shows no mark.
+
 ## 2.4.0 — 2026-10-17
 
 - emx has docs: getting started, guides for sessions, voice and notifications, remote and updating, a page on how emx works, and a reference of every command, key and setting.
