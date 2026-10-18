@@ -14,7 +14,7 @@ from unittest import mock
 
 import emx
 from emx import core, remote
-from emx.tmux import RELAY_HOST_OPT, RELAY_OPT
+from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT
 
 SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 FAKE_SSH = str(Path(__file__).resolve().parent / "fake_ssh.py")
@@ -102,10 +102,10 @@ class Follow(unittest.TestCase):
         self.thread = None
         self.addCleanup(self.finish)
 
-    def start(self, host=None):
+    def start(self, host=None, paste=False):
         self.thread = threading.Thread(
             target=remote.follow, args=(self.path, self.out, self.tmux),
-            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop, "host": host}, daemon=True,
+            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop, "host": host, "paste": paste}, daemon=True,
         )
         self.thread.start()
         time.sleep(0.1)
@@ -189,6 +189,36 @@ class Follow(unittest.TestCase):
         self.assertTrue(self.tmux.set)
         self.assertNotIn(RELAY_HOST_OPT, [n for n, _ in self.tmux.set])
 
+    def test_beats_stamp_the_paste_option_when_asked(self):
+        self.start(paste=True)
+        time.sleep(0.2)
+        values = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        self.assertTrue(values)
+        float(values[0])
+
+    def test_no_paste_no_paste_stamp(self):
+        self.start()
+        time.sleep(0.2)
+        self.assertTrue(self.tmux.set)
+        self.assertNotIn(RELAY_PASTE_OPT, [n for n, _ in self.tmux.set])
+
+    def test_a_paste_record_is_streamed(self):
+        self.start(paste=True)
+        self.put(core.relay_paste("%3", SID, "20261018-120000-0a1b2c3d", 1.0))
+        time.sleep(0.3)
+        self.assertEqual(
+            [r for r in self.out.records() if r["kind"] == "paste"],
+            [{"kind": "paste", "pane": "%3", "sid": SID, "id": "20261018-120000-0a1b2c3d"}],
+        )
+
+    def test_ending_clears_the_paste_stamp(self):
+        self.start(paste=True)
+        time.sleep(0.2)
+        self.finish()
+        stamps = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        self.assertEqual(stamps[-1], "")
+        self.assertNotEqual(stamps[0], "")
+
     def test_no_session_no_stamp(self):
         self.tmux.has = False
         self.start()
@@ -252,6 +282,23 @@ class DeliveryHandle(unittest.TestCase):
         self.assertEqual(self.notifier.posts, [("t · p", "Said.", SID)])
         self.assertEqual(self.voice.spoken, [])
 
+    def test_a_paste_record_goes_to_the_paster(self):
+        class Paste:
+            def __init__(self):
+                self.requests = []
+
+            def request(self, *args):
+                self.requests.append(args)
+
+        paste = Paste()
+        delivery = remote.Delivery(self.voice, self.notifier, paste)
+        delivery.handle({"kind": "paste", "pane": "%3", "sid": SID, "id": "20261018-120000-0a1b2c3d"})
+        self.assertEqual(paste.requests, [("%3", SID, "20261018-120000-0a1b2c3d")])
+
+    def test_a_paste_record_without_a_paster_does_nothing(self):
+        self.delivery.handle({"kind": "paste", "pane": "%3", "sid": SID, "id": "20261018-120000-0a1b2c3d"})
+        self.assertEqual((self.voice.spoken, self.notifier.posts), ([], []))
+
     def test_a_hush_silences_once_and_a_beat_does_nothing(self):
         self.delivery.handle({"kind": "hush"})
         self.delivery.handle({"kind": "beat"})
@@ -287,7 +334,7 @@ class ConnectCase(unittest.TestCase):
         for patch in (
             mock.patch.dict(os.environ, {"EMX_SSH": FAKE_SSH, "FAKE_SSH_LOG": str(self.log), "EMX_SOCKET": "emx-test-lap",
                                          "EMX_SHOW_TEST_SESSIONS": "1"}),
-            mock.patch.object(remote.Delivery, "started", classmethod(lambda cls, socket: self.delivery)),
+            mock.patch.object(remote.Delivery, "started", classmethod(lambda cls, socket, paste=None: self.delivery)),
             mock.patch.object(remote, "Follower", Seen),
             mock.patch.object(remote, "control_dir", lambda: "/tmp/emx-test-ctl/1"),
             mock.patch.object(remote, "NOTE_SECONDS", 0),
@@ -686,3 +733,148 @@ class ControlDir(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PASTE_ID = "20261018-120000-0a1b2c3d"
+FIXTURE_PNG = core.PNG_SIGNATURE + b"\x00throwaway picture\xff"
+
+
+class ConnectPaste(ConnectCase):
+    def setUp(self):
+        super().setUp()
+        self.paster_made = []
+        outer = self
+
+        class Made(remote.Paster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                outer.paster_made.append(self)
+
+        patch = mock.patch.object(remote, "Paster", Made)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.picture = self.tmp / "picture.png"
+        self.picture.write_bytes(FIXTURE_PNG)
+
+    def paste_server(self):
+        record = json.dumps(core.relay_paste("%3", SID, PASTE_ID, 1.0))
+        path = self.tmp / "fake-emx"
+        path.write_text(
+            "#!/bin/sh\n"
+            f"DIR={shlex.quote(str(self.tmp))}\n"
+            'case "$1" in\n'
+            "  --version) echo 'emx 9.9.9';;\n"
+            "  update) printf '%s\\n' 'emx-update current 9.9.9 9.9.9 -';;\n"
+            f"  follow) printf '%s\\n' {shlex.quote(record)}; exec sleep 5;;\n"
+            '  paste-image) shift; cat > "$DIR/got"; printf \'%s\\n\' "$@" > "$DIR/args";;\n'
+            "  *) sleep 1; exit 0;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        os.environ["EMX_REMOTE_COMMAND"] = str(path)
+
+    def connect_with(self, reader):
+        self.paste_server()
+        os.environ["EMX_CLIPBOARD_IMAGE"] = reader
+        self.addCleanup(os.environ.pop, "EMX_CLIPBOARD_IMAGE", None)
+        def started(cls, socket, paste=None):
+            self.delivery = remote.Delivery(StubVoice(), StubNotifier(), paste)
+            return self.delivery
+
+        with mock.patch.object(remote.Delivery, "started", classmethod(started)):
+            self.run_connect()
+
+    def test_the_laptops_image_is_uploaded_on_stdin_before_the_connection_closes(self):
+        self.connect_with(f"cp {shlex.quote(str(self.picture))}")
+        self.assertEqual((self.tmp / "got").read_bytes(), FIXTURE_PNG)
+        self.assertEqual((self.tmp / "args").read_text().splitlines(), ["%3", SID, PASTE_ID])
+        calls = self.argvs()
+        (upload,) = [c for c in calls if c[-1].endswith(f"paste-image %3 {SID} {PASTE_ID}'")]
+        self.assertTrue({"-T", "ControlPath=/tmp/emx-test-ctl/1", "BatchMode=yes"} <= set(upload))
+        self.assertNotIn("-n", upload)
+        self.assertLess(calls.index(upload), len(calls) - 1)
+        self.assertEqual(calls[-1][calls[-1].index("-O"):calls[-1].index("-O") + 2], ["-O", "exit"])
+
+    def test_a_reader_that_fails_uploads_nothing_to_paste(self):
+        self.connect_with("false")
+        self.assertEqual((self.tmp / "got").read_bytes(), b"")
+
+
+class PasterJobs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.picture = self.tmp / "picture.png"
+        self.picture.write_bytes(FIXTURE_PNG)
+        ssh = self.tmp / "ssh"
+        ssh.write_text(
+            "#!/bin/sh\n"
+            f"DIR={shlex.quote(str(self.tmp))}\n"
+            'N=$(ls "$DIR" | grep -c "^start-")\n'
+            'date +%s.%N > "$DIR/start-$N"\n'
+            "cat > \"$DIR/in-$N\"\n"
+            "sleep 0.3\n"
+            'date +%s.%N > "$DIR/end-$N"\n',
+            encoding="utf-8",
+        )
+        ssh.chmod(0o755)
+        self.ssh = str(ssh)
+
+    def paster(self, reader):
+        paster = remote.Paster(self.ssh, "emx-test-host", None, "emx", {"EMX_CLIPBOARD_IMAGE": reader})
+        self.addCleanup(paster.close)
+        return paster
+
+    def test_two_requests_upload_in_order(self):
+        paster = self.paster(f"cp {shlex.quote(str(self.picture))}")
+        paster.request("%1", SID, PASTE_ID)
+        paster.request("%2", SID, "20261018-120001-0a1b2c3d")
+        paster.wait(10)
+        stamp = lambda name: float((self.tmp / name).read_text())
+        self.assertGreaterEqual(stamp("start-1"), stamp("end-0"))
+        self.assertEqual((self.tmp / "in-0").read_bytes(), FIXTURE_PNG)
+
+    def test_a_reader_that_hangs_is_cut_at_the_timeout(self):
+        script = self.tmp / "hang.sh"
+        script.write_text("#!/bin/sh\nsleep 5\n")
+        script.chmod(0o755)
+        paster = self.paster(str(script))
+        with mock.patch.object(remote, "CLIPBOARD_TIMEOUT", 0.2):
+            paster.request("%1", SID, PASTE_ID)
+            paster.wait(10)
+        self.assertEqual((self.tmp / "in-0").read_bytes(), b"")
+
+    def test_wait_gives_up_at_its_timeout(self):
+        script = self.tmp / "hang.sh"
+        script.write_text("#!/bin/sh\nsleep 3\n")
+        script.chmod(0o755)
+        paster = self.paster(str(script))
+        paster.request("%1", SID, PASTE_ID)
+        started = time.time()
+        paster.wait(0.2)
+        self.assertLess(time.time() - started, 2)
+
+
+class PasterCleanup(unittest.TestCase):
+    def paster(self):
+        return remote.Paster("true", "emx-test-host", None, "emx", {"EMX_CLIPBOARD_IMAGE": "true"})
+
+    def test_close_removes_the_scratch_folder_even_with_a_job_still_running(self):
+        paster = self.paster()
+        folder = paster._scratch()
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertTrue(os.path.isdir(folder))
+        paster.close()
+        self.assertFalse(os.path.exists(folder))
+        self.assertIsNone(paster._scratch())
+
+    def test_a_finished_request_leaves_nothing_in_the_folder(self):
+        paster = self.paster()
+        paster.request("%1", SID, PASTE_ID)
+        paster.wait(10)
+        folder = paster.folder
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertEqual(os.listdir(folder), [])
+        paster.close()
+        self.assertFalse(os.path.exists(folder))

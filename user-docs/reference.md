@@ -27,6 +27,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `^\` | Jump to the session and back to the panel. |
 | `^q` | Hide the panel; press again to bring it back. |
 | `←` | From an empty prompt in a session, back to the panel. |
+| `^v` | On `emx remote`, pastes the image on your laptop's clipboard into the session as a file path; elsewhere it reaches the session as usual. |
 
 ### In the panel
 
@@ -66,6 +67,7 @@ Environment variables, set before running `emx`.
 | `EMX_NOTIFY_HOME` | The folder the notification helper is built in. |
 | `EMX_OPEN` | Replaces the `open` command. |
 | `EMX_REMOTE_COMMAND` | emx's command on the server for `emx remote` (default `emx`, run through its login shell). |
+| `EMX_CLIPBOARD_IMAGE` | The command `emx remote` reads the laptop clipboard's image with (default `osascript`); it is given a file path to write a PNG to. |
 | `EMX_SSH` | Replaces `ssh` for `emx remote`. |
 | `EMX_HOME` | The folder emx installs into (default `$XDG_DATA_HOME/emx`, else `~/.local/share/emx`). |
 | `EMX_BIN_HOME` | The folder of the `emx` link (default `~/.local/bin`). |

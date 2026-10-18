@@ -9,6 +9,7 @@ import re
 import shlex
 import tempfile
 import textwrap
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass, replace
@@ -3225,6 +3226,17 @@ RELAY_BEAT_SECONDS = 5
 RELAY_LIVE_SECONDS = 15
 RELAY_BEAT = {"kind": "beat"}
 RELAY_HOST_ENV = "EMX_RELAY_HOST"
+RELAY_PASTE_ENV = "EMX_RELAY_PASTE"
+CLIPBOARD_ENV = "EMX_CLIPBOARD_IMAGE"
+PASTE_MAX_BYTES = 32 * 1024 * 1024
+PASTE_KEEP_SECONDS = 7 * 24 * 3600
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PANE = re.compile(r"%\d+")
+_PASTE_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{8}")
+CLIPBOARD_DEFAULT = [
+    "osascript", "-e", "on run argv", "-e", "set f to open for access (POSIX file (item 1 of argv)) with write permission",
+    "-e", "write (the clipboard as «class PNGf») to f", "-e", "close access f", "-e", "end run",
+]
 _REMOTE_VERSION = re.compile(r"emx (\d+\.\d+\.\d+)\s*")
 
 
@@ -3251,8 +3263,11 @@ def ssh_master_args(ssh: str, host: str, control: str) -> list:
     ]
 
 
-def ssh_client_args(ssh: str, host: str, control: str | None, command: str, tty: bool = False, batch: bool = False) -> list:
-    args = [ssh, "-t"] if tty else [ssh, "-n", "-T"]
+def ssh_client_args(
+    ssh: str, host: str, control: str | None, command: str, tty: bool = False, batch: bool = False, stdin: bool = False
+) -> list:
+    """`-n` points ssh's stdin at /dev/null, so a call that sends its own stdin leaves it out."""
+    args = [ssh, "-t"] if tty else [ssh, "-T"] if stdin else [ssh, "-n", "-T"]
     if control:
         args += ["-o", "ControlMaster=no", "-o", f"ControlPath={control}"]
     else:
@@ -3290,6 +3305,48 @@ def relay_notice(title: str, text: str, plain: str, sid: str, mode: str, at: flo
     return {"kind": "notice", "title": title, "text": text, "plain": plain, "sid": sid, "mode": mode, "at": at}
 
 
+def relay_paste(pane: str, sid: str, paste_id_: str, at: float) -> dict:
+    return {"kind": "paste", "pane": pane, "sid": sid, "id": paste_id_, "at": at}
+
+
+def paste_id(now: float, token: str) -> str:
+    """The name of one pasted image; `token` is 8 lowercase hex the caller draws, so core stays free of randomness."""
+    return time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + token
+
+
+def is_pane_id(value) -> bool:
+    return isinstance(value, str) and _PANE.fullmatch(value) is not None
+
+
+def is_paste_id(value: str) -> bool:
+    return isinstance(value, str) and _PASTE_ID.fullmatch(value) is not None
+
+
+def paste_expired(entries, now: float) -> list:
+    """Names of the saved images older than the keep time, from (name, mtime) pairs; anything that is not an image of ours is never listed."""
+    old = []
+    for name, mtime in entries:
+        stem, dot, ext = name.rpartition(".")
+        if dot and ext == "png" and is_paste_id(stem) and now - mtime > PASTE_KEEP_SECONDS:
+            old.append(name)
+    return old
+
+
+def is_png(data: bytes) -> bool:
+    return isinstance(data, bytes) and data.startswith(PNG_SIGNATURE)
+
+
+def clipboard_command(env: Mapping[str, str]) -> list:
+    """The command that writes the clipboard's image to the file path appended to it; [] when the setting cannot be split, which the caller treats as no image."""
+    value = env.get(CLIPBOARD_ENV, "")
+    if not value.strip():
+        return list(CLIPBOARD_DEFAULT)
+    try:
+        return shlex.split(value)
+    except ValueError:
+        return []
+
+
 def relay_hush(at: float) -> dict:
     return {"kind": "hush", "at": at}
 
@@ -3305,6 +3362,13 @@ def parse_relay(line: str) -> dict | None:
         kind = data.get("kind")
         if kind in ("hush", "beat"):
             return {"kind": kind}
+        if kind == "paste":
+            pane, sid, pid = data.get("pane"), data.get("sid"), data.get("id")
+            if not all(isinstance(v, str) for v in (pane, sid, pid)):
+                return None
+            if _PANE.fullmatch(pane) is None or not is_session_id(sid) or not is_paste_id(pid):
+                return None
+            return {"kind": "paste", "pane": pane, "sid": sid, "id": pid}
         if kind != "notice":
             return None
         title, text, plain = data.get("title"), data.get("text"), data.get("plain")
@@ -3347,10 +3411,11 @@ def window_title(host: str) -> str:
 
 
 def follow_shell(base: str, host: str | None) -> str:
-    """The server command that streams notices; the host rides in an environment variable so an older server, which ignores it, still accepts the command."""
+    """The server command that streams notices; the host and the paste flag ride in environment variables so an older server, which ignores them, still accepts the command."""
+    paste = f"{RELAY_PASTE_ENV}=1"
     if host is None or remote_host(host) is None:
-        return remote_shell(base, "follow")
-    return remote_shell(f"env {RELAY_HOST_ENV}={shlex.quote(host)} {base}", "follow")
+        return remote_shell(f"env {paste} {base}", "follow")
+    return remote_shell(f"env {RELAY_HOST_ENV}={shlex.quote(host)} {paste} {base}", "follow")
 
 
 def hush_due(seen: str | None, value: str) -> tuple:

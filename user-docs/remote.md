@@ -23,6 +23,14 @@ Closing the window, closing the laptop or losing the connection leaves the serve
 
 While you are in a server through `emx remote myserver`, the bar at the bottom of the window shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`. Both go when you leave. Someone looking at the server's own screen sees the mark too, while you are connected. An emx older than this feature, on either machine, shows no mark.
 
+## Pasting images
+
+On `emx remote`, Ctrl+V in a session's pane pastes the image on your laptop's clipboard into that session as a file path, so Claude Code can read it. The image goes from your laptop to the server, which keeps it in a private folder for 7 days. With no image on the clipboard, emx says "no image in clipboard" on the server's screen and types nothing.
+
+Your emx on the laptop itself is unchanged: Ctrl+V reaches Claude Code's own image paste. Both machines need this version; with either older, or with a plain `ssh`, Ctrl+V works as before. `EMX_CLIPBOARD_IMAGE` replaces the command that reads the clipboard image (default `osascript`).
+
+While you are connected through `emx remote`, anything running on the server as you can ask for the image on your laptop's clipboard; emx only types its path into the pane that asked.
+
 ## Notifications while connected
 
 The server's notifications reach your laptop, spoken or as emx's notification, in the mode set with `m` on the server's panel. Clicking one opens that session on the server's panel. While you are not connected nothing arrives; the Notifications list (`N`) keeps them. `h` on the server's panel also stops the laptop speaking.

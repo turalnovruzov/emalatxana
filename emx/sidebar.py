@@ -45,6 +45,7 @@ AUTHORIZE_TIMEOUT = 310
 VOICES_TIMEOUT = 10
 BACK_KEY = "C-\\"
 COLLAPSE_KEY = "C-q"
+PASTE_KEY = "C-v"
 RESTORED_NOTICE_SECONDS = 4
 MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notification mode"}
 WHATS_NEW_SECONDS = 60
@@ -1934,6 +1935,7 @@ class App:
                 self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
                 self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket))
                 self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
+                self.tmux.bind_paste(PASTE_KEY, self_command("paste", self.tmux.socket, str(self.relay_file)))
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.window_width = sidebar.window_width

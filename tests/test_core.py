@@ -3756,11 +3756,14 @@ class ModeTagAndRemote(unittest.TestCase):
                 self.assertIsNone(core.relay_host(value, 105.0))
 
     def test_follow_shell(self):
-        self.assertEqual(core.follow_shell("emx", None), core.remote_shell("emx", "follow"))
+        plain = core.follow_shell("emx", None)
+        self.assertIn("env EMX_RELAY_PASTE=1 emx follow", plain)
+        self.assertTrue(plain.endswith("follow'"))
         command = core.follow_shell("emx", "myserver")
-        self.assertIn("env EMX_RELAY_HOST=myserver emx follow", command)
+        self.assertIn("EMX_RELAY_HOST=myserver", command)
+        self.assertIn("EMX_RELAY_PASTE=1", command)
         self.assertTrue(command.endswith("follow'"))
-        self.assertEqual(core.follow_shell("emx", "-bad"), core.remote_shell("emx", "follow"))
+        self.assertEqual(core.follow_shell("emx", "-bad"), plain)
 
     def test_window_title(self):
         self.assertEqual(core.window_title("myserver"), "emx · myserver")
@@ -3817,6 +3820,37 @@ class SshArgs(unittest.TestCase):
         self.assertIn("-n", args)
         self.assertIn("-T", args)
 
+    def test_ssh_client_args_with_stdin(self):
+        args = core.ssh_client_args("ssh", "srv", "/c", "cmd", batch=True, stdin=True)
+        self.assertIn("-T", args)
+        self.assertNotIn("-n", args)
+        self.assertIn("ControlPath=/c", args)
+        self.assertIn("BatchMode=yes", args)
+
+    def test_paste_expired(self):
+        now = 10_000_000.0
+        day = 86400
+        old, new = "20261010-120000-0a1b2c3d.png", "20261012-120000-0a1b2c3d.png"
+        entries = [(old, now - 8 * day), (new, now - 6 * day), ("relay.jsonl", now - 30 * day), ("notes.png", now - 30 * day)]
+        self.assertEqual(core.paste_expired(entries, now), [old])
+
+    def test_is_png(self):
+        self.assertTrue(core.is_png(core.PNG_SIGNATURE + b"rest"))
+        self.assertFalse(core.is_png(b""))
+        self.assertFalse(core.is_png(b"GIF89a"))
+
+    def test_clipboard_command(self):
+        default = core.clipboard_command({})
+        self.assertEqual(default[0], "osascript")
+        self.assertIn("write (the clipboard as «class PNGf») to f", default)
+        self.assertEqual(core.clipboard_command({"EMX_CLIPBOARD_IMAGE": "cp /x/a.png"}), ["cp", "/x/a.png"])
+        self.assertEqual(core.clipboard_command({"EMX_CLIPBOARD_IMAGE": '"unclosed'}), [])
+
+    def test_paste_id_shape(self):
+        value = core.paste_id(1_800_000_000.0, "0a1b2c3d")
+        self.assertTrue(core.is_paste_id(value))
+        self.assertTrue(value.endswith("-0a1b2c3d"))
+
     def test_batch_host_and_command_positions(self):
         args = core.ssh_client_args("ssh", "srv", "/c", "a command", batch=True)
         self.assertIn("BatchMode=yes", args)
@@ -3856,6 +3890,16 @@ class ParseRelay(unittest.TestCase):
         self.assertEqual(
             got, {"kind": "notice", "title": "t · p", "text": "Done.", "plain": "Done plain.", "sid": self.SID, "mode": "voice"}
         )
+
+    def test_a_paste_record_round_trips(self):
+        pid = "20261018-120000-0a1b2c3d"
+        got = core.parse_relay(json.dumps(core.relay_paste("%12", self.SID, pid, 1.0)))
+        self.assertEqual(got, {"kind": "paste", "pane": "%12", "sid": self.SID, "id": pid})
+
+    def test_a_paste_record_with_a_bad_field_is_dropped(self):
+        good = core.relay_paste("%12", self.SID, "20261018-120000-0a1b2c3d", 1.0)
+        for field, value in [("pane", "12"), ("pane", "%1;kill"), ("pane", "-t"), ("sid", "x"), ("id", "../x"), ("id", "a" * 32)]:
+            self.assertIsNone(core.parse_relay(json.dumps({**good, field: value})), (field, value))
 
     def test_texts_are_cleaned(self):
         got = core.parse_relay(json.dumps(self.notice(text="Done [[slnc 9000]]\x9c")))

@@ -2,6 +2,14 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.7.0 — 2026-10-18
+
+- On `emx remote`, Ctrl+V in a session's pane pastes the image on your laptop's clipboard into that session as a file path, so Claude Code can read it. Your laptop sends the image to the server, which keeps it in a private folder for 7 days.
+- With no image on the clipboard, emx says "no image in clipboard" on the server's screen and types nothing.
+- Your emx on the laptop itself is unchanged: Ctrl+V still reaches Claude Code's own image paste. Both machines need 2.7.0; with either older, Ctrl+V works as before.
+- `EMX_CLIPBOARD_IMAGE` replaces the command that reads the laptop's clipboard image (default `osascript`).
+- While you are connected through `emx remote`, anything running on the server as you can ask for the image on your laptop's clipboard; emx only types its path into the pane that asked.
+
 ## 2.6.0 — 2026-10-18
 
 - A new look. The panel sits on its own, slightly lighter ground, and the bar over the selected row is calmer.
