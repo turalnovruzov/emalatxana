@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -19,6 +22,8 @@ NOTE_SECONDS = 2
 VERSION_TIMEOUT = 30
 UPDATE_TIMEOUT = 120
 LAPTOP_FETCH_TIMEOUT = 10
+CLIPBOARD_TIMEOUT = 10
+UPLOAD_TIMEOUT = 60
 
 _append_lock = threading.Lock()
 
@@ -119,22 +124,87 @@ def _stamp(tmux, clock, host: str | None = None, paste: bool = False) -> None:
         pass
 
 
-class Delivery:
-    """Hands the server's records to the laptop's own voice and banners, in the mode the server's panel is in."""
+class Paster:
+    """Answers a server's paste request: reads the laptop's clipboard image and sends it to `emx paste-image` over the connection's ssh.
 
-    def __init__(self, voice, notifier):
+    Requests run one at a time on a worker thread, so two quick presses never
+    interleave and a stuck ssh never blocks the follower's reader. Every
+    failure is swallowed: the server shows "no image in clipboard" for an
+    empty answer, and an upload that fails leaves the pane as it was.
+    """
+
+    def __init__(self, ssh: str, host: str, control: str | None, base: str, env=os.environ):
+        self.ssh, self.host, self.control, self.base, self.env = ssh, host, control, base, env
+        self.jobs: queue.Queue = queue.Queue()
+        threading.Thread(target=self._work, daemon=True).start()
+
+    def request(self, pane: str, sid: str, paste_id: str) -> None:
+        self.jobs.put((pane, sid, paste_id))
+
+    def wait(self, timeout: float) -> None:
+        """Returns when every request taken so far is done, or after `timeout` seconds."""
+        waiter = threading.Thread(target=self.jobs.join, daemon=True)
+        waiter.start()
+        waiter.join(timeout)
+
+    def _work(self) -> None:
+        while True:
+            job = self.jobs.get()
+            try:
+                self._answer(*job)
+            except Exception:
+                pass
+            finally:
+                self.jobs.task_done()
+
+    def _answer(self, pane: str, sid: str, paste_id: str) -> None:
+        image = self._clipboard_image()
+        command = core.remote_shell(self.base, "paste-image", pane, sid, paste_id)
+        argv = core.ssh_client_args(self.ssh, self.host, self.control, command, batch=True, stdin=True)
+        try:
+            subprocess.run(argv, input=image, capture_output=True, timeout=UPLOAD_TIMEOUT)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+
+    def _clipboard_image(self) -> bytes:
+        argv = core.clipboard_command(self.env)
+        if not argv:
+            return b""
+        folder = tempfile.mkdtemp(prefix="emx-clip-")
+        try:
+            path = os.path.join(folder, "image.png")
+            try:
+                done = subprocess.run(
+                    [*argv, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=CLIPBOARD_TIMEOUT,
+                )
+                if done.returncode == 0:
+                    with open(path, "rb") as fh:
+                        return fh.read(core.PASTE_MAX_BYTES + 1)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+            return b""
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+class Delivery:
+    """Hands the server's records to the laptop's own voice and banners, in the mode the server's panel is in, and its paste requests to `paste`."""
+
+    def __init__(self, voice, notifier, paste=None):
         self.voice = voice
         self.notifier = notifier
+        self.paste = paste
 
     @classmethod
-    def started(cls, socket: str) -> "Delivery":
+    def started(cls, socket: str, paste=None) -> "Delivery":
         from emx.sidebar import Notifier, Voice
 
         voice, notifier = Voice(), Notifier(socket)
         voice.fallback_post = notifier.post
         notifier.start()
         voice.start()
-        return cls(voice, notifier)
+        return cls(voice, notifier, paste)
 
     def handle(self, record: dict) -> None:
         kind = record.get("kind")
@@ -145,6 +215,8 @@ class Delivery:
                 self.voice.speak(record["text"], None, fallback=(record["title"], record["plain"], record["sid"]))
             else:
                 self.notifier.post(record["title"], record["text"], record["sid"])
+        elif kind == "paste" and self.paste is not None:
+            self.paste.request(record["pane"], record["sid"], record["id"])
 
 
 class Follower:
@@ -369,7 +441,7 @@ def connect(host_arg: str, env=os.environ) -> int:
     ssh = env.get("EMX_SSH") or "ssh"
     base = env.get("EMX_REMOTE_COMMAND") or "emx"
     control = control_dir()
-    master, follower, note, code, titled = False, None, None, 1, False
+    master, follower, paster, note, code, titled = False, None, None, None, 1, False
     try:
         if control:
             clear_stale_sockets(control)
@@ -411,7 +483,8 @@ def connect(host_arg: str, env=os.environ) -> int:
             os.environ["EMX_REMOTE_CONTROL"] = control
         os.environ["EMX_REMOTE_TERMINAL"] = core.terminal_bundle(os.environ)
         socket = env.get("EMX_SOCKET", "emx")
-        delivery = Delivery.started(socket if socket not in ("", "default") else "emx")
+        paster = Paster(ssh, host, control, base, env)
+        delivery = Delivery.started(socket if socket not in ("", "default") else "emx", paste=paster)
         follower = Follower(core.ssh_client_args(ssh, host, control, core.follow_shell(base, host), batch=True), delivery)
         _show_title(host)
         titled = True
@@ -426,6 +499,8 @@ def connect(host_arg: str, env=os.environ) -> int:
     finally:
         if follower is not None:
             follower.stop()
+        if paster is not None:
+            paster.wait(5)
         if titled:
             _put_title_back()
         if master:
