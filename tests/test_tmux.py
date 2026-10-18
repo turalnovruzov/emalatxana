@@ -620,8 +620,8 @@ class ClientTtys(unittest.TestCase):
 
 class ShippedConf(unittest.TestCase):
     def test_both_focus_hooks_are_there_and_passthrough_is_not_set_globally(self):
-        self.assertIn("set-hook -g client-focus-in 'set-option -t \"=emx:\" @emx_focus 1'", SHELL_CONF)
-        self.assertIn("set-hook -g client-focus-out 'set-option -t \"=emx:\" @emx_focus 0'", SHELL_CONF)
+        self.assertIn("set-hook -g client-focus-in 'set-option @emx_focus 1'", SHELL_CONF)
+        self.assertIn("set-hook -g client-focus-out 'set-option @emx_focus 0'", SHELL_CONF)
         self.assertNotIn("allow-passthrough", SHELL_CONF)
 
     def test_the_status_line_is_on_at_the_bottom(self):
@@ -654,6 +654,21 @@ class Focus(PrivateServer):
         self.assertLess(idle, 5)
         os.write(self.client_fd, b"\x1b[O")
         self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
+
+    def test_a_focus_report_lands_on_the_reporting_clients_own_view(self):
+        self.tmux.run("new-session", "-d", "-s", "emx-view-1", "-x", "80", "-y", "24", "sleep 60")
+        phone = self.attach("emx-view-1")
+        self.tmux.run("set-option", "-t", "=emx:", "@emx_focus", "0")
+        os.write(self.client_fds[phone], b"\x1b[I")
+        view = Tmux(self.tmux.socket, view="emx-view-1")
+        self.wait_for(lambda: view.client_state()[1] == "1", "focus in on the second view")
+        self.assertEqual(self.tmux.client_state()[1], "0")
+
+    def test_nested_clients_get_the_laptops_terminal_features(self):
+        features = self.tmux.run("show-options", "-s", "terminal-features")
+        self.assertIn("tmux*:extkeys:RGB:clipboard:ccolour:cstyle:focus:title", features)
+        self.assertNotIn("hyperlinks", features)
+        self.assertEqual(self.tmux.run("show-options", "-gv", "window-size").strip(), "latest")
 
     def test_the_attached_client_is_listed_by_its_tty(self):
         (tty,) = self.tmux.client_ttys()
