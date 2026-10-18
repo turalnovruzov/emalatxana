@@ -1044,34 +1044,45 @@ def hint_variants(pairs: tuple) -> tuple:
     return (pairs, *middle, pairs[-1:]) if len(pairs) > 1 else (pairs,)
 
 
-def session_hints(s: Session, pinned: bool) -> tuple:
-    """The keys that act on session `s` under the cursor, each only where its key handler really does that."""
+def rest_hints(listing: bool = True) -> tuple:
+    return REST_HINTS if listing else tuple(p for p in REST_HINTS if p[0] != "^x")
+
+
+def session_hints(s: Session, pinned: bool, listing: bool = True) -> tuple:
+    """The keys that act on session `s` under the cursor, each only where its key handler really does that.
+
+    While `listing` is false (sessions can't be listed) `^x` and `^r` are refused, so they are left out.
+    """
     cat = category(s)
     if cat == NEEDS_INPUT:
-        return (("→", "answer"), ("␣", "peek")) + ((("^r", "rename"),) if s.running else ()) + (("^x", "close"), ("?", "keys"))
+        return (
+            (("→", "answer"), ("␣", "peek"))
+            + ((("^r", "rename"),) if s.running and listing else ())
+            + ((("^x", "close"),) if listing else ()) + (("?", "keys"),)
+        )
     if interruptible(s):
-        return (("→", "open"), ("␣", "peek"), ("^x", "interrupt"), ("?", "keys"))
+        return (("→", "open"), ("␣", "peek")) + ((("^x", "interrupt"),) if listing else ()) + (("?", "keys"),)
     if cat == DONE:
-        return (("→", "open"), ("␣", "peek"), ("^t", "unpin" if pinned else "pin"), ("^x", "close"), ("?", "keys"))
-    return REST_HINTS
+        return (("→", "open"), ("␣", "peek"), ("^t", "unpin" if pinned else "pin")) + ((("^x", "close"),) if listing else ()) + (("?", "keys"),)
+    return rest_hints(listing)
 
 
-def session_inline(s: Session) -> str | None:
+def session_inline(s: Session, listing: bool = True) -> str | None:
     """The key a selected row repeats at the end of its last line, dimmed."""
     if category(s) == NEEDS_INPUT:
         return "→ answer"
     if interruptible(s):
-        return "^x interrupt"
+        return "^x interrupt" if listing else None
     if category(s) == DONE:
         return "→ open"
     return None
 
 
-def header_hints(view: str, key: str, collapsed: bool) -> tuple:
+def header_hints(view: str, key: str, collapsed: bool, listing: bool = True) -> tuple:
     new_here = view == PROJECT and bool(key) and key != PINNED
     return (
         (("Enter", "unfold" if collapsed else "fold"), ("n", "new here" if new_here else "new"))
-        + ((("^x ^x", "close group"),) if group_closable(view, key) else ())
+        + ((("^x ^x", "close group"),) if listing and group_closable(view, key) else ())
         + (("?", "keys"),)
     )
 
@@ -1132,6 +1143,8 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
         if notice_key:
             left.append(("  " + NOTICE_KEY, "muted", False))
         room = width - 1 - size(left[:notice_at]) - size(left[notice_at + 1:]) - size(right)
+        if notice_key:
+            room -= 1
         if room < BAR_NOTICE_MIN:
             return None
         left[notice_at] = (fit(latest.text, room), tone, False)

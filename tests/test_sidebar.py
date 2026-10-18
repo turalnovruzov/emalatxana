@@ -4792,6 +4792,54 @@ class HintsInTheBar(AppCase):
         self.app.history = []
         self.assertNotIn("N all", self.bar(200))
 
+    def test_n_all_is_gone_while_the_routines_view_has_the_keys(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        self.app.handle_key("R")
+        self.assertIsNotNone(self.app.routines_view)
+        self.assertNotIn("N all", self.bar(200))
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.routines_view)
+        self.assertIn("N all", self.bar(200))
+
+    def test_the_routines_view_bar_names_only_keys_it_handles(self):
+        self.app.handle_key("R")
+        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
+        self.assertNotRegex(self.bar(200), r"\^x|\^r|\^f|peek|new|close")
+
+    def test_n_all_keeps_two_spaces_from_the_counts_at_every_width(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
+        seen = 0
+        for width in range(40, 140):
+            text = self.bar(width)
+            if "N all" in text:
+                seen += 1
+                self.assertNotRegex(text, r"N all \S", msg=f"width {width}: {text!r}")
+        self.assertGreater(seen, 0)
+
+    def test_close_and_rename_hints_go_while_sessions_cannot_be_listed(self):
+        self.app.list_error = "listing broken"
+        for hints in (
+            core.session_hints(core.Session("i", "n", "", "blocked", "", "", None, True), False, False),
+            core.session_hints(core.Session("i", "n", "", "done", "", "", None, True), False, False),
+            core.session_hints(core.Session("i", "n", "", "working", "", "", None, True), False, False),
+            core.header_hints(core.PROJECT, "/p/alpha", False, False),
+            core.rest_hints(False),
+        ):
+            with self.subTest(hints=hints):
+                self.assertFalse([k for k, _ in hints if k in ("^x", "^r", "^x ^x")])
+        self.assertIsNone(core.session_inline(core.Session("i", "n", "", "working", "", "", None, True), False))
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.list_error = "listing broken"
+        for cursor in (("session", "a"), ("group", "/p/alpha")):
+            self.app.cursor = cursor
+            for variants in (self.app.bar_hints(),):
+                for variant in variants:
+                    self.assertFalse([k for k, _ in variant if k.startswith("^x") or k == "^r"])
+        self.app.list_error = ""
+        self.app.cursor = ("session", "a")
+        self.assertTrue(any(k == "^x" for variant in self.app.bar_hints() for k, _ in variant))
+
 
 class HintsOnEmptyPanel(AppCase):
     def setUp(self):

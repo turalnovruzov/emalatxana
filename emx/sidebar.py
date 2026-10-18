@@ -2957,21 +2957,22 @@ class App:
             return core.hint_variants(core.LOADING_HINTS)
         if not self.sessions:
             return core.hint_variants(core.EMPTY_HINTS)
+        listing = not self.list_error
         if self.focused is False or self.cursor not in self.items():
-            return core.hint_variants(core.REST_HINTS)
+            return core.hint_variants(core.rest_hints(listing))
         if self.cursor[0] == "group":
-            return core.hint_variants(core.header_hints(self.view(), self.cursor[1], self.cursor[1] in self.collapsed()))
+            return core.hint_variants(core.header_hints(self.view(), self.cursor[1], self.cursor[1] in self.collapsed(), listing))
         s = self.session(self.cursor[1])
         if s is None:
-            return core.hint_variants(core.REST_HINTS)
+            return core.hint_variants(core.rest_hints(listing))
         if s.id in self.closing:
             return core.hint_variants(core.CLOSING_HINTS)
-        return core.hint_variants(core.session_hints(s, s.id in core.pinned_ids(self.prefs)))
+        return core.hint_variants(core.session_hints(s, s.id in core.pinned_ids(self.prefs), listing))
 
     def notice_key_live(self) -> bool:
-        """Whether `N` opens the notifications now: not while a prompt, find, rename, help or the history itself has the keys."""
+        """Whether `N` opens the notifications now: not while a prompt, find, rename, help, the history or the routines view has the keys."""
         return (
-            self.history_view is None and not self.help
+            self.history_view is None and self.routines_view is None and not self.help
             and self.prompt is None and self.find is None and self.rename_edit is None
         )
 
@@ -3172,7 +3173,7 @@ class App:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
                 armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
-                inline = core.session_inline(session) if line == self.cursor and self.focused is not False else None
+                inline = core.session_inline(session, not self.list_error) if line == self.cursor and self.focused is not False else None
                 rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height, inline)
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
 
