@@ -822,7 +822,9 @@ class PasterJobs(unittest.TestCase):
         self.ssh = str(ssh)
 
     def paster(self, reader):
-        return remote.Paster(self.ssh, "emx-test-host", None, "emx", {"EMX_CLIPBOARD_IMAGE": reader})
+        paster = remote.Paster(self.ssh, "emx-test-host", None, "emx", {"EMX_CLIPBOARD_IMAGE": reader})
+        self.addCleanup(paster.close)
+        return paster
 
     def test_two_requests_upload_in_order(self):
         paster = self.paster(f"cp {shlex.quote(str(self.picture))}")
