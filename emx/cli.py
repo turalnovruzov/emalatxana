@@ -17,7 +17,7 @@ from pathlib import Path
 import emx
 from emx import BIN, __version__, core, install, remote
 from emx.notify import OPEN_ENV
-from emx.tmux import HUSH_OPT, OPEN_OPT, RELAY_PASTE_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
+from emx.tmux import AGENT_KEY_ENV, HUSH_OPT, OPEN_OPT, RELAY_PASTE_OPT, ROLE, SESSION, TERMINAL_OPT, VERSION_OPT, Tmux, TmuxError
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 CONFIG = os.path.join(HERE, "emx.tmux.conf")
@@ -36,6 +36,7 @@ emx install <url> is internal too: what install.sh runs to install emx from that
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
 emx relaunch <socket> is internal too: what a running panel starts to move its workspace onto the version just installed.
 emx follow is internal too: it streams the notices of this emx to stdout, for a laptop's `emx remote` to read.
+emx copied <socket> is internal too: what every copy in copy mode runs; a copy made in a view hands it on to that terminal's clipboard.
 emx paste <socket> <relay file> <pane> <session id> is internal too: what Ctrl+V in a session runs on a server; it asks the laptop on emx remote for its clipboard image.
 emx paste-image <pane> <session id> <id> is internal too: what emx remote runs on the server to save that image and paste its path.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
@@ -464,6 +465,30 @@ def paste_check(args: list) -> int:
         return 1
 
 
+COPY_MAX_BYTES = 16 * 1024 * 1024
+
+
+def copied(args: list) -> int:
+    """What every copy in copy mode runs, with the copied text on stdin: a copy made in a view's viewer goes on to the clipboard of the terminal showing it. Always returns 0 and prints nothing.
+
+    A copy made anywhere else has already gone to the terminal, so with no
+    session key in the environment tmux gave the copy (AGENT_KEY_ENV, which
+    only a viewer's session holds) it does nothing.
+    """
+    try:
+        data = sys.stdin.buffer.read(COPY_MAX_BYTES + 1)
+        while sys.stdin.buffer.read(1 << 20):
+            pass
+        (socket,) = args
+        key = os.environ.get(AGENT_KEY_ENV, "")
+        if private_socket(socket) is None or not core.is_session_id(key) or not data or len(data) > COPY_MAX_BYTES:
+            return 0
+        Tmux(socket).hand_on_copy(key, data)
+    except Exception:
+        pass
+    return 0
+
+
 def _images_folder() -> Path | None:
     folder = core.state_path() / "images"
     try:
@@ -688,6 +713,8 @@ def main(argv: list) -> int:
         return relaunch(argv[1])
     if argv[0] == "left":
         return left_check(argv[1:])
+    if argv[0] == "copied":
+        return copied(argv[1:])
     if argv[0] == "paste" and len(argv) == 5:
         return paste_check(argv[1:])
     if argv[0] == "paste-image" and len(argv) == 4:

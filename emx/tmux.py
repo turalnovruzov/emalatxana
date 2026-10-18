@@ -249,6 +249,55 @@ class Tmux:
         self.run("set-option", "-t", target, "detach-on-destroy", "on")
         self.run("set-environment", "-t", target, AGENT_KEY_ENV, key)
 
+    def hand_on_copy(self, key: str, data: bytes) -> int:
+        """Send a copy made in a viewer of session `key` to the clipboard of each terminal showing that viewer; the number of terminals it went to.
+
+        The viewer that made it is the one with the latest input among those
+        attached to `emx-a-<key>`: the copy itself is input.
+        """
+        target = f"={agent_session(key)}:"
+        inner = []
+        for line in self.run("list-clients", "-t", target, "-F", "#{client_activity}\t#{client_tty}").splitlines():
+            at, _, tty = line.partition("\t")
+            try:
+                inner.append((float(at), tty))
+            except ValueError:
+                continue
+        if not inner:
+            return 0
+        tty = max(inner)[1]
+        views = set()
+        for line in self.run("list-panes", "-a", "-F", "#{pane_tty}\t#{session_name}").splitlines():
+            pane_tty, _, name = line.partition("\t")
+            if pane_tty == tty and is_view_session(name):
+                views.add(name)
+        clients = [c for name in sorted(views) for c in self.run("list-clients", "-t", f"={name}:", "-F", "#{client_name}").split()]
+        if not clients:
+            return 0
+        names = self.run("list-buffers", "-F", "#{buffer_name}").split()
+        copy = names[0] if names and self._buffer(names[0]) == data else None
+        for client in clients:
+            argv = self.argv("load-buffer", "-w", "-t", client, "-")
+            try:
+                done = subprocess.run(argv, input=data, capture_output=True, timeout=10)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise TmuxError(f"tmux failed: {exc}") from None
+            if done.returncode != 0:
+                raise TmuxError(done.stderr.decode("utf-8", "replace").strip() or "tmux load-buffer failed")
+        # Sending a buffer that has a name would make it a named one, which a plain paste skips; so each send made a new
+        # automatic buffer, and all but the newest of them, and the copy's own, are dropped: one buffer holds the copy, as before.
+        added = self.run("list-buffers", "-F", "#{buffer_name}").split()[1:len(clients)]
+        for name in added + ([copy] if copy else []):
+            self.run("delete-buffer", "-b", name)
+        return len(clients)
+
+    def _buffer(self, name: str) -> bytes | None:
+        try:
+            done = subprocess.run(self.argv("show-buffer", "-b", name), capture_output=True, stdin=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        return done.stdout if done.returncode == 0 else None
+
     def pane_view(self, pane: str) -> str:
         """The session key the slot `pane` shows, "" when none."""
         if not _PANE_ID.fullmatch(pane):

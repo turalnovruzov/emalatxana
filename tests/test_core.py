@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import __version__, core
-from emx.tmux import Pane
+from emx.tmux import Pane, View
 
 class TestSessionsHidden(unittest.TestCase):
     def setUp(self):
@@ -5318,6 +5318,102 @@ class Routines(unittest.TestCase):
         for width in (40, 16, 5):
             for text, _ in self.lines(view, width):
                 self.assertLessEqual(core.display_width(text), width, (width, text))
+
+
+VIEW_KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+
+class MergePrefs(unittest.TestCase):
+    """Each view's panel saves the prefs; what another panel saved meanwhile is kept, except on a key this panel changed."""
+
+    def test_a_pin_another_panel_added_on_disk_survives_this_panel_changing_the_side(self):
+        base = core.normalize_prefs({})
+        mine = core.flip_side(base)
+        disk = core.toggle_pin(base, VIEW_KEY)
+        merged = core.merge_prefs(base, mine, disk)
+        self.assertEqual(merged["side"], "left")
+        self.assertEqual(core.pinned_ids(merged), {VIEW_KEY})
+
+    def test_this_panels_change_wins_on_the_key_it_changed(self):
+        base = core.normalize_prefs({"panel_width": 40})
+        mine = {**base, "panel_width": 60}
+        disk = {**base, "panel_width": 50, "side": "left"}
+        merged = core.merge_prefs(base, mine, disk)
+        self.assertEqual((merged["panel_width"], merged["side"]), (60, "left"))
+
+    def test_a_key_this_panel_dropped_is_dropped_and_nothing_changed_keeps_the_disk(self):
+        base = {**core.normalize_prefs({}), "last_folder": "/p/a"}
+        mine = {k: v for k, v in base.items() if k != "last_folder"}
+        self.assertNotIn("last_folder", core.merge_prefs(base, mine, dict(base)))
+        disk = {**base, "last_folder": "/p/b"}
+        self.assertEqual(core.merge_prefs(base, dict(base), disk), disk)
+
+
+class InFrontAny(unittest.TestCase):
+    """A notice is skipped only while some device shows that session to him."""
+
+    NOW = 1000.0
+
+    def view(self, **change):
+        args = {"name": "emx", "attached": 1, "focus": "1", "activity": self.NOW - 3, "width": 200,
+                "shows": VIEW_KEY, "slot_active": True}
+        return View(**{**args, **change})
+
+    def test_an_attached_focused_recently_used_view_whose_active_slot_shows_it(self):
+        self.assertTrue(core.in_front_any(VIEW_KEY, [self.view()], self.NOW))
+        self.assertTrue(core.in_front_any(VIEW_KEY, [self.view(name="emx-view-1", attached=0), self.view(name="emx")], self.NOW))
+
+    def test_each_condition_alone_lets_the_notice_through(self):
+        cases = {
+            "no client on the view showing it": self.view(attached=0),
+            "its panel is active": self.view(slot_active=False),
+            "focus out": self.view(focus="0"),
+            "focus unknown": self.view(focus=""),
+            "away": self.view(activity=self.NOW - core.AWAY_SECONDS - 1),
+            "activity unknown": self.view(activity=None),
+            "another session": self.view(shows="other"),
+        }
+        for name, view in cases.items():
+            with self.subTest(name):
+                self.assertFalse(core.in_front_any(VIEW_KEY, [view], self.NOW))
+        self.assertFalse(core.in_front_any(VIEW_KEY, [], self.NOW))
+        self.assertFalse(core.in_front_any("", [self.view(shows="")], self.NOW))
+
+    def test_one_device_showing_it_is_enough_whatever_the_others_do(self):
+        phone = self.view(name="emx-view-1", shows="other", width=48)
+        self.assertTrue(core.in_front_any(VIEW_KEY, [phone, self.view()], self.NOW))
+
+
+class ViewsQuiet(unittest.TestCase):
+    def test_clients_add_up_and_the_latest_input_of_any_counts(self):
+        views = [
+            View("emx", 1, "1", 900.0, 200, "", False),
+            View("emx-view-1", 1, "", 990.0, 48, "", False),
+            View("emx-view-2", 0, "", 999.0, 0, "", False),
+        ]
+        self.assertEqual(core.views_quiet(views, 1000.0), (2, 10.0))
+
+    def test_no_client_or_no_activity_known(self):
+        self.assertEqual(core.views_quiet([View("emx", 0, "", None, 0, "", False)], 1000.0), (0, None))
+        self.assertEqual(core.views_quiet([View("emx", 1, "", None, 0, "", False)], 1000.0), (1, None))
+
+
+class SummariesFile(unittest.TestCase):
+    """The primary panel's row lines, handed to the other views' panels through one file."""
+
+    def test_it_holds_only_each_sessions_line_and_its_state_and_reads_back(self):
+        found = {VIEW_KEY: core.Summary("Fixing the parser", core.WORKING, "excerpt text", 12.0)}
+        record = core.summaries_record(found)
+        self.assertEqual(record, {VIEW_KEY: {"text": "Fixing the parser", "state": core.WORKING}})
+        back = core.summaries_from(json.loads(json.dumps(record)))
+        self.assertEqual((back[VIEW_KEY].text, back[VIEW_KEY].category), ("Fixing the parser", core.WORKING))
+
+    def test_anything_else_is_dropped(self):
+        for raw in (None, [], "x", {"not-a-key": {"text": "a", "state": "working"}},
+                    {VIEW_KEY: {"text": 3, "state": "working"}}, {VIEW_KEY: {"text": "a"}}, {VIEW_KEY: "a"},
+                    {VIEW_KEY: {"text": "a" * (core.SUMMARY_LONG_CAP + 1), "state": "working"}}):
+            with self.subTest(raw=str(raw)[:40]):
+                self.assertEqual(core.summaries_from(raw), {})
 
 
 if __name__ == "__main__":

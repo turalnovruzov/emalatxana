@@ -1,7 +1,9 @@
+import base64
 import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import struct
@@ -1234,6 +1236,35 @@ class Views(PrivateServer):
         gate = core.type_gate(self.agent, self.sidebar, self.key, 0, SESSION_OPT)
         self.assertNotEqual(self.tmux.type_if(self.agent, gate, "no", core.TYPED, core.gate_report(SESSION_OPT), enter=False), core.TYPED)
         self.wait_for(lambda: self.typed("agent") == b"hihi", "both typings")
+
+    def test_a_mouse_copy_in_a_viewer_reaches_the_terminal_showing_it(self):
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        self.tmux.bind_copy(cli.self_command("copied", self.tmux.socket))
+        self.show_in(self.main, self.key)
+        self.tmux.select(self.main)
+        seen = bytearray()
+
+        def drain():
+            while select.select([self.client_fd], [], [], 0)[0]:
+                seen.extend(os.read(self.client_fd, 65536))
+
+        time.sleep(0.3)
+        drain()
+        seen.clear()
+        for event in (b"\x1b[<0;1;1M", b"\x1b[<32;2;1M", b"\x1b[<32;3;1M", b"\x1b[<0;3;1m"):
+            os.write(self.client_fd, event)
+            time.sleep(0.1)
+
+        def clipboard():
+            drain()
+            return re.search(rb"\x1b\]52;[a-z]*;([A-Za-z0-9+/=]+)(\x07|\x1b\\\\)", bytes(seen))
+
+        self.wait_for(clipboard, "the clipboard escape on the laptop's terminal")
+        copied = base64.b64decode(clipboard().group(1))
+        time.sleep(0.5)
+        self.assertEqual(copied, self.tmux.run("show-buffer").encode())
+        self.assertTrue(copied.startswith("❯".encode()), copied)
+        self.assertEqual(len(self.tmux.run("list-buffers", "-F", "#{buffer_name}").split()), 1)
 
     def test_views_reads_each_views_clients_and_what_its_slot_shows(self):
         self.show_in(self.main, self.key)

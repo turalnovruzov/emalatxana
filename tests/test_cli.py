@@ -520,6 +520,46 @@ PASTE_ID = "20261018-120000-0a1b2c3d"
 PNG = core.PNG_SIGNATURE + b"rest of a picture"
 
 
+class Copied(unittest.TestCase):
+    """`emx copied` runs on every copy tmux makes; only one made in a viewer, whose session's environment names its key, is handed on."""
+
+    KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+    def run_copied(self, args, env, data=b"copied text"):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = mock.Mock(buffer=io.BytesIO(data))
+        with mock.patch.object(cli.Tmux, "hand_on_copy") as hand_on, mock.patch.object(cli.sys, "stdin", stdin), \
+                mock.patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(err):
+            if "EMX_AGENT_KEY" not in env:
+                os.environ.pop("EMX_AGENT_KEY", None)
+            code = cli.main(["copied", *args])
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "", ""))
+        return hand_on
+
+    def test_a_copy_in_a_viewer_is_handed_on_with_its_key(self):
+        hand_on = self.run_copied(["emx-test-unit"], {"EMX_AGENT_KEY": self.KEY})
+        hand_on.assert_called_once_with(self.KEY, b"copied text")
+
+    def test_anything_else_hands_on_nothing(self):
+        for args, env, data in (
+            (["emx-test-unit"], {}, b"x"),
+            (["emx-test-unit"], {"EMX_AGENT_KEY": "s1"}, b"x"),
+            (["default"], {"EMX_AGENT_KEY": self.KEY}, b"x"),
+            ([], {"EMX_AGENT_KEY": self.KEY}, b"x"),
+            (["emx-test-unit"], {"EMX_AGENT_KEY": self.KEY}, b""),
+        ):
+            with self.subTest(args=args, env=env, data=data):
+                self.run_copied(args, env, data).assert_not_called()
+
+    def test_a_failure_still_exits_0_silently(self):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = mock.Mock(buffer=io.BytesIO(b"x"))
+        with mock.patch.object(cli.Tmux, "hand_on_copy", side_effect=TmuxError("gone")), mock.patch.object(cli.sys, "stdin", stdin), \
+                mock.patch.dict(os.environ, {"EMX_AGENT_KEY": self.KEY}), redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(cli.main(["copied", "emx-test-unit"]), 0)
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+
 class PasteCheck(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

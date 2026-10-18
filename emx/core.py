@@ -452,6 +452,11 @@ def live_viewer(panes, sid: str):
     return next((p for p in panes if p.session == sid and p.agent and not p.dead), None)
 
 
+def live_or_dead_agent(panes, sid: str):
+    """The session's own pane, agent-tagged, whether its process runs or has ended (a dead pane stays, and can be resumed in), or None."""
+    return next((p for p in panes if p.session == sid and p.agent), None)
+
+
 def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None) -> str | None:
     """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
 
@@ -1708,6 +1713,13 @@ def prune_plan(on_disk, current: str, running) -> list:
     return [v for v in below if v not in keep]
 
 
+def views_quiet(views, now: float) -> tuple:
+    """(clients attached over every view, seconds since the most recent input on any of them or None when unknown), for `update_quiet`: a relaunch respawns every view's panel."""
+    attached = sum(v.attached for v in views)
+    seen = [max(0.0, now - v.activity) for v in views if v.attached and v.activity is not None]
+    return attached, min(seen) if seen else None
+
+
 def update_quiet(attached: int, idle, busy: bool) -> bool:
     if busy:
         return False
@@ -2132,9 +2144,27 @@ def load_prefs(path: Path) -> dict:
     return normalize_prefs(raw)
 
 
+def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
+    """The prefs to write when this panel read `base`, holds `mine`, and finds `disk` on file now: another view's panel may have written since.
+
+    Only the keys this panel changed since `base` take its value; every other
+    key keeps what is on disk. Two panels changing the same key between two
+    reads: the last write wins.
+    """
+    merged = dict(disk)
+    for key in set(base) | set(mine):
+        if mine.get(key) != base.get(key):
+            if key in mine:
+                merged[key] = mine[key]
+            else:
+                merged.pop(key, None)
+    return merged
+
+
 def save_prefs(path: Path, prefs: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Per process: each view's panel saves, and two must not share one temporary file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(normalize_prefs(prefs), indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
@@ -3429,6 +3459,41 @@ def in_front(sid: str, main_sid: str, main_id: str, attached: int, focus: str, a
         bool(main_sid) and sid == main_sid and attached > 0 and focus == "1"
         and bool(main_id) and active == main_id and idle is not None and idle <= AWAY_SECONDS
     )
+
+
+def in_front_any(sid: str, views, now: float) -> bool:
+    """Whether a notice for `sid` is skipped because he is looking at that session on some device.
+
+    `views` are `tmux.View`s and `now` is wall-clock seconds, as tmux gives a
+    client's activity. Some view must hold all of what `in_front` asks of the
+    one workspace: it shows `sid` in its slot, the slot (not the panel) is
+    active, a client is attached, its terminal last reported focus-in, and the
+    client had input within `AWAY_SECONDS`.
+    """
+    return any(
+        bool(sid) and v.shows == sid and v.slot_active and v.attached > 0 and v.focus == "1"
+        and v.activity is not None and now - v.activity <= AWAY_SECONDS
+        for v in views
+    )
+
+
+def summaries_record(found: dict) -> dict:
+    """What the primary panel writes to `summaries.json` for the other views' panels: each session's line and the state it is for, nothing else."""
+    return {sid: {"text": s.text, "state": s.category} for sid, s in found.items() if is_session_id(sid)}
+
+
+def summaries_from(raw) -> dict:
+    """The lines in a `summaries.json` the primary panel wrote, as `Summary`s; anything not shaped as `summaries_record` writes is dropped."""
+    if not isinstance(raw, dict):
+        return {}
+    found = {}
+    for sid, entry in raw.items():
+        if not is_session_id(sid) or not isinstance(entry, dict):
+            continue
+        text, state = entry.get("text"), entry.get("state")
+        if isinstance(text, str) and isinstance(state, str) and len(text) <= SUMMARY_LONG_CAP:
+            found[sid] = Summary(text, state, "", 0.0)
+    return found
 
 
 NOTICE_INSTRUCTION = (
