@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -4830,6 +4831,243 @@ class InstallDecisions(unittest.TestCase):
 
     def test_updated_heading(self):
         self.assertEqual(core.updated_heading("2.3.1"), "emx updated to 2.3.1.")
+
+
+
+def journal_line(message, unit, invocation, at, **fields):
+    return json.dumps({"MESSAGE_ID": message, "USER_UNIT": unit, "USER_INVOCATION_ID": invocation,
+                       "__REALTIME_TIMESTAMP": str(int(at * 1e6)), **fields})
+
+
+class Routines(unittest.TestCase):
+    START, DONE, EXITED = core.MSG_START, core.MSG_DONE, core.MSG_EXITED
+    UNIT_FAILED, JOB_FAILED = core.MSG_UNIT_FAILED, core.MSG_JOB_FAILED
+    NOW = 1_800_000_000.0
+
+    def runs(self, *lines, active=frozenset()):
+        return core.journal_runs("\n".join(lines), frozenset(active))
+
+    def test_names_drop_comments_blanks_suffixes_and_duplicates(self):
+        text = "backup-nightly\n# note\n\nreport-weekly.timer\nbackup-nightly.service\n"
+        self.assertEqual(core.routine_names(text), ["backup-nightly", "report-weekly"])
+
+    def test_the_list_lives_beside_the_prefs(self):
+        self.assertEqual(core.routines_path({"EMX_CONFIG_HOME": "/x"}), Path("/x/emx/routines"))
+
+    def test_show_blocks_key_by_id_whatever_their_order(self):
+        text = "Id=backup-nightly.timer\nLoadState=loaded\nUnit=backup-job.service\n\nLoadState=not-found\nId=gone.timer\nUnit=\n"
+        blocks = core.show_blocks(text)
+        self.assertEqual(blocks["backup-nightly.timer"]["Unit"], "backup-job.service")
+        self.assertEqual(blocks["gone.timer"]["LoadState"], "not-found")
+        self.assertEqual(blocks["gone.timer"]["Unit"], "")
+
+    def test_show_time(self):
+        self.assertEqual(core.show_time("@1792339714"), 1792339714.0)
+        self.assertIsNone(core.show_time(""))
+        self.assertIsNone(core.show_time("Mon 2026"))
+
+    def test_calendar_specs_reads_every_entry(self):
+        value = "{ OnCalendar=*-*-* 09,11,13:10:00 America/New_York ; next_elapse=@1 } { OnCalendar=Mon *-*-* 08:00:00 ; next_elapse=@2 }"
+        self.assertEqual(core.calendar_specs(value), ["*-*-* 09,11,13:10:00 America/New_York", "Mon *-*-* 08:00:00"])
+
+    def test_calendar_times_reads_the_utc_lines(self):
+        text = (
+            "Normalized form: *-*-* 09,11:10:00 America/New_York\n"
+            "    Next elapse: Mon 2026-10-19 09:10:00 EDT\n"
+            "       (in UTC): Mon 2026-10-19 13:10:00 UTC\n"
+            "       From now: 20h left\n"
+            "   Iteration #2: Mon 2026-10-19 11:10:00 EDT\n"
+            "       (in UTC): Mon 2026-10-19 15:10:00 UTC\n"
+            "       From now: 22h left\n"
+        )
+        self.assertEqual(core.calendar_times(text), [1792415400.0, 1792422600.0])
+
+    def test_calendar_times_reads_the_iteration_lines_in_a_utc_zone(self):
+        text = (
+            "Normalized form: *-*-* 13,15:10:00\n"
+            "    Next elapse: Mon 2026-10-19 13:10:00 UTC\n"
+            "       From now: 16h left\n"
+            "   Iteration #2: Mon 2026-10-19 15:10:00 UTC\n"
+            "       From now: 18h left\n"
+        )
+        self.assertEqual(core.calendar_times(text), [1792415400.0, 1792422600.0])
+
+    def test_a_passed_oneshot_is_one_passed_run_at_its_start(self):
+        runs = self.runs(
+            journal_line(self.START, "backup-job.service", "i1", 1000, JOB_TYPE="start"),
+            journal_line(self.DONE, "backup-job.service", "i1", 1002, JOB_RESULT="done"),
+        )
+        self.assertEqual(runs, {"backup-job.service": [core.Run(1000.0, core.PASSED, "")]})
+
+    def test_a_failed_oneshot_is_one_failed_run_with_its_status(self):
+        runs = self.runs(
+            journal_line(self.START, "backup-job.service", "i1", 1000),
+            journal_line(self.EXITED, "backup-job.service", "i1", 1001, EXIT_CODE="exited", EXIT_STATUS="2"),
+            journal_line(self.UNIT_FAILED, "backup-job.service", "i1", 1001, UNIT_RESULT="exit-code"),
+            journal_line(self.JOB_FAILED, "backup-job.service", "i1", 1001, JOB_RESULT="failed"),
+        )
+        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "2")])
+
+    def test_a_failed_simple_run_starts_at_its_done_line(self):
+        runs = self.runs(
+            journal_line(self.DONE, "loop.service", "i1", 500, JOB_RESULT="done"),
+            journal_line(self.EXITED, "loop.service", "i1", 540, EXIT_CODE="exited", EXIT_STATUS="1"),
+            journal_line(self.UNIT_FAILED, "loop.service", "i1", 540, UNIT_RESULT="exit-code"),
+        )
+        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "1")])
+
+    def test_a_killed_run_carries_the_signal_number(self):
+        runs = self.runs(
+            journal_line(self.START, "loop.service", "i1", 500),
+            journal_line(self.EXITED, "loop.service", "i1", 501, EXIT_CODE="killed", EXIT_STATUS="15"),
+        )
+        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "15")])
+
+    def test_two_invocations_are_two_runs_oldest_first_even_when_interleaved(self):
+        runs = self.runs(
+            journal_line(self.START, "backup-job.service", "late", 2000),
+            journal_line(self.START, "backup-job.service", "early", 1000),
+            journal_line(self.DONE, "backup-job.service", "late", 2003, JOB_RESULT="done"),
+            journal_line(self.EXITED, "backup-job.service", "early", 1002, EXIT_STATUS="4"),
+        )
+        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "4"), core.Run(2000.0, core.PASSED, "")])
+
+    def test_lines_that_are_not_systemds_lifecycle_are_skipped(self):
+        runs = self.runs(
+            "not json at all",
+            json.dumps({"MESSAGE": "no id", "USER_UNIT": "backup-job.service", "USER_INVOCATION_ID": "i1", "__REALTIME_TIMESTAMP": "1000000000"}),
+            journal_line("0123456789abcdef0123456789abcdef", "backup-job.service", "i1", 1000, MESSAGE="the script's own output"),
+            json.dumps({"MESSAGE_ID": self.START, "USER_UNIT": "backup-job.service", "__REALTIME_TIMESTAMP": "1000000000"}),
+        )
+        self.assertEqual(runs, {})
+
+    def test_a_lone_start_is_running_only_while_the_unit_is_active(self):
+        line = journal_line(self.START, "backup-job.service", "i1", 1000)
+        self.assertEqual(self.runs(line, active={"backup-job.service"})["backup-job.service"][0].result, core.RUNNING)
+        self.assertEqual(self.runs(line)["backup-job.service"][0].result, core.UNKNOWN)
+
+    def test_units_in_one_text_come_back_under_their_own_names(self):
+        runs = self.runs(
+            journal_line(self.START, "backup-job.service", "a", 1000),
+            journal_line(self.DONE, "backup-job.service", "a", 1001, JOB_RESULT="done"),
+            journal_line(self.START, "report-job.service", "b", 1500),
+            journal_line(self.EXITED, "report-job.service", "b", 1501, EXIT_STATUS="3"),
+        )
+        self.assertEqual(runs["backup-job.service"][0].result, core.PASSED)
+        self.assertEqual(runs["report-job.service"][0], core.Run(1500.0, core.FAILED, "3"))
+
+    def slots(self, count=6):
+        return [self.NOW - 3600 * (count - i) + 600 for i in range(count)]
+
+    def test_missed_times_names_the_one_slot_without_a_run(self):
+        slots = self.slots()
+        starts = [t for i, t in enumerate(slots) if i != 2]
+        self.assertEqual(core.missed_times(slots, starts, self.NOW - 86400, self.NOW), [slots[2]])
+
+    def test_a_run_shortly_after_its_slot_counts_as_ran(self):
+        slots = self.slots()
+        self.assertEqual(core.missed_times(slots, [t + 30 for t in slots], self.NOW - 86400, self.NOW), [])
+
+    def test_a_run_just_before_a_slot_does_not_cover_it(self):
+        slots = self.slots()
+        starts = [t for i, t in enumerate(slots) if i != 3] + [slots[3] - 1]
+        self.assertEqual(core.missed_times(slots, starts, self.NOW - 86400, self.NOW), [slots[3]])
+
+    def test_a_slot_within_the_slack_of_now_is_not_missed(self):
+        slot = self.NOW - core.MISSED_SLACK + 1
+        self.assertEqual(core.missed_times([slot], [], self.NOW - 86400, self.NOW), [])
+        self.assertEqual(core.missed_times([slot - 2], [], self.NOW - 86400, self.NOW), [slot - 2])
+
+    def test_slots_before_since_are_not_missed(self):
+        slots = self.slots()
+        self.assertEqual(core.missed_times(slots, [], slots[4] - 1, self.NOW), slots[4:])
+
+    def timer(self, **props):
+        base = {"Id": "backup-nightly.timer", "LoadState": "loaded", "ActiveState": "active", "Unit": "backup-job.service",
+                "TimersCalendar": "{ OnCalendar=hourly ; next_elapse=@1 }",
+                "ActiveEnterTimestamp": f"@{int(self.NOW - 86400 * 3)}", "NextElapseUSecRealtime": f"@{int(self.NOW + 1800)}"}
+        return {**base, **props}
+
+    def view(self, timer=None, service=None, runs=(), slots=(), **kwargs):
+        return core.routine_view("backup-nightly", timer if timer is not None else self.timer(), service,
+                                 list(runs), list(slots), self.NOW, self.NOW - 86400, **kwargs)
+
+    def test_a_missing_timer_is_not_found(self):
+        view = self.view(timer={"LoadState": "not-found", "Unit": ""})
+        self.assertEqual((view.tag, view.tone, view.events), ("not found", "error", ()))
+
+    def test_nothing_scheduled_and_nothing_run_is_not_due(self):
+        view = self.view()
+        self.assertEqual((view.tag, view.tone), ("not due", "muted"))
+
+    def test_a_missed_newest_slot_tags_the_routine_missed(self):
+        slots = self.slots()
+        runs = [core.Run(t, core.PASSED) for t in slots[:-1]]
+        view = self.view(runs=runs, slots=slots)
+        self.assertEqual((view.tag, view.tone), ("missed", "needs"))
+        self.assertEqual(view.events[0][:2], (slots[-1], core.MISSED))
+
+    def test_a_newest_failed_run_names_its_exit_status(self):
+        view = self.view(runs=[core.Run(self.NOW - 900, core.FAILED, "2")])
+        self.assertEqual((view.tag, view.tone), ("failed · exit 2", "error"))
+
+    def test_a_new_timer_misses_nothing_before_it_existed(self):
+        slots = [self.NOW - 7200 + 60, self.NOW - 3600 + 60, self.NOW - 1200]
+        view = self.view(timer=self.timer(ActiveEnterTimestamp=f"@{int(self.NOW - 600)}"), slots=slots)
+        self.assertEqual(view.events, ())
+
+    def test_with_no_journal_runs_the_service_state_gives_the_latest_run(self):
+        service = {"ExecMainStartTimestamp": f"@{int(self.NOW - 3000)}", "Result": "exit-code", "ExecMainStatus": "1"}
+        view = self.view(service=service)
+        self.assertEqual(view.events, ((self.NOW - 3000, core.FAILED, "1"),))
+
+    def test_a_service_run_outside_the_window_is_not_shown(self):
+        service = {"ExecMainStartTimestamp": f"@{int(self.NOW - 90000)}", "Result": "success"}
+        self.assertEqual(self.view(service=service).events, ())
+
+    def test_a_calendar_list_that_hit_the_cap_names_no_missed_times(self):
+        slots = [self.NOW - 86000 + i for i in range(core.CALENDAR_CAP)]
+        slots[-1] = self.NOW - 3000
+        view = self.view(slots=slots)
+        self.assertEqual(view.events, ())
+
+    def test_a_stopped_timer_shows_its_runs_and_no_missed_times(self):
+        slots = self.slots()
+        view = self.view(timer=self.timer(ActiveState="inactive"), runs=[core.Run(slots[0], core.PASSED)], slots=slots)
+        self.assertEqual(view.tag, "timer off")
+        self.assertEqual([e[1] for e in view.events], [core.PASSED])
+
+    def test_a_timer_with_no_calendar_shows_runs_and_a_note(self):
+        view = self.view(timer=self.timer(TimersCalendar=""), runs=[core.Run(self.NOW - 900, core.PASSED)])
+        self.assertEqual((view.tag, view.note), ("passed", "no calendar schedule"))
+
+    def lines(self, view, width=40):
+        return core.routine_lines(view, width, self.NOW, local=time.gmtime)
+
+    def test_lines_show_the_next_time_by_how_far_off_it_is(self):
+        near = self.lines(core.RoutineView("backup-nightly", "not due", "muted", (), self.NOW + 7200))
+        far = self.lines(core.RoutineView("backup-nightly", "not due", "muted", (), self.NOW + 3 * 86400))
+        self.assertEqual(near[-1][0], "  next " + time.strftime("%H:%M", time.gmtime(self.NOW + 7200)))
+        self.assertEqual(far[-1][0], "  next " + time.strftime("%a %H:%M", time.gmtime(self.NOW + 3 * 86400)))
+
+    def test_lines_put_the_name_left_the_tag_right_and_runs_newest_first(self):
+        events = ((self.NOW - 600, core.FAILED, "2"), (self.NOW - 4200, core.MISSED, ""), (self.NOW - 7800, core.PASSED, ""))
+        view = core.RoutineView("backup-nightly", "failed · exit 2", "error", events, None)
+        rows = self.lines(view)
+        self.assertTrue(rows[0][0].startswith("backup-nightly") and rows[0][0].endswith("failed · exit 2"))
+        self.assertEqual(rows[0][1], "error")
+        body = " ".join(text.strip() for text, _ in rows[1:])
+        stamps = [time.strftime("%H:%M", time.gmtime(self.NOW - s)) for s in (600, 4200, 7800)]
+        self.assertEqual([body.index(s) for s in stamps], sorted(body.index(s) for s in stamps))
+        for token in ("✗2", "⚠ missed", "✓"):
+            self.assertIn(token, body)
+
+    def test_no_row_is_wider_than_the_width(self):
+        events = tuple((self.NOW - 600 * i, core.PASSED, "") for i in range(1, 30))
+        view = core.RoutineView("a-routine-with-a-quite-long-name", "failed · exit 2", "error", events, self.NOW + 99999)
+        for width in (40, 16, 5):
+            for text, _ in self.lines(view, width):
+                self.assertLessEqual(core.display_width(text), width, (width, text))
 
 
 if __name__ == "__main__":
