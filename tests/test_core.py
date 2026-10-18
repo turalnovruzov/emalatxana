@@ -384,84 +384,130 @@ class Navigation(unittest.TestCase):
         self.assertIsNone(core.cursor_group(None, self.GROUPS))
 
 
-class Summary(unittest.TestCase):
-    SESSIONS = [
-        mk(state="blocked"), mk(state="working"), mk(state="working"), mk(state="done"), mk(state="stopped", running=False),
-    ]
+class BarCounts(unittest.TestCase):
+    def test_nonzero_counts_in_order_with_idle_apart_from_working_and_stopped_left_out(self):
+        sessions = [
+            mk(state="blocked"), mk(state="working"), mk(state="working"), mk(state="working", status="idle"),
+            mk(state="done"), mk(state="stopped", running=False),
+        ]
+        self.assertEqual(core.bar_counts(sessions), [("needs_input", 1), ("working", 2), ("done", 1), ("idle", 1)])
 
-    def test_counts_nonzero_only_in_order(self):
-        self.assertEqual(core.summary(self.SESSIONS), [
-            ("1 waiting", core.NEEDS_INPUT), ("2 working", core.WORKING), ("1 done", core.DONE), ("1 stopped", core.STOPPED),
-        ])
-        self.assertEqual(core.summary([mk(state="done")]), [("1 done", core.DONE)])
-        self.assertEqual(core.summary([]), [])
+    def test_an_idle_session_never_counts_as_working(self):
+        self.assertEqual(core.bar_counts([mk(state="working", status="idle")]), [("idle", 1)])
 
-    def text(self, placed):
-        line = ""
-        for x, text, _ in placed:
-            line = line.ljust(x) + text
-        return line
+    def test_no_sessions_gives_nothing(self):
+        self.assertEqual(core.bar_counts([]), [])
 
-    def test_the_top_line_gives_up_words_then_name_then_counts(self):
-        cases = {
-            62: "⚒ emalatxana 1.0.0  1 waiting · 2 working · 1 done · 1 stopped",
-            61: "⚒ emalatxana 1.0.0          1 wait · 2 work · 1 done · 1 stop",
-            53: "⚒ emalatxana 1.0.0  1 wait · 2 work · 1 done · 1 stop",
-            52: "⚒ 1.0.0            1 wait · 2 work · 1 done · 1 stop",
-            42: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 stop",
-            41: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1 st…",
-            38: "⚒ 1.0.0  1 wait · 2 work · 1 done · 1…",
-            30: "⚒ 1.0.0  1 wait · 2 work · 1…",
-            10: "⚒ 1.0.0  …",
-            9: "⚒ 1.0.0",
-            7: "⚒ 1.0.0",
-            6: "⚒  1…",
-            4: "⚒  …",
-            3: "⚒",
-            1: "⚒",
-            0: "",
-        }
-        for width, want in cases.items():
-            with self.subTest(width=width):
-                self.assertEqual(self.text(core.top_line(self.SESSIONS, "1.0.0", width)), want)
 
-    def test_the_version_stays_at_the_default_width(self):
-        for count in range(1, 5):
-            with self.subTest(categories=count):
-                sessions = [mk(state=state) for state in ("blocked", "working", "done", "stopped")[:count]]
-                placed = core.top_line(sessions, "1.0.0", 38)
-                self.assertIn(("1.0.0", "version"), [(t, tag) for _, t, tag in placed])
+class BarParts(unittest.TestCase):
+    COUNTS = [("needs_input", 1), ("working", 2), ("done", 1), ("idle", 1)]
+    ENTRY = core.Entry("s1", core.NOTICE_NEEDS, "t-fix · proj", "test-fix wants to run Bash for a long while", 100.0)
+    HINTS = ("N notifications  ? keys", "? keys")
 
-    def test_the_name_goes_before_the_version(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                tags = [tag for _, _, tag in core.top_line(self.SESSIONS, "1.0.0", width)]
-                if "name" in tags:
-                    self.assertIn("version", tags)
+    def bar(self, width, **kw):
+        args = dict(version="2.6.0", counts=self.COUNTS, latest=self.ENTRY, now=220.0, tag=None, remote=None, hints=self.HINTS, width=width)
+        args.update(kw)
+        return core.bar_parts(**args)
 
-    def test_one_count_fits_beside_the_whole_logo_in_a_default_panel(self):
-        placed = core.top_line([mk(state="working"), mk(state="working")], "1.0.0", 38)
-        self.assertEqual(self.text(placed), "⚒ emalatxana 1.0.0           2 working")
-        self.assertEqual([tag for _, _, tag in placed], ["logo", "name", "version", core.WORKING])
+    def text(self, parts):
+        return "".join(t for t, _, _ in parts)
 
-    def test_the_top_line_before_the_first_listing_and_with_no_sessions(self):
-        self.assertEqual(self.text(core.top_line([], "1.0.0", 38, loaded=False)), "⚒ emalatxana 1.0.0                   …")
-        self.assertEqual(self.text(core.top_line([], "1.0.0", 38)), "⚒ emalatxana 1.0.0         no sessions")
+    def test_the_full_bar_at_120(self):
+        parts = self.bar(120)
+        text = self.text(parts)
+        self.assertTrue(text.startswith(" ⚒ emx 2.6.0"), text)
+        self.assertTrue(text.endswith("N notifications  ? keys "), text)
+        self.assertEqual(core.display_width(text), 120)
+        self.assertIn("✻ 2m test-fix wants to run Bash for a long while", text)
 
-    def test_the_top_line_never_overflows_and_always_keeps_the_logo(self):
-        self.assertEqual(core.display_width(core.LOGO), 1)
-        for sessions in ([], self.SESSIONS):
-            for loaded in (True, False):
-                for width in range(0, 81):
-                    with self.subTest(sessions=len(sessions), loaded=loaded, width=width):
-                        placed = core.top_line(sessions, "10.20.30", width, loaded)
-                        end = max((x + core.display_width(t) for x, t, _ in placed), default=0)
-                        self.assertLessEqual(end, width)
-                        if width:
-                            self.assertEqual(placed[0], (0, core.LOGO, "logo"))
-                        xs = [x for x, _, _ in placed]
-                        self.assertEqual(xs, sorted(xs))
+    def test_the_counts_are_four_parts_in_their_tones(self):
+        counts = [(t, tone, bold) for t, tone, bold in self.bar(120) if re.fullmatch(r"✻\d", t) and bold]
+        self.assertEqual(counts, [("✻1", "needs", True), ("✻2", "muted", True), ("✻1", "done", True), ("✻1", "idle", True)])
 
+    def test_the_width_is_exact_and_the_mark_stays_from_120_down_to_8(self):
+        for tag, remote in ((None, None), ("voice", "myserver")):
+            for width in range(120, 7, -1):
+                text = self.text(self.bar(width, tag=tag, remote=remote))
+                self.assertEqual(core.display_width(text), width, (width, text))
+                self.assertIn("⚒", text)
+
+    def test_room_runs_out_in_the_stated_order(self):
+        def stage(width):
+            text = self.text(self.bar(width, tag="voice", remote="myserver-host"))
+            return (
+                bool(re.search(r"✻ 2m [^│]*…", text)), "test-fix" in text, "N notifications" in text,
+                "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
+                "⇄" in text, "emx" in text,
+            )
+        seen = []
+        for width in range(200, 7, -1):
+            now = stage(width)
+            if not seen or seen[-1] != now:
+                seen.append(now)
+        names = ["notice cut", "notice", "long hints", "any hints", "version", "tag", "host", "mark", "name"]
+        gone = []
+        for before, after in zip(seen, seen[1:]):
+            gone.append([n for n, b, a in zip(names, before, after) if b != a])
+        self.assertEqual(seen[0], (False,) + (True,) * 8)
+        order = [n for step in gone for n in step if n != "notice cut"]
+        self.assertEqual(order, ["long hints", "notice", "any hints", "version", "tag", "host", "mark", "name"])
+
+    def test_the_notice_is_cut_with_an_ellipsis_before_anything_else_goes(self):
+        text = ""
+        for width in range(120, 40, -1):
+            text = self.text(self.bar(width))
+            if "…" in text:
+                break
+        self.assertRegex(text, r"✻ 2m [^│]*…")
+        self.assertIn("N notifications  ? keys", text)
+        self.assertIn("2.6.0", text)
+
+    def test_the_short_hint_shows_after_the_long_one(self):
+        for width in range(120, 20, -1):
+            text = self.text(self.bar(width))
+            if "N notifications" not in text:
+                break
+        self.assertIn("? keys", text)
+        self.assertRegex(text, r"✻ 2m test-fix w[^│]*…")
+
+    def test_a_remote_host_shows_in_the_remote_tone_bold(self):
+        parts = self.bar(120, remote="myserver")
+        self.assertIn(("myserver", "remote", True), parts)
+        self.assertIn("2.6.0 ⇄ myserver", self.text(parts))
+
+    def test_a_long_host_is_cut_to_the_limit(self):
+        text = self.text(self.bar(120, remote="x" * 40))
+        self.assertIn("⇄ " + "x" * 19 + "…", text)
+
+    def test_blocked_tags_are_errors_and_voice_is_muted(self):
+        blocked = self.bar(120, tag=core.BLOCKED_TAG)
+        self.assertIn((" notifications blocked", "error", False), blocked)
+        self.assertIn((" voice", "muted", False), self.bar(120, tag="voice"))
+
+    def test_a_read_entry_is_muted_throughout(self):
+        read = replace(self.ENTRY, read=True)
+        parts = self.bar(120, latest=read)
+        self.assertIn(("✻", "muted", False), parts)
+        self.assertIn((" 2m ", "muted", False), parts)
+        self.assertIn(("test-fix wants to run Bash for a long while", "muted", False), parts)
+
+    def test_an_unread_needs_entry_has_a_needs_mark_and_plain_text(self):
+        parts = self.bar(120)
+        self.assertIn(("✻", "needs", False), parts)
+        self.assertIn(("test-fix wants to run Bash for a long while", "plain", False), parts)
+
+    def test_not_loaded_shows_an_ellipsis_for_the_counts(self):
+        text = self.text(self.bar(120, loaded=False))
+        self.assertNotRegex(text, r"✻\d")
+        self.assertIn(" …  ", text)
+
+    def test_no_notification_still_fills_the_width(self):
+        text = self.text(self.bar(80, latest=None))
+        self.assertEqual(core.display_width(text), 80)
+        self.assertTrue(text.endswith("N notifications  ? keys "))
+
+
+class FitParts(unittest.TestCase):
     def test_fit_parts_never_exceeds_width(self):
         parts = [("1 waiting", 1), ("22 working", 2), ("3 done", 3)]
         for width in range(0, 40):
@@ -469,6 +515,8 @@ class Summary(unittest.TestCase):
                 placed = core.fit_parts(parts, width)
                 end = max((x + core.display_width(t) for x, t, _ in placed), default=0)
                 self.assertLessEqual(end, width)
+
+
 
 
 class Paths(unittest.TestCase):
@@ -516,263 +564,109 @@ def rendered(parts):
 
 
 class RowLayout(unittest.TestCase):
-    def row(self, width, name="emx-test-perm", worktree="", word="Needs input", detail="", age="12m", align=0):
-        return core.row_layout(name, worktree, word, detail, age, width, align)
+    """A row's first line: the name, a worktree's branch and the age."""
+
+    def row(self, width, name="emx-test-perm", worktree="", age="12m"):
+        return core.row_layout(name, worktree, age, width)
 
     def test_full_row_with_worktree(self):
-        got = rendered(self.row(60, name="emx-test-wt", worktree="feat-x", word="Working"))
-        self.assertEqual(got, "   emx-test-wt ⎇ feat-x  Working" + " " * 24 + "12m")
+        self.assertEqual(rendered(self.row(60, name="emx-test-wt", worktree="feat-x")), "   emx-test-wt ⎇ feat-x" + " " * 33 + "12m")
 
     def test_age_is_right_aligned_one_column_in(self):
         for width in (30, 40, 60):
             for age in ("4s", "12m", "3h"):
                 with self.subTest(width=width, age=age):
-                    parts = self.row(width, age=age)
-                    x, text, part = parts[-1]
+                    x, text, part = self.row(width, age=age)[-1]
                     self.assertEqual((part, x + core.display_width(text)), ("age", width - 1))
 
-    def test_detail_shortens_then_branch_goes_and_mark_stays(self):
-        got = rendered(self.row(50, detail="approve Bash: touch made-by-test.txt"))
-        self.assertEqual(got, "   emx-test-perm  Needs input · approve Bash… 12m")
-        got = rendered(self.row(41, name="emx-test-wt", worktree="feat-x", word="Needs input", detail="approve it"))
-        self.assertEqual(got, "   emx-test-wt ⎇ feat-x  Needs input 12m")
-        got = rendered(self.row(36, name="emx-test-wt", worktree="feat-x"))
-        self.assertEqual(got, "   emx-test-wt ⎇  Needs input   12m")
+    def test_the_branch_shortens_then_goes_and_the_mark_stays(self):
+        self.assertEqual(rendered(self.row(40, name="emx-test-wt", worktree="feature/3-grouped-panel")), "   emx-test-wt ⎇ feature/3-grouped… 12m")
+        self.assertEqual(rendered(self.row(27, name="emx-test-wt", worktree="feat-x")), "   emx-test-wt ⎇ feat… 12m")
+        self.assertEqual(rendered(self.row(25, name="emx-test-wt", worktree="feat-x")), "   emx-test-wt ⎇     12m")
 
-    def test_tiny_detail_is_left_out(self):
-        got = rendered(self.row(40, detail="approve Bash: touch x"))
-        self.assertEqual(got, "   emx-test-perm  Needs input       12m")
-
-    def test_at_30_columns_the_state_word_goes_whole_before_the_name_is_cut(self):
-        self.assertEqual(rendered(self.row(30)), "   emx-test-perm" + " " * 10 + "12m")
-        self.assertEqual(rendered(self.row(30, name="emx-test-stopped", word="Stopped", age="2d")),
-                         "   emx-test-stopped" + " " * 8 + "2d")
-
-    def test_the_state_word_is_never_cut(self):
-        for width in range(0, 70):
-            for name in ("x", "emx-test-perm", "emx-test-a-very-long-session-name"):
-                with self.subTest(width=width, name=name):
-                    statuses = [t for _, t, p in self.row(width, name=name, detail="approve it") if p == "status"]
-                    for status in statuses:
-                        self.assertTrue(status.startswith("Needs input"), status)
-
-    def test_worktree_mark_survives_at_40_by_shortening_its_branch(self):
-        got = rendered(self.row(40, name="emx-test-wt", worktree="feat-x"))
-        self.assertEqual(got, "   emx-test-wt ⎇ feat…  Needs input 12m")
-        got = rendered(self.row(40, name="emx-test-wt", worktree="feature/3-grouped-panel", word="Working"))
-        self.assertEqual(got, "   emx-test-wt ⎇ feature/…  Working 12m")
-
-    def test_states_line_up_to_the_column_given(self):
-        a = self.row(40, name="emx-test-a", word="Working", age="1m", align=13)
-        b = self.row(40, name="emx-test-long", word="Done", age="2m", align=13)
-        status_x = [next(x for x, _, p in parts if p == "status") for parts in (a, b)]
-        self.assertEqual(status_x, [3 + 13 + 2] * 2)
-        self.assertEqual(rendered(a), "   emx-test-a     Working" + " " * 12 + "1m")
-
-    def test_a_row_that_cannot_afford_the_alignment_ignores_it(self):
-        got = self.row(30, name="emx-test", word="Needs input", age="1m", align=13)
-        self.assertEqual(rendered(got), "   emx-test  Needs input" + " " * 3 + "1m")
-
-    def test_no_state_word_leaves_the_detail(self):
-        got = rendered(self.row(40, word="", detail="approve Bash: x"))
-        self.assertEqual(got, "   emx-test-perm  approve Bash: x   12m")
-        self.assertEqual(rendered(self.row(40, word="")), "   emx-test-perm" + " " * 20 + "12m")
-        got = rendered(self.row(30, word="", detail="approve Bash: touch x"))
-        self.assertEqual(got, "   emx-test-perm  approv… 12m")
-
-    def test_name_column(self):
-        def column(names, width=40):
-            return core.name_column([(n, "") for n in names], width)
-
-        self.assertEqual(column(["emx-test-a", "emx-test-long"]), 13)
-        self.assertEqual(column(["x", "emx-test-a-very-long-session-name"]), 1)
-        self.assertEqual(column(["emx-test-quick", "emx-test-stopped", "emx-test-a-very-long-session-name"]), 16)
-        self.assertEqual(column(["emx-test-a-very-long-session-name"]), 0)
-        self.assertEqual(column([]), 0)
-        self.assertEqual(core.row_label("emx-test-wt", "feat-x"), "emx-test-wt ⎇ feat-x")
-        self.assertEqual(core.row_label("emx-test-wt", ""), "emx-test-wt")
-
-    def test_states_line_up_in_a_group_with_a_worktree_row(self):
-        groups = [
-            [("emx-test-a", ""), ("emx-test-wt", "feat-x")],
-            [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")],
-            [("emx-test-wt1", "feature/3-grouped-panel"), ("emx-test-wt2", "fix/x")],
-        ]
-        for group in groups:
-            for width in range(26, 81):
-                column = core.name_column(group, width)
-                with self.subTest(group=group, width=width, column=column):
-                    rows = [self.row(width, name=n, worktree=w, word="Working", align=column) for n, w in group]
-                    status_x = [next((x for x, _, p in parts if p == "status"), None) for parts in rows]
-                    if None not in status_x:
-                        self.assertEqual(len(set(status_x)), 1, [rendered(r) for r in rows])
-                    for (n, w), parts in zip(group, rows):
-                        if w and next(t for _, t, p in parts if p == "name") == n:
-                            self.assertIn("⎇", rendered(parts))
-                    if group[0][1] == "" and width in (40, 50, 60):
-                        self.assertEqual(status_x, [3 + column + 2] * len(rows))
-                        self.assertIn("⎇", rendered(rows[-1]))
-        long = [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")]
-        self.assertIn("⎇ feature/3-gro…  Working", rendered(self.row(60, "emx-test-wt", "feature/3-grouped-panel", "Working",
-                                                                      align=core.name_column(long, 60))))
-
-    def test_a_row_alone_in_its_group_keeps_its_whole_branch(self):
-        alone = [("emx-test-wt", "feature/3-grouped-panel")]
-        self.assertEqual(core.name_column(alone, 40), 0)
-        got = rendered(self.row(40, "emx-test-wt", "feature/3-grouped-panel", "Working", align=core.name_column(alone, 40)))
-        self.assertEqual(got, "   emx-test-wt ⎇ feature/…  Working 12m")
-
-    def test_long_name_is_cut_to_keep_the_state_word(self):
-        got = rendered(self.row(40, name="emx-test-a-very-long-session-name", age="3h"))
-        self.assertEqual(got, "   emx-test-a-very-lon…  Needs input 3h")
-
-    def test_name_takes_everything_when_nothing_else_fits(self):
-        got = rendered(self.row(30, name="emx-test-a-very-long-session-name", age="3h"))
-        self.assertEqual(got, "   emx-test-a-very-long-s… 3h")
+    def test_a_long_name_is_cut_and_a_worktree_keeps_its_mark_when_the_whole_name_fits(self):
+        self.assertEqual(rendered(self.row(30, name="emx-test-a-very-long-session-name", age="3h")), "   emx-test-a-very-long-s… 3h")
+        self.assertEqual(rendered(self.row(25, name="emx-test-wt-long", worktree="b")), "   emx-test-wt-lo… ⎇ 12m")
+        self.assertEqual(rendered(self.row(23, name="emx-test-wt-long", worktree="b")), "   emx-test-wt-lo… 12m")
 
     def test_never_wider_than_the_pane_less_one(self):
         for width in range(0, 70):
             for name in ("x", "emx-test-a-very-long-session-name", "日本語の名前"):
-                with self.subTest(width=width, name=name):
-                    line = rendered(self.row(width, name=name, worktree="feat", detail="approve Bash: x"))
-                    self.assertLessEqual(core.display_width(line), max(0, width - 1))
+                for worktree in ("", "feat"):
+                    with self.subTest(width=width, name=name, worktree=worktree):
+                        self.assertLessEqual(core.display_width(rendered(self.row(width, name=name, worktree=worktree))), max(0, width - 1))
 
     def test_no_age(self):
-        got = self.row(30, age="")
-        self.assertNotIn("age", [p for _, _, p in got])
+        self.assertNotIn("age", [p for _, _, p in self.row(30, age="")])
 
 
-class RowLines(unittest.TestCase):
-    """A row too long for the panel wraps onto indented lines instead of being cut."""
+class TwoLineRows(unittest.TestCase):
+    """A live row is two lines, the name over what it is doing; a stopped one is one line."""
 
-    NAMES = ("x", "emx-test-perm", "emx-test-a-very-long-session-name", "日本語の名前", "emx test 🎉 party")
-    DETAILS = ("", "approve Bash: x", "Running the whole unittest suite with verbose output", "完了しました 🎉 すべて合格")
+    DETAIL = "approve Bash: touch made-by-test.txt"
 
-    def lines(self, width, name="emx-test-perm", worktree="", word="Needs input", detail="", age="12m", align=0):
-        return core.row_lines(name, worktree, word, detail, age, width, align)
+    def lines(self, width, name="emx-test-perm", worktree="", word="Working", detail=DETAIL, age="12m", stopped=False):
+        return core.row_lines(name, worktree, word, detail, age, width, stopped)
 
-    def test_a_row_that_fits_is_row_layouts_line_unchanged(self):
-        self.assertEqual(self.lines(60, name="emx-test-wt", worktree="feat-x", word="Working"),
-                         [core.row_layout("emx-test-wt", "feat-x", "Working", "", "12m", 60)])
-        a = self.lines(40, name="emx-test-a", word="Working", age="1m", align=13)
-        self.assertEqual(a, [core.row_layout("emx-test-a", "", "Working", "", "1m", 40, 13)])
-        self.assertEqual(rendered(a[0]), "   emx-test-a     Working" + " " * 12 + "1m")
+    def test_a_working_row_at_40_is_two_lines(self):
+        first, second = self.lines(40, detail="Running the tests")
+        self.assertEqual(first[0], (3, "emx-test-perm", "name"))
+        self.assertEqual(first[-1], (39 - len("12m"), "12m", "age"))
+        self.assertEqual(second, [(3, "Working", "status"), (10, " · ", "sep"), (13, "Running the tests", "detail")])
+        self.assertEqual(rendered(second), "   Working · Running the tests")
 
-    def test_at_40_columns_the_detail_wraps_under_the_row_and_nothing_is_cut(self):
-        got = [rendered(p) for p in self.lines(40, detail="approve Bash: touch made-by-test.txt")]
-        self.assertEqual(got, [
-            "   emx-test-perm  Needs input       12m",
-            "     approve Bash: touch",
-            "     made-by-test.txt",
-        ])
+    def test_a_long_detail_is_cut_with_an_ellipsis_and_stays_inside_the_pane(self):
+        _, second = self.lines(40)
+        self.assertEqual([part for _, _, part in second], ["status", "sep", "detail"])
+        self.assertTrue(second[-1][1].endswith("…"))
+        self.assertLessEqual(core.display_width(rendered(second)), 39)
+        self.assertEqual(rendered(second), "   Working · approve Bash: touch made-…")
 
-    def test_at_60_columns_the_detail_continues_after_the_state_word(self):
-        got = [rendered(p) for p in self.lines(60, detail="approve Bash: touch made-by-test.txt and more words")]
-        self.assertEqual(got, [
-            "   emx-test-perm  Needs input · approve Bash: touch     12m",
-            "     made-by-test.txt and more words",
-        ])
+    def test_a_detail_too_narrow_to_keep_a_few_columns_is_left_out(self):
+        _, second = self.lines(20, word="Needs input")
+        self.assertEqual(second, [(3, "Needs input", "status")])
 
-    def test_a_long_name_and_branch_wrap_whole_and_the_age_stays_on_the_first_line(self):
-        got = [rendered(p) for p in self.lines(40, "emx-test-a-very-long-session-name", "feature/3-grouped-panel",
-                                               "Working", "Running the tests", "3h")]
-        self.assertEqual(got, [
-            "   emx-test-a-very-long-session-name 3h",
-            "     ⎇ feature/3-grouped-panel  Working",
-            "     Running the tests",
-        ])
+    def test_the_word_is_cut_when_even_it_does_not_fit(self):
+        _, second = self.lines(10, word="Needs input")
+        self.assertEqual(rendered(second), "   Needs…")
 
-    def test_a_branch_cut_only_to_line_up_is_shown_whole_without_the_column(self):
-        long = [("emx-test-a", ""), ("emx-test-wt", "feature/3-grouped-panel")]
-        got = self.lines(60, "emx-test-wt", "feature/3-grouped-panel", "Working", align=core.name_column(long, 60))
-        self.assertEqual(got, [core.row_layout("emx-test-wt", "feature/3-grouped-panel", "Working", "", "12m", 60)])
-        self.assertIn("⎇ feature/3-grouped-panel  Working", rendered(got[0]))
+    def test_a_stopped_row_is_one_line_with_no_status(self):
+        (only,) = self.lines(40, word="Stopped", stopped=True)
+        self.assertNotIn("status", [part for _, _, part in only])
 
-    def test_wide_characters_wrap_by_display_columns(self):
-        got = [rendered(p) for p in self.lines(30, name="日本語の名前のセッションです", word="Done", detail="完了 🎉 nice", age="1d")]
-        self.assertEqual(got, [
-            "   日本語の名前のセッショ  1d",
-            "     ンです  Done · 完了 🎉",
-            "     nice",
-        ])
+    def test_by_state_the_second_line_is_the_detail_alone(self):
+        _, second = self.lines(40, word="", detail="Running the tests")
+        self.assertEqual(second, [(3, "Running the tests", "detail")])
 
-    def test_name_branch_and_state_are_whole_and_only_a_summary_past_two_lines_is_cut(self):
+    def test_with_neither_word_nor_detail_it_is_one_line(self):
+        self.assertEqual(len(self.lines(40, word="", detail="")), 1)
+
+    def test_a_worktree_keeps_its_branch_on_the_first_line(self):
+        first, second = self.lines(60, name="emx-test-wt", worktree="feat-x", detail="Running the tests")
+        self.assertIn("⎇ feat-x", rendered(first))
+        self.assertNotIn("⎇", rendered(second))
+
+    def test_a_pane_too_narrow_for_a_second_line_gets_one(self):
+        self.assertEqual(len(self.lines(4)), 1)
+        self.assertEqual(len(self.lines(6)), 2)
+
+    def test_no_line_is_wider_than_the_pane_less_one(self):
         for width in range(0, 71):
-            for name in self.NAMES:
-                for detail in self.DETAILS:
+            for name in ("x", "emx-test-a-very-long-session-name", "日本語の名前"):
+                for detail in ("", "ok", self.DETAIL, "完了しました 🎉 すべて合格"):
                     for worktree in ("", "feature/3-grouped-panel"):
                         with self.subTest(width=width, name=name, detail=detail, worktree=worktree):
-                            self.check_sweep(width, name, worktree, detail)
+                            for parts in self.lines(width, name=name, worktree=worktree, detail=detail):
+                                self.assertLessEqual(core.display_width(rendered(parts)), max(0, width - 1))
 
-    def check_sweep(self, width, name, worktree, detail):
-        lines = self.lines(width, name=name, worktree=worktree, detail=detail)
-        by_part = {"name": [], "extra": [], "status": []}
-        word_ends = None
-        for i, parts in enumerate(lines):
-            self.assertLessEqual(core.display_width(rendered(parts)), max(0, width - 1))
-            for _, text, part in parts:
-                if part != "age":
-                    by_part[part].append(text)
-            if word_ends is None and len("".join(" ".join(by_part["status"]).split())) >= len("Needsinput"):
-                word_ends = i
-        if len(lines) > 1:
-            self.assertEqual(lines[0][-1], (width - 1 - 3, "12m", "age"))
-            for parts in lines[1:]:
-                self.assertGreaterEqual(parts[0][0], core.ROW_INDENT)
-        if width - 1 - core.ROW_INDENT < 2:
-            return
-        squeeze = lambda texts: "".join(" ".join(texts).split())
-        self.assertEqual(squeeze(by_part["name"]), squeeze([name]))
-        self.assertEqual(squeeze(by_part["extra"]), squeeze([core.WORKTREE_MARK + worktree] if worktree else []))
-        status = squeeze(by_part["status"])
-        self.assertTrue(status.startswith("Needsinput"), status)
-        shown = status[len("Needsinput"):].removeprefix("·")
-        self.assertLessEqual(len(lines) - 1 - word_ends, core.DETAIL_LINES)
-        if shown == squeeze([detail]):
-            return
-        self.assertTrue(shown.endswith("…"), shown)
-        self.assertTrue(squeeze([detail]).startswith(shown[:-1]), shown)
-        with mock.patch.object(core, "DETAIL_LINES", 99):
-            uncut = self.lines(width, name=name, worktree=worktree, detail=detail)
-        self.assertGreater(len(uncut), len(lines))
-
-    def test_the_summary_takes_two_lines_of_its_own_then_ends_in_an_ellipsis(self):
-        done = "I ran the command, and it created the empty file `made-by-emx-test-n.txt` in the working directory."
-        got = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=done, age="1m")]
-        self.assertEqual(got, [
-            "   emx-test-19-short  Done · I ran   1m",
-            "     the command, and it created the",
-            "     empty file `made-by-emx-test-n.tx…",
-        ])
-
-    def test_a_summary_that_fits_its_two_lines_is_not_cut(self):
-        fits = "I ran the command, and it created the empty file here"
-        got = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=fits, age="1m")]
-        self.assertEqual(got, [
-            "   emx-test-19-short  Done · I ran   1m",
-            "     the command, and it created the",
-            "     empty file here",
-        ])
-        once_more = [rendered(p) for p in self.lines(40, name="emx-test-19-short", word="Done", detail=fits + " x", age="1m")]
-        self.assertEqual(once_more[-1], "     empty file here x")
-
-    def test_a_summary_starting_on_its_own_line_gets_two_lines(self):
-        wait = "approve Bash: python3 -m unittest discover -s tests -v and then some more words"
-        got = [rendered(p) for p in self.lines(34, detail=wait)]
-        self.assertEqual(got, [
-            "   emx-test-perm  Needs input 12m",
-            "     approve Bash: python3 -m",
-            "     unittest discover -s tests…",
-        ])
-
-    def test_the_armed_label_wraps_too(self):
-        self.assertEqual(core.confirm_lines("ctrl+x again to stop", 40), [[(3, "ctrl+x again to stop", "confirm")]])
-        got = [rendered(p) for p in core.confirm_lines("ctrl+x again to remove", 19)]
-        self.assertEqual(got, ["   ctrl+x again to", "     remove"])
+    def test_the_armed_label_wraps_from_the_same_column(self):
+        self.assertEqual(core.confirm_lines("^x again to stop", 40), [[(3, "^x again to stop", "confirm")]])
+        got = [rendered(p) for p in core.confirm_lines("^x again to remove", 15)]
+        self.assertEqual(got, ["   ^x again to", "   remove"])
 
     def test_the_armed_label_is_padded_to_the_rows_height(self):
-        self.assertEqual(core.confirm_lines("ctrl+x again to stop", 40, 3), [[(3, "ctrl+x again to stop", "confirm")], [], []])
-        self.assertEqual(len(core.confirm_lines("ctrl+x again to remove", 19, 1)), 2)
+        self.assertEqual(core.confirm_lines("^x again to stop", 40, 3), [[(3, "^x again to stop", "confirm")], [], []])
+        self.assertEqual(len(core.confirm_lines("^x again to remove", 15, 1)), 2)
 
 
 class ListWindow(unittest.TestCase):
@@ -1908,12 +1802,11 @@ class NoticeExpiry(unittest.TestCase):
 
 
 class FocusStyle(unittest.TestCase):
-    def test_selection_bar_and_title_follow_focus(self):
+    def test_selection_bar_follows_focus(self):
         self.assertIsNone(core.selection_bar(False, True))
         self.assertIsNone(core.selection_bar(False, False))
         self.assertEqual(core.selection_bar(True, True), "focused")
         self.assertEqual(core.selection_bar(True, False), "unfocused")
-        self.assertEqual((core.title_style(True), core.title_style(False)), ("bold", "dim"))
 
 
 class ListingChecks(unittest.TestCase):
@@ -2073,27 +1966,27 @@ class CloseConfirm(unittest.TestCase):
         self.assertFalse(core.group_closable(core.PROJECT, core.PINNED))
         self.assertFalse(core.group_closable(core.BY_STATE, core.WORKING))
         self.assertTrue(core.group_closable(core.PROJECT, "/r/app"))
-        self.assertEqual(core.GROUP_CLOSE_REFUSAL, "Ctrl+X closes a project's group from the project view.")
+        self.assertEqual(core.GROUP_CLOSE_REFUSAL, "^x closes a project's group from the project view.")
 
     def test_the_pinned_header_gets_its_own_refusal(self):
         self.assertEqual(core.group_close_refusal(core.PINNED),
-                         "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+                         "^x can't close the Pinned group; close its sessions one at a time.")
         self.assertEqual(core.group_close_refusal(core.WORKING), core.GROUP_CLOSE_REFUSAL)
 
     def test_labels_read_close_and_count(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        self.assertEqual(core.confirm_label(armed), "ctrl+x again to close")
-        self.assertEqual(core.group_confirm_label(1), "ctrl+x again to close 1 session")
-        self.assertEqual(core.group_confirm_label(3), "ctrl+x again to close 3 sessions")
+        self.assertEqual(core.confirm_label(armed), "^x again to close")
+        self.assertEqual(core.group_confirm_label(1), "^x again to close 1 session")
+        self.assertEqual(core.group_confirm_label(3), "^x again to close 3 sessions")
         group, _ = core.press_close(None, ("group", "/r/app"), self.group(self.running, mk(id="b")), 0.0)
-        self.assertEqual(core.confirm_label(group), "ctrl+x again to close 2 sessions")
+        self.assertEqual(core.confirm_label(group), "^x again to close 2 sessions")
         self.assertEqual(core.CLOSING_LABEL, "closing…")
 
     def test_a_header_reads_its_armed_label_or_closing_only_for_its_own_group(self):
         b = mk(id="b", name="emx-test-b")
         app, other = self.group(self.running, b), self.group(mk(id="z"), key="/r/other")
         armed, _ = core.press_close(None, ("group", "/r/app"), app, 0.0)
-        self.assertEqual(core.header_label(armed, app, {}), "ctrl+x again to close 2 sessions")
+        self.assertEqual(core.header_label(armed, app, {}), "^x again to close 2 sessions")
         self.assertIsNone(core.header_label(armed, other, {}))
         self.assertEqual(core.header_label(None, app, {"a": None, "b": True}), "closing…")
         self.assertIsNone(core.header_label(None, app, {"a": None}))
@@ -3358,6 +3251,9 @@ class PeekContent(unittest.TestCase):
         self.assertEqual(core.peek_content(st("working"), None, self.NOW), core.Peek("Working", (("Nothing to show yet.", "dim"),)))
         self.assertEqual(core.peek_content(st("blocked", "input needed"), None, self.NOW).lines, (("input needed", "dim"),))
 
+    def test_an_idle_session_is_titled_idle_like_its_row(self):
+        self.assertEqual(core.peek_content(mk(state="working", status="idle"), None, self.NOW).title, "Idle")
+
     def test_a_stopped_session_shows_its_last_reply_with_no_time(self):
         p = self.peek("done", st("stopped"))
         self.assertEqual((p.title, p.lines[0][0][:11]), ("Stopped", "Alpha done."))
@@ -3396,13 +3292,13 @@ class CutLines(unittest.TestCase):
 
 
 class PeekRoom(unittest.TestCase):
-    def test_the_rows_between_the_top_lines_and_the_bottom_lines_or_none_when_too_narrow(self):
-        self.assertEqual(core.peek_room(20, 40, 1), 17)
-        self.assertEqual(core.peek_room(20, 6, 1), 17)
+    def test_the_rows_above_the_bottom_lines_or_none_when_too_narrow(self):
+        self.assertEqual(core.peek_room(20, 40, 1), 19)
+        self.assertEqual(core.peek_room(20, 6, 1), 19)
         self.assertEqual(core.peek_room(20, 5, 1), 0)
-        self.assertEqual(core.peek_room(5, 40, 4), 0)
-        self.assertEqual(core.peek_height(core.peek_room(10, 40, 1), 1), 4)
-        self.assertEqual(core.peek_height(core.peek_room(10, 40, 2), 1), 0)
+        self.assertEqual(core.peek_room(5, 40, 6), 0)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 3), 1), 4)
+        self.assertEqual(core.peek_height(core.peek_room(10, 40, 4), 1), 0)
 
 
 class PeekHeight(unittest.TestCase):
@@ -3837,34 +3733,7 @@ class Voices(unittest.TestCase):
         self.assertIsNone(core.pick_voice(["Bad News", "Bubbles", "Grandpa (English (UK))"]))
 
 
-class TopLineTag(unittest.TestCase):
-    SESSIONS = [mk(state="blocked"), mk(state="working"), mk(state="done"), mk(state="stopped")]
-
-    def test_no_tag_matches_the_old_output_at_every_width(self):
-        for width in range(0, 81):
-            with self.subTest(width=width):
-                for none in (None, ""):
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, none), core.top_line(self.SESSIONS, "1.0.0", width))
-
-    def test_a_tag_follows_the_version_when_wide(self):
-        placed = core.top_line([mk(state="working")], "1.0.0", 60, True, core.VOICE_TAG)
-        self.assertEqual([(t, tag) for _, t, tag in placed][:4], [("⚒", "logo"), ("emalatxana", "name"), ("1.0.0", "version"), ("voice", "mode")])
-
-    def test_the_tag_stays_beside_cut_counts_in_a_default_panel(self):
-        placed = core.top_line(self.SESSIONS, "1.3.0", 36, True, core.VOICE_TAG)
-        self.assertIn("mode", [tag for _, _, tag in placed])
-        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
-
-    def test_the_longest_tag_never_overflows_and_never_costs_the_version(self):
-        for label in (core.VOICE_TAG, core.BLOCKED_TAG, core.UNAVAILABLE_TAG):
-            for width in range(0, 81):
-                with self.subTest(label=label, width=width):
-                    placed = core.top_line(self.SESSIONS, "10.20.30", width, True, label)
-                    self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                    plain = [tag for _, _, tag in core.top_line(self.SESSIONS, "10.20.30", width)]
-                    if "version" in plain:
-                        self.assertIn("version", [tag for _, _, tag in placed])
-
+class ModeTagAndRemote(unittest.TestCase):
     def test_mode_tag_per_mode_and_helper_state(self):
         for helper in core.HELPER_STATES:
             with self.subTest(helper=helper):
@@ -3878,72 +3747,6 @@ class TopLineTag(unittest.TestCase):
         self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
 
 
-class TopLineRemote(unittest.TestCase):
-    SESSIONS = TopLineTag.SESSIONS
-
-    def placed(self, width, remote="myserver", tag=None, version="1.0.0", sessions=None, loaded=True):
-        return core.top_line(self.SESSIONS if sessions is None else sessions, version, width, loaded, tag, remote)
-
-    def text(self, placed):
-        line = ""
-        for x, text, _ in placed:
-            line = line.ljust(x) + text
-        return line
-
-    def test_no_remote_matches_the_old_output_at_every_width(self):
-        for tag in (None, core.VOICE_TAG):
-            for width in range(0, 81):
-                with self.subTest(tag=tag, width=width):
-                    plain = core.top_line(self.SESSIONS, "1.0.0", width, True, tag)
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, None), plain)
-                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, ""), plain)
-
-    def test_the_mark_follows_the_version_when_wide(self):
-        placed = self.placed(80)
-        self.assertEqual([tag for _, _, tag in placed][:4], ["logo", "name", "version", "remote"])
-        self.assertEqual(placed[3][1], "⇄ myserver")
-        placed = self.placed(80, tag=core.VOICE_TAG)
-        self.assertEqual([tag for _, _, tag in placed][:5], ["logo", "name", "version", "remote", "mode"])
-
-    def test_the_mark_at_the_board_width(self):
-        placed = self.placed(36, version="2.4.0")
-        self.assertTrue(self.text(placed).startswith("⚒ 2.4.0 ⇄ myserver  "))
-        self.assertEqual([tag for _, _, tag in placed][:3], ["logo", "version", "remote"])
-        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
-
-    def test_the_mark_beside_short_counts(self):
-        self.assertEqual(self.text(self.placed(60, sessions=Summary.SESSIONS)), "⚒ 1.0.0 ⇄ myserver         1 wait · 2 work · 1 done · 1 stop")
-
-    def test_the_host_is_cut_before_the_mark_goes(self):
-        placed = self.placed(14)
-        self.assertIn("remote", [tag for _, _, tag in placed])
-        self.assertEqual([t for _, t, tag in placed if tag == "remote"], ["⇄ mys…"])
-        self.assertEqual(self.placed(11), core.top_line(self.SESSIONS, "1.0.0", 11))
-
-    def test_a_long_host_is_capped(self):
-        text = next(t for _, t, tag in self.placed(80, remote="h" * 253) if tag == "remote")
-        self.assertEqual(core.display_width(text), 2 + core.REMOTE_HOST_MAX)
-
-    def test_the_mark_never_overflows_and_never_costs_the_version(self):
-        for remote in ("myserver", "h" * 253):
-            for tag in (None, core.VOICE_TAG):
-                for loaded in (True, False):
-                    for width in range(0, 81):
-                        with self.subTest(remote=remote[:3], tag=tag, loaded=loaded, width=width):
-                            placed = self.placed(width, remote, tag, "10.20.30", loaded=loaded)
-                            self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
-                            tags = [t for _, _, t in placed]
-                            if width > 0:
-                                self.assertEqual(placed[0], (0, core.LOGO, "logo"))
-                            xs = [x for x, _, _ in placed]
-                            self.assertEqual(xs, sorted(xs))
-                            plain = [t for _, _, t in core.top_line(self.SESSIONS, "10.20.30", width, loaded)]
-                            if "version" in plain:
-                                self.assertIn("version", tags)
-                            if "mode" in tags:
-                                self.assertIn("remote", tags)
-                            if "remote" in tags:
-                                self.assertEqual(tags.index("remote"), tags.index("version") + 1)
 
     def test_relay_host(self):
         self.assertEqual(core.relay_host(core.relay_host_value("myserver", 100.0), 105.0), "myserver")
@@ -4192,46 +3995,6 @@ class History(unittest.TestCase):
         for _ in range(core.STALE_AFTER_MISSES - 1):
             history, misses = core.history_prune(history, ["s2"], misses)
         self.assertEqual([e.id for e in history], ["s2"])
-
-    def test_the_strip_shows_the_newest_three_one_line_each_with_unread_count(self):
-        history = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(4)])
-        history = core.history_read(core.history_read(history, "s0"), "s1")
-        got = core.history_strip(history, 10, 40, 5)
-        self.assertEqual([t for t, _ in got], ["Notifications (2)", "7s t3", "8s t2", "9s t1", "… 1 more"])
-
-    def test_the_strip_title_has_no_count_when_all_are_read(self):
-        history = core.history_read(self.added(self.item("s1", 1)), "s1")
-        self.assertEqual(core.history_strip(history, 10, 40, 5)[0][0], "Notifications")
-
-    def test_the_strip_marks_read_rows(self):
-        history = core.history_read(self.added(self.item("s1", 1, "a"), self.item("s2", 2, "b")), "s1")
-        self.assertEqual(core.history_strip(history, 10, 40, 5), [("Notifications (1)", False), ("8s b", False), ("9s a", True)])
-
-    def test_a_two_row_strip_shows_the_newest_under_the_title(self):
-        three = self.added(*[self.item(f"s{i}", i, f"t{i}") for i in range(3)])
-        self.assertEqual([t for t, _ in core.history_strip(three, 10, 40, 2)], ["Notifications (3)", "8s t2"])
-        self.assertEqual([t for t, _ in core.history_strip(three[:1], 10, 40, 2)], ["Notifications (1)", "8s t2"])
-
-    def test_strip_rows_are_one_row_each_and_fit_the_width(self):
-        history = [core.Entry("s1", core.NOTICE_DONE, "s1 · p", " ".join(["word"] * 28), 0.0)]
-        (title, _), (line, _) = core.history_strip(history, 125, 30, 5)
-        self.assertEqual(title, "Notifications (1)")
-        self.assertLessEqual(core.display_width(line), 30)
-        self.assertTrue(line.endswith("…"))
-        self.assertTrue(line.startswith("2m "))
-
-    def test_room_below_two_or_empty_shows_nothing(self):
-        history = [self.item("s1", 0.0)]
-        self.assertEqual(core.history_strip(history, 1, 40, 1), [])
-        self.assertEqual(core.history_strip(history, 1, 40, 0), [])
-        self.assertEqual(core.history_strip([], 1, 40, 5), [])
-
-    def test_room_leaves_the_list_its_minimum(self):
-        self.assertEqual(core.history_room(12, 1), 3)
-        self.assertEqual(core.history_room(9, 1), 0)
-        self.assertEqual(core.history_room(11, 1), 2)
-        self.assertEqual(core.history_room(40, 1), core.HISTORY_SHOWN + 2)
-        self.assertEqual(core.history_room(None, 1), core.HISTORY_SHOWN + 2)
 
     def test_a_full_view_row_is_a_header_and_at_most_two_wrapped_lines(self):
         long = " ".join(f"w{i}" for i in range(60))

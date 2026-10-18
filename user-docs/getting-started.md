@@ -23,13 +23,17 @@ Run `emx`. It opens the workspace: the panel on one side, the session you are in
 
 ## The panel at a glance
 
-The panel lists your sessions, grouped by project, with what each one is doing (working, needs you, done). The row under the cursor is the one the keys act on. Press `?` in the panel to see every key.
+The panel lists your sessions, grouped by project. Each shows on two lines: its name and age, and under the name what it is doing. The row under the cursor is the one the keys act on. Press `?` in the panel to see every key.
+
+The colours say the state at a glance: Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is lavender, and Stopped is dim.
+
+One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on a slightly lighter ground than the session next to it.
 
 ## Start your first session
 
 1. In the panel press `n`.
-2. With no sessions yet, emx asks for a folder first: pick one from the list with `↑` and `↓` (type to filter) and press `↵`.
-3. Type a message for Claude, or leave it empty to start an empty session, then press `↵`.
+2. With no sessions yet, emx asks for a folder first: pick one from the list with `↑` and `↓` (type to filter) and press `Enter`.
+3. Type a message for Claude, or leave it empty to start an empty session, then press `Enter`.
 4. The session opens on the other side. Type to Claude as usual.
 
 More about starting sessions is in `emx docs sessions`.

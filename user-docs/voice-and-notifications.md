@@ -17,7 +17,7 @@ In voice mode, `h` in the panel stops the voice now: the sentence being spoken a
 
 ## The history
 
-Press `N` in the panel to see the last 20 notifications, newest first. `↑` and `↓` move, `↵` or a click opens that session, `Esc` goes back. Opening a session dims its entries.
+The newest notification shows in the bar at the bottom of the window. Press `N` in the panel to see the last 20 notifications, newest first. `↑` and `↓` move, `Enter` or a click opens that session, `Esc` goes back. Opening a session dims its entries.
 
 ## Click a notification
 

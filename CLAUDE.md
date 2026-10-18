@@ -137,6 +137,10 @@ Report **in-session, in plain language**: when a piece is merged, tell him what 
 
 *General, not exact: the agent works out commands, inputs and data from the project as it is now and the work at hand. The limits here are hard.*
 
+### Design
+
+The emx design system, https://claude.ai/artifact/4usXjToRXheh52ujRn6gde, is the design reference for future emx designs and builds (Tural, 2026-10-18, #65).
+
 ### Deploy
 
 No deploy stage.

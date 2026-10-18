@@ -21,7 +21,7 @@ Closing the window, closing the laptop or losing the connection leaves the serve
 
 ## Knowing you're on remote
 
-While you are in a server through `emx remote myserver`, the panel's top line shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`. Both go when you leave. Someone looking at the server's own screen sees the mark too, while you are connected. An emx older than this feature, on either machine, shows no mark.
+While you are in a server through `emx remote myserver`, the bar at the bottom of the window shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`. Both go when you leave. Someone looking at the server's own screen sees the mark too, while you are connected. An emx older than this feature, on either machine, shows no mark.
 
 ## Notifications while connected
 

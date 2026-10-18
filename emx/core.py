@@ -104,7 +104,6 @@ NEEDS_INPUT, WORKING, DONE, STOPPED = "needs_input", "working", "done", "stopped
 CATEGORIES = (NEEDS_INPUT, WORKING, DONE, STOPPED)
 CATEGORY_LABELS = {NEEDS_INPUT: "Needs input", WORKING: "Working", DONE: "Done", STOPPED: "Stopped"}
 SUMMARY_WORDS = {NEEDS_INPUT: "waiting", WORKING: "working", DONE: "done", STOPPED: "stopped"}
-SUMMARY_SHORT = {NEEDS_INPUT: "wait", WORKING: "work", DONE: "done", STOPPED: "stop"}
 _STATE_CATEGORY = {"blocked": NEEDS_INPUT, "working": WORKING, "done": DONE, "starting": NEEDS_INPUT}
 WORKING_FRAMES = "·✢✳✶✻✶✳✢"
 GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
@@ -207,8 +206,8 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
 
 CONFIRM_SECONDS = 2.0
 CLOSING_LABEL = "closing…"
-GROUP_CLOSE_REFUSAL = "Ctrl+X closes a project's group from the project view."
-PINNED_CLOSE_REFUSAL = "Ctrl+X can't close the Pinned group; close its sessions one at a time."
+GROUP_CLOSE_REFUSAL = "^x closes a project's group from the project view."
+PINNED_CLOSE_REFUSAL = "^x can't close the Pinned group; close its sessions one at a time."
 
 
 @dataclass(frozen=True)
@@ -237,11 +236,11 @@ def close_targets(confirm) -> tuple:
 def confirm_label(confirm) -> str:
     if isinstance(confirm, GroupConfirm):
         return group_confirm_label(len(confirm.sessions))
-    return "ctrl+x again to close"
+    return "^x again to close"
 
 
 def group_confirm_label(count: int) -> str:
-    return f"ctrl+x again to close {count} session{'' if count == 1 else 's'}"
+    return f"^x again to close {count} session{'' if count == 1 else 's'}"
 
 
 def group_closable(view: str, key: str) -> bool:
@@ -943,21 +942,11 @@ def cursor_group(cursor, groups) -> str | None:
     return next((g.key for g in groups if any(s.id == cursor[1] for s in g.sessions)), None)
 
 
-def summary(sessions, words: Mapping = SUMMARY_WORDS) -> list:
-    """(text, category) pairs for the line at the top of the panel, nonzero counts only."""
-    counts = {c: 0 for c in CATEGORIES}
-    for s in sessions:
-        counts[category(s)] += 1
-    return [(f"{counts[c]} {words[c]}", c) for c in CATEGORIES if counts[c]]
-
-
 LOGO = "⚒"
-NAME = "emalatxana"
 VOICE_TAG = "voice"
 BLOCKED_TAG = "notifications blocked"
 UNAVAILABLE_TAG = "notifications unavailable"
 HELPER_STATES = (HELPER_OK, HELPER_PENDING, HELPER_BLOCKED, HELPER_UNAVAILABLE) = ("ok", "pending", "blocked", "unavailable")
-TOP_GAP = 2
 REMOTE_MARK = "⇄"
 REMOTE_HOST_MAX = 20
 
@@ -971,96 +960,135 @@ def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
     return {HELPER_BLOCKED: BLOCKED_TAG, HELPER_UNAVAILABLE: UNAVAILABLE_TAG}.get(helper, "")
 
 
-def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str | None = None, remote: str | None = None) -> list:
-    """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
+BAR_NAME = "emx"
+BAR_SEP = "  │  "
+BAR_NOTICE_MIN = 12
+BAR_COUNT_ORDER = (NEEDS_INPUT, WORKING, DONE, "idle")
 
-    Room runs out in this order: the counts switch to short words, the name
-    goes, then the counts are cut; when not even one cut count fits beside
-    the logo and the version, the counts go and the version stays. Only when
-    the version itself does not fit does it go, and a cut count takes its place.
-    A `tag` (see `mode_tag`) follows the version, and is kept ahead of the counts.
 
-    With `remote` (the host a laptop is connected from), a mark "⇄ host"
-    follows the version, ahead of the tag. Room then runs out in this
-    order: short words, the name, the counts cut, the tag, the counts, the
-    host cut with an ellipsis, the mark, the version.
+def bar_counts(sessions) -> list:
+    """(key, count) per state in the bar's order, nonzero only. An interrupted session counts as idle and never as working; stopped ones are not counted."""
+    counts = {key: 0 for key in BAR_COUNT_ORDER}
+    for s in sessions:
+        if idle(s):
+            counts["idle"] += 1
+        elif category(s) != STOPPED:
+            counts[category(s)] += 1
+    return [(key, counts[key]) for key in BAR_COUNT_ORDER if counts[key]]
+
+
+_BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
+_BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
+
+
+def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True) -> list:
+    """(text, tone, bold) parts of the bar across the window's bottom, exactly `width` columns wide.
+
+    Left: the mark, the name, the version, the remote host and the mode tag, then the newest notification (`latest`, an Entry or None).
+    Right: a count per state, then the first of `hints` that fits. A fill of spaces sits between.
+    Room runs out in this order: the notification text is cut (down to `BAR_NOTICE_MIN`), the hints step
+    through their variants, the notification goes, the hints go, then the version, the tag, the host
+    (cut, then the mark), the name; the counts are cut from the right last, and the mark stays.
     """
     if width <= 0:
         return []
+    if width < 3:
+        return [("⚒"[:width] if width == 1 else " ⚒", "copper", False)]
+    count_parts = _bar_count_parts(counts, loaded)
+    variants = list(hints)
+    last = len(variants) - 1 if variants else None
+    if latest is not None:
+        stages = [("flex", i) for i in range(len(variants))] or [("flex", None)]
+        stages += [("off", last)] if variants else []
+        stages.append(("off", None))
+    else:
+        stages = [("off", i) for i in range(len(variants))] + [("off", None)]
+    # (name, version, tag, host) kept at each step once the hints are gone.
+    shrinking = [
+        (True, False, True, "full"), (True, False, False, "full"),
+        (True, False, False, "cut"), (True, False, False, None), (False, False, False, None),
+    ]
+    attempts = [((True, True, True, "full"), notice, hint) for notice, hint in stages]
+    attempts += [(head, "off", None) for head in shrinking]
+    for (name, show_version, show_tag, host), notice, hint in attempts:
+        built = _bar_try(
+            version if show_version else None, count_parts, latest if notice == "flex" else None, now,
+            tag if show_tag else None, remote if host else None, host, name,
+            variants[hint] if hint is not None else "", width,
+        )
+        if built:
+            return built
+    return _bar_cut_counts(count_parts, width)
+
+
+def _bar_count_parts(counts: list, loaded: bool) -> list:
+    if not loaded:
+        return [("…", "muted", False)]
+    parts = []
+    for key, number in counts:
+        if parts:
+            parts.append((" ", "plain", False))
+        parts.append((f"✻{number}", _BAR_COUNT_TONES[key], True))
+    return parts
+
+
+def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width):
+    left = [(" ", "plain", False), (LOGO, "copper", False)]
+    if name:
+        left.append((f" {BAR_NAME}", "plain", True))
+    if version:
+        left.append((f" {version}", "muted", False))
+    host_at = None
     if remote:
-        return _remote_top_line(sessions, version, width, loaded, tag, remote)
-    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")]
-    nameless = [(LOGO, "logo"), (version, "version")]
-    bare = [(LOGO, "logo")]
-    tagged = [(LOGO, "logo"), (NAME, "name"), (version, "version"), (tag, "mode")]
-    tagged_nameless = [(LOGO, "logo"), (version, "version"), (tag, "mode")]
-    if not loaded:
-        counts = [[("…", None)]]
-    elif sessions:
-        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
-    else:
-        counts = [[("no sessions", None)]]
-    shown = [(whole, counts[0])] + [(logo, counts[-1]) for logo in (whole, nameless)]
+        left.append((f" {REMOTE_MARK} ", "remote", True))
+        host_at = len(left)
+        left.append((fit(remote, REMOTE_HOST_MAX), "remote", True))
     if tag:
-        shown = [(tagged, counts[0])] + [(logo, counts[-1]) for logo in (tagged, tagged_nameless)]
-    for logo, parts in shown:
-        logo_width = display_width(" ".join(t for t, _ in logo))
-        parts_width = display_width(" · ".join(t for t, _ in parts))
-        if logo_width + TOP_GAP + parts_width <= width:
-            return _logo(logo) + [(width - parts_width + x, t, tag) for x, t, tag in fit_parts(parts, parts_width)]
-    # The tag is kept over the counts, which are cut to make room; only when even one cut count won't fit beside the tag does it go.
-    variants = (tagged_nameless, nameless) if tag else (nameless,)
-    kept = next((v for v in variants if display_width(" ".join(t for t, _ in v)) + TOP_GAP + 1 <= width), bare)
-    if kept is bare:
-        fits = next((v for v in variants if display_width(" ".join(t for t, _ in v)) <= width), None)
-        if fits:
-            return _logo(fits)
-    start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
-    return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
+        left.append((f" {tag}", "error" if tag in (BLOCKED_TAG, UNAVAILABLE_TAG) else "muted", False))
+    right = list(count_parts)
+    if hint:
+        right += ([(BAR_SEP, "muted", False)] if count_parts else []) + [(hint, "muted", False)]
+    right.append((" ", "plain", False))
+
+    def size(parts):
+        return sum(display_width(t) for t, _, _ in parts)
+
+    if latest is not None:
+        age = format_age(now - latest.at)
+        tone = "muted" if latest.read else "plain"
+        left.append((BAR_SEP, "muted", False))
+        left.append(("✻", "muted" if latest.read else _BAR_MARK_TONES.get(latest.kind, "plain"), False))
+        left.append((f" {age} ", tone, False))
+        left.append((latest.text, tone, False))
+        room = width - 1 - size(left[:-1]) - size(right)
+        if room < BAR_NOTICE_MIN:
+            return None
+        left[-1] = (fit(latest.text, room), tone, False)
+    elif host_at is not None and host == "cut":
+        room = width - 1 - size(left[:host_at]) - size(left[host_at + 1:]) - size(right)
+        if room < 2:
+            return None
+        left[host_at] = (fit(remote, min(REMOTE_HOST_MAX, room)), "remote", True)
+    fill = width - size(left) - size(right)
+    if fill < 1:
+        return None
+    return left + [(" " * fill, "plain", False)] + right
 
 
-def _remote_top_line(sessions, version: str, width: int, loaded: bool, tag: str | None, remote: str) -> list:
-    mark = (f"{REMOTE_MARK} {fit(remote, REMOTE_HOST_MAX)}", "remote")
-    tagged_tail = [mark] + ([(tag, "mode")] if tag else [])
-    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")] + tagged_tail
-    nameless = [(LOGO, "logo"), (version, "version")] + tagged_tail
-    marked = [(LOGO, "logo"), (version, "version"), mark]
-    if not loaded:
-        counts = [[("…", None)]]
-    elif sessions:
-        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
-    else:
-        counts = [[("no sessions", None)]]
-
-    def head_width(head: list) -> int:
-        return display_width(" ".join(t for t, _ in head))
-
-    for head, parts in ((whole, counts[0]), (whole, counts[-1]), (nameless, counts[-1])):
-        parts_width = display_width(" · ".join(t for t, _ in parts))
-        if head_width(head) + TOP_GAP + parts_width <= width:
-            return _logo(head) + [(width - parts_width + x, t, c) for x, t, c in fit_parts(parts, parts_width)]
-    variants = (nameless, marked) if tag else (marked,)
-    for head in variants:
-        if head_width(head) + TOP_GAP + 1 <= width:
-            start = head_width(head) + TOP_GAP
-            return _logo(head) + [(start + x, t, c) for x, t, c in fit_parts(counts[-1], width - start)]
-    for head in variants:
-        if head_width(head) <= width:
-            return _logo(head)
-    prefix = display_width(f"{LOGO} {version} {REMOTE_MARK} ")
-    room = min(width - prefix, REMOTE_HOST_MAX)
-    if room >= 2:
-        cut = [(LOGO, "logo"), (version, "version"), (f"{REMOTE_MARK} {fit(remote, room)}", "remote")]
-        return _logo(cut)
-    return top_line(sessions, version, width, loaded)
-
-
-def _logo(parts: list) -> list:
-    placed, x = [], 0
-    for text, tag in parts:
-        placed.append((x, text, tag))
-        x += display_width(text) + 1
-    return placed
+def _bar_cut_counts(count_parts: list, width: int) -> list:
+    left = [(" ", "plain", False), (LOGO, "copper", False)]
+    room = width - 2 - 1 - 1
+    kept, used = [], 0
+    for text, tone, bold in count_parts:
+        if used + display_width(text) > room:
+            break
+        kept.append((text, tone, bold))
+        used += display_width(text)
+    while kept and kept[-1][0] == " ":
+        kept.pop()
+    used = sum(display_width(t) for t, _, _ in kept)
+    fill = width - 2 - used - (1 if kept else 0)
+    return left + [(" " * fill, "plain", False)] + kept + ([(" ", "plain", False)] if kept else [])
 
 
 def parse_version(text) -> tuple | None:
@@ -1222,46 +1250,10 @@ def short_path(path: str, width: int, home: str | None = None) -> str:
 
 
 ROW_LEAD = 3
-NAME_MIN = 12
-STATUS_MIN = 5
 DETAIL_MIN = 6
 BRANCH_MIN = 4
 WORKTREE_MARK = "⎇ "
 BARE_MARK = WORKTREE_MARK.rstrip()
-
-
-def row_label(name: str, worktree: str) -> str:
-    """A row's name with its worktree mark, as wide as `row_layout` draws it when there is room."""
-    return f"{name} {WORKTREE_MARK}{worktree}" if worktree else name
-
-
-def name_column(rows, width: int) -> int:
-    """How wide a group's name column is, so its states line up, from the group's (name, worktree) pairs.
-
-    The column is the widest `row_label` within half the row. A worktree
-    label too wide for that counts as half the row when its branch could
-    shorten to fit, and as its name and the bare mark when even that is too
-    wide; a name too wide for that is left out, so one long name doesn't push
-    every row. `row_lines` draws the branch whole, so a row whose label is
-    wider than the column puts its state word after the branch, out of line
-    with the rest of its group, wrapping when it must. A row alone in its
-    group has nothing to line up with, so it gets no column.
-    """
-    rows = list(rows)
-    if len(rows) < 2:
-        return 0
-    cap = max(0, width - ROW_LEAD) // 2
-    widths = []
-    for name, worktree in rows:
-        label = display_width(row_label(name, worktree))
-        shortest = display_width(name) + 1 + display_width(WORKTREE_MARK) + _branch_floor(worktree)
-        if label > cap and worktree:
-            if shortest <= cap:
-                label = cap
-            elif _bare_label(name) <= cap:
-                label = _bare_label(name)
-        widths.append(label)
-    return max((w for w in widths if w <= cap), default=0)
 
 
 def _branch_floor(worktree: str) -> int:
@@ -1272,26 +1264,14 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
-    """Where a session row's parts go: (x, text, part) for "name", "extra", "status" and "age".
+def row_layout(name: str, worktree: str, age: str, width: int) -> list:
+    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra" and "age".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
-    right-aligned one column in from the edge. The status starts `align`
-    columns after the name's start when the row can afford it, so states
-    line up within a group; a worktree's branch shortens to stay inside that
-    column, or goes when it can't. `row_lines` draws this line only when it
-    shows every part whole, or on a pane too narrow to wrap, so the
-    shortening below is seen only there; otherwise the row wraps. As space runs
-    out, in order: the status detail shortens; the worktree's branch
-    shortens, down to BRANCH_MIN, then goes, leaving the bare mark; the state
-    word goes whole, never cut, since the glyph's colour still shows the
-    state; a name too long to leave even STATUS_MIN columns is cut, down to
-    NAME_MIN, to keep the state word; and last the status goes and the name
-    is cut to whatever is left. A worktree row keeps at least its bare mark
-    while its name is whole, and keeps it on a cut name when the whole name
-    alone would have fitted.
-    An empty `word` (the by-state view, whose header already says it) leaves
-    the detail alone as the status.
+    right-aligned one column in from the edge. As space runs out, in order: the
+    worktree's branch shortens, down to BRANCH_MIN, then goes, leaving the bare
+    mark; the name is cut to whatever is left, keeping the bare mark when the
+    whole name alone would have fitted.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -1299,211 +1279,69 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     room = age_x - 1 - ROW_LEAD
     if room <= 0:
         return [(age_x, age, "age")] if age else []
-    name_w, word_w = display_width(name), display_width(word)
-    gap = 2 if word else 0
-
+    name_w = display_width(name)
     extra = ""
     if worktree:
-        spare = room - name_w - 1 - gap - word_w - display_width(WORKTREE_MARK)
-        in_column = align - name_w - 1 - display_width(WORKTREE_MARK)
-        if align:
-            spare = min(spare, in_column)
+        spare = room - name_w - 1 - display_width(WORKTREE_MARK)
         if spare >= _branch_floor(worktree):
             extra = WORKTREE_MARK + fit(worktree, spare)
     mark_w = _bare_label(name) - name_w if worktree else 0
-    if extra or name_w + mark_w + gap + word_w <= room:
-        shown, keep_word = name, True
-    elif room - name_w - mark_w - 2 >= STATUS_MIN:
-        shown, keep_word = name, False
-    elif word and NAME_MIN <= room - 2 - word_w < name_w:
-        shown, keep_word = fit(name, room - 2 - word_w), True
-    elif name_w + mark_w <= room:
-        shown, keep_word = name, False
-    elif worktree and name_w <= room and room > mark_w:
-        # The name would fit only without its mark; cutting it keeps both on screen.
-        return _row(fit(name, room - mark_w), BARE_MARK, "", age, age_x)
-    else:
-        return _row(fit(name, room), "", "", age, age_x)
-    if worktree and not extra and shown == name:
+    if not extra and name_w + mark_w > room:
+        if worktree and name_w <= room and room > mark_w:
+            return _row(fit(name, room - mark_w), BARE_MARK, age, age_x)
+        return _row(fit(name, room), "", age, age_x)
+    if worktree and not extra:
         extra = BARE_MARK
-
-    lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
-    status_room = room - lead_w - 2
-    status = _fit_status(word, detail, status_room) if keep_word else ""
-    pad = max(0, align - lead_w)
-    if status and pad and _fit_status(word, detail, status_room - pad) and status_room - pad >= word_w:
-        status = _fit_status(word, detail, status_room - pad)
-    else:
-        pad = 0
-    return _row(shown, extra, status, age, age_x, pad)
+    return _row(name, extra, age, age_x)
 
 
-def _fit_status(word: str, detail: str, room: int) -> str:
-    """The whole status if it fits, else its detail cut short; a detail that would keep fewer than DETAIL_MIN columns is left out."""
-    status = " · ".join(p for p in (word, detail) if p)
-    if display_width(status) <= room:
-        return status
-    if detail and room >= (display_width(word) + 3 if word else 0) + DETAIL_MIN:
-        return fit(status, room)
-    return word if display_width(word) <= room else ""
-
-
-def _row(name: str, extra: str, status: str, age: str, age_x: int, pad: int = 0) -> list:
+def _row(name: str, extra: str, age: str, age_x: int) -> list:
     parts = [(ROW_LEAD, name, "name")]
-    x = ROW_LEAD + display_width(name)
     if extra:
-        parts.append((x + 1, extra, "extra"))
-        x += 1 + display_width(extra)
-    if status:
-        parts.append((x + 2 + pad, status, "status"))
+        parts.append((ROW_LEAD + display_width(name) + 1, extra, "extra"))
     if age:
         parts.append((age_x, age, "age"))
     return parts
 
 
-ROW_INDENT = ROW_LEAD + 2
-DETAIL_LINES = 2
+def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False) -> list:
+    """A session row as one or two lines of (x, text, part).
 
-
-def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
-    """A session row as lines of (x, text, part), the parts `row_layout` names.
-
-    A row `row_layout` shows whole, at the column `align` or else without it,
-    is that one line. Any other row wraps: the name starts the first line,
-    which keeps the age at its right, and the worktree label, state word and
-    detail follow on the line they fit, continuing on lines indented to
-    ROW_INDENT. Words split only when longer than a line. The name, label and
-    state word always show whole; the detail takes at most DETAIL_LINES lines
-    of its own, past whatever it shares with the state word, and ends in "…"
-    when that is not enough. A pane too narrow to indent gets `row_layout`'s line.
+    The first line is the name (and a worktree's branch) with the age at the
+    right, as `row_layout` draws it. The second, from ROW_LEAD, is the state
+    `word` ("status"), " · " ("sep") and the `detail`; it is left out for a
+    stopped row and when there is neither. Room runs out in this order: the
+    detail is cut with "…" while it keeps DETAIL_MIN columns, then goes, then
+    the word is cut.
     """
-    for column in dict.fromkeys((align, 0)):
-        parts = row_layout(name, worktree, word, detail, age, width, column)
-        if _shows_all(parts, name, worktree, word, detail, age):
-            return [parts]
-    usable = width - 1
-    rest = usable - ROW_INDENT
-    if rest < 2:
-        return [row_layout(name, worktree, word, detail, age, width, align)]
-    age = fit(age, max(0, usable - ROW_LEAD))
-    age_x = usable - display_width(age)
-    flow = _Flow(ROW_LEAD, age_x - 1 if age else usable, usable)
-    flow.words(name, "name", 0)
-    if worktree:
-        flow.unit(WORKTREE_MARK + worktree, "extra", 1)
-    if word:
-        flow.unit(word, "status", 2, ROW_LEAD + align + 2 if align else 0)
-    if detail:
-        flow.words(detail, "status", 1 if word else 2, "· " if word else "", DETAIL_LINES)
-    if age:
-        flow.lines[0].append((age_x, age, "age"))
-    return flow.lines
+    first = row_layout(name, worktree, age, width)
+    room = width - 1 - ROW_LEAD
+    if stopped or not (word or detail) or room < 2:
+        return [first]
+    return [first, _second_line(word, detail, room)]
+
+
+def _second_line(word: str, detail: str, room: int) -> list:
+    if not word:
+        return [(ROW_LEAD, fit(detail, room), "detail")]
+    lead = display_width(word) + len(" · ")
+    if detail and (lead + display_width(detail) <= room or room - lead >= DETAIL_MIN):
+        return [(ROW_LEAD, word, "status"), (ROW_LEAD + display_width(word), " · ", "sep"),
+                (ROW_LEAD + lead, fit(detail, room - lead), "detail")]
+    return [(ROW_LEAD, fit(word, room), "status")]
 
 
 def confirm_lines(label: str, width: int, height: int = 1) -> list:
-    """The armed close label in place of a row's parts, wrapped like a row so it is read whole.
+    """The armed close label in place of a row's parts, wrapped from ROW_LEAD like every row's second line so it is read whole.
 
     Empty lines pad it to `height`, the row's own, so arming doesn't move the rows below.
     """
     usable = width - 1
-    if usable - ROW_INDENT < 2:
+    if usable - ROW_LEAD < 2:
         lines = [[(ROW_LEAD, fit(label, usable - ROW_LEAD), "confirm")]]
     else:
-        flow = _Flow(ROW_LEAD, usable, usable)
-        flow.words(label, "confirm", 0)
-        lines = flow.lines
+        lines = [[(ROW_LEAD, text, "confirm")] for text in wrap_words(label, usable - ROW_LEAD)]
     return lines + [[] for _ in range(height - len(lines))]
-
-
-def _shows_all(parts: list, name: str, worktree: str, word: str, detail: str, age: str) -> bool:
-    shown = {part: text for _, text, part in parts}
-    status = " · ".join(p for p in (word, detail) if p)
-    want = {"name": name, "extra": WORKTREE_MARK + worktree if worktree else None,
-            "status": status or None, "age": age or None}
-    return all(shown.get(part) == text for part, text in want.items())
-
-
-class _Flow:
-    """Places a row's parts left to right, starting a line indented to ROW_INDENT when the next part doesn't fit."""
-
-    def __init__(self, x: int, end: int, usable: int):
-        self.lines, self.x, self.end, self.usable = [[]], x, end, usable
-        self.rest = usable - ROW_INDENT
-
-    def newline(self) -> None:
-        self.lines.append([])
-        self.x, self.end = ROW_INDENT, self.usable
-
-    def place(self, x: int, text: str, part: str) -> None:
-        self.lines[-1].append((x, text, part))
-        self.x = x + display_width(text)
-
-    def unit(self, text: str, part: str, gap: int, at: int = 0) -> None:
-        """A part kept on one line when any line can hold it; on the first line it starts at column `at` if that fits."""
-        busy = bool(self.lines[-1])
-        w = display_width(text)
-        if len(self.lines) == 1 and at > self.x + gap and at + w <= self.end:
-            self.place(at, text, part)
-        elif self.x + (gap if busy else 0) + w <= self.end:
-            self.place(self.x + (gap if busy else 0), text, part)
-        elif w <= self.rest:
-            self.newline()
-            self.place(self.x, text, part)
-        else:
-            self.words(text, part, gap)
-
-    def words(self, text: str, part: str, gap: int, lead: str = "", most: int = 0) -> None:
-        """A part wrapped at spaces, its first words on the current line when they fit, there after `lead`.
-
-        With `most`, the part starts at most that many lines of its own, the
-        last of them cut to end in "…" when the rest does not fit there.
-        """
-        busy = bool(self.lines[-1])
-        start = self.x + (gap if busy else 0)
-        first = self.end - start - display_width(lead if busy else "")
-        chunks = _flow_words(text, first, self.rest, busy)
-        if most and len(chunks) > most + 1:
-            kept = chunks[:most]
-            chunks = kept + [fit(_after(text, "".join(kept)), self.rest)]
-        if chunks[0]:
-            self.place(start, (lead if busy else "") + chunks[0], part)
-        for chunk in chunks[1:]:
-            self.newline()
-            self.place(self.x, chunk, part)
-
-
-def _after(text: str, shown: str) -> str:
-    """What of `text` is left once the non-space characters of `shown`, its start, are taken, with spaces collapsed."""
-    taken = sum(1 for ch in shown if not ch.isspace())
-    for i, ch in enumerate(text):
-        if taken == 0:
-            return " ".join(text[i:].split())
-        if not ch.isspace():
-            taken -= 1
-    return ""
-
-
-def _flow_words(text: str, first: int, rest: int, busy: bool) -> list:
-    """`text` in lines of at most `first` columns, then `rest`. The first line is "" when even its first word would not fit on a line already `busy`; a word longer than its line is split there."""
-    lines, line, room = [], "", first
-    for word in text.split():
-        gap = " " if line else ""
-        if display_width(line + gap + word) <= room:
-            line += gap + word
-            continue
-        if line or busy or room <= 0:
-            lines.append(line)
-            line, room, busy = "", rest, False
-            if display_width(word) <= room:
-                line = word
-                continue
-        for ch in word:
-            if display_width(line + ch) > room:
-                lines.append(line)
-                line, room = "", rest
-            line += ch
-    lines.append(line)
-    return lines
 
 
 def list_window(heights: list, at: int, scroll: int, height: int) -> int:
@@ -2415,11 +2253,6 @@ def selection_bar(selected: bool, focused: bool) -> str | None:
     return "focused" if focused else "unfocused"
 
 
-def title_style(focused: bool) -> str:
-    """The panel's top line is bold while the panel has focus and dim otherwise."""
-    return "bold" if focused else "dim"
-
-
 def notice_expired(until: float | None, now: float) -> bool:
     """Whether a notice shown only for a while (`until` is when it ends, None for one that stays) is due to go."""
     return until is not None and now >= until
@@ -3105,7 +2938,7 @@ def peek_content(session: Session, transcript: Transcript | None, now_ms: float)
     elif t.reply and (t.answered or cat == STOPPED):
         lines = [(t.reply, "body")]
         since = t.reply_at if cat == DONE else None
-    title = CATEGORY_LABELS[cat]
+    title = "Idle" if idle(session) else CATEGORY_LABELS[cat]
     if since is not None:
         age = format_age((now_ms - since) / 1000)
         title += f" · {age} ago" if cat == DONE else f" · for {age}"
@@ -3143,12 +2976,12 @@ def cut_lines(lines: list, rows: int) -> list:
 
 
 def peek_room(height: int, width: int, bottom_count: int) -> int:
-    """Rows the peek box and the list share in a pane `height` by `width`, under the panel's two top lines and above its `bottom_count` lines; 0 when the box is too narrow to hold text."""
-    return max(0, height - 2 - bottom_count) if width - 5 > 0 else 0
+    """Rows the peek box and the list share in a pane `height` by `width`, above its `bottom_count` lines; 0 when the box is too narrow to hold text."""
+    return max(0, height - bottom_count) if width - 5 > 0 else 0
 
 
 def peek_height(available: int, body: int, cursor_rows: int = 1) -> int:
-    """Rows the peek box takes from the `available` rows under the panel's top lines: two borders, its title and at most PEEK_BODY_LINES of body.
+    """Rows the peek box takes from the `available` rows above the panel's bottom lines: two borders, its title and at most PEEK_BODY_LINES of body.
 
     It leaves the list at least PEEK_MIN_LIST_ROWS and at least the
     `cursor_rows` the cursor's row takes, so that row stays whole in view;
@@ -3529,9 +3362,7 @@ def hush_due(seen: str | None, value: str) -> tuple:
     return value, value != seen
 
 
-HISTORY_SHOWN = 3
 HISTORY_KEPT = 20
-HISTORY_MIN_LIST_ROWS = 6
 HISTORY_TITLE = "Notifications"
 HISTORY_MARKS = {NOTICE_NEEDS: "●", NOTICE_DONE: "✓"}
 HISTORY_BODY_LINES = 2
@@ -3568,33 +3399,6 @@ def history_prune(history: list, live_ids, misses: dict) -> tuple:
     """(history, misses) with the entries of sessions gone from `STALE_AFTER_MISSES` listings in a row dropped, judged like a viewer's."""
     misses, gone = stale_viewers([e.id for e in history], live_ids, misses)
     return [e for e in history if e.id not in gone], misses
-
-
-def history_room(height: int | None, used: int) -> int:
-    """The rows the strip may take on a pane of `height` that already has `used` other bottom rows (footer included), leaving the session list `HISTORY_MIN_LIST_ROWS` rows and the panel's two top lines."""
-    room = HISTORY_SHOWN + 2
-    if height is None:
-        return room
-    return max(0, min(room, height - 2 - used - HISTORY_MIN_LIST_ROWS))
-
-
-def history_strip(history: list, now: float, width: int, room: int) -> list:
-    """(text, read) rows of the strip in at most `room` rows: the title with the unread count, one row per entry cut to `width`, and `… N more` when not all are shown. With room for the title and one row only, the newest shows alone."""
-    if not history or room < 2:
-        return []
-    unread = history_unread(history)
-    title = f"{HISTORY_TITLE} ({unread})" if unread else HISTORY_TITLE
-    cap = min(HISTORY_SHOWN, room - 1)
-    if len(history) <= cap:
-        shown = history
-    elif room == 2:
-        shown = history[:1]
-    else:
-        shown = history[:min(cap, room - 2)]
-    rows = [(title, False)] + [(fit(f"{format_age(now - e.at)} {e.text}", width), e.read) for e in shown]
-    if room > 2 and len(shown) < len(history):
-        rows.append((fit(f"… {len(history) - len(shown)} more", width), False))
-    return rows
 
 
 def history_rows(history: list, now: float, width: int) -> list:
