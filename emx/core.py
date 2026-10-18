@@ -958,6 +958,8 @@ BLOCKED_TAG = "notifications blocked"
 UNAVAILABLE_TAG = "notifications unavailable"
 HELPER_STATES = (HELPER_OK, HELPER_PENDING, HELPER_BLOCKED, HELPER_UNAVAILABLE) = ("ok", "pending", "blocked", "unavailable")
 TOP_GAP = 2
+REMOTE_MARK = "⇄"
+REMOTE_HOST_MAX = 20
 
 
 def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
@@ -969,7 +971,7 @@ def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
     return {HELPER_BLOCKED: BLOCKED_TAG, HELPER_UNAVAILABLE: UNAVAILABLE_TAG}.get(helper, "")
 
 
-def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str | None = None) -> list:
+def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str | None = None, remote: str | None = None) -> list:
     """(x, text, tag) placements for the panel's top line: the logo on the left ("logo", "name", "version"), the session counts right-aligned (tagged by category, None for the rest).
 
     Room runs out in this order: the counts switch to short words, the name
@@ -977,9 +979,16 @@ def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str |
     the logo and the version, the counts go and the version stays. Only when
     the version itself does not fit does it go, and a cut count takes its place.
     A `tag` (see `mode_tag`) follows the version, and is kept ahead of the counts.
+
+    With `remote` (the host a laptop is connected from), a mark "⇄ host"
+    follows the version, ahead of the tag. Room then runs out in this
+    order: short words, the name, the counts cut, the tag, the counts, the
+    host cut with an ellipsis, the mark, the version.
     """
     if width <= 0:
         return []
+    if remote:
+        return _remote_top_line(sessions, version, width, loaded, tag, remote)
     whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")]
     nameless = [(LOGO, "logo"), (version, "version")]
     bare = [(LOGO, "logo")]
@@ -1008,6 +1017,42 @@ def top_line(sessions, version: str, width: int, loaded: bool = True, tag: str |
             return _logo(fits)
     start = display_width(" ".join(t for t, _ in kept)) + TOP_GAP
     return _logo(kept) + [(start + x, t, tag) for x, t, tag in fit_parts(counts[-1], width - start)]
+
+
+def _remote_top_line(sessions, version: str, width: int, loaded: bool, tag: str | None, remote: str) -> list:
+    mark = (f"{REMOTE_MARK} {fit(remote, REMOTE_HOST_MAX)}", "remote")
+    tagged_tail = [mark] + ([(tag, "mode")] if tag else [])
+    whole = [(LOGO, "logo"), (NAME, "name"), (version, "version")] + tagged_tail
+    nameless = [(LOGO, "logo"), (version, "version")] + tagged_tail
+    marked = [(LOGO, "logo"), (version, "version"), mark]
+    if not loaded:
+        counts = [[("…", None)]]
+    elif sessions:
+        counts = [summary(sessions), summary(sessions, SUMMARY_SHORT)]
+    else:
+        counts = [[("no sessions", None)]]
+
+    def head_width(head: list) -> int:
+        return display_width(" ".join(t for t, _ in head))
+
+    for head, parts in ((whole, counts[0]), (whole, counts[-1]), (nameless, counts[-1])):
+        parts_width = display_width(" · ".join(t for t, _ in parts))
+        if head_width(head) + TOP_GAP + parts_width <= width:
+            return _logo(head) + [(width - parts_width + x, t, c) for x, t, c in fit_parts(parts, parts_width)]
+    variants = (nameless, marked) if tag else (marked,)
+    for head in variants:
+        if head_width(head) + TOP_GAP + 1 <= width:
+            start = head_width(head) + TOP_GAP
+            return _logo(head) + [(start + x, t, c) for x, t, c in fit_parts(counts[-1], width - start)]
+    for head in variants:
+        if head_width(head) <= width:
+            return _logo(head)
+    prefix = display_width(f"{LOGO} {version} {REMOTE_MARK} ")
+    room = min(width - prefix, REMOTE_HOST_MAX)
+    if room >= 2:
+        cut = [(LOGO, "logo"), (version, "version"), (f"{REMOTE_MARK} {fit(remote, room)}", "remote")]
+        return _logo(cut)
+    return top_line(sessions, version, width, loaded)
 
 
 def _logo(parts: list) -> list:
@@ -3346,6 +3391,7 @@ RELAY_LINE_MAX = 8192
 RELAY_BEAT_SECONDS = 5
 RELAY_LIVE_SECONDS = 15
 RELAY_BEAT = {"kind": "beat"}
+RELAY_HOST_ENV = "EMX_RELAY_HOST"
 _REMOTE_VERSION = re.compile(r"emx (\d+\.\d+\.\d+)\s*")
 
 
@@ -3448,6 +3494,30 @@ def relay_live(value: str, now: float) -> bool:
         return -1 <= now - float(value) <= RELAY_LIVE_SECONDS
     except (TypeError, ValueError):
         return False
+
+
+def relay_host_value(host: str, now: float) -> str:
+    return f"{now} {host}"
+
+
+def relay_host(value: str, now: float) -> str | None:
+    """The host in a `relay_host_value` that is still fresh and safe to show, else None; never raises, since the value comes from another machine."""
+    try:
+        stamp, host = value.split(" ", 1)
+    except (AttributeError, ValueError):
+        return None
+    return remote_host(host) if relay_live(stamp, now) else None
+
+
+def window_title(host: str) -> str:
+    return f"emx · {host}"
+
+
+def follow_shell(base: str, host: str | None) -> str:
+    """The server command that streams notices; the host rides in an environment variable so an older server, which ignores it, still accepts the command."""
+    if host is None or remote_host(host) is None:
+        return remote_shell(base, "follow")
+    return remote_shell(f"env {RELAY_HOST_ENV}={shlex.quote(host)} {base}", "follow")
 
 
 def hush_due(seen: str | None, value: str) -> tuple:
