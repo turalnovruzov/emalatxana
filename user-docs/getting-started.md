@@ -23,11 +23,11 @@ Run `emx`. It opens the workspace: the panel on one side, the session you are in
 
 ## The panel at a glance
 
-The panel lists your sessions, grouped by project. Each shows on two lines: its name and age, and under the name what it is doing. The row under the cursor is the one the keys act on. Press `?` in the panel to see every key.
+The panel lists your sessions, grouped by project. Each shows its name and age, and under the name what it is doing, in full: a long status wraps onto as many lines as it needs. The row under the cursor is the one the keys act on. Press `?` in the panel to see every key.
 
 The colours say the state at a glance: Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is lavender, and Stopped is dim.
 
-One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on a slightly lighter ground than the session next to it.
+One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints (`N` for all notifications, `?` for the keys). The panel itself is just your sessions, on your terminal's own background.
 
 ## Start your first session
 

@@ -130,6 +130,9 @@ class Tmux:
     def set_pane_option(self, pane: str, name: str, value: str) -> None:
         self.run("set-option", "-p", "-t", pane, name, value)
 
+    def unset_pane_option(self, pane: str, name: str) -> None:
+        self.run("set-option", "-p", "-u", "-t", pane, name)
+
     def client_state(self, now: float | None = None) -> tuple:
         """(clients attached, last focus report "1" in, "0" out or "" unknown, the active pane's id, seconds since the client's last input or None when unknown)."""
         out = self.run(

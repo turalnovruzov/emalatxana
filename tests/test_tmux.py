@@ -649,10 +649,10 @@ class Bar(PrivateServer):
         self.tmux.set_bar("emx-bar-probe")
         self.read_client_until(b"emx-bar-probe")
 
-    def test_the_panel_ground_reaches_the_attached_client(self):
-        self.tmux.select(self.sidebar)
+    def test_unsetting_the_2_6_0_panel_style_leaves_the_terminals_own(self):
         self.tmux.set_pane_option(self.sidebar, "window-style", "bg=colour235")
-        self.read_client_until(b"48;5;235")
+        self.tmux.unset_pane_option(self.sidebar, "window-style")
+        self.assertEqual(self.tmux.run("show-options", "-p", "-t", self.sidebar, "window-style").strip(), "")
 
     def test_set_bar_targets_the_emx_session(self):
         tmux = Tmux("emx-test-unused")
