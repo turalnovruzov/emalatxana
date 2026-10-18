@@ -3048,18 +3048,13 @@ class App:
         """(lines, each session line's laid-out rows, every line's height in screen rows) for the list at `width`."""
         lines = self.lines()
         group_of = {s.id: g.key for g in self.groups for s in g.sessions}
-        aligns = {}
-        for g in self.groups:
-            column = core.name_column(((s.name, self.worktree(s)) for s in g.sessions), width)
-            aligns.update((s.id, column) for s in g.sessions)
         now_ms = time.time() * 1000
         rows = {}
         for line in lines:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
                 armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
-                rows[line] = self.session_lines(session, width, aligns.get(session.id, 0), now_ms, armed,
-                                                group_of.get(session.id, ""))
+                rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""))
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
 
     def cursor_rows(self, layout: tuple) -> int:
@@ -3114,13 +3109,13 @@ class App:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
     def session_lines(
-        self, s, width: int, align: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
+        self, s, width: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
     ) -> list:
         """The row's lines as `core.row_lines` gives them, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
-        word = "" if core.state_group(self.view(), group_key) else core.state_word(s)
+        word = "" if core.state_group(self.view(), group_key) and not core.idle(s) else core.state_word(s)
         age = core.session_age(s, now_ms)
         detail = core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
-        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, align)
+        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED)
         if s.id in self.closing:
             return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
         if armed is not None:
@@ -3144,13 +3139,13 @@ class App:
             return pal.attr(tone, selected) | extra
 
         glyph_tone = "idle" if core.idle(s) else "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
-        tones = {"name": "plain", "extra": "path", "status": session_tone(s), "age": "muted"}
+        tones = {"name": "plain", "extra": "path", "status": session_tone(s), "sep": "muted", "detail": "muted", "age": "muted"}
         for i, parts in enumerate(rows):
             if y + i not in shown:
                 continue
-            if in_main:
-                self.put(y + i, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
             if i == 0:
+                if in_main:
+                    self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
                 self.put(y, 1, core.session_glyph(s, frame), attr(glyph_tone))
             for x, text, part in parts:
                 if part in ("confirm", "rename"):

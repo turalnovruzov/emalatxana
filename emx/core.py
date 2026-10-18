@@ -1250,46 +1250,10 @@ def short_path(path: str, width: int, home: str | None = None) -> str:
 
 
 ROW_LEAD = 3
-NAME_MIN = 12
-STATUS_MIN = 5
 DETAIL_MIN = 6
 BRANCH_MIN = 4
 WORKTREE_MARK = "⎇ "
 BARE_MARK = WORKTREE_MARK.rstrip()
-
-
-def row_label(name: str, worktree: str) -> str:
-    """A row's name with its worktree mark, as wide as `row_layout` draws it when there is room."""
-    return f"{name} {WORKTREE_MARK}{worktree}" if worktree else name
-
-
-def name_column(rows, width: int) -> int:
-    """How wide a group's name column is, so its states line up, from the group's (name, worktree) pairs.
-
-    The column is the widest `row_label` within half the row. A worktree
-    label too wide for that counts as half the row when its branch could
-    shorten to fit, and as its name and the bare mark when even that is too
-    wide; a name too wide for that is left out, so one long name doesn't push
-    every row. `row_lines` draws the branch whole, so a row whose label is
-    wider than the column puts its state word after the branch, out of line
-    with the rest of its group, wrapping when it must. A row alone in its
-    group has nothing to line up with, so it gets no column.
-    """
-    rows = list(rows)
-    if len(rows) < 2:
-        return 0
-    cap = max(0, width - ROW_LEAD) // 2
-    widths = []
-    for name, worktree in rows:
-        label = display_width(row_label(name, worktree))
-        shortest = display_width(name) + 1 + display_width(WORKTREE_MARK) + _branch_floor(worktree)
-        if label > cap and worktree:
-            if shortest <= cap:
-                label = cap
-            elif _bare_label(name) <= cap:
-                label = _bare_label(name)
-        widths.append(label)
-    return max((w for w in widths if w <= cap), default=0)
 
 
 def _branch_floor(worktree: str) -> int:
@@ -1300,26 +1264,14 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
-    """Where a session row's parts go: (x, text, part) for "name", "extra", "status" and "age".
+def row_layout(name: str, worktree: str, age: str, width: int) -> list:
+    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra" and "age".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
-    right-aligned one column in from the edge. The status starts `align`
-    columns after the name's start when the row can afford it, so states
-    line up within a group; a worktree's branch shortens to stay inside that
-    column, or goes when it can't. `row_lines` draws this line only when it
-    shows every part whole, or on a pane too narrow to wrap, so the
-    shortening below is seen only there; otherwise the row wraps. As space runs
-    out, in order: the status detail shortens; the worktree's branch
-    shortens, down to BRANCH_MIN, then goes, leaving the bare mark; the state
-    word goes whole, never cut, since the glyph's colour still shows the
-    state; a name too long to leave even STATUS_MIN columns is cut, down to
-    NAME_MIN, to keep the state word; and last the status goes and the name
-    is cut to whatever is left. A worktree row keeps at least its bare mark
-    while its name is whole, and keeps it on a cut name when the whole name
-    alone would have fitted.
-    An empty `word` (the by-state view, whose header already says it) leaves
-    the detail alone as the status.
+    right-aligned one column in from the edge. As space runs out, in order: the
+    worktree's branch shortens, down to BRANCH_MIN, then goes, leaving the bare
+    mark; the name is cut to whatever is left, keeping the bare mark when the
+    whole name alone would have fitted.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -1327,211 +1279,69 @@ def row_layout(name: str, worktree: str, word: str, detail: str, age: str, width
     room = age_x - 1 - ROW_LEAD
     if room <= 0:
         return [(age_x, age, "age")] if age else []
-    name_w, word_w = display_width(name), display_width(word)
-    gap = 2 if word else 0
-
+    name_w = display_width(name)
     extra = ""
     if worktree:
-        spare = room - name_w - 1 - gap - word_w - display_width(WORKTREE_MARK)
-        in_column = align - name_w - 1 - display_width(WORKTREE_MARK)
-        if align:
-            spare = min(spare, in_column)
+        spare = room - name_w - 1 - display_width(WORKTREE_MARK)
         if spare >= _branch_floor(worktree):
             extra = WORKTREE_MARK + fit(worktree, spare)
     mark_w = _bare_label(name) - name_w if worktree else 0
-    if extra or name_w + mark_w + gap + word_w <= room:
-        shown, keep_word = name, True
-    elif room - name_w - mark_w - 2 >= STATUS_MIN:
-        shown, keep_word = name, False
-    elif word and NAME_MIN <= room - 2 - word_w < name_w:
-        shown, keep_word = fit(name, room - 2 - word_w), True
-    elif name_w + mark_w <= room:
-        shown, keep_word = name, False
-    elif worktree and name_w <= room and room > mark_w:
-        # The name would fit only without its mark; cutting it keeps both on screen.
-        return _row(fit(name, room - mark_w), BARE_MARK, "", age, age_x)
-    else:
-        return _row(fit(name, room), "", "", age, age_x)
-    if worktree and not extra and shown == name:
+    if not extra and name_w + mark_w > room:
+        if worktree and name_w <= room and room > mark_w:
+            return _row(fit(name, room - mark_w), BARE_MARK, age, age_x)
+        return _row(fit(name, room), "", age, age_x)
+    if worktree and not extra:
         extra = BARE_MARK
-
-    lead_w = display_width(shown) + (1 + display_width(extra) if extra else 0)
-    status_room = room - lead_w - 2
-    status = _fit_status(word, detail, status_room) if keep_word else ""
-    pad = max(0, align - lead_w)
-    if status and pad and _fit_status(word, detail, status_room - pad) and status_room - pad >= word_w:
-        status = _fit_status(word, detail, status_room - pad)
-    else:
-        pad = 0
-    return _row(shown, extra, status, age, age_x, pad)
+    return _row(name, extra, age, age_x)
 
 
-def _fit_status(word: str, detail: str, room: int) -> str:
-    """The whole status if it fits, else its detail cut short; a detail that would keep fewer than DETAIL_MIN columns is left out."""
-    status = " · ".join(p for p in (word, detail) if p)
-    if display_width(status) <= room:
-        return status
-    if detail and room >= (display_width(word) + 3 if word else 0) + DETAIL_MIN:
-        return fit(status, room)
-    return word if display_width(word) <= room else ""
-
-
-def _row(name: str, extra: str, status: str, age: str, age_x: int, pad: int = 0) -> list:
+def _row(name: str, extra: str, age: str, age_x: int) -> list:
     parts = [(ROW_LEAD, name, "name")]
-    x = ROW_LEAD + display_width(name)
     if extra:
-        parts.append((x + 1, extra, "extra"))
-        x += 1 + display_width(extra)
-    if status:
-        parts.append((x + 2 + pad, status, "status"))
+        parts.append((ROW_LEAD + display_width(name) + 1, extra, "extra"))
     if age:
         parts.append((age_x, age, "age"))
     return parts
 
 
-ROW_INDENT = ROW_LEAD + 2
-DETAIL_LINES = 2
+def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False) -> list:
+    """A session row as one or two lines of (x, text, part).
 
-
-def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, align: int = 0) -> list:
-    """A session row as lines of (x, text, part), the parts `row_layout` names.
-
-    A row `row_layout` shows whole, at the column `align` or else without it,
-    is that one line. Any other row wraps: the name starts the first line,
-    which keeps the age at its right, and the worktree label, state word and
-    detail follow on the line they fit, continuing on lines indented to
-    ROW_INDENT. Words split only when longer than a line. The name, label and
-    state word always show whole; the detail takes at most DETAIL_LINES lines
-    of its own, past whatever it shares with the state word, and ends in "…"
-    when that is not enough. A pane too narrow to indent gets `row_layout`'s line.
+    The first line is the name (and a worktree's branch) with the age at the
+    right, as `row_layout` draws it. The second, from ROW_LEAD, is the state
+    `word` ("status"), " · " ("sep") and the `detail`; it is left out for a
+    stopped row and when there is neither. Room runs out in this order: the
+    detail is cut with "…" while it keeps DETAIL_MIN columns, then goes, then
+    the word is cut.
     """
-    for column in dict.fromkeys((align, 0)):
-        parts = row_layout(name, worktree, word, detail, age, width, column)
-        if _shows_all(parts, name, worktree, word, detail, age):
-            return [parts]
-    usable = width - 1
-    rest = usable - ROW_INDENT
-    if rest < 2:
-        return [row_layout(name, worktree, word, detail, age, width, align)]
-    age = fit(age, max(0, usable - ROW_LEAD))
-    age_x = usable - display_width(age)
-    flow = _Flow(ROW_LEAD, age_x - 1 if age else usable, usable)
-    flow.words(name, "name", 0)
-    if worktree:
-        flow.unit(WORKTREE_MARK + worktree, "extra", 1)
-    if word:
-        flow.unit(word, "status", 2, ROW_LEAD + align + 2 if align else 0)
-    if detail:
-        flow.words(detail, "status", 1 if word else 2, "· " if word else "", DETAIL_LINES)
-    if age:
-        flow.lines[0].append((age_x, age, "age"))
-    return flow.lines
+    first = row_layout(name, worktree, age, width)
+    room = width - 1 - ROW_LEAD
+    if stopped or not (word or detail) or room < 2:
+        return [first]
+    return [first, _second_line(word, detail, room)]
+
+
+def _second_line(word: str, detail: str, room: int) -> list:
+    if not word:
+        return [(ROW_LEAD, fit(detail, room), "detail")]
+    lead = display_width(word) + len(" · ")
+    if detail and (lead + display_width(detail) <= room or room - lead >= DETAIL_MIN):
+        return [(ROW_LEAD, word, "status"), (ROW_LEAD + display_width(word), " · ", "sep"),
+                (ROW_LEAD + lead, fit(detail, room - lead), "detail")]
+    return [(ROW_LEAD, fit(word, room), "status")]
 
 
 def confirm_lines(label: str, width: int, height: int = 1) -> list:
-    """The armed close label in place of a row's parts, wrapped like a row so it is read whole.
+    """The armed close label in place of a row's parts, wrapped from ROW_LEAD like every row's second line so it is read whole.
 
     Empty lines pad it to `height`, the row's own, so arming doesn't move the rows below.
     """
     usable = width - 1
-    if usable - ROW_INDENT < 2:
+    if usable - ROW_LEAD < 2:
         lines = [[(ROW_LEAD, fit(label, usable - ROW_LEAD), "confirm")]]
     else:
-        flow = _Flow(ROW_LEAD, usable, usable)
-        flow.words(label, "confirm", 0)
-        lines = flow.lines
+        lines = [[(ROW_LEAD, text, "confirm")] for text in wrap_words(label, usable - ROW_LEAD)]
     return lines + [[] for _ in range(height - len(lines))]
-
-
-def _shows_all(parts: list, name: str, worktree: str, word: str, detail: str, age: str) -> bool:
-    shown = {part: text for _, text, part in parts}
-    status = " · ".join(p for p in (word, detail) if p)
-    want = {"name": name, "extra": WORKTREE_MARK + worktree if worktree else None,
-            "status": status or None, "age": age or None}
-    return all(shown.get(part) == text for part, text in want.items())
-
-
-class _Flow:
-    """Places a row's parts left to right, starting a line indented to ROW_INDENT when the next part doesn't fit."""
-
-    def __init__(self, x: int, end: int, usable: int):
-        self.lines, self.x, self.end, self.usable = [[]], x, end, usable
-        self.rest = usable - ROW_INDENT
-
-    def newline(self) -> None:
-        self.lines.append([])
-        self.x, self.end = ROW_INDENT, self.usable
-
-    def place(self, x: int, text: str, part: str) -> None:
-        self.lines[-1].append((x, text, part))
-        self.x = x + display_width(text)
-
-    def unit(self, text: str, part: str, gap: int, at: int = 0) -> None:
-        """A part kept on one line when any line can hold it; on the first line it starts at column `at` if that fits."""
-        busy = bool(self.lines[-1])
-        w = display_width(text)
-        if len(self.lines) == 1 and at > self.x + gap and at + w <= self.end:
-            self.place(at, text, part)
-        elif self.x + (gap if busy else 0) + w <= self.end:
-            self.place(self.x + (gap if busy else 0), text, part)
-        elif w <= self.rest:
-            self.newline()
-            self.place(self.x, text, part)
-        else:
-            self.words(text, part, gap)
-
-    def words(self, text: str, part: str, gap: int, lead: str = "", most: int = 0) -> None:
-        """A part wrapped at spaces, its first words on the current line when they fit, there after `lead`.
-
-        With `most`, the part starts at most that many lines of its own, the
-        last of them cut to end in "…" when the rest does not fit there.
-        """
-        busy = bool(self.lines[-1])
-        start = self.x + (gap if busy else 0)
-        first = self.end - start - display_width(lead if busy else "")
-        chunks = _flow_words(text, first, self.rest, busy)
-        if most and len(chunks) > most + 1:
-            kept = chunks[:most]
-            chunks = kept + [fit(_after(text, "".join(kept)), self.rest)]
-        if chunks[0]:
-            self.place(start, (lead if busy else "") + chunks[0], part)
-        for chunk in chunks[1:]:
-            self.newline()
-            self.place(self.x, chunk, part)
-
-
-def _after(text: str, shown: str) -> str:
-    """What of `text` is left once the non-space characters of `shown`, its start, are taken, with spaces collapsed."""
-    taken = sum(1 for ch in shown if not ch.isspace())
-    for i, ch in enumerate(text):
-        if taken == 0:
-            return " ".join(text[i:].split())
-        if not ch.isspace():
-            taken -= 1
-    return ""
-
-
-def _flow_words(text: str, first: int, rest: int, busy: bool) -> list:
-    """`text` in lines of at most `first` columns, then `rest`. The first line is "" when even its first word would not fit on a line already `busy`; a word longer than its line is split there."""
-    lines, line, room = [], "", first
-    for word in text.split():
-        gap = " " if line else ""
-        if display_width(line + gap + word) <= room:
-            line += gap + word
-            continue
-        if line or busy or room <= 0:
-            lines.append(line)
-            line, room, busy = "", rest, False
-            if display_width(word) <= room:
-                line = word
-                continue
-        for ch in word:
-            if display_width(line + ch) > room:
-                lines.append(line)
-                line, room = "", rest
-            line += ch
-    lines.append(line)
-    return lines
 
 
 def list_window(heights: list, at: int, scroll: int, height: int) -> int:

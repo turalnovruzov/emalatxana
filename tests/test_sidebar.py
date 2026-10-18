@@ -3794,8 +3794,8 @@ class Peek(AppCase):
 
     def test_the_row_shows_the_request_after_the_state_word(self):
         self.app.draw()
-        row = next(line for line in self.screen() if "emx-test-a" in line)
-        self.assertIn("Needs input · approve", row)
+        at = next(y for y, line in enumerate(self.screen()) if "emx-test-a" in line)
+        self.assertIn("Needs input · approve", self.screen()[at + 1])
 
     def test_space_on_a_session_opens_the_peek_and_it_is_drawn_boxed_and_read_only(self):
         self.app.cursor = ("session", "a")
@@ -3921,8 +3921,8 @@ class Peek(AppCase):
 LONG_WAIT = "approve Bash: python3 -m unittest discover -s tests -v"
 
 
-class WrappedRows(AppCase):
-    """On a narrow panel a long row takes several lines; clicks, the cursor and scrolling count every one of them."""
+class TwoLineRowsDrawn(AppCase):
+    """A live row takes two lines; clicks, the cursor and scrolling count both of them."""
 
     def setUp(self):
         super().setUp()
@@ -3937,17 +3937,30 @@ class WrappedRows(AppCase):
     def rows_of(self, sid):
         return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
 
-    def test_the_whole_request_is_on_screen_under_the_row(self):
-        self.assertEqual(self.app.notice, "")
+    def test_a_live_row_is_two_lines_the_second_from_column_3(self):
         ys = self.rows_of("a")
-        self.assertGreater(len(ys), 1)
-        self.assertEqual(ys, list(range(ys[0], ys[0] + len(ys))))
-        shown = " ".join(self.screen()[y] for y in ys)
-        self.assertEqual(" ".join(shown.split()).split("Needs input · ")[1], LONG_WAIT)
-        self.assertNotIn("…", shown)
-        self.assertTrue(self.screen()[ys[0]].startswith(" ✻ emx-test-a"))
-        for y in ys[1:]:
-            self.assertTrue(self.screen()[y].startswith(" " * core.ROW_INDENT), self.screen()[y])
+        self.assertEqual(ys, [ys[0], ys[0] + 1])
+        first, second = (self.screen()[y] for y in ys)
+        self.assertTrue(first.startswith(" ✻ emx-test-a"), first)
+        self.assertTrue(second.startswith("   Needs input · approve Bash"), second)
+        self.assertTrue(second.endswith("…"), second)
+        self.assertLessEqual(core.display_width(second), 39)
+
+    def test_the_main_marker_is_on_the_first_line_only(self):
+        self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
+        self.app.draw()
+        first, second = (self.screen()[y] for y in self.rows_of("a"))
+        self.assertTrue(first.startswith("▎"), first)
+        self.assertFalse(second.startswith("▎"), second)
+
+    def test_an_idle_row_in_the_by_state_view_still_says_idle(self):
+        self.poll(idle_row("c", "/p/alpha"), session("b", "/p/alpha"))
+        self.app.refresh()
+        self.app.toggle_view()
+        self.app.draw()
+        second = self.screen()[self.rows_of("c")[1]]
+        self.assertTrue(second.startswith("   Idle"), second)
+        self.assertEqual(len(self.rows_of("b")), 1)
 
     def test_a_click_on_any_line_of_a_wrapped_row_opens_it(self):
         for y in self.rows_of("a"):
@@ -3975,9 +3988,7 @@ class WrappedRows(AppCase):
             self.app.cursor = ("session", sid)
             self.app.draw()
             ys = self.rows_of(sid)
-            self.assertEqual(len(ys), len(core.row_lines(
-                f"emx-test-{sid}", "", "Needs input", LONG_WAIT, core.session_age(self.app.session(sid), time.time() * 1000), 40,
-            )), sid)
+            self.assertEqual(len(ys), 2, sid)
             self.assertTrue(self.screen()[ys[0]].startswith(" ✻ emx-test-" + sid), self.screen())
             with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, ys[-1], 0, curses.BUTTON1_CLICKED)):
                 self.opened.clear()
@@ -4002,7 +4013,7 @@ class WrappedRows(AppCase):
         self.app.draw()
         self.assertIsNotNone(self.app.confirm)
         self.assertEqual((self.rows_of("b"), self.rows_of("a")), before)
-        self.assertIn("ctrl+x again", self.screen()[before[0][0]])
+        self.assertIn("x again", self.screen()[before[0][0]])
 
     def test_the_closing_label_keeps_the_rows_height(self):
         self.app.cursor = ("session", "a")
@@ -4031,16 +4042,15 @@ class WrappedRows(AppCase):
         self.app.handle_key(" ")
         self.app.draw()
         self.assertTrue(self.app.peeking)
-        tall = len(self.rows_of("a"))
-        self.assertGreater(tall, core.PEEK_MIN_LIST_ROWS)
+        self.assertEqual(len(self.rows_of("a")), 2)
         box = next(y for y, line in enumerate(self.screen()) if line.startswith("╭─"))
         self.assertLess(self.rows_of("a")[-1], box)
 
-    def test_a_wide_panel_keeps_the_row_on_one_line(self):
+    def test_a_wide_panel_shows_the_whole_request_on_the_second_line(self):
         self.scr.size = (20, 100)
         self.app.draw()
-        self.assertEqual(len(self.rows_of("a")), 1)
-        self.assertIn("Needs input · " + LONG_WAIT, self.screen()[self.rows_of("a")[0]])
+        self.assertEqual(len(self.rows_of("a")), 2)
+        self.assertIn("Needs input · " + LONG_WAIT, self.screen()[self.rows_of("a")[1]])
 
 
 class WhatsNew(AppCase):
@@ -4818,10 +4828,11 @@ class InterruptSession(AppCase):
         self.app.scr = scr
         self.poll(idle_row("working", "/p/alpha"), session("b", "/p/beta"))
         self.app.refresh()
-        row = next(line for line in scr.cells.values() if "emx-test-working" in line)
+        ys = sorted(y for y, line in scr.cells.items() if "emx-test-working" in line)
+        row, below = scr.cells[ys[0]], scr.cells[ys[0] + 1]
         self.assertTrue(row.startswith(" ✻ emx-test-working"), row)
-        self.assertIn("Idle", row)
-        self.assertNotIn("Working", row)
+        self.assertTrue(below.startswith("   Idle"), below)
+        self.assertNotIn("Working", row + below)
         with mock.patch.object(sidebar.time, "monotonic", return_value=12345.6):
             self.app.draw()
         self.assertTrue(next(line for line in scr.cells.values() if "emx-test-working" in line).startswith(" ✻ "))
