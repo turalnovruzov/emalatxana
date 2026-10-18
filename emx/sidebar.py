@@ -56,10 +56,10 @@ RELAUNCH_RETRY_SECONDS = 300
 ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
 ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
 HELP = (
-    ("→ ↵", "open the session and go to it"),
+    ("→ Enter", "open the session and go to it"),
     ("←", "back here, from an empty prompt"),
     ("↑↓ j k", "move"),
-    ("↵ click", "fold a group; a click opens a session"),
+    ("Enter click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
     ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
@@ -69,7 +69,7 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
-    ("N", "notifications: the last 20; ↵ opens one"),
+    ("N", "notifications: the last 20; Enter opens one"),
     ("m", "voice mode or notification mode"),
     ("h", "stop the voice now (voice mode)"),
     ("s", "panel to the other side"),
@@ -90,11 +90,11 @@ CTRL_T = "\x14"
 CTRL_R = "\x12"
 CTRL_U = "\x15"
 CONFIRM_FOOTER = "^x to confirm"
-RENAME_FOOTER = "tab suggest · enter save · esc cancel"
+RENAME_FOOTER = "Tab suggest · Enter save · Esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
-FIND_HINT = "↑↓ move · ↵ open · Esc clear"
-HISTORY_HINT = "↑↓ move · ↵ open · Esc back"
+FIND_HINT = "↑↓ move · Enter open · Esc clear"
+HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
 OPEN_GONE = "That session isn't listed any more."
 PEEK_FOOTERS = ("␣ Esc close  ↑↓ next  → open", "␣ close ↑↓ next", "␣ close")
@@ -2911,7 +2911,7 @@ class App:
             hint = "Enter start · Tab folder · Esc cancel"
         else:
             head = [("New session · pick a folder:", curses.A_BOLD)]
-            hint = "↑↓ pick · Tab fill · ↵ use · ^t ★ · Esc " + ("back" if p.get("back") else "cancel")
+            hint = "↑↓ pick · Tab fill · Enter use · ^t ★ · Esc " + ("back" if p.get("back") else "cancel")
         head += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
         tail = [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]] if p["hint"] else []
         tail += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]

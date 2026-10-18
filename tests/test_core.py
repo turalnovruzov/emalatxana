@@ -1966,27 +1966,27 @@ class CloseConfirm(unittest.TestCase):
         self.assertFalse(core.group_closable(core.PROJECT, core.PINNED))
         self.assertFalse(core.group_closable(core.BY_STATE, core.WORKING))
         self.assertTrue(core.group_closable(core.PROJECT, "/r/app"))
-        self.assertEqual(core.GROUP_CLOSE_REFUSAL, "Ctrl+X closes a project's group from the project view.")
+        self.assertEqual(core.GROUP_CLOSE_REFUSAL, "^x closes a project's group from the project view.")
 
     def test_the_pinned_header_gets_its_own_refusal(self):
         self.assertEqual(core.group_close_refusal(core.PINNED),
-                         "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+                         "^x can't close the Pinned group; close its sessions one at a time.")
         self.assertEqual(core.group_close_refusal(core.WORKING), core.GROUP_CLOSE_REFUSAL)
 
     def test_labels_read_close_and_count(self):
         armed, _ = core.press_close(None, self.on_a, self.running, 0.0)
-        self.assertEqual(core.confirm_label(armed), "ctrl+x again to close")
-        self.assertEqual(core.group_confirm_label(1), "ctrl+x again to close 1 session")
-        self.assertEqual(core.group_confirm_label(3), "ctrl+x again to close 3 sessions")
+        self.assertEqual(core.confirm_label(armed), "^x again to close")
+        self.assertEqual(core.group_confirm_label(1), "^x again to close 1 session")
+        self.assertEqual(core.group_confirm_label(3), "^x again to close 3 sessions")
         group, _ = core.press_close(None, ("group", "/r/app"), self.group(self.running, mk(id="b")), 0.0)
-        self.assertEqual(core.confirm_label(group), "ctrl+x again to close 2 sessions")
+        self.assertEqual(core.confirm_label(group), "^x again to close 2 sessions")
         self.assertEqual(core.CLOSING_LABEL, "closing…")
 
     def test_a_header_reads_its_armed_label_or_closing_only_for_its_own_group(self):
         b = mk(id="b", name="emx-test-b")
         app, other = self.group(self.running, b), self.group(mk(id="z"), key="/r/other")
         armed, _ = core.press_close(None, ("group", "/r/app"), app, 0.0)
-        self.assertEqual(core.header_label(armed, app, {}), "ctrl+x again to close 2 sessions")
+        self.assertEqual(core.header_label(armed, app, {}), "^x again to close 2 sessions")
         self.assertIsNone(core.header_label(armed, other, {}))
         self.assertEqual(core.header_label(None, app, {"a": None, "b": True}), "closing…")
         self.assertIsNone(core.header_label(None, app, {"a": None}))

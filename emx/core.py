@@ -206,8 +206,8 @@ def refusal(name: str, trigger: str, fresh: bool, session: Session | None) -> st
 
 CONFIRM_SECONDS = 2.0
 CLOSING_LABEL = "closing…"
-GROUP_CLOSE_REFUSAL = "Ctrl+X closes a project's group from the project view."
-PINNED_CLOSE_REFUSAL = "Ctrl+X can't close the Pinned group; close its sessions one at a time."
+GROUP_CLOSE_REFUSAL = "^x closes a project's group from the project view."
+PINNED_CLOSE_REFUSAL = "^x can't close the Pinned group; close its sessions one at a time."
 
 
 @dataclass(frozen=True)
@@ -236,11 +236,11 @@ def close_targets(confirm) -> tuple:
 def confirm_label(confirm) -> str:
     if isinstance(confirm, GroupConfirm):
         return group_confirm_label(len(confirm.sessions))
-    return "ctrl+x again to close"
+    return "^x again to close"
 
 
 def group_confirm_label(count: int) -> str:
-    return f"ctrl+x again to close {count} session{'' if count == 1 else 's'}"
+    return f"^x again to close {count} session{'' if count == 1 else 's'}"
 
 
 def group_closable(view: str, key: str) -> bool:

@@ -1232,7 +1232,7 @@ class CloseSession(AppCase):
     def test_the_armed_row_says_what_the_second_press_does(self):
         self.press(sidebar.CTRL_X)
         drawn = self.drawn()
-        self.assertIn("ctrl+x again to close", drawn)
+        self.assertIn("^x again to close", drawn)
         self.assertNotIn("emx-test-a", drawn)
 
     def test_the_row_reads_closing_from_the_second_press_until_a_listing_lacks_it(self):
@@ -1315,7 +1315,7 @@ class CloseSession(AppCase):
         self.app.cursor = ("group", "/p/alpha")
         self.press(sidebar.CTRL_X)
         self.assertIsInstance(self.app.confirm, core.GroupConfirm)
-        self.assertIn("ctrl+x again to close 2 sessions", self.drawn())
+        self.assertIn("^x again to close 2 sessions", self.drawn())
         self.assertEqual(self.log, [])
         self.press(sidebar.CTRL_X)
         self.assertEqual(self.app.notice, "Closing 2 sessions…")
@@ -1346,19 +1346,19 @@ class CloseSession(AppCase):
         self.app.cursor = ("group", core.PINNED)
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.assertEqual((self.app.confirm, self.app.closer), (None, None))
-        self.assertEqual(self.app.notice, "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+        self.assertEqual(self.app.notice, "^x can't close the Pinned group; close its sessions one at a time.")
         self.app.say("")
         self.app.prefs = core.toggle_view(self.app.prefs)
         self.app.regroup()
         self.app.cursor = ("group", core.PINNED)
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.assertEqual((self.app.confirm, self.app.closer), (None, None))
-        self.assertEqual(self.app.notice, "Ctrl+X can't close the Pinned group; close its sessions one at a time.")
+        self.assertEqual(self.app.notice, "^x can't close the Pinned group; close its sessions one at a time.")
         self.app.say("")
         self.app.cursor = ("group", core.NEEDS_INPUT)
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.assertEqual((self.app.confirm, self.app.closer), (None, None))
-        self.assertEqual(self.app.notice, "Ctrl+X closes a project's group from the project view.")
+        self.assertEqual(self.app.notice, "^x closes a project's group from the project view.")
         self.assertEqual(self.log, [])
 
     def test_first_ctrl_x_on_a_folded_header_unfolds_and_arms_and_the_second_closes_all(self):
@@ -1369,7 +1369,7 @@ class CloseSession(AppCase):
         self.assertNotIn("/p/alpha", self.app.collapsed())
         self.assertEqual(self.app.cursor, ("group", "/p/alpha"))
         self.assertEqual(self.app.confirm.key, "/p/alpha")
-        self.assertIn("ctrl+x again to close 2 sessions", self.drawn())
+        self.assertIn("^x again to close 2 sessions", self.drawn())
         self.assertEqual(self.log, [])
         self.press(sidebar.CTRL_X)
         self.settle()
@@ -3751,7 +3751,7 @@ class HaikuRows(AppCase):
         self.app.refresh()
         self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
         self.app.draw()
-        self.assertIn("ctrl+x again to close", self.screen())
+        self.assertIn("^x again to close", self.screen())
         self.assertNotIn("Wrote the parser", self.screen())
         self.app.confirm = None
         self.app.closing["a"] = None
@@ -4523,6 +4523,33 @@ class PanelGround(AppCase):
         for _ in range(2):
             sidebar.App.housekeep(self.app, False)
         self.assertEqual([c for c in calls if c[0] == "set_pane_option"], [("set_pane_option", ("%1", "window-style", "bg=colour235"))])
+
+
+class KeyWording(AppCase):
+    """Keys are written ^x, Esc and Enter wherever a hint shows them."""
+
+    def test_no_hint_says_ctrl_or_a_return_arrow(self):
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+        texts = [*(f"{key} {what}" for key, what in sidebar.HELP), sidebar.CONFIRM_FOOTER, sidebar.RENAME_FOOTER,
+                 sidebar.FIND_HINT, sidebar.HISTORY_HINT, *sidebar.PEEK_FOOTERS,
+                 core.confirm_label(core.Confirm("a", "n", True, 0.0)), core.group_confirm_label(1), core.group_confirm_label(3),
+                 core.GROUP_CLOSE_REFUSAL, core.PINNED_CLOSE_REFUSAL]
+        for key in ("n", "\t"):
+            self.app.handle_key(key)
+            texts += [t for t, _ in self.app.prompt_lines(39)]
+        self.assertIsNotNone(self.app.prompt)
+        self.assertEqual(self.app.prompt["stage"], "folder")
+        for text in texts:
+            with self.subTest(text=text):
+                self.assertNotRegex(text, r"[Cc]trl\+|↵|\besc\b|\benter\b")
+
+    def test_the_hints_use_the_spelled_keys(self):
+        self.assertIn(("→ Enter", "open the session and go to it"), sidebar.HELP)
+        self.assertEqual(sidebar.RENAME_FOOTER, "Tab suggest · Enter save · Esc cancel")
+        self.assertEqual(sidebar.CONFIRM_FOOTER, "^x to confirm")
+        self.assertEqual(core.confirm_label(core.Confirm("a", "n", True, 0.0)), "^x again to close")
 
 
 class BarFormat(unittest.TestCase):
@@ -6254,7 +6281,7 @@ class HistoryWiring(AppCase):
         self.assertIsNone(again.history_view)
 
     def test_the_help_has_the_N_line(self):
-        self.assertIn(("N", "notifications: the last 20; ↵ opens one"), sidebar.HELP)
+        self.assertIn(("N", "notifications: the last 20; Enter opens one"), sidebar.HELP)
 
 
 class HistoryView(AppCase):
