@@ -299,6 +299,17 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: the laptop runs `--version`, `follow`, `open --no-window <id>` and `update --report` on the server and reads `emx X.Y.Z`, the relay records through `parse_relay`, and one `emx-update …` line through `parse_update_report`.
 4. **Gotcha**: adding a subcommand, a line or a relay field that the older side ignores is not a major; dropping a field an older `parse_relay` requires, or changing the words of the `emx-update` line, is. A session's hook argv outlives the version that wrote it until the session is resumed, so the newest `current` must still accept every older form.
 
+### Anything new one emx hands another over `emx remote` travels in an `env VAR=value` prefix, and a value written for another machine to read is validated again on read
+
+1. **Rule**: what a newer emx adds to its call on the server goes in an `env VAR=value` prefix built by a core builder over `core.remote_shell` (`core.follow_shell`), never as a new positional argument. A value one machine writes into a session option for another to read carries its own timestamp and is validated again in core when read (`core.relay_host`).
+2. **Why**: an older server ignores an unknown variable but rejects an unknown argument, and a session option outlives its writer, so what is read back may be stale or from a version that wrote it differently.
+3. **Minimal example**:
+   ```python
+   shell = core.follow_shell(base, host_name)
+   host = core.relay_host(option_value, time.time())
+   ```
+4. **Gotcha**: `env` finds only real files on PATH, so an `emx` that exists only as an alias needs `EMX_REMOTE_COMMAND`. `@emx_relay` stays a bare float, because an older panel parses it as one.
+
 ### A transcript path from a hook record goes through `engine.allowed_transcript` first
 
 1. **Rule**: a Claude transcript emx opens at a path taken from a hook record passes `engine.allowed_transcript(path)` first and is opened only at the real path it returns. (The older `Transcripts.locate` in `emx/sidebar.py` does its own equivalent check; new code uses the helper.)

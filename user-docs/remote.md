@@ -19,6 +19,10 @@ emx remote myserver
 
 Closing the window, closing the laptop or losing the connection leaves the server's emx and its sessions running. Run `emx remote myserver` again to come back. `q` in the panel leaves them running too. Plain `emx` shows only this machine's sessions.
 
+## Knowing you're on remote
+
+While you are in a server through `emx remote myserver`, the panel's top line shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`. Both go when you leave. Someone looking at the server's own screen sees the mark too, while you are connected. An emx older than this feature, on either machine, shows no mark.
+
 ## Notifications while connected
 
 The server's notifications reach your laptop, spoken or as emx's notification, in the mode set with `m` on the server's panel. Clicking one opens that session on the server's panel. While you are not connected nothing arrives; the Notifications list (`N`) keeps them. `h` on the server's panel also stops the laptop speaking.

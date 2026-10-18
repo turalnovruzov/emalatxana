@@ -19,6 +19,7 @@ HUSH_OPT = "@emx_hush"
 OPEN_OPT = "@emx_open"
 TERMINAL_OPT = "@emx_terminal"
 RELAY_OPT = "@emx_relay"
+RELAY_HOST_OPT = "@emx_relay_host"
 
 
 _PANE_ID = re.compile(r"%\d+")

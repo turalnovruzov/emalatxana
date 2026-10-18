@@ -18,7 +18,7 @@ import emx
 from emx import __version__, core, install, notify, remote
 from emx.cli import read_changelog, self_command
 from emx.engine import AGENT, Engine, allowed_transcript, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -130,6 +130,7 @@ TONES = {
     "path": (244, curses.COLOR_WHITE),
     "error": (203, curses.COLOR_RED),
     "copper": (173, curses.COLOR_YELLOW),
+    "remote": (141, curses.COLOR_MAGENTA),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
@@ -1722,6 +1723,7 @@ class App:
         self.state = core.state_path()
         self.relay_file = core.relay_path(self.state)
         self.relayed = False
+        self.relay_host = None
         self.legacy_cleared = False
         self.me = os.environ.get("TMUX_PANE", "")
         self.prefs_file = core.prefs_path()
@@ -1993,7 +1995,14 @@ class App:
             value = self.tmux.session_option(RELAY_OPT)
         except TmuxError:
             return
-        self.relayed = core.relay_live(value, time.time())
+        now = time.time()
+        self.relayed = core.relay_live(value, now)
+        try:
+            host = self.tmux.session_option(RELAY_HOST_OPT)
+        except TmuxError:
+            self.relay_host = None
+            return
+        self.relay_host = core.relay_host(host, now)
 
     def check_open(self) -> None:
         """`emx open` from outside (a notification click) writes a session id to a session option; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
@@ -2953,8 +2962,9 @@ class App:
         label = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         warn = label in (core.BLOCKED_TAG, core.UNAVAILABLE_TAG)
         logo = {"logo": self.palette.attr("copper"), "name": style, "version": curses.A_DIM,
-                "mode": self.palette.attr("error") if warn else curses.A_DIM}
-        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, label):
+                "mode": self.palette.attr("error") if warn else curses.A_DIM,
+                "remote": self.palette.attr("remote") | curses.A_BOLD}
+        for x, text, tag in core.top_line(self.sessions, __version__, width - 2, self.loaded, label, self.relay_host):
             if tag in logo:
                 attr = logo[tag]
             else:

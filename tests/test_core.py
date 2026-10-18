@@ -3878,6 +3878,94 @@ class TopLineTag(unittest.TestCase):
         self.assertEqual((core.BLOCKED_TAG, core.UNAVAILABLE_TAG), ("notifications blocked", "notifications unavailable"))
 
 
+class TopLineRemote(unittest.TestCase):
+    SESSIONS = TopLineTag.SESSIONS
+
+    def placed(self, width, remote="myserver", tag=None, version="1.0.0", sessions=None, loaded=True):
+        return core.top_line(self.SESSIONS if sessions is None else sessions, version, width, loaded, tag, remote)
+
+    def text(self, placed):
+        line = ""
+        for x, text, _ in placed:
+            line = line.ljust(x) + text
+        return line
+
+    def test_no_remote_matches_the_old_output_at_every_width(self):
+        for tag in (None, core.VOICE_TAG):
+            for width in range(0, 81):
+                with self.subTest(tag=tag, width=width):
+                    plain = core.top_line(self.SESSIONS, "1.0.0", width, True, tag)
+                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, None), plain)
+                    self.assertEqual(core.top_line(self.SESSIONS, "1.0.0", width, True, tag, ""), plain)
+
+    def test_the_mark_follows_the_version_when_wide(self):
+        placed = self.placed(80)
+        self.assertEqual([tag for _, _, tag in placed][:4], ["logo", "name", "version", "remote"])
+        self.assertEqual(placed[3][1], "⇄ myserver")
+        placed = self.placed(80, tag=core.VOICE_TAG)
+        self.assertEqual([tag for _, _, tag in placed][:5], ["logo", "name", "version", "remote", "mode"])
+
+    def test_the_mark_at_the_board_width(self):
+        placed = self.placed(36, version="2.4.0")
+        self.assertTrue(self.text(placed).startswith("⚒ 2.4.0 ⇄ myserver  "))
+        self.assertEqual([tag for _, _, tag in placed][:3], ["logo", "version", "remote"])
+        self.assertIn(core.NEEDS_INPUT, [tag for _, _, tag in placed])
+
+    def test_the_mark_beside_short_counts(self):
+        self.assertEqual(self.text(self.placed(60, sessions=Summary.SESSIONS)), "⚒ 1.0.0 ⇄ myserver         1 wait · 2 work · 1 done · 1 stop")
+
+    def test_the_host_is_cut_before_the_mark_goes(self):
+        placed = self.placed(14)
+        self.assertIn("remote", [tag for _, _, tag in placed])
+        self.assertEqual([t for _, t, tag in placed if tag == "remote"], ["⇄ mys…"])
+        self.assertEqual(self.placed(11), core.top_line(self.SESSIONS, "1.0.0", 11))
+
+    def test_a_long_host_is_capped(self):
+        text = next(t for _, t, tag in self.placed(80, remote="h" * 253) if tag == "remote")
+        self.assertEqual(core.display_width(text), 2 + core.REMOTE_HOST_MAX)
+
+    def test_the_mark_never_overflows_and_never_costs_the_version(self):
+        for remote in ("myserver", "h" * 253):
+            for tag in (None, core.VOICE_TAG):
+                for loaded in (True, False):
+                    for width in range(0, 81):
+                        with self.subTest(remote=remote[:3], tag=tag, loaded=loaded, width=width):
+                            placed = self.placed(width, remote, tag, "10.20.30", loaded=loaded)
+                            self.assertLessEqual(max((x + core.display_width(t) for x, t, _ in placed), default=0), width)
+                            tags = [t for _, _, t in placed]
+                            if width > 0:
+                                self.assertEqual(placed[0], (0, core.LOGO, "logo"))
+                            xs = [x for x, _, _ in placed]
+                            self.assertEqual(xs, sorted(xs))
+                            plain = [t for _, _, t in core.top_line(self.SESSIONS, "10.20.30", width, loaded)]
+                            if "version" in plain:
+                                self.assertIn("version", tags)
+                            if "mode" in tags:
+                                self.assertIn("remote", tags)
+                            if "remote" in tags:
+                                self.assertEqual(tags.index("remote"), tags.index("version") + 1)
+
+    def test_relay_host(self):
+        self.assertEqual(core.relay_host(core.relay_host_value("myserver", 100.0), 105.0), "myserver")
+        self.assertIsNone(core.relay_host(core.relay_host_value("myserver", 100.0), 100 + core.RELAY_LIVE_SECONDS + 1))
+        for value in ("", "100", "abc myserver", "100.0 -oProxyCommand=x", "100.0 bad\x1bhost"):
+            with self.subTest(value=value):
+                self.assertIsNone(core.relay_host(value, 105.0))
+
+    def test_follow_shell(self):
+        self.assertEqual(core.follow_shell("emx", None), core.remote_shell("emx", "follow"))
+        command = core.follow_shell("emx", "myserver")
+        self.assertIn("env EMX_RELAY_HOST=myserver emx follow", command)
+        self.assertTrue(command.endswith("follow'"))
+        self.assertEqual(core.follow_shell("emx", "-bad"), core.remote_shell("emx", "follow"))
+
+    def test_window_title(self):
+        self.assertEqual(core.window_title("myserver"), "emx · myserver")
+
+    def test_the_arrow_is_one_column(self):
+        self.assertEqual(core.display_width("⇄"), 1)
+
+
 class RemoteHost(unittest.TestCase):
     def test_accepts_names_from_an_ssh_config(self):
         for value in ("myserver", "me@box.example.com", "box-1_a"):

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import emx
 from emx import __version__, core, install
-from emx.tmux import RELAY_OPT, TmuxError
+from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, TmuxError
 
 NOTE_SECONDS = 2
 VERSION_TIMEOUT = 30
@@ -43,8 +43,8 @@ def append_relay(path: Path, record: dict) -> None:
         pass
 
 
-def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: float = 0.5, stop: threading.Event | None = None, clock=time.time) -> int:
-    """Stream the relay file from its end to `out`, one JSON line per valid record, plus a beat line every `beat` seconds that also stamps `RELAY_OPT` so the panel knows a laptop is listening. Returns 0 when `out` is gone or `stop` is set."""
+def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: float = 0.5, stop: threading.Event | None = None, clock=time.time, host: str | None = None) -> int:
+    """Stream the relay file from its end to `out`, one JSON line per valid record, plus a beat line every `beat` seconds that also stamps `RELAY_OPT` so the panel knows a laptop is listening, and `RELAY_HOST_OPT` with the laptop's `host` when given. Returns 0 when `out` is gone or `stop` is set."""
     handle = None
     pending = b""
     try:
@@ -77,7 +77,7 @@ def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: f
                 next_beat = time.monotonic() + beat
                 out.write(json.dumps(core.RELAY_BEAT) + "\n")
                 out.flush()
-                _stamp(tmux, clock)
+                _stamp(tmux, clock, host)
             if stop is not None:
                 stop.wait(tick)
             else:
@@ -102,10 +102,12 @@ def _emit(data: bytes, pending: bytes, out) -> bytes:
     return tail
 
 
-def _stamp(tmux, clock) -> None:
+def _stamp(tmux, clock, host: str | None = None) -> None:
     try:
         if tmux.has_session():
             tmux.set_session_option(RELAY_OPT, str(clock()))
+            if host:
+                tmux.set_session_option(RELAY_HOST_OPT, core.relay_host_value(host, clock()))
     except (TmuxError, OSError):
         pass
 
@@ -246,6 +248,28 @@ def _restore_terminal() -> None:
         pass
 
 
+# xterm's title stack: push the current title, and pop it back at the end. A terminal without the stack is left with the empty title set before the pop.
+TITLE_PUSH = "\x1b[22;0t"
+TITLE_POP = "\x1b[23;0t"
+
+
+def _write_to_terminal(text: str) -> None:
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.write(text)
+            sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _show_title(host: str) -> None:
+    _write_to_terminal(TITLE_PUSH + "\x1b]0;" + core.window_title(host) + "\x07")
+
+
+def _put_title_back() -> None:
+    _write_to_terminal("\x1b]0;\x07" + TITLE_POP)
+
+
 def _exit_master(ssh: str, host: str, control: str) -> None:
     try:
         subprocess.run(
@@ -338,7 +362,7 @@ def connect(host_arg: str, env=os.environ) -> int:
     ssh = env.get("EMX_SSH") or "ssh"
     base = env.get("EMX_REMOTE_COMMAND") or "emx"
     control = control_dir()
-    master, follower, note, code = False, None, None, 1
+    master, follower, note, code, titled = False, None, None, 1, False
     try:
         if control:
             clear_stale_sockets(control)
@@ -381,7 +405,9 @@ def connect(host_arg: str, env=os.environ) -> int:
         os.environ["EMX_REMOTE_TERMINAL"] = core.terminal_bundle(os.environ)
         socket = env.get("EMX_SOCKET", "emx")
         delivery = Delivery.started(socket if socket not in ("", "default") else "emx")
-        follower = Follower(core.ssh_client_args(ssh, host, control, core.remote_shell(base, "follow"), batch=True), delivery)
+        follower = Follower(core.ssh_client_args(ssh, host, control, core.follow_shell(base, host), batch=True), delivery)
+        _show_title(host)
+        titled = True
         follower.start()
         try:
             code = subprocess.run(core.ssh_client_args(ssh, host, control, core.remote_shell(base), tty=True)).returncode
@@ -393,6 +419,8 @@ def connect(host_arg: str, env=os.environ) -> int:
     finally:
         if follower is not None:
             follower.stop()
+        if titled:
+            _put_title_back()
         if master:
             _exit_master(ssh, host, control)
     if note:

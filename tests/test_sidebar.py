@@ -16,7 +16,7 @@ from unittest import mock
 
 import emx
 from emx import cli, core, sidebar
-from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
 
 
 def git(*args):
@@ -4422,11 +4422,12 @@ def nearest_256(r, g, b):
 
 
 class TopLine(AppCase):
-    def drawn_top_line(self, focused):
+    def drawn_top_line(self, focused, host=None):
         scr = AttrScr()
         app = sidebar.App(scr, tmux=None, claude="claude")
         app.palette = TonePalette()
         app.focused = focused
+        app.relay_host = host
         app.draw_top_line(38)
         return {text: attr for y, x, text, attr in scr.drawn if y == 0}
 
@@ -4441,6 +4442,15 @@ class TopLine(AppCase):
 
     def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
         self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
+
+    def test_remote_is_the_nearest_256_colour_to_af87ff(self):
+        self.assertEqual(sidebar.TONES["remote"][0], nearest_256(0xAF, 0x87, 0xFF))
+
+    def test_the_remote_mark_is_bold_violet_focused_or_not(self):
+        for focused in (True, False):
+            with self.subTest(focused=focused):
+                drawn = self.drawn_top_line(focused, "myserver")
+                self.assertEqual(drawn["⇄ myserver"], TonePalette().attr("remote") | curses.A_BOLD)
 
     def test_the_top_line_draws_the_logo_then_the_counts(self):
         scr = RecordingScr()
@@ -6384,6 +6394,22 @@ class AppRelay(AppCase):
         self.app.tmux.options[RELAY_OPT] = str(time.time() - 60)
         sidebar.App.housekeep(self.app, False)
         self.assertTrue(any("notifications unavailable" in t for t in self.top_line()))
+
+    def test_a_connected_laptop_puts_its_host_on_the_top_line(self):
+        now = time.time()
+        self.app.tmux.options[RELAY_OPT] = str(now)
+        self.app.tmux.options[RELAY_HOST_OPT] = core.relay_host_value("myserver", now)
+        sidebar.App.housekeep(self.app, False)
+        self.assertIn("⇄ myserver", self.top_line())
+        self.app.tmux.options[RELAY_OPT] = str(now - 60)
+        self.app.tmux.options[RELAY_HOST_OPT] = core.relay_host_value("myserver", now - 60)
+        sidebar.App.housekeep(self.app, False)
+        self.assertFalse(any("⇄" in t for t in self.top_line()))
+
+    def test_no_host_option_no_mark(self):
+        self.app.tmux.options[RELAY_OPT] = str(time.time())
+        sidebar.App.housekeep(self.app, False)
+        self.assertFalse(any("⇄" in t for t in self.top_line()))
 
 
 class ModeKey(AppCase):
