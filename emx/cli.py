@@ -256,7 +256,8 @@ def follow() -> int:
     if socket is None:
         print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
-    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket))
+    host = core.remote_host(os.environ.get(core.RELAY_HOST_ENV, ""))
+    return remote.follow(core.relay_path(core.state_path()), sys.stdout, Tmux(socket), host=host)
 
 
 def open_command() -> str:

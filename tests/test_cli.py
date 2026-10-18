@@ -463,6 +463,21 @@ class FollowCommand(unittest.TestCase):
         self.assertEqual(str(path), "/x/state/emx/relay.jsonl")
         self.assertEqual((tmux.socket, tmux.config), ("emx-test-x", None))
 
+    def follow_host(self, value):
+        from emx import remote
+
+        env = {"EMX_SOCKET": "emx-test-x", "XDG_STATE_HOME": "/x/state", "EMX_RELAY_HOST": value}
+        with mock.patch.dict(os.environ, env), mock.patch.object(remote, "follow", return_value=0) as follow:
+            code = cli.main(["follow"])
+        follow.assert_called_once()
+        return code, follow.call_args.kwargs.get("host")
+
+    def test_the_host_the_laptop_sent_is_handed_on(self):
+        self.assertEqual(self.follow_host("emx-test-host"), (0, "emx-test-host"))
+
+    def test_a_host_that_could_be_an_option_is_dropped_and_it_still_follows(self):
+        self.assertEqual(self.follow_host("-oX"), (0, None))
+
     def test_the_usage_names_it_as_internal(self):
         self.assertIn("emx follow is internal", cli.USAGE)
 

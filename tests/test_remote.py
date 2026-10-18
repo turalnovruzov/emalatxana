@@ -14,7 +14,7 @@ from unittest import mock
 
 import emx
 from emx import core, remote
-from emx.tmux import RELAY_OPT
+from emx.tmux import RELAY_HOST_OPT, RELAY_OPT
 
 SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 FAKE_SSH = str(Path(__file__).resolve().parent / "fake_ssh.py")
@@ -102,10 +102,10 @@ class Follow(unittest.TestCase):
         self.thread = None
         self.addCleanup(self.finish)
 
-    def start(self):
+    def start(self, host=None):
         self.thread = threading.Thread(
             target=remote.follow, args=(self.path, self.out, self.tmux),
-            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop}, daemon=True,
+            kwargs={"tick": 0.01, "beat": 0.05, "stop": self.stop, "host": host}, daemon=True,
         )
         self.thread.start()
         time.sleep(0.1)
@@ -173,6 +173,21 @@ class Follow(unittest.TestCase):
         name, value = self.tmux.set[0]
         self.assertEqual(name, RELAY_OPT)
         float(value)
+
+    def test_beats_stamp_the_host_when_given(self):
+        self.start(host="emx-test-host")
+        time.sleep(0.2)
+        self.assertEqual(self.tmux.set[0][0], RELAY_OPT)
+        float(self.tmux.set[0][1])
+        values = [v for n, v in self.tmux.set if n == RELAY_HOST_OPT]
+        self.assertTrue(values)
+        self.assertEqual(core.relay_host(values[0], time.time()), "emx-test-host")
+
+    def test_no_host_no_host_stamp(self):
+        self.start()
+        time.sleep(0.2)
+        self.assertTrue(self.tmux.set)
+        self.assertNotIn(RELAY_HOST_OPT, [n for n, _ in self.tmux.set])
 
     def test_no_session_no_stamp(self):
         self.tmux.has = False
@@ -364,9 +379,24 @@ class Connect(ConnectCase):
         for seq in ("\x1b[?1049l", "\x1b[?1000l", "\x1b[?1002l", "\x1b[?1003l", "\x1b[?1006l", "\x1b[?1l\x1b>", "\x1b[?25h"):
             self.assertIn(seq, written)
 
-    def test_a_clean_exit_writes_no_restore_sequences(self):
+    def test_a_clean_exit_sets_the_title_and_puts_it_back_without_restore_sequences(self):
         self.server(code=0)
-        self.assertEqual(self.run_on_tty(), "")
+        written = self.run_on_tty()
+        self.assertNotIn("\x1b[?1049l", written)
+        self.assertTrue(written.startswith("\x1b[22;0t\x1b]0;emx · emx-test-host\x07"))
+        self.assertTrue(written.endswith("\x1b]0;\x07\x1b[23;0t"))
+
+    def test_a_lost_connection_restores_the_title_before_the_terminal(self):
+        self.server(code=255)
+        written = self.run_on_tty()
+        self.assertLess(written.index("\x1b[23;0t"), written.index("\x1b[?1049l"))
+
+    def test_the_follower_carries_the_host(self):
+        self.server()
+        self.run_connect()
+        follower = [c for c in self.argvs() if c[-1].endswith("follow'")]
+        self.assertEqual(len(follower), 1)
+        self.assertIn("env EMX_RELAY_HOST=emx-test-host ", follower[0][-1])
 
     def test_a_lost_connection_writes_nothing_when_stdout_is_not_a_tty(self):
         self.server(code=255)
@@ -425,6 +455,21 @@ class Connect(ConnectCase):
         self.assertIsNotNone(self.followers[0].proc.poll())
         last = self.argvs()[-1]
         self.assertEqual(last[last.index("-O"):last.index("-O") + 2], ["-O", "exit"])
+
+    def test_ctrl_c_puts_the_title_back_on_a_tty(self):
+        self.server()
+        real = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            if "-t" in argv:
+                raise KeyboardInterrupt
+            return real(argv, *args, **kwargs)
+
+        out = Tty()
+        with mock.patch.object(remote.subprocess, "run", run), mock.patch.object(remote.sys, "stdout", out):
+            code, _ = self.run_connect()
+        self.assertEqual(code, 130)
+        self.assertTrue(out.getvalue().endswith("\x1b]0;\x07\x1b[23;0t"))
 
 
 class Tty(io.StringIO):
