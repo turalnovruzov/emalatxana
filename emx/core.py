@@ -1306,30 +1306,36 @@ def _row(name: str, extra: str, age: str, age_x: int) -> list:
 
 
 def row_lines(name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False) -> list:
-    """A session row as one or two lines of (x, text, part).
+    """A session row as lines of (x, text, part).
 
     The first line is the name (and a worktree's branch) with the age at the
-    right, as `row_layout` draws it. The second, from ROW_LEAD, is the state
-    `word` ("status"), " · " ("sep") and the `detail`; it is left out for a
-    stopped row and when there is neither. Room runs out in this order: the
-    detail is cut with "…" while it keeps DETAIL_MIN columns, then goes, then
-    the word is cut.
+    right, as `row_layout` draws it. Under it, from ROW_LEAD, come the state
+    `word` ("status"), " · " ("sep") and the `detail`, word-wrapped by display
+    width onto as many lines as it needs, every one from ROW_LEAD; nothing is
+    cut. A stopped row, or one with neither, stays the one line.
     """
     first = row_layout(name, worktree, age, width)
     room = width - 1 - ROW_LEAD
     if stopped or not (word or detail) or room < 2:
         return [first]
-    return [first, _second_line(word, detail, room)]
+    return [first] + _status_lines(word, detail, room)
 
 
-def _second_line(word: str, detail: str, room: int) -> list:
+def _status_lines(word: str, detail: str, room: int) -> list:
     if not word:
-        return [(ROW_LEAD, fit(detail, room), "detail")]
+        return [[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)]
     lead = display_width(word) + len(" · ")
-    if detail and (lead + display_width(detail) <= room or room - lead >= DETAIL_MIN):
-        return [(ROW_LEAD, word, "status"), (ROW_LEAD + display_width(word), " · ", "sep"),
-                (ROW_LEAD + lead, fit(detail, room - lead), "detail")]
-    return [(ROW_LEAD, fit(word, room), "status")]
+    if not detail or lead >= room:
+        lines = [[(ROW_LEAD, fit(word, room), "status")]]
+        return lines + ([[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)] if detail else [])
+    if lead + min(display_width(detail), DETAIL_MIN) > room:
+        return [[(ROW_LEAD, word, "status")]] + [[(ROW_LEAD, text, "detail")] for text in wrap_words(detail, room)]
+    wrapped = wrap_words(" " * lead + detail, room)
+    head = wrapped[0][lead:]
+    first = [(ROW_LEAD, word, "status"), (ROW_LEAD + display_width(word), " · ", "sep")]
+    if head:
+        first.append((ROW_LEAD + lead, head, "detail"))
+    return [first] + [[(ROW_LEAD, text, "detail")] for text in wrapped[1:]]
 
 
 def confirm_lines(label: str, width: int, height: int = 1) -> list:

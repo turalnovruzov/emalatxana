@@ -123,7 +123,6 @@ TONES = {
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 237, "unfocused": 236}
-PANEL_GROUND = 235
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
@@ -1749,7 +1748,7 @@ class App:
         self.relayed = False
         self.relay_host = None
         self.legacy_cleared = False
-        self.ground_painted = False
+        self.ground_reset = False
         self.window_width = 0
         self.bar = StatusBar(tmux)
         self.me = os.environ.get("TMUX_PANE", "")
@@ -1939,7 +1938,7 @@ class App:
                 self.bound = (sidebar.id, main.id)
             if sidebar:
                 self.window_width = sidebar.window_width
-                self.paint_ground(sidebar)
+                self.reset_ground(sidebar)
                 self.take_focus(sidebar)
                 followed = core.follow_zoom(self.prefs, sidebar.zoomed)
                 if followed is not self.prefs:
@@ -1957,11 +1956,11 @@ class App:
         self.time_whats_new()
         self.check_update()
 
-    def paint_ground(self, sidebar) -> None:
-        """The panel sits a step apart from the sessions: the pane's own background, so default-background cells show it too."""
-        if not self.ground_painted:
-            self.tmux.set_pane_option(sidebar.id, "window-style", f"bg=colour{PANEL_GROUND}")
-            self.ground_painted = True
+    def reset_ground(self, sidebar) -> None:
+        """2.6.0 set the pane's background; a workspace upgrading from it keeps the option until it is unset here."""
+        if not self.ground_reset:
+            self.tmux.unset_pane_option(sidebar.id, "window-style")
+            self.ground_reset = True
 
     def time_whats_new(self) -> None:
         if not self.whats_new_waits:

@@ -615,19 +615,30 @@ class TwoLineRows(unittest.TestCase):
         self.assertEqual(second, [(3, "Working", "status"), (10, " · ", "sep"), (13, "Running the tests", "detail")])
         self.assertEqual(rendered(second), "   Working · Running the tests")
 
-    def test_a_long_detail_is_cut_with_an_ellipsis_and_stays_inside_the_pane(self):
-        _, second = self.lines(40)
-        self.assertEqual([part for _, _, part in second], ["status", "sep", "detail"])
-        self.assertTrue(second[-1][1].endswith("…"))
-        self.assertLessEqual(core.display_width(rendered(second)), 39)
-        self.assertEqual(rendered(second), "   Working · approve Bash: touch made-…")
+    def test_a_long_detail_wraps_whole_under_the_name_from_column_3(self):
+        _, *rest = self.lines(40)
+        text = " ".join(rendered(parts).strip() for parts in rest)
+        self.assertEqual(text, "Working · approve Bash: touch made-by-test.txt")
+        self.assertEqual(rendered(rest[0]), "   Working · approve Bash: touch")
+        self.assertEqual(rest[1], [(3, "made-by-test.txt", "detail")])
+        self.assertNotIn("…", text)
+        for parts in rest:
+            self.assertEqual(parts[0][0] if len(parts) == 1 else 3, 3)
+            self.assertLessEqual(core.display_width(rendered(parts)), 39)
 
-    def test_a_detail_too_narrow_to_keep_a_few_columns_is_left_out(self):
-        _, second = self.lines(20, word="Needs input")
-        self.assertEqual(second, [(3, "Needs input", "status")])
+    def test_a_wrapped_detail_loses_no_word_at_any_width(self):
+        for width in range(30, 60):
+            _, *rest = self.lines(width, word="Needs input")
+            words = " ".join(rendered(p).strip() for p in rest).split()
+            self.assertEqual(words, ("Needs input · " + self.DETAIL).split(), width)
 
-    def test_the_word_is_cut_when_even_it_does_not_fit(self):
-        _, second = self.lines(10, word="Needs input")
+    def test_a_narrow_pane_puts_the_detail_on_its_own_lines_under_the_word(self):
+        _, word, *rest = self.lines(20, word="Needs input")
+        self.assertEqual(word, [(3, "Needs input", "status")])
+        self.assertEqual(" ".join(rendered(p).strip() for p in rest), self.DETAIL)
+
+    def test_a_word_wider_than_the_pane_is_cut(self):
+        _, second, *_ = self.lines(10, word="Needs input")
         self.assertEqual(rendered(second), "   Needs…")
 
     def test_a_stopped_row_is_one_line_with_no_status(self):
@@ -648,7 +659,7 @@ class TwoLineRows(unittest.TestCase):
 
     def test_a_pane_too_narrow_for_a_second_line_gets_one(self):
         self.assertEqual(len(self.lines(4)), 1)
-        self.assertEqual(len(self.lines(6)), 2)
+        self.assertGreaterEqual(len(self.lines(6)), 2)
 
     def test_no_line_is_wider_than_the_pane_less_one(self):
         for width in range(0, 71):

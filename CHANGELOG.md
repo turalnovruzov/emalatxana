@@ -2,6 +2,11 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.7.1 — 2026-10-18
+
+- The panel uses your terminal's own background again, as before 2.6.0.
+- A session's whole status shows under its name: a long one wraps onto as many lines as it needs instead of being cut off.
+
 ## 2.7.0 — 2026-10-18
 
 - On `emx remote`, Ctrl+V in a session's pane pastes the image on your laptop's clipboard into that session as a file path, so Claude Code can read it. Your laptop sends the image to the server, which keeps it in a private folder for 7 days.

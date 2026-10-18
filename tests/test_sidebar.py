@@ -3937,21 +3937,25 @@ class TwoLineRowsDrawn(AppCase):
     def rows_of(self, sid):
         return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
 
-    def test_a_live_row_is_two_lines_the_second_from_column_3(self):
+    def test_a_live_row_is_the_name_then_its_whole_status_from_column_3(self):
         ys = self.rows_of("a")
-        self.assertEqual(ys, [ys[0], ys[0] + 1])
-        first, second = (self.screen()[y] for y in ys)
+        self.assertEqual(ys, list(range(ys[0], ys[0] + len(ys))))
+        self.assertGreater(len(ys), 2)
+        first, *rest = (self.screen()[y] for y in ys)
         self.assertTrue(first.startswith(" ✻ emx-test-a"), first)
-        self.assertTrue(second.startswith("   Needs input · approve Bash"), second)
-        self.assertTrue(second.endswith("…"), second)
-        self.assertLessEqual(core.display_width(second), 39)
+        self.assertTrue(rest[0].startswith("   Needs input · approve Bash"), rest[0])
+        for line in rest:
+            self.assertTrue(line.startswith("   ") and line[3] != " ", line)
+            self.assertLessEqual(core.display_width(line), 39)
+        self.assertEqual(" ".join(line.strip() for line in rest), "Needs input · " + LONG_WAIT)
+        self.assertFalse(any("…" in line for line in rest))
 
     def test_the_main_marker_is_on_the_first_line_only(self):
         self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
         self.app.draw()
-        first, second = (self.screen()[y] for y in self.rows_of("a"))
+        first, *rest = (self.screen()[y] for y in self.rows_of("a"))
         self.assertTrue(first.startswith("▎"), first)
-        self.assertFalse(second.startswith("▎"), second)
+        self.assertFalse(any(line.startswith("▎") for line in rest), rest)
 
     def test_an_idle_row_in_the_by_state_view_still_says_idle(self):
         self.poll(idle_row("c", "/p/alpha"), session("b", "/p/alpha"))
@@ -3988,7 +3992,7 @@ class TwoLineRowsDrawn(AppCase):
             self.app.cursor = ("session", sid)
             self.app.draw()
             ys = self.rows_of(sid)
-            self.assertEqual(len(ys), 2, sid)
+            self.assertGreater(len(ys), 2, sid)
             self.assertTrue(self.screen()[ys[0]].startswith(" ✻ emx-test-" + sid), self.screen())
             with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, ys[-1], 0, curses.BUTTON1_CLICKED)):
                 self.opened.clear()
@@ -4042,7 +4046,7 @@ class TwoLineRowsDrawn(AppCase):
         self.app.handle_key(" ")
         self.app.draw()
         self.assertTrue(self.app.peeking)
-        self.assertEqual(len(self.rows_of("a")), 2)
+        self.assertGreater(len(self.rows_of("a")), 1)
         box = next(y for y, line in enumerate(self.screen()) if line.startswith("╭─"))
         self.assertLess(self.rows_of("a")[-1], box)
 
@@ -4463,9 +4467,6 @@ class Tones(unittest.TestCase):
     def test_the_selection_bar_is_237_focused_236_not(self):
         self.assertEqual(sidebar.BAR_BG, {"focused": 237, "unfocused": 236})
 
-    def test_the_panel_ground_is_235(self):
-        self.assertEqual(sidebar.PANEL_GROUND, 235)
-
 
 class IdleRows(AppCase):
     def drawn(self, *sessions, width=60):
@@ -4506,7 +4507,9 @@ class IdleRows(AppCase):
 
 
 class PanelGround(AppCase):
-    def test_housekeep_paints_the_panel_once(self):
+    """2.6.0 gave the panel its own background; it is the terminal's again, and a workspace upgrading from 2.6.0 loses the option."""
+
+    def test_housekeep_resets_the_panel_style_to_the_terminals_once(self):
         calls = []
 
         class Housekeeping(ClientTmux):
@@ -4522,7 +4525,8 @@ class PanelGround(AppCase):
         self.app.me = "%1"
         for _ in range(2):
             sidebar.App.housekeep(self.app, False)
-        self.assertEqual([c for c in calls if c[0] == "set_pane_option"], [("set_pane_option", ("%1", "window-style", "bg=colour235"))])
+        self.assertEqual([c for c in calls if c[0] == "unset_pane_option"], [("unset_pane_option", ("%1", "window-style"))])
+        self.assertEqual([c for c in calls if c[0] == "set_pane_option"], [])
 
 
 class KeyWording(AppCase):
