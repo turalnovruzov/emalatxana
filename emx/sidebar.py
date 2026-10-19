@@ -94,7 +94,8 @@ NARROW_HELP = (
     ("↵ Enter", "open in the Claude app; with no link, here. On a header, fold"),
     ("t →", "open here, in the terminal"),
     ("‹ ← ^\\ ^q", "back to the sessions: tap ‹ sessions, or ← on an empty prompt"),
-    ("click", "a tap opens a session; on a header, folds"),
+    ("a", "actions: open, peek, rename, pin, interrupt, close; Esc closes them"),
+    ("click", "a tap selects a row; on the selected row, its actions"),
     ("↑↓ j k", "move"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
@@ -136,6 +137,8 @@ ROUTINES_NONE = "No systemd user timers on this machine."
 ROUTINES_LOADING = "Reading routines…"
 OPEN_GONE = "That session isn't listed any more."
 APP_LINE = "↗ open in the Claude app"
+MENU_CLOSE_NOTE = "(it goes offline in the app)"
+MENU_ARMED = "again to close"
 NO_APP_DETAIL = "no app: opens here"
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
@@ -161,6 +164,7 @@ TONES = {
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
+MENU_TONES = {"menu-frame": "muted", "menu-key": "accent", "menu-close": "error", "menu-note": "muted"}
 CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
 
 
@@ -1887,6 +1891,8 @@ class App:
         self.slot_active = False
         self.links = {}
         self.shown_link = None
+        self.menu = None
+        self.started_note = None
         self.palette = Palette()
         self.main_pane = None
         self.applied = None
@@ -1897,6 +1903,7 @@ class App:
         self.prompt = None
         self.row_map = {}
         self.row_actions = {}
+        self.menu_at = None
         self.scroll = 0
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state), primary=self.primary)
@@ -2253,7 +2260,7 @@ class App:
     def update_busy(self) -> bool:
         """Whether something open in the panel, or a worker it started, would be lost to a switch onto a new version now."""
         held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view, self.routines_view,
-                self.starter, self.closer, self.renamer, self.namer)
+                self.starter, self.closer, self.renamer, self.namer, self.menu)
         return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row()
 
     def check_update(self) -> None:
@@ -2994,6 +3001,10 @@ class App:
         self.fresh[sid] = time.monotonic()
         self.wanted_cursor = ("session", sid)
         self.poller.wake.set()
+        if self.narrow:
+            # A phone stays on its panel, the new session under the cursor, so it can go to the Claude app from there.
+            self.started_note = (sid, session.name)
+            return
         self.switch_to(sid, core.NEW, (session, True))
         if not self.notice_error:
             self.say("Session started.")
@@ -3028,8 +3039,20 @@ class App:
             if not item or item[0] == "group":
                 return
             self.close_find()
+        if self.menu is not None:
+            if item and item[0] == "menu":
+                self.menu_key(item[1])
+                return
+            self.close_menu()
         if item and item[0] == "link":
             self.open_in_app(self.session(item[1]))
+            return
+        if self.narrow and item and item[0] == "session":
+            # A tap selects, as a phone has no hover; a tap on the row already selected opens its actions.
+            if item == self.cursor:
+                self.open_menu()
+            else:
+                self.cursor, self.wanted_cursor = item, None
             return
         self.activate(item)
 
@@ -3038,7 +3061,12 @@ class App:
             if self.notice == self.whats_new:
                 self.say("")
             self.whats_new = None
-        self.confirm = core.confirm_after_key(self.confirm, key == CTRL_X, key == curses.KEY_RESIZE)
+        if key != curses.KEY_RESIZE:
+            self.started_note = None
+        # In the actions menu `x` is the close key, and a tap on its line is the menu's to judge.
+        in_menu = self.menu is not None
+        close_key = key == CTRL_X or (in_menu and key == "x")
+        self.confirm = core.confirm_after_key(self.confirm, close_key, key == curses.KEY_RESIZE or (in_menu and key == curses.KEY_MOUSE))
         if self.peeking and key not in PEEK_KEYS and key != curses.KEY_RESIZE:
             self.peeking = False
         if key == curses.KEY_MOUSE:
@@ -3050,6 +3078,8 @@ class App:
                 if not self.notice:
                     # A notice that took the room is kept rather than replaced by this one.
                     self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
+        elif self.menu is not None:
+            self.menu_key(key)
         elif self.prompt is not None:
             self.prompt_key(key)
         elif self.rename_edit is not None:
@@ -3084,6 +3114,8 @@ class App:
                 self.activate(self.cursor)
         elif key == "t" and self.narrow:
             self.open_here()
+        elif key == "a" and self.narrow:
+            self.open_menu()
         elif key == CTRL_S:
             self.toggle_view()
         elif key == CTRL_X:
@@ -3134,6 +3166,73 @@ class App:
         except TmuxError:
             # The link is on screen all the same.
             pass
+
+    def open_menu(self) -> None:
+        """`a` on a phone, or a tap on the selected row: the session's actions in a box under its row, each a plain key or a tap."""
+        s = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
+        if s is None:
+            return
+        self.menu = s.id
+        self.peeking = False
+        self.say("")
+
+    def close_menu(self) -> None:
+        self.menu = None
+        self.confirm = None
+
+    def menu_lines(self, s) -> list:
+        """(key, label, note) for each line of the actions menu, as the App 3 board draws them."""
+        link = self.link_for(s)
+        armed = isinstance(self.confirm, core.Confirm) and self.confirm.id == s.id
+        lines = [("↵", "open in the Claude app", "")] if link else []
+        lines += [
+            ("t", "open here, in the terminal", ""), ("␣", "peek", ""), ("r", "rename", ""),
+            ("p", "unpin" if s.id in core.pinned_ids(self.prefs) else "pin to top", ""), ("i", "interrupt", ""),
+            ("x", MENU_ARMED if armed else "close", "" if armed or not link else MENU_CLOSE_NOTE),
+        ]
+        return lines
+
+    def menu_key(self, key) -> None:
+        """A key, or the key of the line tapped, in the actions menu. Esc, or any key the menu has no line for, closes it."""
+        s = self.session(self.menu)
+        if s is None:
+            self.close_menu()
+            return
+        if key == "x":
+            self.menu_close(s)
+            return
+        self.close_menu()
+        if key in ENTER_KEYS or key == "↵":
+            if self.link_for(s):
+                self.open_in_app(s)
+            else:
+                self.open_here()
+        elif key == "t":
+            self.open_here()
+        elif key in (" ", "␣"):
+            self.open_peek()
+        elif key == "r":
+            self.start_rename()
+        elif key == "p":
+            self.toggle_pin()
+        elif key == "i":
+            self.start_interrupt(s)
+
+    def menu_close(self, s) -> None:
+        """`x` in the menu: the first arms the close, as a first Ctrl+X does but without interrupting; the second within the confirm time closes it."""
+        if s.id in self.closing:
+            self.close_menu()
+            self.say(core.still_closing(s.name))
+            return
+        blocked = core.close_blocked(bool(self.list_error), self.closer.current if self.closer else None)
+        if blocked:
+            self.close_menu()
+            self.say(blocked)
+            return
+        self.confirm, act = core.press_close(self.confirm, ("session", s.id), s, time.monotonic(), self.view())
+        if act is not None:
+            self.close_menu()
+            self.start_close(act)
 
     def open_here(self) -> None:
         """`t` on a phone: the session under the cursor, full width in the terminal; on a header, nothing."""
@@ -3300,6 +3399,12 @@ class App:
 
     def narrow_hints(self) -> tuple:
         """The key hints a phone's bar offers over its panel: the phone's own on a row or a header, the panel's own anywhere else."""
+        if self.menu is not None:
+            return (core.MENU_HINT,)
+        if self.started_note is not None:
+            sid, name = self.started_note
+            started = self.session(sid)
+            return (f"Started {name}.  " + ("↵ open in app" if started is not None and self.link_for(started) else "↵ open"),)
         held = (self.confirm, self.history_view, self.routines_view, self.prompt, self.find, self.rename_edit)
         if any(v is not None for v in held) or self.peeking or self.help or not self.loaded or not self.sessions:
             return self.bar_hints()
@@ -3539,10 +3644,14 @@ class App:
         now_ms = time.time() * 1000
         rows = {}
         self.row_actions = {}
+        self.menu_at = None
         for line in lines:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
                 armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
+                if self.menu == session.id:
+                    # The menu's own `x` line says it is armed.
+                    armed = None
                 # A row repeats the laptop's key for it; a phone's keys are in its bar.
                 selected = line == self.cursor and self.focused is not False and not self.narrow
                 inline = core.session_inline(session, not self.list_error) if selected else None
@@ -3557,10 +3666,37 @@ class App:
         """The rows a phone adds under the selected session: the Claude app's link when it has one. A tap on one does what it says, noted in `row_actions`."""
         if s.id in self.closing or (self.rename_edit is not None and self.rename_edit["id"] == s.id):
             return []
+        if self.menu == s.id:
+            return self.menu_rows(s, line, at)
         if core.app_line(AGENT, self.link_for(s)) != "link":
             return []
         self.row_actions[line] = {at: ("link", s.id)}
         return [[(core.ROW_LEAD, APP_LINE, "link")]]
+
+    def menu_rows(self, s, line, at: int) -> list:
+        """The actions menu as rows of parts: a box under the row, titled with its name, a line per action."""
+        width = self.scr.getmaxyx()[1]
+        box = max(8, width - 5)
+        inner = box - 4
+        title = core.fit(s.name, max(1, box - 6))
+        rows = [[(2, "╭─ ", "menu-frame"), (5, title, "menu-title"),
+                 (5 + core.display_width(title), " " + "─" * max(0, box - 5 - core.display_width(title)) + "╮", "menu-frame")]]
+        actions = {}
+        for key, label, note in self.menu_lines(s):
+            tone = "menu-close" if label == MENU_ARMED else "menu-text"
+            text = core.fit(label + (" " + note if note else ""), max(1, inner - 3))
+            parts = [(2, "│", "menu-frame"), (4, key, "menu-close" if key == "x" else "menu-key")]
+            if note and text.endswith(note):
+                parts += [(7, label, tone), (8 + core.display_width(label), note, "menu-note")]
+            else:
+                parts.append((7, text, tone))
+            parts.append((2 + box - 1, "│", "menu-frame"))
+            actions[at + len(rows)] = ("menu", key)
+            rows.append(parts)
+        rows.append([(2, "╰" + "─" * max(0, box - 2) + "╯", "menu-frame")])
+        self.row_actions[line] = actions
+        self.menu_at = (line, at)
+        return rows
 
     def cursor_rows(self, layout: tuple) -> int:
         """How many screen rows the cursor's line takes in `layout`, 1 when the cursor is not on a listed line."""
@@ -3587,9 +3723,12 @@ class App:
                     self.row_map[first + i] = action
             selected = core.selection_bar(line == self.cursor, self.focused is not False)
             shown = [r for r in range(first, y) if top <= r < top + height]
+            # The actions menu sits under its row, off the row's selection bar.
+            barred = y if self.menu_at is None or self.menu_at[0] != line else first + self.menu_at[1]
             if selected:
                 for r in shown:
-                    self.put(r, 0, " " * width, self.palette.attr("plain", selected))
+                    if r < barred:
+                        self.put(r, 0, " " * width, self.palette.attr("plain", selected))
             if line[0] == "group":
                 self.draw_header(first, groups[line[1]], selected, line[1] == cursor_group, width,
                                  core.header_label(self.confirm, groups[line[1]], self.closing))
@@ -3664,6 +3803,10 @@ class App:
                     self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
                 self.put(y, 1, core.session_glyph(s, frame), attr(glyph_tone))
             for x, text, part in parts:
+                if part.startswith("menu-"):
+                    tone = MENU_TONES.get(part, "plain")
+                    self.put(y + i, x, text, pal.attr(tone) | (curses.A_BOLD if part == "menu-title" else 0))
+                    continue
                 if part == "link":
                     self.put(y + i, x, text, pal.attr("accent", selected) | curses.A_UNDERLINE)
                     continue
@@ -3827,6 +3970,8 @@ class App:
                 self.confirm = None
             if core.notice_expired(self.notice_until, now):
                 self.say("")
+            if self.menu is not None and (not self.narrow or self.cursor != ("session", self.menu) or self.session(self.menu) is None):
+                self.close_menu()
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:
                 self.last_housekeep = now
                 self.housekeep(fresh_list)
