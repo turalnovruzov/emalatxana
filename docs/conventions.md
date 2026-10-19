@@ -359,10 +359,10 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: ``sidebar.bar_format([(session_name, "muted", False)])``
 4. **Gotcha**: escape after cutting with `fit()`, never before, or a cut can split a doubled `##` and leave a lone `#`. Set the option on the session (`-t =emx:`), not globally.
 
-### Phone behaviour is gated on the window's width, never writes prefs, and the wide path is held by a golden
+### Phone behaviour is gated on the window's width, never writes the laptop's layout prefs, and the wide path is held by a golden
 
-1. **Rule**: anything that behaves differently on a phone is gated on `core.narrow(window_width)` in Python and on `NARROW_WINDOW` (the window narrower than `core.NARROW_BELOW`) in a tmux binding, with the laptop's behaviour as the other branch. A narrow view never writes prefs: zoom, hidden panel and widths saved are the laptop's. Before a change to a path the laptop also takes, what that path gives is captured from the previous release tag's code into a committed fixture, and a test holds the wide output to it byte for byte.
-2. **Why**: in #67 every attached device gets its own view, and the laptop looks and works as it did before. A width check in one place and the prefs shared by every view mean a phone can never move the laptop's layout, and a golden from the old tag catches a wide change that a test computed by the code under test would not.
+1. **Rule**: anything that behaves differently on a phone is gated on `core.narrow(window_width)` in Python and on `NARROW_WINDOW` (the window narrower than `core.NARROW_BELOW`) in a tmux binding, with the laptop's behaviour as the other branch. A narrow view never writes the layout prefs (the panel's width, whether it is hidden, the zoom): only the home view, and only while wide, writes them; the prefs every view shares (pins, favourites, recent folders) any view writes, a phone too. Before a change to a path the laptop also takes, what that path gives is captured from the previous release tag's code into a committed fixture, and a test holds the wide output to it byte for byte.
+2. **Why**: in #67 every attached device gets its own view, and the laptop looks and works as it did before. A width check in one place, and the layout prefs left to the laptop, mean a phone can never move the laptop's layout, and a golden from the old tag catches a wide change that a test computed by the code under test would not.
 3. **Minimal example**:
    ```python
    if self.narrow:            # core.narrow(self.window_width)
