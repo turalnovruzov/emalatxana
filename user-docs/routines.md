@@ -4,15 +4,13 @@ If your server runs routines as systemd user timers, `R` in the panel opens a vi
 
 The view only reads. It never starts, stops or changes a routine, and it does not open a run or read what a run printed. Pass or fail comes from the exit code alone.
 
-## List your routines
+## Which routines show
 
-emx shows the routines you list, in a file called `routines` beside the prefs file (`emx docs reference`), by default `~/.config/emx/routines`. One timer name per line; blank lines and lines starting with `#` are ignored, and `.timer` is optional. To find the names on the server:
+Every systemd user timer on the machine, in name order. There is nothing to list: emx reads them from systemd when the view opens and again every minute while it is open, so a new timer appears and a removed one disappears on the next read. A `routines` file from an earlier version is ignored; you can delete it. To see the same set yourself:
 
 ```
 systemctl --user list-timers --all
 ```
-
-The file is read each time the view opens and again every minute while it is open.
 
 ## What each routine shows
 
@@ -25,6 +23,10 @@ The file is read each time the view opens and again every minute while it is ope
 Missed times come from the journal, checked against systemd's own record of the routine's last start. A routine that was scheduled and has no run in the past 24 hours shows each of those times as `⚠ missed`. When the journal holds nothing for a routine but systemd says it started in the past 24 hours (the journal may have been rotated away), the routine shows that run and no missed times.
 
 When the journal can't be read, each routine shows the journal's error in red under its name, its latest run from systemd's own record, and no missed times; `unknown` if it was due and emx can see no run at all.
+
+## When there is nothing to show
+
+With no user timers, the view says "No systemd user timers on this machine."
 
 ## On a machine without systemd
 

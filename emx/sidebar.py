@@ -108,7 +108,7 @@ HISTORY_EMPTY = "No notifications yet."
 ROUTINES_SECONDS = 60
 ROUTINES_HINT = "↑↓ scroll · R or Esc back"
 ROUTINES_TITLE = "Routines · past 24 hours"
-ROUTINES_EMPTY = "No routines listed. Put one timer name per line in this file:"
+ROUTINES_NONE = "No systemd user timers on this machine."
 ROUTINES_LOADING = "Reading routines…"
 OPEN_GONE = "That session isn't listed any more."
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
@@ -645,7 +645,7 @@ class RoutinesReader(threading.Thread):
 
     def run(self) -> None:
         try:
-            self.result = routines.read(core.routines_path(), time.time())
+            self.result = routines.read(time.time())
         except Exception as exc:
             self.result = (None, core.error_line(exc))
 
@@ -3278,8 +3278,7 @@ class App:
         if self.routines_error:
             return [(t, "error") for t in core.wrap_words(self.routines_error, inner)]
         if not self.routine_views:
-            path = core.short_path(str(core.routines_path()), inner, self.home)
-            return [(t, "muted") for t in core.wrap_words(ROUTINES_EMPTY, inner)] + [(path, "plain")]
+            return [(t, "muted") for t in core.wrap_words(ROUTINES_NONE, inner)]
         rows, now = [], time.time()
         for view in self.routine_views:
             if rows:

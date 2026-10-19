@@ -5038,12 +5038,12 @@ class Routines(unittest.TestCase):
     def runs(self, *lines, active=frozenset()):
         return core.journal_runs("\n".join(lines), frozenset(active))
 
-    def test_names_drop_comments_blanks_suffixes_and_duplicates(self):
-        text = "backup-nightly\n# note\n\nreport-weekly.timer\nbackup-nightly.service\n"
-        self.assertEqual(core.routine_names(text), ["backup-nightly", "report-weekly"])
-
-    def test_the_list_lives_beside_the_prefs(self):
-        self.assertEqual(core.routines_path({"EMX_CONFIG_HOME": "/x"}), Path("/x/emx/routines"))
+    def test_timer_units_take_the_first_timer_token_of_each_row(self):
+        text = ("backup-nightly.timer loaded active waiting Nightly backup\n"
+                "● gone.timer not-found inactive dead gone.timer\n\n"
+                "backup-nightly.timer loaded active waiting Nightly backup\n"
+                "-x.timer loaded active waiting x\n")
+        self.assertEqual(core.timer_units(text), ["backup-nightly.timer", "gone.timer"])
 
     def test_show_blocks_key_by_id_whatever_their_order(self):
         text = "Id=backup-nightly.timer\nLoadState=loaded\nUnit=backup-job.service\n\nLoadState=not-found\nId=gone.timer\nUnit=\n"

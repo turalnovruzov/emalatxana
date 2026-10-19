@@ -1,4 +1,4 @@
-"""Reads the routines he listed from systemd's user timers and journal. It only reads: `systemctl show`, `journalctl` and `systemd-analyze calendar`, never a verb that changes a unit."""
+"""Reads every systemd user timer, with its journal. It only reads: `systemctl list-units` and `show`, `journalctl` and `systemd-analyze calendar`, never a verb that changes a unit."""
 
 from __future__ import annotations
 
@@ -52,27 +52,21 @@ def _slots(timer: dict, now: float, cache: dict) -> tuple:
     return sorted(set(slots)), capped
 
 
-def read(path, now: float) -> tuple:
-    """(views, None), or (None, one line). A missing list file is no routines, not an error."""
+def read(now: float) -> tuple:
+    """(views, None), or (None, one line). No user timers is no routines, not an error."""
     try:
         if shutil.which("systemctl") is None:
             return None, NO_SYSTEMD
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                names = core.routine_names(fh.read())
-        except FileNotFoundError:
+        out, error = _run(["systemctl", "--user", "list-units", "--type=timer", "--all", "--plain", "--no-legend", "--no-pager"])
+        if error:
+            return None, error
+        asked = core.timer_units(out)
+        if not asked:
             return [], None
-        except OSError as exc:
-            return None, f"couldn't read {path}: {exc.strerror or exc}"
-        if not names:
-            return [], None
-        asked = [f"{name}.timer" for name in names if not name.startswith("-")]
-        timers = {}
-        if asked:
-            out, error = _run(["systemctl", "--user", "show", "--timestamp=unix", "-p", TIMER_PROPS, *asked])
-            if error:
-                return None, error
-            timers = core.show_blocks(out)
+        out, error = _run(["systemctl", "--user", "show", "--timestamp=unix", "-p", TIMER_PROPS, *asked])
+        if error:
+            return None, error
+        timers = core.show_blocks(out)
         names_of = sorted({t["Unit"] for t in timers.values() if t.get("LoadState") != "not-found" and t.get("Unit")})
         services, runs, journal_error = {}, {}, None
         if names_of:
@@ -85,8 +79,9 @@ def read(path, now: float) -> tuple:
                            f"--output-fields={JOURNAL_FIELDS}", *[arg for svc in names_of for arg in ("-u", svc)]])
             runs = core.journal_runs(log or "", active)
         cache, views = {}, []
-        for name in names:
-            timer = timers.get(f"{name}.timer")
+        for asked_unit in asked:
+            name = asked_unit[: -len(".timer")]
+            timer = timers.get(asked_unit)
             loaded = timer is not None and timer.get("LoadState") != "not-found"
             unit = timer.get("Unit", "") if loaded else ""
             slots, capped = _slots(timer, now, cache) if loaded else ([], False)
