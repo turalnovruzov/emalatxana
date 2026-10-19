@@ -3004,6 +3004,8 @@ class App:
         if self.narrow:
             # A phone stays on its panel, the new session under the cursor, so it can go to the Claude app from there.
             self.started_note = (sid, session.name)
+            if not self.notice_error:
+                self.say("")
             return
         self.switch_to(sid, core.NEW, (session, True))
         if not self.notice_error:
@@ -3747,7 +3749,7 @@ class App:
         tones = {"arrow": "muted", "dir": "path", "name": name_tone, "count": "muted", "hint": "muted"}
         collapsed = group.key in self.collapsed()
         parts = core.header_layout(view, group.key, len(group.sessions), collapsed, width)
-        if selected and self.focused is not False:
+        if selected and self.focused is not False and not self.narrow:
             parts = core.place_inline(parts, core.header_inline(collapsed), width)
         for x, text, part in parts:
             attr = self.palette.attr(tones[part], selected)

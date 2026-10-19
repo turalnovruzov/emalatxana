@@ -7858,6 +7858,17 @@ class PhonePanel(AppCase):
         self.app.draw()
         self.assertTrue(any("→ open" in line for line in self.scr.cells.values()), self.scr.cells)
 
+    def test_a_selected_header_repeats_no_laptop_key_on_a_phone(self):
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.focused = True
+        self.app.cursor = ("group", self.app.groups[0].key)
+        self.app.draw()
+        self.assertFalse(any("Enter fold" in line for line in self.scr.cells.values()), self.scr.cells)
+        self.app.window_width = 0
+        self.app.draw()
+        self.assertTrue(any("Enter fold" in line for line in self.scr.cells.values()), self.scr.cells)
+
     def test_side_and_width_keys_do_nothing_on_a_phone(self):
         before = dict(self.app.prefs)
         self.app.tmux = PhoneTmux()
@@ -8226,8 +8237,10 @@ class ActionsMenu(AppCase):
         done = sidebar.Starter(FakeEngine(), "/p/alpha", "add a dark mode toggle")
         done.result = (new, None)
         self.app.starter = done
+        self.app.say("Starting a session…")
         self.app.finish_start()
         self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.notice, "")
         self.assertEqual(self.app.wanted_cursor, ("session", KEY_A))
         self.assertEqual(self.app.narrow_hints(), ("Started dark-toggle.  ↵ open",))
         self.poll(new, session("b", "/p/alpha", "working"))
