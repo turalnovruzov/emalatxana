@@ -337,6 +337,19 @@ class Tmux:
         target = f"={agent_session(key)}:"
         return f"exec env -u TMUX tmux -L {shlex.quote(self.socket)} attach-session -t {shlex.quote(target)}"
 
+    def claim_width(self, slot: str, key: str) -> None:
+        """Make the viewer running in `slot` the latest client of session `key`, so the session's window takes this view's width again (`window-size latest`) without restarting the viewer.
+
+        A viewer left attached while its device was away is not the latest
+        client once another device used the session; switching it to the
+        session it already shows counts as using it.
+        """
+        if not _PANE_ID.fullmatch(slot):
+            raise TmuxError(f"not a pane id: {slot!r}")
+        tty = self.run("display-message", "-p", "-t", slot, "#{pane_tty}").strip()
+        if tty:
+            self.run("switch-client", "-c", tty, "-t", f"={agent_session(key)}:")
+
     def session_option(self, name: str) -> str:
         return self.run("show-options", "-qv", "-t", f"={SESSION}:", name).strip()
 

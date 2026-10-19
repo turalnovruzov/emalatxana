@@ -1155,6 +1155,20 @@ class Views(PrivateServer):
         self.assertEqual([line.split("\t")[1] for line in self.clients()], [SESSION])
         self.assertFalse(self.tmux.has_agent_session(self.key))
 
+    def test_a_viewer_left_attached_claims_the_sessions_width_back_without_restarting(self):
+        self.show_in(self.main, self.key)
+        slot2, _, client2 = self.second_view()
+        fcntl.ioctl(self.client_fds[client2], termios.TIOCSWINSZ, struct.pack("HHHH", 24, 48, 0, 0))
+        self.wait_for(lambda: self.show(slot2, "#{window_width}") == "48", "the second device's narrow terminal")
+        self.show_in(slot2, self.key)
+        mine, other = self.show(self.main, "#{pane_width}"), self.show(slot2, "#{pane_width}")
+        self.assertNotEqual(mine, other)
+        self.wait_for(lambda: self.show(self.agent, "#{window_width}") == other, "the session to take the other view's width")
+        viewer = self.show(self.main, "#{pane_pid}")
+        self.tmux.claim_width(self.main, self.key)
+        self.wait_for(lambda: self.show(self.agent, "#{window_width}") == mine, "the session to take this view's width back")
+        self.assertEqual(self.show(self.main, "#{pane_pid}"), viewer)
+
     def test_the_toggle_key_acts_only_in_the_view_it_is_pressed_in(self):
         self.tmux.bind_toggle("C-\\")
         slot2, panel2, client2 = self.second_view()

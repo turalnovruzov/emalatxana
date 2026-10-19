@@ -2054,12 +2054,15 @@ class App:
         """Keep the slot showing something that is there, and hand it back and forth with the view's clients.
 
         A viewer whose session's pane has gone, or that has exited, gives way
-        to the placeholder. A view no client is attached to parks what it
-        shows in REOPEN_OPT, so a device that went away holds no claim on that
-        session's width; when a client attaches again, or at this panel's
-        start with one attached (an upgrade respawns the panel under an
-        attached laptop), the session is shown again. Showing it again never
-        starts a session's process.
+        to the placeholder. A view other than `emx` with no client attached
+        parks what it shows in REOPEN_OPT, so a device that went away holds no
+        claim on that session's width; when a client attaches again, or at
+        this panel's start with one attached (an upgrade respawns the panel
+        under an attached laptop), the session is shown again. The home view
+        keeps its viewer while the laptop is away, so the session is there the
+        moment he comes back, as before 2.10.0; on his return its viewer
+        claims the session's width back from a device that used it meanwhile.
+        Showing it again never starts a session's process.
         """
         if slot.role == "viewer" and slot.view:
             held = core.live_or_dead_agent(self.tmux.panes(), slot.view)
@@ -2069,12 +2072,18 @@ class App:
         attached = self.tmux.client_state()[0]
         was, self.attached = self.attached, attached
         if not attached:
-            if slot.role == "viewer" and slot.view:
+            if not self.primary and slot.role == "viewer" and slot.view:
                 self.tmux.set_view_option(REOPEN_OPT, slot.view)
                 self.park(slot)
             return
         if was:
             return
+        if self.primary and slot.role == "viewer" and slot.view:
+            try:
+                self.tmux.claim_width(slot.id, slot.view)
+            except TmuxError:
+                # Best effort: the session still shows, at whatever width its window has.
+                pass
         key = self.tmux.view_option(REOPEN_OPT)
         if not key:
             return

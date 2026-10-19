@@ -7487,6 +7487,9 @@ class ViewTmux(ClientTmux):
     def link_agent(self, window, key, inert):
         self.calls.append(("link_agent", window, key))
 
+    def claim_width(self, slot, key):
+        self.calls.append(("claim_width", slot, key))
+
     def viewer_command(self, key):
         return f"viewer {key}"
 
@@ -7549,7 +7552,7 @@ class FollowerPanel(AppCase):
 
 
 class SlotTending(AppCase):
-    """A view's slot shows its session through a viewer, parks it while no client is attached, and shows it again on the next attach."""
+    """A view's slot shows its session through a viewer; a view other than `emx` parks it while no client is attached and shows it again on the next attach, and `emx` keeps it."""
 
     VIEWER = Pane("%2", "@1", False, "viewer", "", 100, 141, view=KEY_A)
 
@@ -7565,10 +7568,25 @@ class SlotTending(AppCase):
             ("set_pane_option", "%2", sidebar.ROLE, "placeholder"), ("unset_pane_option", "%2", sidebar.VIEW_OPT),
         ]
 
-    def test_a_view_with_no_client_parks_its_session_and_remembers_it(self):
+    def test_a_view_other_than_emx_with_no_client_parks_its_session_and_remembers_it(self):
+        self.app.primary = False
         self.app.attached = 1
-        calls = self.tend(ViewTmux(slot=self.VIEWER, attached=0))
+        calls = self.tend(ViewTmux(view="emx-view-1", slot=self.VIEWER, attached=0))
         self.assertEqual(calls, [("set_view_option", sidebar.REOPEN_OPT, KEY_A)] + self.parked())
+
+    def test_the_home_view_with_no_client_keeps_showing_its_session(self):
+        self.assertTrue(self.app.primary)
+        self.app.attached = 1
+        self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER, attached=0)), [])
+
+    def test_the_laptop_coming_back_claims_the_sessions_width_with_no_restart_of_the_viewer(self):
+        self.app.attached = 0
+        self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER, attached=1)), [("claim_width", "%2", KEY_A)])
+
+    def test_another_views_device_coming_back_claims_nothing(self):
+        self.app.primary = False
+        self.app.attached = 0
+        self.assertEqual(self.tend(ViewTmux(view="emx-view-1", slot=self.VIEWER, attached=1)), [])
 
     def test_the_next_attach_shows_it_again_and_clears_the_note(self):
         tmux = ViewTmux(attached=1)
