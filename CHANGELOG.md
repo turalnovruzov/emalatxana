@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.10.0 — 2026-10-18
+
+- The Routines view shows every systemd user timer on the machine; there is no list to keep. A new routine appears and a removed one disappears the next time the view reads, within a minute.
+- The `routines` file beside `prefs.json` is no longer read; you can delete it.
+- With no user timers, the view says so.
+
 ## 2.9.0 — 2026-10-18
 
 - The bar shows the keys for whatever the cursor is on: the rest keys when nothing is selected or the panel is not in focus, a session's own keys by its state (answer when it needs input, interrupt while it works, pin when it is done), a project header's keys (fold, new here, close group), the peek's keys, and `n new session` when there are no sessions. A key shows only when it really does that now.
