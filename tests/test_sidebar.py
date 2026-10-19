@@ -7433,6 +7433,27 @@ class Routines(AppCase):
         self.assertIn("No journal files were found.", drawn)
         self.assertTrue(any(t.startswith("backup-nightly") for t in drawn), drawn)
 
+    def test_a_failed_second_listing_shows_above_the_routines(self):
+        message = "Switched-off timers couldn't be read: x"
+        self.answer = (self.answer[0], message)
+        self.app.scr = self.scr = TallScr(width=300)
+        self.app.handle_key("R")
+        self.settle()
+        drawn = self.drawn()
+        error_at = next(i for i, t in enumerate(drawn) if message in t)
+        routine_at = next(i for i, t in enumerate(drawn) if t.startswith("backup-nightly"))
+        self.assertLess(error_at, routine_at)
+
+    def test_a_failed_second_listing_with_no_loaded_timers_is_only_the_error(self):
+        message = "Switched-off timers couldn't be read: x"
+        self.answer = ([], message)
+        self.app.scr = self.scr = TallScr(width=300)
+        self.app.handle_key("R")
+        self.settle()
+        drawn = self.drawn()
+        self.assertTrue(any(message in t for t in drawn))
+        self.assertNotIn(sidebar.ROUTINES_NONE, drawn)
+
     def test_a_machine_without_systemd_gets_the_one_line(self):
         self.answer = (None, sidebar.routines.NO_SYSTEMD)
         self.app.handle_key("R")

@@ -3598,8 +3598,9 @@ class App:
         inner = max(1, width - 2)
         if self.routine_views is None and self.routines_error is None:
             return [(ROUTINES_LOADING, "muted")]
-        if self.routines_error:
-            return [(t, "error") for t in core.wrap_words(self.routines_error, inner)]
+        error_rows = [(t, "error") for t in core.wrap_words(self.routines_error, inner)] if self.routines_error else []
+        if self.routines_error and not self.routine_views:
+            return error_rows
         if not self.routine_views:
             return [(t, "muted") for t in core.wrap_words(ROUTINES_NONE, inner)]
         rows, now = [], time.time()
@@ -3607,7 +3608,7 @@ class App:
             if rows:
                 rows.append(("", "plain"))
             rows += core.routine_lines(view, inner, now)
-        return rows
+        return error_rows + [("", "plain")] + rows if error_rows else rows
 
     def draw_routines(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, ROUTINES_TITLE, curses.A_BOLD)
