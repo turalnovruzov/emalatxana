@@ -1017,7 +1017,7 @@ class CreateWorkspace(unittest.TestCase):
         with mock.patch.dict(os.environ, {"TMUX_PANE": panel}):
             self.assertEqual(sidebar.own_view(self.tmux.socket), "emx-view-1")
         self.tmux.bind_collapse(sidebar.COLLAPSE_KEY)
-        # 2.11.0: on a phone Ctrl+Q goes back from the session to the panel, which then takes the whole window.
+        # 2.12.0: on a phone Ctrl+Q goes back from the session to the panel, which then takes the whole window.
         slot = self.tmux.run("list-panes", "-t", "=emx-view-1:", "-f", "#{!=:#{@emx_role},sidebar}", "-F", "#{pane_id}").strip()
         self.tmux.select(slot)
         self.tmux.run("send-keys", "-K", "-c", client, "C-q")
