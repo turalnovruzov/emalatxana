@@ -397,6 +397,22 @@ class Tmux:
             idle = None
         return count, focus, active, idle
 
+    def copy_to_client(self, text: str) -> None:
+        """Put `text` in the clipboard of the terminal that used this view last, by the clipboard escape tmux sends it (`set-buffer -w`).
+
+        A named buffer, so a plain paste in tmux still gets his own last copy.
+        """
+        out = self.run("list-clients", "-t", f"={self.view}:", "-F", "#{client_activity}\t#{client_name}")
+        latest = []
+        for line in out.splitlines():
+            at, _, name = line.partition("\t")
+            try:
+                latest.append((float(at), name))
+            except ValueError:
+                continue
+        if latest:
+            self.run("set-buffer", "-w", "-t", max(latest)[1], "-b", "emx-link", "--", text)
+
     def client_ttys(self) -> list:
         """The tty of each client attached to this view."""
         out = self.run("list-clients", "-t", f"={self.view}:", "-F", "#{client_tty}")

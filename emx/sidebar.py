@@ -20,7 +20,7 @@ from pathlib import Path
 import emx
 from emx import __version__, core, install, notify, remote, routines
 from emx.cli import CONFIG, PLACEHOLDER_TEXT, read_changelog, self_command
-from emx.engine import AGENT, Engine, allowed_transcript, claude_home
+from emx.engine import AGENT, Engine, allowed_transcript, bridge_file, bridge_link, claude_home
 from emx.tmux import (
     AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT, REOPEN_OPT, ROLE, SESSION, SESSION_OPT,
     TERMINAL_OPT, VIEW_OPT, Pane, Tmux, TmuxError, is_view_session,
@@ -135,6 +135,8 @@ ROUTINES_TITLE = "Routines · past 24 hours"
 ROUTINES_NONE = "No systemd user timers on this machine."
 ROUTINES_LOADING = "Reading routines…"
 OPEN_GONE = "That session isn't listed any more."
+APP_LINE = "↗ open in the Claude app"
+NO_APP_DETAIL = "no app: opens here"
 PEEK_KEYS = (" ", "\x1b", curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 PEEK_TONES = {"body": "plain", "code": "accent", "dim": "muted"}
 PEEK_NO_ROOM = "Too short to peek."
@@ -1704,6 +1706,10 @@ class Poller(threading.Thread):
         self.voice = Voice()
         self.voice.fallback_post = self.notifier.post
         self.notices = Notices(engine.claude, self.transcripts, self.resolver, self.voice, self.notifier, core.relay_path(engine.state))
+        # Set by a phone's panel: only a narrow view offers the Claude app, so only then are Claude's files read for its links.
+        self.links_wanted = False
+        self.links = {}
+        self.link_cache = {}
 
     def poll(self) -> tuple:
         sessions, error = fetch_sessions(self.engine)
@@ -1716,7 +1722,38 @@ class Poller(threading.Thread):
                 self.summaries.want(sessions)
                 self.asks.want(sessions)
                 self.notices.want(sessions)
+        if self.links_wanted:
+            self.read_links(sessions or [])
         return sessions, None
+
+    def read_links(self, sessions: list) -> None:
+        """Each running session's Remote Control id, from Claude's file for its own pane's process; a file is read again only once it changed."""
+        panes = self.engine.tmux.panes()
+        found, cache = {}, {}
+        for s in sessions:
+            pane = core.live_viewer(panes, s.id) if s.running else None
+            if pane is None or pane.pid <= 1:
+                continue
+            try:
+                st = os.lstat(bridge_file(pane.pid))
+                stamp = (st.st_mtime_ns, st.st_ino, st.st_size)
+            except OSError:
+                stamp = None
+            seen = self.link_cache.get(pane.pid)
+            if seen is not None and seen[0] == (s.session_id, stamp):
+                bridge = seen[1]
+            else:
+                bridge = bridge_link(pane.pid, s.session_id)
+            cache[pane.pid] = ((s.session_id, stamp), bridge)
+            if bridge:
+                found[s.id] = bridge
+        self.link_cache = cache
+        with self.lock:
+            self.links = found
+
+    def take_links(self) -> dict:
+        with self.lock:
+            return dict(self.links)
 
     def workers(self) -> list:
         mine = [self.resolver, self.transcripts]
@@ -1848,6 +1885,8 @@ class App:
         self.help_scroll = 0
         self.was_narrow = False
         self.slot_active = False
+        self.links = {}
+        self.shown_link = None
         self.palette = Palette()
         self.main_pane = None
         self.applied = None
@@ -1857,6 +1896,7 @@ class App:
         self.bound = None
         self.prompt = None
         self.row_map = {}
+        self.row_actions = {}
         self.scroll = 0
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state), primary=self.primary)
@@ -2055,6 +2095,7 @@ class App:
                 self.bind_keys()
             if sidebar:
                 self.window_width = sidebar.window_width
+                self.poller.links_wanted = self.narrow
                 self.reset_ground(sidebar)
                 self.take_focus(sidebar)
                 # The hidden panel saved in prefs is the laptop's, the home view's; another view's stays its own, and a phone's zoom hides no panel.
@@ -2987,6 +3028,9 @@ class App:
             if not item or item[0] == "group":
                 return
             self.close_find()
+        if item and item[0] == "link":
+            self.open_in_app(self.session(item[1]))
+            return
         self.activate(item)
 
     def handle_key(self, key) -> None:
@@ -3034,6 +3078,8 @@ class App:
             blocked = core.open_blocked(self.starter is not None or self.awaiting_started_row(), self.cursor)
             if blocked:
                 self.say(blocked)
+            elif key in ENTER_KEYS and self.narrow and self.cursor_link():
+                self.open_in_app(self.session(self.cursor[1]))
             elif key in ENTER_KEYS or (self.cursor and self.cursor[0] == "session"):
                 self.activate(self.cursor)
         elif key == "t" and self.narrow:
@@ -3066,6 +3112,28 @@ class App:
             self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
+
+    def link_for(self, s) -> str | None:
+        """The Claude app's link for session `s`, while it runs and its claude's Remote Control id is known."""
+        return core.app_link(self.links.get(s.id)) if s is not None and s.running else None
+
+    def cursor_link(self) -> str | None:
+        if not self.cursor or self.cursor[0] != "session":
+            return None
+        return self.link_for(self.session(self.cursor[1]))
+
+    def open_in_app(self, s) -> None:
+        """A terminal cannot open the app itself: the link goes on screen, for one tap, and into the phone's clipboard."""
+        url = self.link_for(s)
+        if url is None:
+            return
+        self.say(f"Tap the link to open {s.name} in the Claude app.")
+        self.shown_link = (self.notice, url)
+        try:
+            self.tmux.copy_to_client(url)
+        except TmuxError:
+            # The link is on screen all the same.
+            pass
 
     def open_here(self) -> None:
         """`t` on a phone: the session under the cursor, full width in the terminal; on a header, nothing."""
@@ -3177,6 +3245,9 @@ class App:
             else:
                 shown = shown[:6]
             lines += [(t, attr) for t in shown]
+            if self.shown_link and self.shown_link[0] == self.notice:
+                # Cut at the edge, never at a word: the terminal app finds the link in one run of characters.
+                lines += [(t, self.color("accent")) for t in core.wrap(self.shown_link[1], width)]
         if self.prompt is not None:
             room = None if height is None else height - len(lines)
             return lines + self.prompt_lines(width, room)
@@ -3241,7 +3312,7 @@ class App:
             return core.hint_variants(core.NARROW_REST_HINTS)
         if s.id in self.closing:
             return core.hint_variants(core.CLOSING_HINTS)
-        return core.hint_variants(core.NARROW_HINTS)
+        return core.hint_variants(core.NARROW_LINK_HINTS if self.link_for(s) else core.NARROW_HINTS)
 
     def narrow_bar(self) -> list:
         counts = core.bar_counts(self.sessions)
@@ -3467,6 +3538,7 @@ class App:
         group_of = {s.id: g.key for g in self.groups for s in g.sessions}
         now_ms = time.time() * 1000
         rows = {}
+        self.row_actions = {}
         for line in lines:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
@@ -3474,8 +3546,21 @@ class App:
                 # A row repeats the laptop's key for it; a phone's keys are in its bar.
                 selected = line == self.cursor and self.focused is not False and not self.narrow
                 inline = core.session_inline(session, not self.list_error) if selected else None
-                rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height, inline)
+                # On a phone, a session whose agent has no app says it opens here; every session is Claude's so far.
+                no_app = self.narrow and core.app_line(AGENT, None) == "no-app"
+                rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height, inline, no_app)
+                if self.narrow and line == self.cursor:
+                    rows[line] = rows[line] + self.phone_rows(session, line, len(rows[line]))
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
+
+    def phone_rows(self, s, line, at: int) -> list:
+        """The rows a phone adds under the selected session: the Claude app's link when it has one. A tap on one does what it says, noted in `row_actions`."""
+        if s.id in self.closing or (self.rename_edit is not None and self.rename_edit["id"] == s.id):
+            return []
+        if core.app_line(AGENT, self.link_for(s)) != "link":
+            return []
+        self.row_actions[line] = {at: ("link", s.id)}
+        return [[(core.ROW_LEAD, APP_LINE, "link")]]
 
     def cursor_rows(self, layout: tuple) -> int:
         """How many screen rows the cursor's line takes in `layout`, 1 when the cursor is not on a listed line."""
@@ -3497,6 +3582,9 @@ class App:
             first, y = y, y + rows_taken
             if line is None or y <= top or first >= top + height:
                 continue
+            for i, action in self.row_actions.get(line, {}).items():
+                if first + i in self.row_map:
+                    self.row_map[first + i] = action
             selected = core.selection_bar(line == self.cursor, self.focused is not False)
             shown = [r for r in range(first, y) if top <= r < top + height]
             if selected:
@@ -3535,12 +3623,12 @@ class App:
 
     def session_lines(
         self, s, width: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
-        max_lines: int = 0, inline: str | None = None,
+        max_lines: int = 0, inline: str | None = None, no_app: bool = False,
     ) -> list:
         """The row's lines as `core.row_lines` gives them, with `inline` placed on the last one when it fits, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) and not core.idle(s) else core.state_word(s)
         age = core.session_age(s, now_ms)
-        detail = core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
+        detail = NO_APP_DETAIL if no_app else core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
         lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED, max_lines)
         if s.id in self.closing:
             return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
@@ -3576,6 +3664,9 @@ class App:
                     self.put(y, 0, "▎", pal.attr("accent", selected) | curses.A_BOLD)
                 self.put(y, 1, core.session_glyph(s, frame), attr(glyph_tone))
             for x, text, part in parts:
+                if part == "link":
+                    self.put(y + i, x, text, pal.attr("accent", selected) | curses.A_UNDERLINE)
+                    continue
                 if part in ("confirm", "rename"):
                     tone = "error" if part == "confirm" else "accent"
                     self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
@@ -3595,6 +3686,7 @@ class App:
             return False
         self.list_error = ""
         self.sessions = sessions
+        self.links = self.poller.take_links()
         self.history, self.history_misses = core.history_prune(self.history, [s.id for s in sessions], self.history_misses)
         self.closing = core.closing_after(self.closing, {}, [s.id for s in sessions])
         if self.rename_edit is None:

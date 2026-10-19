@@ -1553,6 +1553,27 @@ class NarrowView(PrivateServer):
         self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
         self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
 
+    def test_a_link_copied_for_the_phone_reaches_its_terminals_clipboard_and_no_other(self):
+        url = "https://claude.ai/code/session_01AbCdEfGhIjKlMnOpQrStUv"
+        laptop = self.client_fds[self.client]
+        for fd in (laptop, self.client_fds[self.phone]):
+            while select.select([fd], [], [], 0.2)[0]:
+                os.read(fd, 65536)
+        Tmux(self.tmux.socket, view="emx-view-1").copy_to_client(url)
+        want = b"\x1b]52;;" + base64.b64encode(url.encode())
+        seen = bytearray()
+
+        def arrived():
+            if select.select([self.client_fds[self.phone]], [], [], 0)[0]:
+                seen.extend(os.read(self.client_fds[self.phone], 65536))
+            return want in seen
+
+        self.wait_for(arrived, "the clipboard escape on the phone")
+        time.sleep(0.3)
+        other = os.read(laptop, 65536) if select.select([laptop], [], [], 0)[0] else b""
+        self.assertNotIn(b"]52;", other)
+        self.assertEqual(self.tmux.run("show-buffer", "-b", "emx-link"), url)
+
     def test_a_tap_elsewhere_on_the_bar_changes_nothing(self):
         self.back_bar()
         for column in (14, 30, 46):

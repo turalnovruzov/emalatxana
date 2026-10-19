@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 import shlex
+import stat
 import shutil
 import sys
 import time
@@ -24,6 +25,7 @@ from emx.tmux import AGENT_OPT, SESSION_OPT, Tmux, TmuxError
 
 AGENT = "claude"
 READ_TAIL_BYTES = 64 * 1024
+BRIDGE_FILE_MAX = 64 * 1024
 
 
 def claude_home() -> str:
@@ -214,6 +216,56 @@ def allowed_transcript(path: str) -> str | None:
     projects = os.path.realpath(os.path.join(claude_home(), "projects"))
     real = os.path.realpath(path)
     return real if real.startswith(projects + os.sep) else None
+
+
+def bridge_file(pid: int) -> str:
+    return os.path.join(claude_home(), "sessions", f"{pid}.json")
+
+
+def bridge_link(pid, claude_sid: str) -> str | None:
+    """The Remote Control id of the claude running as process `pid` in one of emx's own sessions, or None.
+
+    Read from Claude Code's own `sessions/<pid>.json`, whose name is built
+    from the int alone; nothing else in that folder is listed or opened (its
+    `.key` files least of all), and nothing is ever written there. The file
+    is opened without following a link and without blocking (a FIFO planted
+    there would hang the poller), and is used only when it is a regular file
+    of this user's, at most BRIDGE_FILE_MAX bytes, naming this very `pid`
+    and Claude's `sessionId` for this session. Callers pass the pid of a
+    live agent-tagged pane, whose process is claude itself (`pane_command`
+    execs it).
+    """
+    if type(pid) is not int or pid <= 1 or not core.is_session_id(claude_sid):
+        return None
+    try:
+        fd = os.open(bridge_file(pid), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_size > BRIDGE_FILE_MAX:
+            return None
+        data = b""
+        while len(data) <= BRIDGE_FILE_MAX:
+            chunk = os.read(fd, BRIDGE_FILE_MAX + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > BRIDGE_FILE_MAX:
+        return None
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] != pid:
+        return None
+    if record.get("sessionId") != claude_sid:
+        return None
+    return core.bridge_id(record.get("bridgeSessionId"))
 
 
 def _transcript_lines(path: str) -> list:

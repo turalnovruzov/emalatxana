@@ -1191,6 +1191,30 @@ def _bar_cut_counts(count_parts: list, width: int) -> list:
     return left + [(" " * fill, "plain", False)] + kept + ([(" ", "plain", False)] if kept else [])
 
 
+_BRIDGE_ID = re.compile(r"[A-Za-z0-9_]{8,64}")
+APP_LINK_BASE = "https://claude.ai/code/"
+# The agents whose sessions the Claude app can open; any other's row says it opens in the terminal.
+APP_AGENTS = frozenset({"claude"})
+
+
+def bridge_id(value) -> str | None:
+    """`value` when it can be a Remote Control session id, safe to put in a link and on screen; else None."""
+    return value if isinstance(value, str) and _BRIDGE_ID.fullmatch(value) else None
+
+
+def app_link(bridge) -> str | None:
+    """The link that opens a Remote Control session in the Claude app."""
+    checked = bridge_id(bridge)
+    return APP_LINK_BASE + checked if checked else None
+
+
+def app_line(agent: str, link: str | None) -> str | None:
+    """What a phone shows under the selected row about the Claude app: "link" when the session has one, "no-app" when its agent has no app, else nothing."""
+    if agent not in APP_AGENTS:
+        return "no-app"
+    return "link" if link else None
+
+
 NARROW_HINTS = (("↵", "open"), ("n", "new"), ("a", "actions"), ("?", ""))
 NARROW_LINK_HINTS = (("↵", "open in app"), ("t", "here"), ("a", "actions"), ("?", ""))
 NARROW_REST_HINTS = (("n", "new"), ("?", ""))

@@ -5520,6 +5520,27 @@ class Narrow(unittest.TestCase):
         self.assertFalse(core.narrow(0))
 
 
+class AppLink(unittest.TestCase):
+    def test_a_bridge_id_is_letters_digits_and_underscores_8_to_64_long(self):
+        for good in ("session_01AbCdEfGhIjKlMnOpQrStUv", "a" * 8, "A_1" * 21 + "x"):
+            with self.subTest(good=good):
+                self.assertEqual(core.bridge_id(good), good)
+        for bad in ("a" * 7, "a" * 65, "session-01", "session_01/..", "session_01?x", "session_01\n", "séssion_01", "", None, 5):
+            with self.subTest(bad=bad):
+                self.assertIsNone(core.bridge_id(bad))
+
+    def test_the_link_is_the_claude_apps_code_url(self):
+        self.assertEqual(core.app_link("session_01AbCdEf"), "https://claude.ai/code/session_01AbCdEf")
+        self.assertIsNone(core.app_link("bad/id"))
+        self.assertIsNone(core.app_link(None))
+
+    def test_a_row_offers_the_app_only_for_an_agent_with_one(self):
+        self.assertEqual(core.app_line("claude", "https://claude.ai/code/session_01AbCdEf"), "link")
+        self.assertIsNone(core.app_line("claude", None))
+        self.assertEqual(core.app_line("codex", None), "no-app")
+        self.assertEqual(core.app_line("codex", "https://claude.ai/code/session_01AbCdEf"), "no-app")
+
+
 class NarrowBars(unittest.TestCase):
     COUNTS = [(core.NEEDS_INPUT, 1), (core.WORKING, 1), (core.DONE, 1)]
 

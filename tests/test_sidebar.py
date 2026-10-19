@@ -7974,6 +7974,155 @@ class PhonePanel(AppCase):
                 self.assertTrue(done(), token)
 
 
+BRIDGE = "session_01AbCdEfGhIjKlMnOpQrStUv"
+APP_URL = "https://claude.ai/code/" + BRIDGE
+
+
+class ClaudeAppLink(AppCase):
+    """On a phone the selected Claude session with a known Remote Control link offers the Claude app; ↵ puts the link on screen for a tap."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(height=22, width=PHONE_WIDTH)
+        self.app.scr = self.scr
+        self.app.window_width = PHONE_WIDTH
+        self.app.tmux = PhoneTmux()
+        copies = self.copies = []
+        self.app.tmux.copy_to_client = copies.append
+        self.poll(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.app.links = {"a": BRIDGE}
+        self.app.poller.take_links = lambda: {"a": BRIDGE}
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+
+    def lines(self):
+        self.app.draw()
+        return [self.scr.cells[y] for y in sorted(self.scr.cells)]
+
+    def test_the_selected_row_gets_the_link_line_under_it(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if "emx-test-a" in line)
+        self.assertEqual(lines[at + 2].strip(), sidebar.APP_LINE)
+        link_y = next(y for y, item in self.app.row_map.items() if item == ("link", "a"))
+        self.assertEqual(self.scr.cells[link_y].strip(), sidebar.APP_LINE)
+        self.assertEqual(sum(sidebar.APP_LINE in line for line in lines), 1)
+
+    def test_a_row_not_selected_or_with_no_link_has_no_line(self):
+        self.app.cursor = ("session", "b")
+        self.assertFalse(any(sidebar.APP_LINE in line for line in self.lines()))
+        self.app.links = {}
+        self.app.cursor = ("session", "a")
+        self.assertFalse(any(sidebar.APP_LINE in line for line in self.lines()))
+
+    def test_enter_on_a_linked_session_shows_the_link_and_copies_it_and_opens_nothing(self):
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.copies, [APP_URL])
+        self.assertEqual(self.app.notice, "Tap the link to open emx-test-a in the Claude app.")
+        bottom = "".join(line.strip() for line in self.lines()[-4:])
+        self.assertIn(APP_URL, bottom)
+
+    def test_the_link_stays_whole_when_cut_at_the_edge(self):
+        self.app.handle_key("\n")
+        rows = [t for t, _ in self.app.bottom_lines(PHONE_WIDTH - 1, 22)]
+        self.assertEqual("".join(rows[-2:]), APP_URL)
+
+    def test_the_link_goes_with_its_notice(self):
+        self.app.handle_key("\n")
+        self.app.say("")
+        self.assertFalse(any(APP_URL[:20] in t for t, _ in self.app.bottom_lines(PHONE_WIDTH - 1, 22)))
+
+    def test_enter_with_no_link_opens_here_and_t_always_does(self):
+        self.app.cursor = ("session", "b")
+        self.app.handle_key("\n")
+        self.app.cursor = ("session", "a")
+        self.app.handle_key("t")
+        self.assertEqual(self.opened, [("b", core.OPEN), ("a", core.OPEN)])
+        self.assertEqual(self.copies, [])
+
+    def test_a_tap_on_the_link_line_opens_in_the_app(self):
+        self.lines()
+        y = next(y for y, item in self.app.row_map.items() if item == ("link", "a"))
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual((self.copies, self.opened), ([APP_URL], []))
+
+    def test_the_bar_offers_the_app_on_a_linked_row(self):
+        self.assertEqual(self.bar(PHONE_WIDTH).rstrip(), " ⚒ ✻1 ✻1   ↵ open in app  t here  a actions  ?")
+
+    def test_a_stopped_session_has_no_link(self):
+        self.poll(session("a", "/p/alpha", "stopped", pid=None), session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.assertIsNone(self.app.link_for(self.app.session("a")))
+
+    def test_a_wide_panel_draws_the_same_rows_with_a_link_known_or_not(self):
+        self.app.window_width = 120
+        self.scr.size = (22, 40)
+        with_link = self.lines()
+        self.app.links = {}
+        self.assertEqual(self.lines(), with_link)
+        self.app.links = {"a": BRIDGE}
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+        self.assertEqual(self.copies, [])
+
+
+class PollerReadsLinks(unittest.TestCase):
+    """The poller reads a link only while a phone's panel wants them, from the session's own live agent pane's process."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": tmp.name, "XDG_STATE_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        sessions = [core.Session(KEY_A, "alpha", "/p", "done", "", "", 1.0, True, session_id=CLAUDE_SID),
+                    core.Session("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "beta", "/p", "done", "", "", 1.0, True, session_id=KEY_A)]
+
+        class Tmux:
+            def panes(self):
+                return [Pane("%5", "@5", False, "", KEY_A, 80, 80, agent="claude", pid=4242),
+                        Pane("%6", "@6", False, "", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 80, 80, pid=4343)]
+
+        self.sessions = sessions
+        self.poller = sidebar.Poller(FakeEngine(listing=(sessions, None), tmux=Tmux()))
+        self.reads = []
+
+        def read(pid, sid):
+            self.reads.append((pid, sid))
+            return BRIDGE if (pid, sid) == (4242, CLAUDE_SID) else None
+
+        patch = mock.patch.object(sidebar, "bridge_link", read)
+        patch.start()
+        self.addCleanup(patch.stop)
+        fetch = mock.patch.object(sidebar, "fetch_sessions", lambda engine: engine.list_sessions())
+        fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def test_nothing_is_read_while_no_phone_wants_links(self):
+        self.poller.poll()
+        self.assertEqual((self.reads, self.poller.take_links()), ([], {}))
+
+    def test_a_wanted_link_comes_from_the_agent_panes_pid_and_claudes_session_id_only(self):
+        self.poller.links_wanted = True
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)])
+        self.assertEqual(self.poller.take_links(), {KEY_A: BRIDGE})
+
+    def test_an_unchanged_file_is_not_read_again(self):
+        self.poller.links_wanted = True
+        self.poller.poll()
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)])
+        folder = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "sessions")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "4242.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)] * 2)
+
+
 class PrefsAcrossViews(AppCase):
     """Two views' panels share one prefs file; each keeps the other's changes."""
 
