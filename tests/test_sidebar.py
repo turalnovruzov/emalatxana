@@ -7899,7 +7899,7 @@ class PhonePanel(AppCase):
         answer = ([core.RoutineView("a-very-long-routine-name-backup-nightly-and-more", "passed", "done",
                                     tuple((1_800_000_000.0 + i, core.PASSED, "a long note about the run " * 3) for i in range(4)),
                                     1_800_000_500.0, "a note that is far longer than the forty eight columns of a phone")], None)
-        with mock.patch.object(sidebar.routines, "read", lambda path, now: answer):
+        with mock.patch.object(sidebar.routines, "read", lambda now: answer):
             for back in ("R", "\x1b"):
                 with self.subTest(back=back):
                     self.app.handle_key("R")
