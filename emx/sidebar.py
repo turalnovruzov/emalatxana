@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import curses
+import json
 import locale
 import os
 import stat
@@ -12,13 +14,17 @@ import tempfile
 import textwrap
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import emx
 from emx import __version__, core, install, notify, remote, routines
-from emx.cli import read_changelog, self_command
+from emx.cli import CONFIG, PLACEHOLDER_TEXT, read_changelog, self_command
 from emx.engine import AGENT, Engine, allowed_transcript, claude_home
-from emx.tmux import AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, ROLE, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import (
+    AGENT_OPT, HUSH_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT, REOPEN_OPT, ROLE, SESSION, SESSION_OPT,
+    TERMINAL_OPT, VIEW_OPT, Pane, Tmux, TmuxError, is_view_session,
+)
 
 POLL_SECONDS = 1.5
 HOUSEKEEP_SECONDS = 0.5
@@ -56,6 +62,7 @@ UPDATE_MIN_SECONDS = 5
 RELAUNCH_RETRY_SECONDS = 300
 ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
 ITERM_STEAL_FOCUS = b"\x1b]1337;StealFocus\x07"
+SUMMARIES_FILE = "summaries.json"
 HELP = (
     ("→ Enter", "open the session and go to it"),
     ("←", "back here, from an empty prompt"),
@@ -286,11 +293,18 @@ class Listings:
             self.reading.discard(folder)
 
 
+def park_slot(tmux: Tmux, slot: str) -> None:
+    """Put the placeholder in a view's slot pane."""
+    tmux.respawn(slot, self_command("blank", PLACEHOLDER_TEXT))
+    tmux.set_pane_option(slot, ROLE, "placeholder")
+    tmux.unset_pane_option(slot, VIEW_OPT)
+
+
 class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
     Closing ends the session and removes it from emx: a running one's pane
-    is killed (one in main is first swapped out for the placeholder, so the
+    is killed (every view showing it gets the placeholder first, so the
     layout keeps its two columns), and once a listing shows it no longer
     running its folder under emx's state folder goes. The conversation
     stays in Claude Code's history. `wait_for` holds the Interrupters of any
@@ -349,18 +363,18 @@ class Closer(threading.Thread):
         return True, core.closed_text(confirm)
 
     def end(self, sid: str) -> None:
-        """Kill the session's own pane, swapping the placeholder into main first when the pane is there."""
-        panes = self.engine.tmux.panes()
-        windows = {p.id: p.window for p in panes}
-        for pane in panes:
-            if pane.session != sid or not pane.agent or pane.dead:
-                continue
-            if windows.get(pane.id) is not None and windows.get(pane.id) == windows.get(self.panel):
-                placeholder = next((p for p in panes if p.role == "placeholder"), None)
-                if placeholder is None:
-                    raise TmuxError("there is no placeholder to put in main")
-                self.engine.tmux.swap(placeholder.id, pane.id)
-            self.engine.tmux.kill_pane(pane.id)
+        """Kill the session's own pane. It sits in a hidden window, never in a view's, so no view loses its layout.
+
+        Every view showing it gets the placeholder first, so none shows its
+        viewer's "has closed" line while the kill lands.
+        """
+        tmux = self.engine.tmux
+        for view in tmux.views():
+            if view.shows == sid and view.slot:
+                park_slot(tmux, view.slot)
+        for pane in tmux.panes():
+            if pane.session == sid and pane.agent and not pane.dead:
+                tmux.kill_pane(pane.id)
 
     def wait_until_ended(self, sid: str) -> bool:
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
@@ -1638,11 +1652,18 @@ class Notices(threading.Thread):
 
 
 class Poller(threading.Thread):
-    """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either."""
+    """Lists sessions, and hands each folder to the resolver, and each session to the transcript reader, without waiting for either.
 
-    def __init__(self, engine: Engine):
+    Only the `primary` panel's poller runs Haiku and the notices: the panel of
+    every other view lists and reads transcripts for itself, and takes the
+    row lines from the file the primary writes.
+    """
+
+    def __init__(self, engine: Engine, primary: bool = True):
         super().__init__(daemon=True)
         self.engine = engine
+        self.primary = primary
+        self.started = []
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.result = None
@@ -1662,19 +1683,22 @@ class Poller(threading.Thread):
         if sessions:
             self.resolver.want(s.cwd for s in sessions)
             self.transcripts.want(sessions)
-            self.summaries.want(sessions)
-            self.asks.want(sessions)
-            self.notices.want(sessions)
+            if self.primary:
+                self.summaries.want(sessions)
+                self.asks.want(sessions)
+                self.notices.want(sessions)
         return sessions, None
 
+    def workers(self) -> list:
+        mine = [self.resolver, self.transcripts]
+        if self.primary:
+            mine += [self.summaries, self.asks, self.notifier, self.voice, self.notices]
+        return mine
+
     def run(self) -> None:
-        self.resolver.start()
-        self.transcripts.start()
-        self.summaries.start()
-        self.asks.start()
-        self.notifier.start()
-        self.voice.start()
-        self.notices.start()
+        for worker in self.workers():
+            worker.start()
+            self.started.append(worker)
         while True:
             try:
                 result = self.poll()
@@ -1771,8 +1795,16 @@ class App:
         self.window_width = 0
         self.bar = StatusBar(tmux)
         self.me = os.environ.get("TMUX_PANE", "")
+        # The panel of `emx` itself, the laptop's first view, runs what is done once per workspace; any other view's is a follower.
+        self.primary = getattr(tmux, "view", SESSION) == SESSION
         self.prefs_file = core.prefs_path()
+        self.prefs_mtime = self.file_mtime(self.prefs_file)
         self.prefs = core.load_prefs(self.prefs_file)
+        self.prefs_base = copy.deepcopy(self.prefs)
+        self.summaries_file = self.state / SUMMARIES_FILE
+        self.summaries_mtime = None
+        self.attached = None
+        self.own_width = None
         self.sessions = []
         self.placements = {}
         self.groups = []
@@ -1795,7 +1827,7 @@ class App:
         self.row_map = {}
         self.scroll = 0
         self.last_housekeep = 0.0
-        self.poller = Poller(Engine(tmux, claude, self.state))
+        self.poller = Poller(Engine(tmux, claude, self.state), primary=self.primary)
         self.apply_mode()
         self.notice_seen = None
         self.hush_seen = None
@@ -1833,7 +1865,7 @@ class App:
         self.peek_wrapped = (None, [])
         self.whats_new = None
         self.whats_new_waits = False
-        self.updater = Updater() if emx.ROOT else None
+        self.updater = Updater() if emx.ROOT and self.primary else None
         self.on_disk = None
         self.majors_said = set()
         self.relaunched = {}
@@ -1863,11 +1895,39 @@ class App:
         self.notice, self.notice_error = text, error
         self.notice_until = time.monotonic() + seconds if seconds is not None else None
 
-    def save_prefs(self) -> None:
+    @staticmethod
+    def file_mtime(path) -> float | None:
         try:
-            core.save_prefs(self.prefs_file, self.prefs)
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return None
+
+    def save_prefs(self) -> None:
+        """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept."""
+        try:
+            merged = core.merge_prefs(self.prefs_base, self.prefs, core.load_prefs(self.prefs_file))
+            core.save_prefs(self.prefs_file, merged)
         except OSError as exc:
             self.say(f"Couldn't save prefs: {exc}", error=True)
+            return
+        self.prefs, self.prefs_base = merged, copy.deepcopy(merged)
+        self.prefs_mtime = self.file_mtime(self.prefs_file)
+
+    def reload_prefs(self) -> None:
+        """Take in what another view's panel saved, keeping any change of this panel's own not saved yet."""
+        mtime = self.file_mtime(self.prefs_file)
+        if mtime == self.prefs_mtime:
+            return
+        self.prefs_mtime = mtime
+        disk = core.load_prefs(self.prefs_file)
+        self.prefs = core.merge_prefs(self.prefs_base, self.prefs, disk)
+        self.prefs_base = copy.deepcopy(disk)
+        self.apply_mode()
+        self.regroup()
+
+    def my_panes(self) -> list:
+        """The panes of this panel's own view window."""
+        return self.tmux.window_panes(self.me) if self.me else []
 
     def layout_panes(self, panes: list) -> tuple:
         """(sidebar, main) in the sidebar's window. The main slot is whichever pane is not the sidebar, since swap-pane moves pane ids around."""
@@ -1948,37 +2008,107 @@ class App:
             self.save_prefs()
 
     def housekeep(self, fresh_list: bool) -> None:
+        self.reload_prefs()
         try:
-            panes = self.tmux.panes()
-            sidebar, main = self.layout_panes(panes)
-            if not self.legacy_cleared:
-                panes, main = self.clear_legacy_viewers(panes, main)
+            sidebar, main = self.layout_panes(self.my_panes())
+            if self.primary and not self.legacy_cleared:
+                main = self.clear_legacy_viewers(main)
             self.main_pane = main
-            if sidebar and main and self.bound != (sidebar.id, main.id):
-                self.tmux.bind_toggle(BACK_KEY, sidebar.id, main.id)
-                self.tmux.bind_left(sidebar.id, self_command("left", self.tmux.socket))
-                self.tmux.bind_collapse(COLLAPSE_KEY, main.id)
-                self.tmux.bind_paste(PASTE_KEY, self_command("paste", self.tmux.socket, str(self.relay_file)))
-                self.bound = (sidebar.id, main.id)
+            if sidebar and main and not self.bound:
+                self.bind_keys()
             if sidebar:
                 self.window_width = sidebar.window_width
                 self.reset_ground(sidebar)
                 self.take_focus(sidebar)
-                followed = core.follow_zoom(self.prefs, sidebar.zoomed)
-                if followed is not self.prefs:
-                    self.prefs = followed
-                    self.save_prefs()
+                # The hidden panel saved in prefs is the laptop's, the home view's; another view's stays its own.
+                if self.primary:
+                    followed = core.follow_zoom(self.prefs, sidebar.zoomed)
+                    if followed is not self.prefs:
+                        self.prefs = followed
+                        self.save_prefs()
             if sidebar and main:
                 self.reconcile_widths(sidebar)
-            if fresh_list:
-                self.close_stale(panes, main)
+                self.tend_slot(main)
+            if fresh_list and self.primary:
+                self.close_stale(self.main_pane)
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
-        self.check_hush()
+        if self.primary:
+            self.check_hush()
         self.check_relay()
         self.check_open()
         self.time_whats_new()
         self.check_update()
+
+    def bind_keys(self) -> None:
+        """emx's root keys, the same for every view: they act on the window they are pressed in, so binding them again changes nothing."""
+        socket = self.tmux.socket
+        self.tmux.bind_toggle(BACK_KEY)
+        self.tmux.bind_left(self_command("left", socket))
+        self.tmux.bind_collapse(COLLAPSE_KEY)
+        self.tmux.bind_paste(PASTE_KEY, self_command("paste", socket, str(self.relay_file)))
+        self.tmux.bind_copy(self_command("copied", socket))
+        self.tmux.bind_menu()
+        self.bound = True
+
+    def tend_slot(self, slot: Pane) -> None:
+        """Keep the slot showing something that is there, and hand it back and forth with the view's clients.
+
+        A viewer whose session's pane has gone, or that has exited, gives way
+        to the placeholder. A view other than `emx` with no client attached
+        parks what it shows in REOPEN_OPT, so a device that went away holds no
+        claim on that session's width; when a client attaches again, or at
+        this panel's start with one attached (an upgrade respawns the panel
+        under an attached laptop), the session is shown again. The home view
+        keeps its viewer while the laptop is away, so the session is there the
+        moment he comes back, as before 2.10.0; on his return its viewer
+        claims the session's width back from a device that used it meanwhile.
+        Showing it again never starts a session's process.
+        """
+        if slot.role == "viewer" and slot.view:
+            held = core.live_or_dead_agent(self.tmux.panes(), slot.view)
+            if slot.dead or held is None:
+                self.park(slot)
+                slot = self.main_pane
+        attached = self.tmux.client_state()[0]
+        was, self.attached = self.attached, attached
+        if not attached:
+            if not self.primary and slot.role == "viewer" and slot.view:
+                self.tmux.set_view_option(REOPEN_OPT, slot.view)
+                self.park(slot)
+            return
+        if was:
+            return
+        if self.primary and slot.role == "viewer" and slot.view:
+            try:
+                self.tmux.claim_width(slot.id, slot.view)
+            except TmuxError:
+                # Best effort: the session still shows, at whatever width its window has.
+                pass
+        key = self.tmux.view_option(REOPEN_OPT)
+        if not key:
+            return
+        self.tmux.set_view_option(REOPEN_OPT, "")
+        held = core.live_or_dead_agent(self.tmux.panes(), key) if core.is_session_id(key) else None
+        if held is not None:
+            self.show(slot, key, held.window)
+
+    def show(self, slot: Pane, key: str, window: str) -> None:
+        """Show session `key`, whose pane is in `window`, in the slot through a viewer; the session's pane itself never moves."""
+        if slot.role == "viewer" and slot.view == key and not slot.dead:
+            return
+        self.tmux.link_agent(window, key, self_command("blank", ""))
+        self.tmux.respawn(slot.id, self.tmux.viewer_command(key))
+        self.tmux.set_pane_option(slot.id, ROLE, "viewer")
+        self.tmux.set_pane_option(slot.id, VIEW_OPT, key)
+        self.main_pane = replace(slot, role="viewer", view=key, dead=False)
+
+    def park(self, slot: Pane) -> None:
+        """Put the placeholder in the slot."""
+        park_slot(self.tmux, slot.id)
+        if slot.session:
+            self.tmux.unset_pane_option(slot.id, SESSION_OPT)
+        self.main_pane = replace(slot, role="placeholder", view="", session="", dead=False)
 
     def reset_ground(self, sidebar) -> None:
         """2.6.0 set the pane's background; a workspace upgrading from it keeps the option until it is unset here."""
@@ -2024,7 +2154,7 @@ class App:
         if last is not None and now - last < RELAUNCH_RETRY_SECONDS:
             return
         try:
-            attached, _, _, idle = self.tmux.client_state()
+            attached, idle = core.views_quiet(self.tmux.views(), time.time())
         except TmuxError:
             return
         if not core.update_quiet(attached, idle, self.update_busy()):
@@ -2062,20 +2192,31 @@ class App:
             self.relay_host = None
             return
         self.relay_host = core.relay_host(host, now)
+        if self.primary:
+            self.carry_paste_stamp(now)
+
+    def carry_paste_stamp(self, now: float) -> None:
+        """An `emx follow` from before 2.10.0, still running on the server after an update, stamps its paste offer on the `emx` session, which a viewer's session does not see; copied to the global option, which every session sees."""
+        try:
+            stamp = self.tmux.session_option(RELAY_PASTE_OPT)
+            if core.relay_live(stamp, now) and stamp != self.tmux.global_option(RELAY_PASTE_OPT):
+                self.tmux.set_global_option(RELAY_PASTE_OPT, stamp)
+        except TmuxError:
+            pass
 
     def check_open(self) -> None:
-        """`emx open` from outside (a notification click) writes a session id to a session option; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
+        """`emx open` from outside (a notification click) writes a session id to an option of the view it picked; it is read once and cleared. Unlike the hush token it is no baseline: a request written before the panel's first read still counts, so it waits for the first listing. A failed read changes nothing."""
         if not self.loaded:
             return
         try:
-            value = self.tmux.session_option(OPEN_OPT)
+            value = self.tmux.view_option(OPEN_OPT)
             if not value:
                 return
             sid = core.open_request(value)
             if sid:
-                self.tmux.clear_session_option_if(OPEN_OPT, sid)
+                self.tmux.clear_session_option_if(OPEN_OPT, sid, session=self.tmux.view)
             else:
-                self.tmux.set_session_option(OPEN_OPT, "")
+                self.tmux.set_view_option(OPEN_OPT, "")
         except TmuxError:
             return
         if sid:
@@ -2135,7 +2276,7 @@ class App:
         which would read as leaving the panel and coming back from main.
         """
         try:
-            sidebar, _ = self.layout_panes(self.tmux.panes())
+            sidebar, _ = self.layout_panes(self.my_panes())
         except TmuxError as exc:
             self.say(f"tmux: {exc}", error=True)
             return
@@ -2153,9 +2294,9 @@ class App:
         self.set_focus(sidebar.active, back=back)
 
     def main_session(self) -> str:
-        """The key of the session in the main pane, from the pane's own tags: "" when main holds no session of emx's (the placeholder, or an old viewer)."""
+        """The key of the session the slot shows, from the slot's own tag: "" when it shows none (the placeholder, or an old viewer)."""
         main = self.main_pane
-        return main.session if main is not None and main.agent else ""
+        return main.view if main is not None and main.role == "viewer" else ""
 
     def main_id(self) -> str | None:
         return self.main_pane.id if self.main_pane is not None else None
@@ -2166,43 +2307,46 @@ class App:
             self.applied = None
             return
         if action == "adopt-panel":
-            self.prefs["panel_width"] = sidebar.width
-            self.save_prefs()
+            if self.primary:
+                self.prefs["panel_width"] = sidebar.width
+                self.save_prefs()
+            else:
+                self.own_width = sidebar.width
         if action is not None:
             self.apply_layout(sidebar)
 
+    def panel_width(self) -> int:
+        """The width this view's panel is kept at: the saved one, which is the laptop's, until another view's panel is given its own."""
+        return self.prefs["panel_width"] if self.primary or self.own_width is None else self.own_width
+
     def apply_layout(self, sidebar: Pane) -> None:
-        want = core.compute_layout(sidebar.window_width, self.prefs["panel_width"])
+        want = core.compute_layout(sidebar.window_width, self.panel_width())
         self.tmux.resize_width(sidebar.id, want.panel)
-        sidebar, _ = self.layout_panes(self.tmux.panes())
+        sidebar, _ = self.layout_panes(self.my_panes())
         if sidebar:
             self.applied = (sidebar.window_width, sidebar.width)
 
-    def clear_legacy_viewers(self, panes: list, main: Pane | None) -> tuple:
-        """Once per panel start, kill the `claude attach` viewers an emx before 2.0.0 left: a pane with a session key and no agent tag. Returns the panes and main as they are after.
+    def clear_legacy_viewers(self, main: Pane | None) -> Pane | None:
+        """Once per panel start, kill the `claude attach` viewers an emx before 2.0.0 left: a pane with a session key and no agent tag. Returns the slot as it is after.
 
         `close_stale` would never close them, since emx's listing does not
         hold their sessions and an empty listing counts as no news. Killing a
         viewer leaves its background session running in Claude Code. One in
-        main is swapped out for the placeholder first; with no placeholder it
-        stays, so the layout keeps its two columns.
+        the slot gets the placeholder instead, so the layout keeps its two columns.
         """
-        legacy = [p for p in panes if p.session and not p.agent]
-        if legacy:
-            placeholder = next((p for p in panes if p.role == "placeholder"), None)
-            for pane in legacy:
-                if main is not None and pane.id == main.id:
-                    if placeholder is None:
-                        continue
-                    self.tmux.swap(placeholder.id, pane.id)
+        legacy = [p for p in self.tmux.panes() if p.session and not p.agent]
+        for pane in legacy:
+            if main is not None and pane.id == main.id:
+                self.park(main)
+                main = self.main_pane
+            else:
                 self.tmux.kill_pane(pane.id)
-            panes = self.tmux.panes()
-            _, main = self.layout_panes(panes)
         self.legacy_cleared = True
-        return panes, main
+        return main
 
-    def close_stale(self, panes: list, main: Pane | None) -> None:
+    def close_stale(self, main: Pane | None) -> None:
         """A pane holding one of emx's own sessions (agent-tagged) is the session itself, so it is never closed here: only a double Ctrl+X ends a session."""
+        panes = self.tmux.panes()
         now = time.monotonic()
         live = {s.id for s in self.sessions}
         self.fresh = {sid: t for sid, t in self.fresh.items() if sid not in live and now - t < FRESH_GRACE_SECONDS}
@@ -2212,34 +2356,32 @@ class App:
         self.close_viewers(panes, main, close)
 
     def close_viewers(self, panes: list, main: Pane | None, sids) -> None:
-        """Kill the viewers of these sessions; one in main is first swapped out for the placeholder, so the layout keeps its two columns."""
+        """Kill the panes left holding these sessions, and give the slot the placeholder when it shows one of them."""
         for pane in panes:
-            if pane.session not in sids:
-                continue
-            if main is not None and pane.id == main.id:
-                placeholder = next((p for p in panes if p.role == "placeholder"), None)
-                if placeholder is None:
-                    continue
-                self.tmux.swap(placeholder.id, pane.id)
-            self.tmux.kill_pane(pane.id)
+            if pane.session in sids and (main is None or pane.id != main.id):
+                self.tmux.kill_pane(pane.id)
+        if main is not None and (main.view in sids or (main.session in sids and not main.agent)):
+            self.park(main)
 
     def switch_to(self, sid: str, trigger: str, checked: tuple | None = None) -> None:
+        """Show session `sid` in this view's slot and go to it, resuming its process first only when his open allows it."""
         try:
-            panes = self.tmux.panes()
-            _, main = self.layout_panes(panes)
+            _, main = self.layout_panes(self.my_panes())
             if main is None:
                 self.say("The main pane is missing; restart emx.", error=True)
                 return
-            held = next((p for p in panes if p.session == sid and p.agent), None)
-            if held is not None and not held.dead:
-                pane_id = held.id
-            else:
+            panes = self.tmux.panes()
+            held = core.live_or_dead_agent(panes, sid)
+            if held is None or held.dead:
                 pane_id = self.resume(sid, trigger, checked, held)
                 if pane_id is None:
                     return
-            if pane_id != main.id:
-                self.tmux.swap(pane_id, main.id)
-            self.tmux.select(pane_id)
+                held = next((p for p in self.tmux.panes() if p.id == pane_id), None)
+                if held is None:
+                    self.say("The session's pane went away as it started; open it again.", error=True)
+                    return
+            self.show(main, sid, held.window)
+            self.tmux.select(main.id)
             if trigger == core.OPEN:
                 self.opened[sid] = time.monotonic()
                 self.history = core.history_read(self.history, sid)
@@ -2253,8 +2395,8 @@ class App:
 
         Its own small files under emx's state folder are read and rewritten on
         this thread, as the prefs are; no file of Claude's is. A new pane is
-        tagged before it can be swapped into main, since the ← binding and
-        `cursor_on_focus` read the tag; one that can't be tagged is killed, or
+        tagged before a slot shows it, since the ← check and `cursor_on_focus`
+        read the tag; one that can't be tagged is killed, or
         a second open would resume the same conversation again. Only his
         open resumes: any other trigger finding no live pane is refused, even
         when the listing it took still showed the session running.
@@ -2393,9 +2535,8 @@ class App:
         closed = {sid for sid, ok in finished.items() if ok}
         if closed:
             try:
-                panes = self.tmux.panes()
-                _, main = self.layout_panes(panes)
-                self.close_viewers(panes, main, closed)
+                _, main = self.layout_panes(self.my_panes())
+                self.close_viewers(self.tmux.panes(), main, closed)
             except TmuxError as exc:
                 self.say(f"tmux: {exc}", error=True)
 
@@ -2551,7 +2692,7 @@ class App:
 
     def flip_side(self) -> None:
         try:
-            sidebar, main = self.layout_panes(self.tmux.panes())
+            sidebar, main = self.layout_panes(self.my_panes())
             if sidebar is None or main is None:
                 return
             self.tmux.swap(sidebar.id, main.id)
@@ -2564,8 +2705,11 @@ class App:
         self.housekeep(fresh_list=False)
 
     def change_panel_width(self, delta: int) -> None:
-        self.prefs = core.adjust_panel_width(self.prefs, delta)
-        self.save_prefs()
+        if self.primary:
+            self.prefs = core.adjust_panel_width(self.prefs, delta)
+            self.save_prefs()
+        else:
+            self.own_width = core.adjust_panel_width({"panel_width": self.panel_width()}, delta)["panel_width"]
         self.applied = None
         self.housekeep(fresh_list=False)
 
@@ -3322,16 +3466,15 @@ class App:
         self.notice_seen, events = core.notice_transitions(self.notice_seen, sessions, quiet)
         if not events:
             return
+        if not self.primary:
+            return
         try:
-            attached, focus, active, idle = self.tmux.client_state()
+            views = self.tmux.views()
         except TmuxError:
-            attached, focus, active, idle = 0, "", "", None
-        main = self.main_pane
-        main_sid = self.main_session()
-        main_id = main.id if main is not None else ""
-        now = time.monotonic()
+            views = []
+        now, wall = time.monotonic(), time.time()
         for session in events:
-            if not core.in_front(session.id, main_sid, main_id, attached, focus, active, idle):
+            if not core.in_front_any(session.id, views, wall):
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:
@@ -3350,9 +3493,40 @@ class App:
             self.transcripts = found
 
     def take_summaries(self) -> None:
+        """The primary panel's Haiku lines, which it also writes for the other views' panels; any other panel reads them from that file."""
+        if not self.primary:
+            self.read_summaries()
+            return
         found = self.poller.summaries.take()
         if found is not None:
             self.summaries = found
+            self.write_summaries(found)
+
+    def write_summaries(self, found: dict) -> None:
+        tmp = None
+        try:
+            os.makedirs(self.state, mode=0o700, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=self.state, prefix=".summaries.", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(core.summaries_record(found), fh)
+            os.replace(tmp, self.summaries_file)
+        except OSError:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def read_summaries(self) -> None:
+        mtime = self.file_mtime(self.summaries_file)
+        if mtime is None or mtime == self.summaries_mtime:
+            return
+        self.summaries_mtime = mtime
+        try:
+            with open(self.summaries_file, encoding="utf-8") as fh:
+                self.summaries = core.summaries_from(json.load(fh))
+        except (OSError, ValueError):
+            pass
 
     def peeked(self):
         """The session the peek shows: the one under the cursor."""
@@ -3521,15 +3695,27 @@ class Palette:
         return curses.color_pair(self.pairs[tone][bar]) | extra
 
 
+def own_view(socket: str) -> str:
+    """The view session this panel's pane is in; `emx` when tmux cannot say."""
+    pane = os.environ.get("TMUX_PANE", "")
+    try:
+        name = Tmux(socket).run("display-message", "-p", "-t", pane, "#{session_name}").strip() if pane else ""
+    except TmuxError:
+        name = ""
+    return name if is_view_session(name) else SESSION
+
+
 def run(socket: str) -> int:
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
     claude = os.environ.get("EMX_CLAUDE") or "claude"
 
+    view = own_view(socket)
+
     def body(scr):
         setup_curses(scr)
         try:
-            App(scr, Tmux(socket), claude).run()
+            App(scr, Tmux(socket, CONFIG, view=view), claude).run()
         finally:
             os.write(1, FOCUS_REPORTS_OFF.encode())
 

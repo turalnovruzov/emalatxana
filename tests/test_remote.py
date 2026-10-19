@@ -58,12 +58,16 @@ class FakeTmux:
     def __init__(self, has=True):
         self.has = has
         self.set = []
+        self.global_set = []
 
     def has_session(self):
         return self.has
 
     def set_session_option(self, name, value):
         self.set.append((name, value))
+
+    def set_global_option(self, name, value):
+        self.global_set.append((name, value))
 
 
 class Out:
@@ -192,15 +196,16 @@ class Follow(unittest.TestCase):
     def test_beats_stamp_the_paste_option_when_asked(self):
         self.start(paste=True)
         time.sleep(0.2)
-        values = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        values = [v for n, v in self.tmux.global_set if n == RELAY_PASTE_OPT]
         self.assertTrue(values)
         float(values[0])
+        self.assertNotIn(RELAY_PASTE_OPT, [n for n, _ in self.tmux.set])
 
     def test_no_paste_no_paste_stamp(self):
         self.start()
         time.sleep(0.2)
         self.assertTrue(self.tmux.set)
-        self.assertNotIn(RELAY_PASTE_OPT, [n for n, _ in self.tmux.set])
+        self.assertNotIn(RELAY_PASTE_OPT, [n for n, _ in self.tmux.set + self.tmux.global_set])
 
     def test_a_paste_record_is_streamed(self):
         self.start(paste=True)
@@ -215,7 +220,7 @@ class Follow(unittest.TestCase):
         self.start(paste=True)
         time.sleep(0.2)
         self.finish()
-        stamps = [v for n, v in self.tmux.set if n == RELAY_PASTE_OPT]
+        stamps = [v for n, v in self.tmux.global_set if n == RELAY_PASTE_OPT]
         self.assertEqual(stamps[-1], "")
         self.assertNotEqual(stamps[0], "")
 

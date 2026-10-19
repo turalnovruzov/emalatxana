@@ -44,6 +44,11 @@ def hook_command(state, key: str) -> str:
     return f"{words} >/dev/null 2>&1; exit 0"
 
 
+def inert_command() -> str:
+    """emx's inert pane, as `cli.self_command("blank", "")` gives it; the window `link_agent` replaces at once."""
+    return "exec " + " ".join(shlex.quote(a) for a in [sys.executable, BIN, "blank", ""])
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -168,6 +173,7 @@ def start(tmux: Tmux, claude: str, folder: str, message: str, state=None) -> tup
         # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
         tmux.set_pane_option(pane, AGENT_OPT, AGENT)
         tmux.set_pane_option(pane, SESSION_OPT, key)
+        tmux.link_agent(tmux.window_of(pane), key, inert_command())
     except (OSError, TmuxError) as exc:
         if pane:
             try:

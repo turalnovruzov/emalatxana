@@ -2,13 +2,13 @@
 
 - **Status**: Accepted
 - **Date**: 2026-10-18
-- **Amended**: 2026-10-18 (2.10.0), every user timer instead of a hand-edited list
+- **Amended**: 2026-10-18 (2.11.0), every user timer instead of a hand-edited list
 
 ## Context
 
 Issue #51. Tural wanted a separate view of the routines that run on his server, showing which ran, which failed and which did not run when they should have, and said emx "should just be showing it". He then moved the work to the server: *"build. we have switched to the server."* The routines there are systemd user timers.
 
-Amended in 2.10.0 after he saw the hand-edited list: *"There is two sorts of truth now every time we modify routines or add Now we have to go and change this file"*.
+Amended in 2.11.0 after he saw the hand-edited list: *"There is two sorts of truth now every time we modify routines or add Now we have to go and change this file"*.
 
 ## Decision
 
@@ -36,4 +36,4 @@ No library or service is added: these are system tools, like tmux, ssh and git.
 | **systemd's own tools, read-only** (this record) | The OS already holds the state and the log; nothing to keep or sync | Linux with systemd only | **Chosen** |
 | emx keeps its own run history | Works on any OS | A store to maintain, and a second truth beside the OS's | Rejected in #51 Decided 3 |
 | Reading each routine's script output | Richer detail | Pass or fail is by exit code alone | Rejected in #51 Decided 2 |
-| A hand-edited list of timers | Choose what shows | A second truth beside systemd's | Replaced in 2.10.0 |
+| A hand-edited list of timers | Choose what shows | A second truth beside systemd's | Replaced in 2.11.0 |

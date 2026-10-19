@@ -1,11 +1,16 @@
+import base64
+import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 import uuid
@@ -13,7 +18,15 @@ from pathlib import Path
 from unittest import mock
 
 from emx import cli, core, engine
-from emx.tmux import AGENT_OPT, BACK_OPT, HUSH_OPT, PASTE_OPT, RELAY_PASTE_OPT, SESSION, SESSION_OPT, Tmux, TmuxError
+from emx.tmux import (
+    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
+)
+
+try:
+    from emx.tmux import MENU_CHECK_OPT
+except ImportError:
+    # Lets the menu tests run, and fail one by one, on code from before the check existed.
+    MENU_CHECK_OPT = None
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
@@ -59,6 +72,9 @@ class PrivateServer(unittest.TestCase):
         ).strip()
         self.tmux.set_pane_option(self.main, AGENT_OPT, engine.AGENT)
         self.tmux.set_pane_option(self.main, SESSION_OPT, "s1")
+        self.tmux.set_pane_option(self.sidebar, ROLE, "sidebar")
+        # main stands in for a view's slot showing s1; the bindings gate on the slot's view tag.
+        self.tmux.set_pane_option(self.main, VIEW_OPT, "s1")
         self.client = self.attach()
         self.tmux.select(self.main)
         self.wait_for(lambda: self.show(self.main, "#{cursor_x}") == "2", "the recorder's prompt")
@@ -66,20 +82,31 @@ class PrivateServer(unittest.TestCase):
     def keys(self, pane):
         return os.path.join(self.dir, f"{pane}.keys")
 
-    def attach(self):
+    def attach(self, session=SESSION, size=None):
+        """Attach a pty client to `session` and return its name; the first one's pty is `self.client_fd`, each one's is in `self.client_fds`."""
+        before = set(self.tmux.run("list-clients", "-F", "#{client_name}").split())
         pid, fd = pty.fork()
         if pid == 0:
             # A failed exec must not leave a forked copy of the test run going on.
             try:
                 env = {k: v for k, v in os.environ.items() if k != "TMUX"}
                 env["TERM"] = "xterm-256color"
-                os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={SESSION}:"), env)
+                os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={session}:"), env)
             finally:
                 os._exit(127)
         self.addCleanup(self.reap, pid, fd)
-        self.client_fd = fd
-        self.wait_for(lambda: self.tmux.run("list-clients", "-F", "#{client_name}").strip(), "an attached client")
-        return self.tmux.run("list-clients", "-F", "#{client_name}").strip()
+        if size:
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", size[1], size[0], 0, 0))
+        if not hasattr(self, "client_fd"):
+            self.client_fd = fd
+
+        def new_client():
+            return set(self.tmux.run("list-clients", "-F", "#{client_name}").split()) - before
+
+        self.wait_for(new_client, "an attached client")
+        (name,) = new_client()
+        self.client_fds = {**getattr(self, "client_fds", {}), name: fd}
+        return name
 
     def kill_server(self):
         try:
@@ -119,11 +146,11 @@ class LeftBinding(PrivateServer):
     """The ← binding as installed on a private tmux server, pressed through an attached client so tmux's key table runs."""
 
     def press_left(self, check):
-        self.tmux.bind_left(self.sidebar, check)
+        self.tmux.bind_left(check)
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
 
     def test_the_binding_parses(self):
-        self.tmux.bind_left(self.sidebar, "true")
+        self.tmux.bind_left("true")
         (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if line.split()[:4] == ["bind-key", "-T", "root", "Left"]]
         listed = os.path.join(self.dir, "listed.conf")
         with open(listed, "w", encoding="utf-8") as fh:
@@ -143,8 +170,8 @@ class LeftBinding(PrivateServer):
         time.sleep(0.3)
         self.assertEqual(self.typed("main"), b"")
 
-    def test_a_pane_without_the_agent_tag_never_runs_the_check(self):
-        self.tmux.run("set-option", "-p", "-u", "-t", self.main, AGENT_OPT)
+    def test_a_pane_without_the_view_tag_never_runs_the_check(self):
+        self.tmux.run("set-option", "-p", "-u", "-t", self.main, VIEW_OPT)
         self.press_left("false")
         self.wait_for(lambda: self.typed("main"), "the key in main")
         self.assertEqual(self.typed("main"), LEFT)
@@ -157,12 +184,12 @@ class LeftBinding(PrivateServer):
         self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
 
     def press_toggle(self):
-        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        self.tmux.bind_toggle("C-\\")
         self.tmux.run("send-keys", "-K", "-c", self.client, "C-\\")
         self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
 
     def test_the_toggle_binding_parses(self):
-        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        self.tmux.bind_toggle("C-\\")
         (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " C-\\\\ " in line]
         listed = os.path.join(self.dir, "listed.conf")
         with open(listed, "w", encoding="utf-8") as fh:
@@ -179,7 +206,7 @@ class LeftBinding(PrivateServer):
         self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "")
 
     def test_with_the_panel_gone_the_key_reaches_the_pane(self):
-        self.tmux.bind_left(self.sidebar, "false")
+        self.tmux.bind_left("false")
         self.tmux.kill_pane(self.sidebar)
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
         self.wait_for(lambda: self.typed("main"), "the key in main")
@@ -216,8 +243,10 @@ class LeftInASessionPane(PrivateServer):
             "respawn-pane", "-k", "-t", self.main,
             f"{sys.executable} -I {script} {self.keys('main')} '{json.dumps([line, x])}'",
         )
-        self.tmux.set_pane_option(self.main, SESSION_OPT, str(uuid.uuid4()))
+        key = str(uuid.uuid4())
+        self.tmux.set_pane_option(self.main, SESSION_OPT, key)
         self.tmux.set_pane_option(self.main, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(self.main, VIEW_OPT, key)
         self.tmux.select(self.main)
         self.wait_for(lambda: self.show(self.main, "#{cursor_x}") == str(x), "the drawn prompt")
 
@@ -227,7 +256,7 @@ class LeftInASessionPane(PrivateServer):
         return path.read_text("utf-8").split("\n")[cursor["y"]], cursor["x"]
 
     def press_left(self, check=None):
-        self.tmux.bind_left(self.sidebar, check or cli.self_command("left", self.tmux.socket))
+        self.tmux.bind_left(check or cli.self_command("left", self.tmux.socket))
         self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
 
     def assert_on_the_panel(self):
@@ -298,7 +327,7 @@ class CollapseBinding(PrivateServer):
         self.tmux.run("send-keys", "-K", "-c", self.client, key)
 
     def test_the_collapse_binding_parses(self):
-        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_collapse(self.KEY)
         (line,) = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if " C-q " in line]
         listed = os.path.join(self.dir, "listed.conf")
         with open(listed, "w", encoding="utf-8") as fh:
@@ -306,7 +335,7 @@ class CollapseBinding(PrivateServer):
         self.tmux.run("source-file", "-n", listed)
 
     def test_pressed_in_the_session_hides_and_again_shows(self):
-        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_collapse(self.KEY)
         self.press()
         self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
         self.assertEqual(self.show(self.main, "#{pane_width}"), self.show(self.main, "#{window_width}"))
@@ -316,7 +345,7 @@ class CollapseBinding(PrivateServer):
         self.assertEqual(self.typed("main"), b"")
 
     def test_pressed_in_the_panel_hides_and_lands_in_the_session(self):
-        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_collapse(self.KEY)
         self.tmux.select(self.sidebar)
         self.press()
         self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
@@ -325,8 +354,8 @@ class CollapseBinding(PrivateServer):
         self.assertEqual(self.typed("sidebar"), b"")
 
     def test_the_toggle_key_brings_the_panel_back(self):
-        self.tmux.bind_collapse(self.KEY, self.main)
-        self.tmux.bind_toggle("C-\\", self.sidebar, self.main)
+        self.tmux.bind_collapse(self.KEY)
+        self.tmux.bind_toggle("C-\\")
         self.press()
         self.wait_for(lambda: self.zoomed() == "1", "the panel to hide")
         self.press("C-\\")
@@ -336,7 +365,7 @@ class CollapseBinding(PrivateServer):
     def test_the_raw_ctrl_q_byte_from_the_terminal_hides(self):
         self.tmux.run("set-option", "-s", "extended-keys", "always")
         self.tmux.run("set-option", "-s", "extended-keys-format", "csi-u")
-        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_collapse(self.KEY)
         os.write(self.client_fd, b"\x11")
         self.wait_for(lambda: self.zoomed() == "1", "the raw byte to hide the panel")
         time.sleep(0.3)
@@ -347,7 +376,7 @@ class CollapseBinding(PrivateServer):
         self.assertEqual(self.typed("main"), b"")
 
     def test_with_main_gone_the_key_reaches_the_pane(self):
-        self.tmux.bind_collapse(self.KEY, self.main)
+        self.tmux.bind_collapse(self.KEY)
         self.tmux.kill_pane(self.main)
         self.press()
         self.wait_for(lambda: self.typed("sidebar"), "the key in the panel")
@@ -376,7 +405,7 @@ class CollapseBinding(PrivateServer):
 
     def test_left_at_an_empty_prompt_brings_the_panel_back(self):
         self.tmux.toggle_zoom(self.main)
-        self.tmux.bind_left(self.sidebar, "false")
+        self.tmux.bind_left("false")
         self.press("Left")
         self.wait_for(lambda: self.zoomed() == "0", "the panel to show")
         self.assertEqual(self.show(self.sidebar, "#{pane_active}"), "1")
@@ -599,8 +628,8 @@ class ClientTtys(unittest.TestCase):
 
 class ShippedConf(unittest.TestCase):
     def test_both_focus_hooks_are_there_and_passthrough_is_not_set_globally(self):
-        self.assertIn("set-hook -g client-focus-in 'set-option -t \"=emx:\" @emx_focus 1'", SHELL_CONF)
-        self.assertIn("set-hook -g client-focus-out 'set-option -t \"=emx:\" @emx_focus 0'", SHELL_CONF)
+        self.assertIn("set-hook -g client-focus-in 'set-option @emx_focus 1'", SHELL_CONF)
+        self.assertIn("set-hook -g client-focus-out 'set-option @emx_focus 0'", SHELL_CONF)
         self.assertNotIn("allow-passthrough", SHELL_CONF)
 
     def test_the_status_line_is_on_at_the_bottom(self):
@@ -633,6 +662,21 @@ class Focus(PrivateServer):
         self.assertLess(idle, 5)
         os.write(self.client_fd, b"\x1b[O")
         self.wait_for(lambda: self.tmux.client_state()[1] == "0", "focus out")
+
+    def test_a_focus_report_lands_on_the_reporting_clients_own_view(self):
+        self.tmux.run("new-session", "-d", "-s", "emx-view-1", "-x", "80", "-y", "24", "sleep 60")
+        phone = self.attach("emx-view-1")
+        self.tmux.run("set-option", "-t", "=emx:", "@emx_focus", "0")
+        os.write(self.client_fds[phone], b"\x1b[I")
+        view = Tmux(self.tmux.socket, view="emx-view-1")
+        self.wait_for(lambda: view.client_state()[1] == "1", "focus in on the second view")
+        self.assertEqual(self.tmux.client_state()[1], "0")
+
+    def test_nested_clients_get_the_laptops_terminal_features(self):
+        features = self.tmux.run("show-options", "-s", "terminal-features")
+        self.assertIn("tmux*:extkeys:RGB:clipboard:ccolour:cstyle:focus:title", features)
+        self.assertNotIn("hyperlinks", features)
+        self.assertEqual(self.tmux.run("show-options", "-gv", "window-size").strip(), "latest")
 
     def test_the_attached_client_is_listed_by_its_tty(self):
         (tty,) = self.tmux.client_ttys()
@@ -881,6 +925,8 @@ class EngineLive(unittest.TestCase):
 
 
 BRACKETED_RECORDER = RECORDER.replace('os.write(1, "\\u276f ".encode())', 'os.write(1, b"\\x1b[?2004h" + "\\u276f ".encode())')
+# Asks for every mouse event in SGR form, as Claude Code's fullscreen screen does.
+MOUSE_RECORDER = RECORDER.replace('os.write(1, "\\u276f ".encode())', 'os.write(1, b"\\x1b[?1003h\\x1b[?1006h" + "\\u276f ".encode())')
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -1022,6 +1068,388 @@ class PasteIfTarget(unittest.TestCase):
                     tmux.paste_if(pane, "s1", name, "x")
         run.assert_not_called()
 
+
+class PaneParse(unittest.TestCase):
+    def test_the_pane_line_reads_the_pid_and_the_view(self):
+        tmux = Tmux("emx-test-unused")
+        line = "\t".join(["%3", "@2", "0", "viewer", "", "80", "120", "1", "", "0", "", "4242", "k1"])
+        with mock.patch.object(tmux, "run", return_value=line + "\n"):
+            (pane,) = tmux.panes()
+        self.assertEqual((pane.id, pane.role, pane.pid, pane.view), ("%3", "viewer", 4242, "k1"))
+
+    def test_a_line_with_the_old_eleven_fields_is_skipped(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run", return_value="\t".join(["%3", "@2", "0", "", "", "80", "120", "1", "", "0", ""]) + "\n"):
+            self.assertEqual(tmux.panes(), [])
+
+    def test_the_view_targets_the_bar_the_client_state_and_the_view_options(self):
+        tmux = Tmux("emx-test-unused", view="emx-view-2")
+        with mock.patch.object(tmux, "run", return_value="0\t\t\t\n") as run:
+            tmux.set_bar("x")
+            tmux.client_state()
+            tmux.client_ttys()
+            tmux.view_option("@emx_reopen")
+            tmux.session_option("@emx_hush")
+        targets = [call.args[call.args.index("-t") + 1] for call in run.call_args_list]
+        self.assertEqual(targets, ["=emx-view-2:"] * 4 + ["=emx:"])
+
+    def test_an_agent_session_name_needs_a_session_id(self):
+        key = str(uuid.uuid4())
+        self.assertEqual(Tmux("emx-test-unused").viewer_command(key), f"exec env -u TMUX tmux -L emx-test-unused attach-session -t =emx-a-{key}:")
+        for bad in ("s1", "", "x;y", key + " "):
+            with self.subTest(bad=bad), self.assertRaises(TmuxError):
+                Tmux("emx-test-unused").viewer_command(bad)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class Views(PrivateServer):
+    """Agent panes linked into their own sessions and shown in view slots by nested clients of the same server."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.run("set-option", "-g", "remain-on-exit", "on")
+        self.key = str(uuid.uuid4())
+        recorder = os.path.join(self.dir, "recorder.py")
+        self.agent = self.tmux.new_hidden_window(f"{sys.executable} -I {recorder} {self.keys('agent')}")
+        self.tmux.set_pane_option(self.agent, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(self.agent, SESSION_OPT, self.key)
+        self.window = self.show(self.agent, "#{window_id}")
+        self.wait_for(lambda: self.show(self.agent, "#{cursor_x}") == "2", "the agent's prompt")
+        # main becomes a view's slot, not a session's pane.
+        for opt in (AGENT_OPT, SESSION_OPT, VIEW_OPT):
+            self.tmux.unset_pane_option(self.main, opt)
+
+    def clients(self):
+        return self.tmux.run("list-clients", "-F", "#{client_name}\t#{client_session}").splitlines()
+
+    def show_in(self, slot, key, window=None):
+        self.tmux.link_agent(window or self.window, key, "cat")
+        before = len(self.clients())
+        self.tmux.respawn(slot, self.tmux.viewer_command(key))
+        self.tmux.set_pane_option(slot, ROLE, "viewer")
+        self.tmux.set_pane_option(slot, VIEW_OPT, key)
+        self.wait_for(lambda: len(self.clients()) > before, "the viewer to attach")
+        self.wait_for(lambda: "❯" in self.tmux.capture(slot), "the agent's screen in the slot")
+
+    def second_view(self):
+        slot = self.tmux.run(
+            "new-session", "-d", "-s", "emx-view-1", "-x", "100", "-y", "30", "-P", "-F", "#{pane_id}",
+            f"{sys.executable} -I {os.path.join(self.dir, 'recorder.py')} {self.keys('slot2')}",
+        ).strip()
+        panel = self.tmux.run(
+            "split-window", "-h", "-t", slot, "-P", "-F", "#{pane_id}",
+            f"{sys.executable} -I {os.path.join(self.dir, 'recorder.py')} {self.keys('panel2')}",
+        ).strip()
+        self.tmux.set_pane_option(panel, ROLE, "sidebar")
+        return slot, panel, self.attach("emx-view-1")
+
+    def test_linking_keeps_the_pane_and_its_process_and_a_second_link_changes_nothing(self):
+        before = {p.id: p.pid for p in self.tmux.panes()}[self.agent]
+        self.tmux.link_agent(self.window, self.key, "cat")
+        linked = self.tmux.panes(f"emx-a-{self.key}")
+        self.assertEqual([(p.id, p.pid, p.dead) for p in linked], [(self.agent, before, False)])
+        self.assertIn(self.agent, [p.id for p in self.tmux.panes()])
+        options = self.tmux.run("show-options", "-t", f"=emx-a-{self.key}:", "status").strip()
+        self.assertEqual(options, "status off")
+        sessions = self.tmux.run("list-sessions", "-F", "#{session_name}")
+        self.tmux.link_agent(self.window, self.key, "cat")
+        self.assertEqual(self.tmux.run("list-sessions", "-F", "#{session_name}"), sessions)
+        self.assertEqual([(p.id, p.pid) for p in self.tmux.panes(f"emx-a-{self.key}")], [(self.agent, before)])
+
+    def test_a_viewer_whose_session_pane_is_killed_dies_and_is_never_moved_onto_a_view(self):
+        self.show_in(self.main, self.key)
+        self.tmux.kill_pane(self.agent)
+        self.wait_for(lambda: self.show(self.main, "#{pane_dead}") == "1", "the viewer to exit")
+        self.assertEqual([line.split("\t")[1] for line in self.clients()], [SESSION])
+        self.assertFalse(self.tmux.has_agent_session(self.key))
+
+    def test_a_viewer_left_attached_claims_the_sessions_width_back_without_restarting(self):
+        self.show_in(self.main, self.key)
+        slot2, _, client2 = self.second_view()
+        fcntl.ioctl(self.client_fds[client2], termios.TIOCSWINSZ, struct.pack("HHHH", 24, 48, 0, 0))
+        self.wait_for(lambda: self.show(slot2, "#{window_width}") == "48", "the second device's narrow terminal")
+        self.show_in(slot2, self.key)
+        mine, other = self.show(self.main, "#{pane_width}"), self.show(slot2, "#{pane_width}")
+        self.assertNotEqual(mine, other)
+        self.wait_for(lambda: self.show(self.agent, "#{window_width}") == other, "the session to take the other view's width")
+        viewer = self.show(self.main, "#{pane_pid}")
+        self.tmux.claim_width(self.main, self.key)
+        self.wait_for(lambda: self.show(self.agent, "#{window_width}") == mine, "the session to take this view's width back")
+        self.assertEqual(self.show(self.main, "#{pane_pid}"), viewer)
+
+    def right_click_split(self, slot):
+        """Right-click inside `slot` through the client's terminal, then pick the menu's Horizontal Split."""
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        left, top = int(self.show(slot, "#{pane_left}")), int(self.show(slot, "#{pane_top}"))
+        x, y = left + 5, top + 3
+        self.seen = b""
+        os.write(self.client_fd, f"\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m".encode())
+        self.wait_for(lambda: self.client_shows("Horizontal Split"), "the pane menu")
+        os.write(self.client_fd, b"h")
+
+    def client_shows(self, text):
+        # The menu is drawn on the client, not in a pane, so read what reached the terminal.
+        chunks = []
+        while select.select([self.client_fd], [], [], 0.05)[0]:
+            try:
+                chunks.append(os.read(self.client_fd, 65536))
+            except OSError:
+                break
+        self.seen = getattr(self, "seen", b"") + b"".join(chunks)
+        return text.encode() in self.seen
+
+    def test_a_right_click_in_a_slot_opens_the_pane_menu_on_the_slot_not_on_the_sessions_window(self):
+        self.tmux.bind_menu()
+        self.show_in(self.main, self.key)
+        self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
+        view_window = self.show(self.main, "#{window_id}")
+        self.right_click_split(self.main)
+        self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the view's window to split")
+        self.assertEqual(self.show(self.agent, "#{window_panes}"), "1")
+        self.assertEqual(self.show(self.main, "#{window_id}"), view_window)
+
+    def mouse_agent(self):
+        """A second session whose pane asks for the mouse; returns its key and pane."""
+        recorder = os.path.join(self.dir, "mouse_recorder.py")
+        with open(recorder, "w", encoding="utf-8") as fh:
+            fh.write(MOUSE_RECORDER)
+        key = str(uuid.uuid4())
+        pane = self.tmux.new_hidden_window(f"{sys.executable} -I {recorder} {self.keys('mouse_agent')}")
+        self.tmux.set_pane_option(pane, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(pane, SESSION_OPT, key)
+        self.wait_for(lambda: self.show(pane, "#{mouse_any_flag}") == "1", "the stand-in to ask for the mouse")
+        return key, pane
+
+    def test_a_right_click_in_a_slot_goes_to_a_session_that_asked_for_the_mouse_and_opens_no_menu(self):
+        self.tmux.bind_menu()
+        key, pane = self.mouse_agent()
+        self.show_in(self.main, key, self.show(pane, "#{window_id}"))
+        self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        left, top = int(self.show(self.main, "#{pane_left}")), int(self.show(self.main, "#{pane_top}"))
+        x, y = left + 5, top + 3
+        self.seen = b""
+        os.write(self.client_fd, f"\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m".encode())
+        # The press, not only the release, which tmux passes inward whatever the binding.
+        self.wait_for(lambda: re.search(rb"\x1b\[<2;\d+;\d+M", self.typed("mouse_agent")), "the click to reach the session")
+        os.write(self.client_fd, b"h")
+        self.wait_for(lambda: self.typed("mouse_agent").endswith(b"h"), "h to reach the session")
+        self.assertFalse(self.client_shows("Horizontal Split"))
+        self.assertEqual(self.show(self.main, "#{window_panes}"), "2")
+        self.assertEqual(self.show(pane, "#{window_panes}"), "1")
+
+    def test_the_menu_check_reads_the_shown_sessions_pane_not_the_slot(self):
+        self.assertIsNotNone(MENU_CHECK_OPT, "no check option")
+        self.tmux.bind_menu()
+        key, pane = self.mouse_agent()
+        self.show_in(self.main, self.key)
+        self.tmux.link_agent(self.show(pane, "#{window_id}"), key, "cat")
+        check = self.tmux.global_option(MENU_CHECK_OPT)
+
+        def menu_here(shown):
+            return subprocess.run(["sh", "-c", f"{check} {shown}"], capture_output=True).returncode == 0
+
+        self.assertEqual((menu_here(self.key), menu_here(key), menu_here(str(uuid.uuid4()))), (True, False, False))
+
+    def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
+        self.tmux.bind_menu()
+        self.right_click_split(self.main)
+        self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the window to split")
+
+    def test_the_pane_menu_binding_is_tmuxs_own_menu_gated_on_the_slot_and_binding_again_changes_nothing(self):
+        default = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        self.tmux.bind_menu()
+        once = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        self.tmux.bind_menu()
+        self.assertEqual(self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane"), once)
+        self.assertIn("#{==:#{@emx_role},viewer}", once)
+        self.assertEqual(self.tmux.global_option(MENU_OPT), default.split("MouseDown3Pane", 1)[1].strip())
+        self.show_in(self.main, self.key)
+        gate = "#{==:#{@emx_role},viewer}"
+        self.assertEqual((self.show(self.main, gate), self.show(self.agent, gate), self.show(self.sidebar, gate)), ("1", "0", "0"))
+        listed = os.path.join(self.dir, "menu.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write(once)
+        self.tmux.run("source-file", "-n", listed)
+
+    def test_the_toggle_key_acts_only_in_the_view_it_is_pressed_in(self):
+        self.tmux.bind_toggle("C-\\")
+        slot2, panel2, client2 = self.second_view()
+        self.tmux.select(self.main)
+        self.tmux.select(slot2)
+        self.tmux.run("send-keys", "-K", "-c", client2, "C-\\")
+        self.wait_for(lambda: self.show(panel2, "#{pane_active}") == "1", "view B's panel to be selected")
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+        self.tmux.run("send-keys", "-K", "-c", client2, "C-\\")
+        self.wait_for(lambda: self.show(slot2, "#{pane_active}") == "1", "view B's slot to be selected")
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+
+    def test_the_collapse_key_zooms_only_the_pressing_views_window(self):
+        self.tmux.bind_collapse("C-q")
+        slot2, panel2, client2 = self.second_view()
+        self.tmux.select(panel2)
+        self.tmux.run("send-keys", "-K", "-c", client2, "C-q")
+        self.wait_for(lambda: self.show(slot2, "#{window_zoomed_flag}") == "1", "view B to hide its panel")
+        self.assertEqual(self.show(slot2, "#{pane_active}"), "1")
+        self.assertEqual(self.show(self.main, "#{window_zoomed_flag}"), "0")
+        time.sleep(0.3)
+        self.assertEqual((self.typed("panel2"), self.typed("slot2")), (b"", b""))
+
+    def test_left_on_a_slot_selects_that_views_panel_or_reaches_the_session_through_the_viewer(self):
+        self.show_in(self.main, self.key)
+        self.tmux.select(self.main)
+        self.tmux.bind_left("false")
+        self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
+        self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the panel to be selected")
+        self.assertEqual(self.show(self.sidebar, "#{" + BACK_OPT + "}"), "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("agent"), b"")
+        self.tmux.select(self.main)
+        self.tmux.bind_left("true")
+        self.tmux.run("send-keys", "-K", "-c", self.client, "Left")
+        self.wait_for(lambda: self.typed("agent"), "the key in the session")
+        self.assertEqual(self.typed("agent"), LEFT)
+        self.assertEqual(self.typed("main"), b"")
+
+    def test_ctrl_v_in_a_viewer_runs_the_paste_check_with_the_sessions_own_pane(self):
+        args = os.path.join(self.dir, "paste-args")
+        script = os.path.join(self.dir, "paste.sh")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/sh\necho "$@" > {args}\nexit 0\n')
+        os.chmod(script, 0o755)
+        self.show_in(self.main, self.key)
+        self.tmux.select(self.main)
+        self.tmux.run("set-option", "-g", RELAY_PASTE_OPT, str(time.time()))
+        self.tmux.bind_paste("C-v", script)
+        self.tmux.run("send-keys", "-K", "-c", self.client, "C-v")
+        self.wait_for(lambda: os.path.exists(args) and os.path.getsize(args), "the paste check to run")
+        with open(args, encoding="utf-8") as fh:
+            self.assertEqual(fh.read().split(), [self.agent, self.key])
+        time.sleep(0.3)
+        self.assertEqual(self.typed("agent"), b"")
+
+    def test_every_binding_parses_back(self):
+        self.tmux.bind_toggle("C-\\")
+        self.tmux.bind_collapse("C-q")
+        self.tmux.bind_left("true")
+        self.tmux.bind_paste("C-v", "true")
+        lines = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if line.split()[3] in ("C-\\\\", "C-q", "Left", "C-v")]
+        self.assertEqual(len(lines), 4)
+        listed = os.path.join(self.dir, "listed.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        self.tmux.run("source-file", "-n", listed)
+
+    def test_typing_into_a_linked_session_sees_the_focus_of_a_panel_in_any_view(self):
+        self.tmux.link_agent(self.window, self.key, "cat")
+        _, panel2, _ = self.second_view()
+        for panel in (self.sidebar, panel2):
+            with self.subTest(panel=panel):
+                self.tmux.select(panel)
+                gate = core.type_gate(self.agent, panel, self.key, 0, SESSION_OPT)
+                report = self.tmux.type_if(self.agent, gate, "hi", core.TYPED, core.gate_report(SESSION_OPT), enter=False)
+                self.assertEqual(report, core.TYPED)
+        self.tmux.select(self.main)
+        gate = core.type_gate(self.agent, self.sidebar, self.key, 0, SESSION_OPT)
+        self.assertNotEqual(self.tmux.type_if(self.agent, gate, "no", core.TYPED, core.gate_report(SESSION_OPT), enter=False), core.TYPED)
+        self.wait_for(lambda: self.typed("agent") == b"hihi", "both typings")
+
+    def test_a_mouse_copy_in_a_viewer_reaches_the_terminal_showing_it(self):
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        self.tmux.bind_copy(cli.self_command("copied", self.tmux.socket))
+        self.show_in(self.main, self.key)
+        self.tmux.select(self.main)
+        seen = bytearray()
+
+        def drain():
+            while select.select([self.client_fd], [], [], 0)[0]:
+                seen.extend(os.read(self.client_fd, 65536))
+
+        time.sleep(0.3)
+        drain()
+        seen.clear()
+        for event in (b"\x1b[<0;1;1M", b"\x1b[<32;2;1M", b"\x1b[<32;3;1M", b"\x1b[<0;3;1m"):
+            os.write(self.client_fd, event)
+            time.sleep(0.1)
+
+        def clipboard():
+            drain()
+            return re.search(rb"\x1b\]52;[a-z]*;([A-Za-z0-9+/=]+)(\x07|\x1b\\\\)", bytes(seen))
+
+        self.wait_for(clipboard, "the clipboard escape on the laptop's terminal")
+        copied = base64.b64decode(clipboard().group(1))
+        time.sleep(0.5)
+        self.assertEqual(copied, self.tmux.run("show-buffer").encode())
+        self.assertTrue(copied.startswith("❯".encode()), copied)
+        self.assertEqual(len(self.tmux.run("list-buffers", "-F", "#{buffer_name}").split()), 1)
+
+    def test_views_reads_each_views_clients_and_what_its_slot_shows(self):
+        self.show_in(self.main, self.key)
+        slot2, _, _ = self.second_view()
+        views = {v.name: v for v in self.tmux.views()}
+        self.assertEqual(sorted(views), [SESSION, "emx-view-1"])
+        self.assertEqual((views[SESSION].attached, views[SESSION].shows, views[SESSION].slot), (1, self.key, self.main))
+        self.assertEqual((views["emx-view-1"].attached, views["emx-view-1"].shows, views["emx-view-1"].slot), (1, "", slot2))
+        self.assertIsNotNone(views[SESSION].activity)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class MigratesA290Workspace(PrivateServer):
+    """`refresh_workspace` on a real server holding 2.9.0's shape: session A's pane swapped into the home view, the placeholder and session B's pane hidden."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.run("set-option", "-g", "remain-on-exit", "on")
+        self.a, self.b = str(uuid.uuid4()), str(uuid.uuid4())
+        self.tmux.unset_pane_option(self.main, VIEW_OPT)
+        self.tmux.set_pane_option(self.main, SESSION_OPT, self.a)
+        self.placeholder = self.tmux.new_hidden_window("cat")
+        self.tmux.set_pane_option(self.placeholder, ROLE, "placeholder")
+        self.other = self.tmux.new_hidden_window("cat")
+        self.tmux.set_pane_option(self.other, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(self.other, SESSION_OPT, self.b)
+        self.tmux.set_session_option(cli.VERSION_OPT, cli.code_version())
+        self.before = self.processes()
+
+    def processes(self):
+        return {p.id: (p.pid, p.dead) for p in self.tmux.panes() if p.agent}
+
+    def slot(self):
+        window = self.show(self.sidebar, "#{window_id}")
+        return next(p for p in self.tmux.panes() if p.window == window and p.id != self.sidebar)
+
+    def test_every_sessions_pane_keeps_its_id_and_process_and_gets_its_own_session(self):
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.processes(), self.before)
+        self.assertEqual(sorted(self.before), sorted([self.main, self.other]))
+        for pane, key in ((self.main, self.a), (self.other, self.b)):
+            with self.subTest(key=key):
+                (linked,) = self.tmux.panes(f"emx-a-{key}")
+                self.assertEqual((linked.id, linked.pid, linked.dead), (pane, self.before[pane][0], False))
+        slot = self.slot()
+        self.assertEqual((slot.id, slot.role), (self.placeholder, "placeholder"))
+        self.assertEqual(self.tmux.session_option(cli.REOPEN_OPT), self.a)
+
+    def test_the_session_moved_out_of_the_home_view_keeps_its_size_and_its_window_follows_clients_again(self):
+        size = self.show(self.main, "#{pane_width}x#{pane_height}")
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.show(self.main, "#{pane_width}x#{pane_height}"), size)
+        self.assertEqual(self.tmux.run("show-options", "-w", "-t", self.main, "window-size").strip(), "")
+
+    def test_a_second_run_changes_nothing(self):
+        cli.refresh_workspace(self.tmux)
+        layout = self.tmux.run("list-panes", "-a", "-F", "#{session_name} #{window_id} #{pane_id} #{pane_pid}")
+        sessions = self.tmux.run("list-sessions", "-F", "#{session_name}")
+        cli.refresh_workspace(self.tmux)
+        self.assertEqual(self.tmux.run("list-panes", "-a", "-F", "#{session_name} #{window_id} #{pane_id} #{pane_pid}"), layout)
+        self.assertEqual(self.tmux.run("list-sessions", "-F", "#{session_name}"), sessions)
+
+    def test_the_session_that_was_in_the_home_view_shows_there_again_through_a_viewer(self):
+        cli.refresh_workspace(self.tmux)
+        slot = self.slot()
+        self.tmux.respawn(slot.id, self.tmux.viewer_command(self.a))
+        self.wait_for(lambda: "❯" in self.tmux.capture(slot.id), "the session's screen in the slot")
+        self.assertEqual(self.processes(), self.before)
 
 
 if __name__ == "__main__":

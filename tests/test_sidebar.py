@@ -16,7 +16,7 @@ from unittest import mock
 
 import emx
 from emx import cli, core, sidebar
-from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError
+from emx.tmux import AGENT_OPT, OPEN_OPT, RELAY_HOST_OPT, RELAY_OPT, SESSION, SESSION_OPT, TERMINAL_OPT, Pane, Tmux, TmuxError, View
 
 
 def git(*args):
@@ -260,12 +260,42 @@ class FakeNotifier:
         return False
 
 
-class ClientTmux:
-    """The two tmux calls a listing makes for notices; anything else is an error, as it is with no tmux at all."""
+def window_of(panes, pane):
+    """The panes in the window of `pane`, as `Tmux.window_panes` gives them."""
+    mine = next((p for p in panes if p.id == pane), None)
+    return [p for p in panes if mine is not None and p.window == mine.window]
 
-    def __init__(self, state=(0, "", "", None)):
+
+class WindowPanes:
+    def window_panes(self, pane):
+        return window_of(self.panes(), pane)
+
+
+class ClientTmux(WindowPanes):
+    """The tmux calls a listing makes for notices; anything else is an error, as it is with no tmux at all.
+
+    `state` is the one view's client state as `Tmux.client_state` gives it;
+    `views` reads the same view, its slot `slot` showing `shows`.
+    """
+
+    def __init__(self, state=(0, "", "", None), shows="", slot="%2"):
         self.state = state
         self.hush = ""
+        self.shows = shows
+        self.slot = slot
+
+    def views(self):
+        if isinstance(self.state, Exception):
+            raise self.state
+        attached, focus, active, idle = self.state
+        activity = None if idle is None else time.time() - idle
+        return [View(SESSION, attached, focus, activity, 0, self.shows, active == self.slot, self.slot)]
+
+    def view_option(self, name):
+        return self.session_option(name)
+
+    def set_view_option(self, name, value):
+        return self.set_session_option(name, value)
 
     def session_option(self, name):
         if isinstance(self.hush, Exception):
@@ -441,23 +471,34 @@ CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 
 
 class SwitchToTmux(ClientTmux):
-    """The panel (%1) and main (%2, the placeholder) in one window, and `held` as the pane of session KEY_A, or none. Records every call that changes something, in order."""
+    """The panel (%1) and the slot (%2, the placeholder unless `slot` says otherwise) in one window, and `held` as the pane of session KEY_A, or none. Records every call that changes something, in order."""
 
-    def __init__(self, held=None):
+    socket = "emx-test-switch"
+
+    def __init__(self, held=None, slot=None):
         super().__init__()
         self.held = held
+        self.made = None
+        self.slot_pane = slot or Pane("%2", "@1", False, "placeholder", "", 100, 141)
         self.calls = []
 
     def panes(self):
-        listed = [Pane("%1", "@1", False, "sidebar", "", 40, 141), Pane("%2", "@1", False, "placeholder", "", 100, 141)]
-        return listed + ([self.held] if self.held is not None else [])
+        listed = [Pane("%1", "@1", False, "sidebar", "", 40, 141), self.slot_pane]
+        return listed + [p for p in (self.held, self.made) if p is not None]
 
     def respawn(self, pane, command, cwd=None):
         self.calls.append(("respawn", pane, command, cwd))
 
     def new_hidden_window(self, command, cwd=None):
         self.calls.append(("new_hidden_window", command, cwd))
+        self.made = Pane("%9", "@9", False, "", KEY_A, 100, 100, agent="claude")
         return "%9"
+
+    def link_agent(self, window, key, inert):
+        self.calls.append(("link_agent", window, key))
+
+    def viewer_command(self, key):
+        return f"viewer {key}"
 
     def set_pane_option(self, pane, name, value):
         self.calls.append(("set_pane_option", pane, name, value))
@@ -500,13 +541,33 @@ class SwitchTo(AppCase):
         sidebar.App.switch_to(self.app, KEY_A, trigger, checked)
         return self.app.tmux.calls
 
-    def test_a_running_session_is_swapped_into_main_and_selected(self):
+    def shown(self, window, slot="%2"):
+        """The calls that show KEY_A, whose pane is in `window`, in the slot and go to it."""
+        return [
+            ("link_agent", window, KEY_A), ("respawn", slot, f"viewer {KEY_A}", None),
+            ("set_pane_option", slot, sidebar.ROLE, "viewer"), ("set_pane_option", slot, sidebar.VIEW_OPT, KEY_A),
+            ("select", slot),
+        ]
+
+    def test_a_running_session_is_shown_in_the_slot_by_a_viewer_and_its_pane_never_moves(self):
         calls = self.open(Pane("%5", "@2", False, "", KEY_A, 100, 100, agent="claude"), "done")
-        self.assertEqual(calls, [("swap", "%5", "%2"), ("select", "%5")])
+        self.assertEqual(calls, self.shown("@2"))
+        self.assertNotIn("swap", [c[0] for c in calls])
+        self.assertNotIn("kill", [c[0] for c in calls])
+
+    def test_a_slot_already_showing_the_session_is_only_selected(self):
+        self.app.tmux = SwitchToTmux(
+            Pane("%5", "@2", False, "", KEY_A, 100, 100, agent="claude"),
+            slot=Pane("%2", "@1", False, "viewer", "", 100, 141, view=KEY_A),
+        )
+        self.poll(core.Session(KEY_A, "alpha", self.cwd, "done", "", "", 1.0, True))
+        self.app.refresh()
+        sidebar.App.switch_to(self.app, KEY_A, core.OPEN)
+        self.assertEqual(self.app.tmux.calls, [("select", "%2")])
 
     def test_a_stopped_session_with_a_dead_pane_is_resumed_there_on_open(self):
         calls = self.open(Pane("%5", "@2", True, "", KEY_A, 100, 100, agent="claude"), "stopped")
-        respawns = [c for c in calls if c[0] == "respawn"]
+        respawns = [c for c in calls if c[0] == "respawn" and c[1] != "%2"]
         self.assertEqual(len(respawns), 1)
         _, pane, command, cwd = respawns[0]
         words = shlex.split(command)
@@ -514,16 +575,16 @@ class SwitchTo(AppCase):
         self.assertEqual(words[words.index("--resume") + 1], CLAUDE_SID)
         self.assertIn("--settings", words)
         self.assertNotIn("new_hidden_window", [c[0] for c in calls])
-        self.assertEqual(calls[-2:], [("swap", "%5", "%2"), ("select", "%5")])
+        self.assertEqual(calls[1:], self.shown("@2"))
 
-    def test_a_stopped_session_with_no_pane_gets_a_tagged_window_before_the_swap(self):
+    def test_a_stopped_session_with_no_pane_gets_a_tagged_window_before_it_is_shown(self):
         calls = self.open(None, "stopped")
-        self.assertEqual([c[0] for c in calls], ["new_hidden_window", "set_pane_option", "set_pane_option", "swap", "select"])
+        self.assertEqual([c[0] for c in calls[:3]], ["new_hidden_window", "set_pane_option", "set_pane_option"])
         _, command, cwd = calls[0]
         self.assertEqual(cwd, self.cwd)
         self.assertIn(f"--resume {CLAUDE_SID}", command)
         self.assertEqual(calls[1:3], [("set_pane_option", "%9", AGENT_OPT, "claude"), ("set_pane_option", "%9", SESSION_OPT, KEY_A)])
-        self.assertEqual(calls[3], ("swap", "%9", "%2"))
+        self.assertEqual(calls[3:], self.shown("@9"))
 
     def test_a_stopped_session_is_never_resumed_by_any_other_trigger(self):
         stopped = core.Session(KEY_A, "alpha", self.cwd, "stopped", "", "", 1.0, False)
@@ -549,7 +610,7 @@ class SwitchTo(AppCase):
     def test_an_old_viewer_with_no_agent_tag_is_never_taken_for_the_session(self):
         calls = self.open(Pane("%5", "@2", False, "", KEY_A, 100, 100), "stopped")
         self.assertEqual(calls[0][0], "new_hidden_window")
-        self.assertNotIn(("swap", "%5", "%2"), calls)
+        self.assertNotIn(("link_agent", "@2", KEY_A), calls)
 
     def test_a_window_that_cannot_be_tagged_is_killed(self):
         class Untaggable(SwitchToTmux):
@@ -561,7 +622,8 @@ class SwitchTo(AppCase):
         self.app.refresh()
         sidebar.App.switch_to(self.app, KEY_A, core.OPEN)
         self.assertIn(("kill", "%9"), self.app.tmux.calls)
-        self.assertNotIn("swap", [c[0] for c in self.app.tmux.calls])
+        self.assertNotIn("respawn", [c[0] for c in self.app.tmux.calls])
+        self.assertNotIn("link_agent", [c[0] for c in self.app.tmux.calls])
         self.assertTrue(self.app.notice_error)
 
 
@@ -635,8 +697,8 @@ class CursorAfterStart(AppCase):
 FOCUS_IN, FOCUS_OUT = ["\x1b", "[", "I"], ["\x1b", "[", "O"]
 
 
-class FocusTmux:
-    """The sidebar (%1) and main (%2); `panel_active` is which of them tmux says is active."""
+class FocusTmux(WindowPanes):
+    """The sidebar (%1) and the slot (%2) showing `b`, or with `main_agent` empty showing nothing; `panel_active` is which of them tmux says is active."""
 
     def __init__(self):
         self.panel_active = True
@@ -647,7 +709,8 @@ class FocusTmux:
     def panes(self):
         return [
             Pane("%1", "@1", False, "sidebar", "", 40, 121, self.panel_active, self.back),
-            Pane("%2", "@1", False, "", "b", 80, 121, not self.panel_active, agent=self.main_agent),
+            Pane("%2", "@1", False, "viewer" if self.main_agent else "placeholder", "", 80, 121, not self.panel_active,
+                 view="b" if self.main_agent else ""),
         ]
 
     def clear_back(self, pane):
@@ -803,8 +866,8 @@ class ArrowKeys(AppCase):
                 self.assertIn(arrow, help_keys)
 
 
-class CloseTmux:
-    """The sidebar (%1), main (%2) showing `a`, a hidden viewer (%3) of `b` and the placeholder (%4) in its own window."""
+class CloseTmux(WindowPanes):
+    """The sidebar (%1), the slot (%2) holding an old viewer of `a`, a hidden old viewer (%3) of `b` and the 2.9.0 placeholder (%4) in its own window."""
 
     def __init__(self):
         self.list = [
@@ -824,6 +887,15 @@ class CloseTmux:
     def kill_pane(self, pane):
         self.calls.append(("kill", pane))
 
+    def respawn(self, pane, command, cwd=None):
+        self.calls.append(("respawn", pane))
+
+    def set_pane_option(self, pane, name, value):
+        pass
+
+    def unset_pane_option(self, pane, name):
+        pass
+
     def client_state(self):
         return 0, "", "", None
 
@@ -837,9 +909,8 @@ class CloseStaleOnListings(AppCase):
 
     def run_close(self, times):
         for _ in range(times):
-            panes = self.tmux.panes()
-            main = next(p for p in panes if p.id == "%2")
-            self.app.close_stale(panes, main)
+            main = next(p for p in self.tmux.panes() if p.id == "%2")
+            self.app.close_stale(main)
 
     def make_dead(self, pane_id):
         self.tmux.list = [replace(p, dead=True) if p.id == pane_id else p for p in self.tmux.list]
@@ -854,16 +925,16 @@ class CloseStaleOnListings(AppCase):
         self.assertIn(("kill", "%3"), self.tmux.calls)
         self.assertNotIn(("kill", "%2"), self.tmux.calls)
 
-    def test_a_dead_viewer_in_main_is_swapped_for_the_placeholder(self):
+    def test_a_dead_viewer_in_the_slot_gives_way_to_the_placeholder(self):
         self.make_dead("%2")
         self.run_close(core.STALE_AFTER_MISSES)
-        self.assertEqual(self.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2")])
+        self.assertEqual(self.tmux.calls, [("respawn", "%2")])
 
     def test_a_listing_without_the_session_still_closes_its_viewer(self):
         self.app.sessions = [session("b", "/tmp/b")]
         self.run_close(2)
-        self.assertIn(("swap", "%4", "%2"), self.tmux.calls)
-        self.assertIn(("kill", "%2"), self.tmux.calls)
+        self.assertIn(("respawn", "%2"), self.tmux.calls)
+        self.assertNotIn(("kill", "%2"), self.tmux.calls)
         self.assertNotIn(("kill", "%3"), self.tmux.calls)
 
 
@@ -902,6 +973,9 @@ class LegacyTmux(ClientTmux):
     def capture(self, pane):
         return ""
 
+    def respawn(self, pane, command, cwd=None):
+        self.calls.append(("respawn", pane))
+
     def __getattr__(self, name):
         return lambda *args, **kwargs: None
 
@@ -919,10 +993,10 @@ class LegacyViewers(AppCase):
     def housekeep(self):
         sidebar.App.housekeep(self.app, False)
 
-    def test_with_an_empty_listing_the_placeholder_goes_into_main_then_every_old_viewer_is_killed(self):
+    def test_with_an_empty_listing_the_slot_gets_the_placeholder_and_every_other_old_viewer_is_killed(self):
         self.housekeep()
-        self.assertEqual(self.app.tmux.calls, [("swap", "%4", "%2"), ("kill", "%2"), ("kill", "%3")])
-        self.assertEqual(self.app.main_pane.id, "%4")
+        self.assertEqual(self.app.tmux.calls, [("respawn", "%2"), ("kill", "%3")])
+        self.assertEqual((self.app.main_pane.id, self.app.main_pane.role), ("%2", "placeholder"))
         self.assertTrue(self.app.legacy_cleared)
 
     def test_it_runs_once(self):
@@ -938,10 +1012,10 @@ class LegacyViewers(AppCase):
         self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
         self.assertIn("%5", [p.id for p in self.app.tmux.list])
 
-    def test_with_no_placeholder_main_stays_and_the_rest_go(self):
+    def test_with_no_placeholder_pane_the_slot_still_gets_the_placeholder_and_the_rest_go(self):
         self.app.tmux.list = [p for p in self.app.tmux.list if p.role != "placeholder"]
         self.housekeep()
-        self.assertEqual(self.app.tmux.calls, [("kill", "%3")])
+        self.assertEqual(self.app.tmux.calls, [("respawn", "%2"), ("kill", "%3")])
 
     def test_a_tmux_failure_leaves_it_to_the_next_housekeep(self):
         def broken(pane):
@@ -971,8 +1045,7 @@ class StaleNeverEndsASession(AppCase):
         self.app.tmux = LegacyTmux()
         self.app.sessions = [session("other", "/p")]
         for _ in range(core.STALE_AFTER_MISSES + 1):
-            panes = self.app.tmux.panes()
-            self.app.close_stale(panes, panes[1])
+            self.app.close_stale(self.app.tmux.panes()[1])
         self.assertNotIn(("kill", "%5"), self.app.tmux.calls)
         self.assertIn(("kill", "%3"), self.app.tmux.calls)
 
@@ -1002,28 +1075,39 @@ class EmptyListing(AppCase):
         self.assertEqual(self.app.cursor, ("session", "c"))
 
 class SessionCloseTmux(ClientTmux):
-    """The panel (%1); main (%2) holding session `a`; session `b`'s own pane (%3) hidden; the placeholder (%4). Swaps and kills change what `panes` lists, as tmux would, and go into the shared `log`."""
+    """The panel (%1); the slot (%2) showing session `a` through a viewer, as does another view's slot (%8); `a`'s own pane (%5) and `b`'s (%3) hidden. Kills and the slots' tags change what `panes` and `views` list, as tmux would, and kills and the slots' respawns go into the shared `log`."""
 
     def __init__(self, log):
         super().__init__()
         self.log = log
         self.list = [
             Pane("%1", "@1", False, "sidebar", "", 40, 121),
-            Pane("%2", "@1", False, "", "a", 80, 121, agent="claude"),
+            Pane("%2", "@1", False, "viewer", "", 80, 121, view="a"),
             Pane("%3", "@2", False, "", "b", 80, 80, agent="claude"),
-            Pane("%4", "@3", False, "placeholder", "", 80, 80),
+            Pane("%5", "@4", False, "", "a", 80, 80, agent="claude"),
         ]
         self.kill_fails = False
         self.kill_ends = True
+        self.shows = {"%2": "a", "%8": "a"}
 
     def panes(self):
         return list(self.list)
 
-    def swap(self, source, target):
-        self.log.append(("swap", source, target))
-        where = {p.id: p.window for p in self.list}
-        moved = {source: where[target], target: where[source]}
-        self.list = [replace(p, window=moved.get(p.id, p.window)) for p in self.list]
+    def views(self):
+        return [View(SESSION, 1, "", None, 121, self.shows.get("%2", ""), False, "%2"),
+                View("emx-view-1", 1, "", None, 48, self.shows.get("%8", ""), False, "%8")]
+
+    def respawn(self, pane, command, cwd=None):
+        self.log.append(("respawn", pane))
+
+    def set_pane_option(self, pane, name, value):
+        if name == sidebar.ROLE:
+            self.list = [replace(p, role=value) if p.id == pane else p for p in self.list]
+
+    def unset_pane_option(self, pane, name):
+        if name == sidebar.VIEW_OPT:
+            self.shows.pop(pane, None)
+            self.list = [replace(p, view="") if p.id == pane else p for p in self.list]
 
     def kill_pane(self, pane):
         self.log.append(("kill", pane))
@@ -1110,21 +1194,21 @@ class CloseSession(AppCase):
         self.assertEqual(self.app.notice, "Closing emx-test-a…")
         self.assertIsNone(self.app.confirm)
         self.settle()
-        self.assertEqual(self.log, [("swap", "%4", "%2"), ("kill", "%2"), ("forget", "a")])
+        # Every view showing it gets the placeholder before the kill, so none shows its viewer closing.
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a")])
         self.assertEqual(self.engine.threads, [True])
         self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a.", False))
         self.assertTrue(self.app.poller.wake.is_set())
-        _, main = self.app.layout_panes(self.app.tmux.panes())
-        self.assertEqual(main.id, "%4")
+        self.assertEqual([(p.id, p.role, p.view) for p in self.app.tmux.list if p.id == "%2"], [("%2", "placeholder", "")])
 
-    def test_a_stopped_session_is_only_forgotten_and_its_dead_pane_in_main_closes_after(self):
-        self.app.tmux.list = [replace(p, dead=True) if p.id == "%2" else p for p in self.app.tmux.list]
+    def test_a_stopped_session_is_only_forgotten_and_its_dead_pane_and_the_slot_showing_it_close_after(self):
+        self.app.tmux.list = [replace(p, dead=True) if p.id == "%5" else p for p in self.app.tmux.list]
         self.poll(self.stopped("a"), self.b)
         self.app.refresh()
         self.listing = ([self.stopped("a"), self.b], None)
         self.press(sidebar.CTRL_X, sidebar.CTRL_X)
         self.settle()
-        self.assertEqual(self.log, [("forget", "a"), ("swap", "%4", "%2"), ("kill", "%2")])
+        self.assertEqual(self.log, [("forget", "a"), ("kill", "%5"), ("respawn", "%2")])
         self.assertEqual(self.app.notice, "Closed emx-test-a.")
 
     def test_closing_a_session_whose_pane_is_hidden_kills_that_pane_with_no_swap(self):
@@ -1147,7 +1231,7 @@ class CloseSession(AppCase):
         with mock.patch.object(sidebar, "LISTED_WAIT_SECONDS", 0):
             self.press(sidebar.CTRL_X, sidebar.CTRL_X)
             self.settle()
-        self.assertIn(("kill", "%2"), self.log)
+        self.assertIn(("kill", "%5"), self.log)
         self.assertNotIn("forget", [c[0] for c in self.log])
         self.assertEqual((self.app.notice, self.app.notice_error),
                          ("emx-test-a is still running, so emx didn't remove it.", True))
@@ -1325,7 +1409,7 @@ class CloseSession(AppCase):
         drawn = self.drawn()
         self.assertEqual(drawn.count("closing…"), 3)
         self.settle()
-        self.assertEqual(self.log, [("swap", "%4", "%2"), ("kill", "%2"), ("forget", "a"), ("forget", "b"), ("kill", "%3")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a"), ("forget", "b"), ("kill", "%3")])
         self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a. Closed emx-test-b.", False))
         self.poll(other)
         self.app.refresh()
@@ -1338,7 +1422,7 @@ class CloseSession(AppCase):
         self.listing = ([self.a], None)
         self.press(sidebar.CTRL_X)
         self.settle()
-        self.assertEqual(self.log, [("swap", "%4", "%2"), ("kill", "%2"), ("forget", "a")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a")])
         self.assertEqual(self.app.notice, "Closed emx-test-a. emx-test-b isn't listed any more, so emx didn't close it.")
         self.assertTrue(self.app.notice_error)
         self.assertEqual(self.app.closing, {"a": True})
@@ -1376,7 +1460,7 @@ class CloseSession(AppCase):
         self.assertEqual(self.log, [])
         self.press(sidebar.CTRL_X)
         self.settle()
-        self.assertEqual(self.log, [("swap", "%4", "%2"), ("kill", "%2"), ("forget", "a"), ("kill", "%3"), ("forget", "b")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a"), ("kill", "%3"), ("forget", "b")])
 
     def test_the_help_shows_ctrl_x(self):
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))
@@ -2079,7 +2163,7 @@ INTERACTIVE_CURSORS = json.loads(
 )
 
 
-class RenameTmux:
+class RenameTmux(WindowPanes):
     """The panel (%1) has focus; main (%2) shows `named`; a hidden viewer (%3) shows `b`. Its screen and prompt come from real captures, and tmux's last-moment check answers `gate_says`."""
 
     def __init__(self):
@@ -2088,7 +2172,7 @@ class RenameTmux:
             Pane("%2", "@1", False, "", "named", 100, 141, agent="claude"),
             Pane("%3", "@2", False, "", "b", 100, 100, agent="claude"),
         ]
-        self.view("named-viewer", "prompt-empty")
+        self.show_screen("named-viewer", "prompt-empty")
         self.in_mode = False
         self.gate_says = core.TYPED
         self.prompt_after = None
@@ -2103,7 +2187,7 @@ class RenameTmux:
         self.events = []
         self.threads = []
 
-    def view(self, screen, prompt):
+    def show_screen(self, screen, prompt):
         self.screen, _ = fixture_screen(screen)
         text, width = fixture_screen(prompt)
         cursor = {**PROMPT_CURSORS["cursors"], **INTERACTIVE_CURSORS["cursors"]}[prompt]
@@ -2158,7 +2242,7 @@ class RenameTmux:
         if self.prompt_after == "gone":
             self.prompt_probe = mock.Mock(side_effect=TmuxError("can't find pane"))
         elif self.prompt_after is not None:
-            self.view("named-viewer", self.prompt_after)
+            self.show_screen("named-viewer", self.prompt_after)
 
     def submit_if(self, pane, gate, typed, report):
         self.note()
@@ -2303,7 +2387,7 @@ class RenameSession(AppCase):
         for prompt in ("prompt-text", "prompt-text-at-start", "prompt-multiline", "prompt-slash-menu", "prompt-permission"):
             with self.subTest(prompt=prompt):
                 self.listings = [[self.named]]
-                self.app.tmux.view("named-viewer", prompt)
+                self.app.tmux.show_screen("named-viewer", prompt)
                 self.rename_to("fresh name")
                 self.settle()
                 self.refused("emx-test-named's prompt isn't empty, so emx didn't type into it.")
@@ -2313,7 +2397,7 @@ class RenameSession(AppCase):
             with self.subTest(screen=screen):
                 self.app.tmux = RenameTmux()
                 self.listings = [[self.named]]
-                self.app.tmux.view(screen, "prompt-empty")
+                self.app.tmux.show_screen(screen, "prompt-empty")
                 self.rename_to("fresh name")
                 self.settle()
                 self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
@@ -2331,7 +2415,7 @@ class RenameSession(AppCase):
         self.poll(unnamed)
         self.app.refresh()
         self.listings = [[unnamed]]
-        self.app.tmux.view("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
+        self.app.tmux.show_screen("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
         self.keys(sidebar.CTRL_R)
         self.assertEqual(self.app.rename_edit["text"], "")
         self.keys(*"fresh name", "\r")
@@ -2345,7 +2429,7 @@ class RenameSession(AppCase):
         self.app.refresh()
         self.listings = [[unnamed]]
         self.after = core.Session("named", "Fixing the login bug", "/p/alpha", "blocked", "", "", 0.0, True, named=False)
-        self.app.tmux.view("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
+        self.app.tmux.show_screen("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual(self.app.tmux.typed, [("%2", "/rename fresh name")])
@@ -2392,7 +2476,7 @@ class RenameSession(AppCase):
 
     def test_a_working_session_whose_prompt_holds_text_is_never_typed_into(self):
         self.listings = [[session("named", "/p/alpha", state="working")]]
-        self.app.tmux.view("named-viewer", "prompt-text")
+        self.app.tmux.show_screen("named-viewer", "prompt-text")
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual((self.app.tmux.typed, self.app.tmux.gates), ([], []))
@@ -2497,7 +2581,7 @@ class RenameSession(AppCase):
 
     def test_a_dialog_opening_between_the_typing_and_enter_gets_no_enter(self):
         tmux = self.app.tmux
-        tmux.after_typing = lambda: tmux.view("prompt-permission", "prompt-permission")
+        tmux.after_typing = lambda: tmux.show_screen("prompt-permission", "prompt-permission")
         self.rename_to("fresh name")
         self.settle()
         self.assertEqual(tmux.typed, [("%2", "/rename fresh name")])
@@ -3970,7 +4054,7 @@ class TwoLineRowsDrawn(AppCase):
         self.assertFalse(any("…" in line for line in rest))
 
     def test_the_main_marker_is_on_the_first_line_only(self):
-        self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
+        self.app.main_pane = Pane("%2", "@1", False, "viewer", "", 100, 141, view="a")
         self.app.draw()
         first, *rest = (self.screen()[y] for y in self.rows_of("a"))
         self.assertTrue(first.startswith("▎"), first)
@@ -4941,14 +5025,14 @@ class InterruptTmux(RenameTmux):
     def __init__(self):
         super().__init__()
         self.list[1] = Pane("%2", "@1", False, "", "working", 100, 141, agent="claude")
-        self.view("working-streaming", "prompt-empty")
+        self.show_screen("working-streaming", "prompt-empty")
         self.screen_name = "working-streaming"
         self.screens = None
         self.events = []
         self.keys_sent = []
 
-    def view(self, screen, prompt):
-        super().view(screen, prompt)
+    def show_screen(self, screen, prompt):
+        super().show_screen(screen, prompt)
         self.screen_name = screen
 
     def capture(self, pane):
@@ -5066,7 +5150,7 @@ class InterruptSession(AppCase):
         self.settle()
 
     def test_a_draft_in_the_prompt_still_interrupts(self):
-        self.app.tmux.view("working-streaming", "prompt-text")
+        self.app.tmux.show_screen("working-streaming", "prompt-text")
         x, y = PROMPT_CURSORS["cursors"]["prompt-text"]["x"], PROMPT_CURSORS["cursors"]["prompt-text"]["y"]
         self.press(sidebar.CTRL_X)
         self.settle()
@@ -5089,7 +5173,7 @@ class InterruptSession(AppCase):
     def test_a_scrolled_back_pane_or_one_with_its_cursor_hidden_gets_nothing_and_says_why(self):
         cases = {
             "scrolled back": lambda tmux: setattr(tmux, "in_mode", True),
-            "isn't showing its prompt": lambda tmux: tmux.view("interactive-named-permission", "interactive-prompt-permission"),
+            "isn't showing its prompt": lambda tmux: tmux.show_screen("interactive-named-permission", "interactive-prompt-permission"),
         }
         for want, arrange in cases.items():
             with self.subTest(want=want):
@@ -5179,7 +5263,7 @@ class InterruptSession(AppCase):
             Pane("%2", "@1", False, "", "other", 100, 141, agent="claude"),
             Pane("%3", "@2", False, "", "working", 100, 100, agent="claude"),
         ]
-        tmux.view("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
+        tmux.show_screen("interactive-unnamed-empty", "interactive-prompt-empty-unnamed")
         first = core.Session("working", "working", "/p/alpha", "working", "", "", 0.0, True)
         second = core.Session("other", "other", "/p/alpha", "working", "", "", 0.0, True)
         self.listings = [[first, second]]
@@ -6152,9 +6236,10 @@ class NoticeWiring(AppCase):
         self.poll(*sessions)
         self.app.refresh()
 
-    def main_shows(self, sid, state=(1, "1", "%2", 3.0), agent="claude"):
-        self.app.main_pane = Pane("%2", "@1", False, "", sid, 100, 141, agent=agent)
-        self.app.tmux = ClientTmux(state)
+    def main_shows(self, sid, state=(1, "1", "%2", 3.0), shown=True):
+        """The view's slot (%2) shows `sid`, or with `shown` False shows no session (the placeholder)."""
+        self.app.main_pane = Pane("%2", "@1", False, "viewer" if shown else "placeholder", "", 100, 141, view=sid if shown else "")
+        self.app.tmux = ClientTmux(state, shows=sid if shown else "")
 
     def test_working_then_done_gives_one_notice_and_a_third_identical_poll_none(self):
         self.step(session("a", "/p/alpha", "working"))
@@ -6225,8 +6310,8 @@ class NoticeWiring(AppCase):
                 self.step(session("a", "/p/alpha", "done"))
                 self.assertEqual([n.id for n in self.pending()], ["a"])
 
-    def test_a_main_pane_without_the_agent_tag_is_not_in_front(self):
-        self.main_shows("a", agent="")
+    def test_a_slot_showing_no_session_is_not_in_front(self):
+        self.main_shows("a", shown=False)
         self.step(session("a", "/p/alpha", "working"))
         self.step(session("a", "/p/alpha", "done"))
         self.assertEqual(len(self.pending()), 1)
@@ -6378,7 +6463,16 @@ class SwitchTmux(ClientTmux):
     def capture(self, pane):
         return ""
 
-    def swap(self, a, b):
+    def link_agent(self, window, key, inert):
+        pass
+
+    def viewer_command(self, key):
+        return f"viewer {key}"
+
+    def respawn(self, pane, command, cwd=None):
+        pass
+
+    def set_pane_option(self, pane, name, value):
         pass
 
     def select(self, pane):
@@ -6523,7 +6617,7 @@ class HistoryWiring(AppCase):
 
     def test_an_in_front_skip_adds_nothing_to_the_history(self):
         self.app.main_pane = Pane("%2", "@1", False, "", "a", 100, 141, agent="claude")
-        self.app.tmux = ClientTmux((1, "1", "%2", 3.0))
+        self.app.tmux = ClientTmux((1, "1", "%2", 3.0), shows="a")
         self.poll(session("a", "/p/alpha", "working"))
         self.app.refresh()
         self.poll(session("a", "/p/alpha", "done"))
@@ -6691,8 +6785,8 @@ class CollapseTmux(ClientTmux):
             Pane(self.main_id, "@1", False, "", "", 100, self.window_width, zoomed=self.zoomed),
         ]
 
-    def bind_collapse(self, key, main):
-        self.calls.append(("bind_collapse", key, main))
+    def bind_collapse(self, key):
+        self.calls.append(("bind_collapse", key))
 
     def bind_paste(self, key, check):
         self.calls.append(("bind_paste", key, check))
@@ -6721,13 +6815,30 @@ class CollapseWiring(AppCase):
     def saved(self):
         return core.load_prefs(self.app.prefs_file)
 
-    def test_binds_the_key_to_main_and_rebinds_when_main_changes(self):
+    def test_binds_the_key_once_and_a_new_slot_needs_no_rebinding(self):
         self.tick()
-        self.assertEqual(self.app.tmux.of("bind_collapse"), [("bind_collapse", sidebar.COLLAPSE_KEY, "%2")])
+        self.assertEqual(self.app.tmux.of("bind_collapse"), [("bind_collapse", sidebar.COLLAPSE_KEY)])
         self.tick()
-        self.assertEqual(len(self.app.tmux.of("bind_collapse")), 1)
         self.tick(main_id="%3")
-        self.assertEqual(self.app.tmux.of("bind_collapse")[1:], [("bind_collapse", sidebar.COLLAPSE_KEY, "%3")])
+        self.assertEqual(len(self.app.tmux.of("bind_collapse")), 1)
+
+    def test_a_follower_views_hidden_panel_is_its_own_and_never_saved(self):
+        self.app.primary = False
+        self.tick(zoomed=True)
+        self.assertNotIn("panel_collapsed", self.saved())
+
+    def test_a_follower_views_dragged_or_stepped_width_is_its_own_and_never_saved(self):
+        self.app.primary = False
+        self.app.applied = (161, 40)
+        self.tick(panel_width=60)
+        self.assertEqual(self.app.own_width, 60)
+        self.app.change_panel_width(-sidebar.core.WIDTH_STEP)
+        self.tick()
+        self.assertEqual(self.app.own_width, 55)
+        self.assertEqual(self.app.tmux.of("resize_width")[-1], ("resize_width", "%1", 55))
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+        self.assertNotEqual(self.saved()["panel_width"], 55)
+        self.assertNotEqual(self.saved()["panel_width"], 60)
 
     def test_binds_paste_once_with_the_relay_file(self):
         self.tick()
@@ -6993,7 +7104,7 @@ class OpenTmux(HushTmux):
     def set_session_option(self, name, value):
         self.options[name] = value
 
-    def clear_session_option_if(self, name, value):
+    def clear_session_option_if(self, name, value, session=SESSION):
         if self.options.get(name) == value:
             self.options[name] = ""
 
@@ -7028,9 +7139,9 @@ class OpenRequests(AppCase):
         self.app.tmux.options[OPEN_OPT] = self.SID
         real = self.app.tmux.clear_session_option_if
 
-        def clearing(name, value):
+        def clearing(name, value, session=SESSION):
             self.app.tmux.options[OPEN_OPT] = "second"
-            real(name, value)
+            real(name, value, session)
 
         with mock.patch.object(self.app.tmux, "clear_session_option_if", clearing):
             self.housekeep()
@@ -7338,6 +7449,237 @@ class Routines(AppCase):
 
     def test_the_help_has_the_R_line(self):
         self.assertTrue(any(key == "R" for key, _ in sidebar.HELP))
+
+
+class ViewTmux(ClientTmux):
+    """One view (`view`) with its panel (%1) and slot (`slot`), session KEY_A's own pane (%5, hidden) unless `held` is None; records what changes."""
+
+    socket = "emx-test-views"
+
+    def __init__(self, view=SESSION, slot=None, held="default", attached=1):
+        super().__init__((attached, "", "%2", None))
+        self.view = view
+        self.slot_pane = slot or Pane("%2", "@1", False, "placeholder", "", 100, 141)
+        self.held = Pane("%5", "@5", False, "", KEY_A, 100, 100, agent="claude") if held == "default" else held
+        self.options = {}
+        self.calls = []
+
+    def panes(self, session=SESSION):
+        listed = [Pane("%1", "@1", False, "sidebar", "", 40, 141), self.slot_pane]
+        return listed + ([self.held] if self.held is not None else [])
+
+    def view_option(self, name):
+        return self.options.get(name, "")
+
+    def set_view_option(self, name, value):
+        self.calls.append(("set_view_option", name, value))
+        self.options[name] = value
+
+    def respawn(self, pane, command, cwd=None):
+        self.calls.append(("respawn", pane, command))
+
+    def set_pane_option(self, pane, name, value):
+        self.calls.append(("set_pane_option", pane, name, value))
+
+    def unset_pane_option(self, pane, name):
+        self.calls.append(("unset_pane_option", pane, name))
+
+    def link_agent(self, window, key, inert):
+        self.calls.append(("link_agent", window, key))
+
+    def claim_width(self, slot, key):
+        self.calls.append(("claim_width", slot, key))
+
+    def viewer_command(self, key):
+        return f"viewer {key}"
+
+    def __getattr__(self, name):
+        return lambda *args, **kwargs: None
+
+
+class FollowerPanel(AppCase):
+    """The panel of a view other than `emx` itself lists for itself but leaves Haiku, the notices, the voice and the updates to the primary."""
+
+    def follower(self, **kwargs):
+        with mock.patch.object(emx, "ROOT", "/tmp/emx-test-root"):
+            return sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1", **kwargs), claude="claude")
+
+    def test_a_follower_starts_no_haiku_notice_voice_or_notifier_worker_and_no_updater(self):
+        app = self.follower()
+        self.assertFalse(app.primary)
+        self.assertIsNone(app.updater)
+        poller = app.poller
+        started = []
+        for worker in (poller.resolver, poller.transcripts, poller.summaries, poller.asks, poller.notifier, poller.voice, poller.notices):
+            worker.start = lambda w=worker: started.append(w)
+        with mock.patch.object(sidebar, "POLL_SECONDS", 0.01):
+            threading.Thread(target=poller.run, daemon=True).start()
+            deadline = time.monotonic() + 5
+            while len(poller.started) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.1)
+        self.assertEqual(started, [poller.resolver, poller.transcripts])
+        self.assertEqual(poller.started, [poller.resolver, poller.transcripts])
+
+    def test_the_primary_starts_every_worker(self):
+        with mock.patch.object(emx, "ROOT", "/tmp/emx-test-root"):
+            app = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        self.assertTrue(app.primary)
+        self.assertIsNotNone(app.updater)
+        poller = app.poller
+        self.assertEqual(poller.workers(), [poller.resolver, poller.transcripts, poller.summaries, poller.asks,
+                                            poller.notifier, poller.voice, poller.notices])
+
+    def test_a_follower_shows_the_lines_the_primary_wrote(self):
+        primary = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        primary.poller.summaries.take = lambda: {KEY_A: core.Summary("Fixing the parser", core.WORKING, "the excerpt", 5.0)}
+        primary.take_summaries()
+        path = primary.state / sidebar.SUMMARIES_FILE
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(path.read_text()), {KEY_A: {"text": "Fixing the parser", "state": core.WORKING}})
+        app = self.follower()
+        app.poller.summaries.take = lambda: self.fail("a follower asked its own Haiku")
+        app.take_summaries()
+        self.assertEqual((app.summaries[KEY_A].text, app.summaries[KEY_A].category), ("Fixing the parser", core.WORKING))
+
+    def test_a_follower_queues_no_notice(self):
+        app = self.follower()
+        app.poller.result = ([session("a", "/p/alpha", "working")], None)
+        app.refresh()
+        app.poller.result = ([session("a", "/p/alpha", "done")], None)
+        app.refresh()
+        self.assertEqual(list(app.poller.notices.pending), [])
+
+
+class SlotTending(AppCase):
+    """A view's slot shows its session through a viewer; a view other than `emx` parks it while no client is attached and shows it again on the next attach, and `emx` keeps it."""
+
+    VIEWER = Pane("%2", "@1", False, "viewer", "", 100, 141, view=KEY_A)
+
+    def tend(self, tmux):
+        self.app.tmux = tmux
+        self.app.me = "%1"
+        sidebar.App.tend_slot(self.app, tmux.slot_pane)
+        return tmux.calls
+
+    def parked(self):
+        return [
+            ("respawn", "%2", sidebar.self_command("blank", sidebar.PLACEHOLDER_TEXT)),
+            ("set_pane_option", "%2", sidebar.ROLE, "placeholder"), ("unset_pane_option", "%2", sidebar.VIEW_OPT),
+        ]
+
+    def test_a_view_other_than_emx_with_no_client_parks_its_session_and_remembers_it(self):
+        self.app.primary = False
+        self.app.attached = 1
+        calls = self.tend(ViewTmux(view="emx-view-1", slot=self.VIEWER, attached=0))
+        self.assertEqual(calls, [("set_view_option", sidebar.REOPEN_OPT, KEY_A)] + self.parked())
+
+    def test_the_home_view_with_no_client_keeps_showing_its_session(self):
+        self.assertTrue(self.app.primary)
+        self.app.attached = 1
+        self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER, attached=0)), [])
+
+    def test_the_laptop_coming_back_claims_the_sessions_width_with_no_restart_of_the_viewer(self):
+        self.app.attached = 0
+        self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER, attached=1)), [("claim_width", "%2", KEY_A)])
+
+    def test_another_views_device_coming_back_claims_nothing(self):
+        self.app.primary = False
+        self.app.attached = 0
+        self.assertEqual(self.tend(ViewTmux(view="emx-view-1", slot=self.VIEWER, attached=1)), [])
+
+    def test_the_next_attach_shows_it_again_and_clears_the_note(self):
+        tmux = ViewTmux(attached=1)
+        tmux.options[sidebar.REOPEN_OPT] = KEY_A
+        self.app.attached = 0
+        calls = self.tend(tmux)
+        self.assertEqual(calls, [
+            ("set_view_option", sidebar.REOPEN_OPT, ""), ("link_agent", "@5", KEY_A), ("respawn", "%2", f"viewer {KEY_A}"),
+            ("set_pane_option", "%2", sidebar.ROLE, "viewer"), ("set_pane_option", "%2", sidebar.VIEW_OPT, KEY_A),
+        ])
+
+    def test_at_panel_start_with_a_client_attached_the_note_is_honoured(self):
+        tmux = ViewTmux(attached=1)
+        tmux.options[sidebar.REOPEN_OPT] = KEY_A
+        self.app.attached = None
+        self.assertIn(("respawn", "%2", f"viewer {KEY_A}"), self.tend(tmux))
+
+    def test_a_note_for_a_session_with_no_pane_any_more_starts_nothing(self):
+        tmux = ViewTmux(attached=1, held=None)
+        tmux.options[sidebar.REOPEN_OPT] = KEY_A
+        self.app.attached = None
+        self.assertEqual(self.tend(tmux), [("set_view_option", sidebar.REOPEN_OPT, "")])
+
+    def test_while_attached_a_note_is_not_read_again(self):
+        tmux = ViewTmux(attached=1)
+        tmux.options[sidebar.REOPEN_OPT] = KEY_A
+        self.app.attached = 1
+        self.assertEqual(self.tend(tmux), [])
+
+    def test_a_viewer_whose_sessions_pane_is_gone_or_that_exited_gets_the_placeholder(self):
+        for tmux in (ViewTmux(slot=self.VIEWER, held=None), ViewTmux(slot=replace(self.VIEWER, dead=True))):
+            with self.subTest(held=tmux.held, dead=tmux.slot_pane.dead):
+                self.app.attached = 1
+                self.assertEqual(self.tend(tmux), self.parked())
+
+    def test_a_viewer_of_a_live_session_with_a_client_is_left_alone(self):
+        self.app.attached = 1
+        self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER)), [])
+
+
+class PrefsAcrossViews(AppCase):
+    """Two views' panels share one prefs file; each keeps the other's changes."""
+
+    def test_a_pin_on_one_panel_and_a_side_on_the_other_both_land(self):
+        other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")
+        self.app.prefs = core.toggle_pin(self.app.prefs, KEY_A)
+        self.app.save_prefs()
+        other.prefs = core.flip_side(other.prefs)
+        other.save_prefs()
+        saved = core.load_prefs(self.app.prefs_file)
+        self.assertEqual((core.pinned_ids(saved), saved["side"]), ({KEY_A}, "left"))
+
+    def test_a_panel_takes_in_what_another_saved_and_keeps_its_own_unsaved_change(self):
+        other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")
+        other.prefs = core.toggle_pin(other.prefs, KEY_A)
+        other.save_prefs()
+        os.utime(self.app.prefs_file, ns=(1, 1))
+        self.app.prefs = {**self.app.prefs, "side": "left"}
+        self.app.reload_prefs()
+        self.assertEqual((core.pinned_ids(self.app.prefs), self.app.prefs["side"]), ({KEY_A}, "left"))
+
+
+class StampTmux(ClientTmux):
+    def __init__(self, session_stamp):
+        super().__init__()
+        self.stamps = {"session": session_stamp, "global": ""}
+
+    def session_option(self, name):
+        return self.stamps["session"] if name == sidebar.RELAY_PASTE_OPT else ""
+
+    def global_option(self, name):
+        return self.stamps["global"]
+
+    def set_global_option(self, name, value):
+        self.stamps["global"] = value
+
+
+class PasteStampCarried(AppCase):
+    """An `emx follow` from before 2.10.0 keeps stamping its paste offer on `emx` until he reconnects; the primary panel copies it to the global option a viewer's Ctrl+V reads."""
+
+    def test_a_live_stamp_on_emx_is_copied_to_the_global_option(self):
+        now = time.time()
+        self.app.tmux = StampTmux(str(now))
+        self.app.carry_paste_stamp(now)
+        self.assertEqual(self.app.tmux.stamps["global"], str(now))
+
+    def test_a_stale_or_missing_stamp_is_not(self):
+        now = time.time()
+        for stamp in (str(now - 60), ""):
+            with self.subTest(stamp=stamp):
+                self.app.tmux = StampTmux(stamp)
+                self.app.carry_paste_stamp(now)
+                self.assertEqual(self.app.tmux.stamps["global"], "")
 
 
 if __name__ == "__main__":
