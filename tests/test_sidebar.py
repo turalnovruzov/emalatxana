@@ -4694,6 +4694,29 @@ class BarFormat(unittest.TestCase):
         self.assertTrue(out.endswith("#[default]"))
 
 
+WIDE_BAR_GOLDEN = Path(__file__).parent / "fixtures" / "bar" / "wide-2.10.0.json"
+
+
+class WideBarIsUnchanged(unittest.TestCase):
+    """The laptop's bar at 200 columns is byte-for-byte what 2.10.0 gave: the expected values were captured from tag v2.10.0's code, not from the code under test."""
+
+    def test_every_captured_case_gives_the_same_parts_and_the_same_tmux_format(self):
+        cases = json.loads(WIDE_BAR_GOLDEN.read_text("utf-8"))["cases"]
+        self.assertGreater(len(cases), 100)
+        for i, case in enumerate(cases):
+            a = case["args"]
+            latest = core.Entry(**a["latest"]) if a["latest"] else None
+            hints = tuple(tuple(tuple(p) for p in h) if isinstance(h, list) else h for h in a["hints"])
+            with self.subTest(case=i):
+                self.assertEqual(a["width"], 200)
+                parts = core.bar_parts(
+                    a["version"], [tuple(c) for c in a["counts"]], latest, a["now"], a["tag"], a["remote"], hints,
+                    a["width"], a["loaded"], a["notice_key"],
+                )
+                self.assertEqual([list(p) for p in parts], case["parts"])
+                self.assertEqual(sidebar.bar_format(parts), case["format"])
+
+
 class StatusBarPush(unittest.TestCase):
     def test_the_same_text_twice_is_one_call(self):
         tmux = mock.Mock()
