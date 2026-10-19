@@ -638,7 +638,7 @@ class ShippedConf(unittest.TestCase):
         self.assertNotIn("status off", SHELL_CONF)
 
     def test_the_status_line_mouse_keys_are_unbound_but_a_click_on_the_back_range(self):
-        # 2.11.0: a click on a phone's `‹ sessions` goes back to the panel; every other status key stays unbound.
+        # 2.12.0: a click on a phone's `‹ sessions` goes back to the panel; every other status key stays unbound.
         for key in STATUS_KEYS:
             if key == "MouseDown1Status":
                 continue

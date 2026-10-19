@@ -55,6 +55,19 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `q` | Detach; sessions keep running. |
 | `?` | Show or close the key help. |
 
+### On a phone
+
+On a screen narrower than 70 columns (`emx docs phone`) the panel and the session each fill the screen, and these keys work besides the panel's own (all but `s`, `<` and `>`).
+
+| Key | What it does |
+| --- | --- |
+| `↵` `Enter` | Open in the Claude app when the session has a Remote Control link: the link goes on screen and into the phone's clipboard. With no link, open it here. On a header, fold. |
+| `t` `→` | Open the session here, in the terminal. |
+| `a` | The session's actions: `↵` open in the Claude app, `t` open here, `␣` peek, `r` rename, `p` pin or unpin, `i` interrupt, `x` close (`x` again to confirm). `Esc` closes them. |
+| `click` | A tap selects a row; a tap on the selected row opens its actions. |
+| `‹` | `‹ sessions` in the bar, over a session: a tap goes back to the panel, as do `←` on an empty prompt, `^\` and `^q`. |
+| `?` | The phone's key help; `↑↓` scroll it. |
+
 ## Settings
 
 Environment variables, set before running `emx`.

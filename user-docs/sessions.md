@@ -48,6 +48,10 @@ Press `^x` on a working session to interrupt it. Press `^x` twice to close it. O
 
 `s` moves the panel to the other side. `<` makes it narrower and `>` wider. Both are remembered.
 
+## On a phone
+
+On a narrow screen the panel and the session take turns on the whole screen, and a Claude session can open in the Claude app. `emx docs phone` says how.
+
 ## Detach
 
 `q` leaves the workspace. Your sessions keep running; run `emx` to return.
