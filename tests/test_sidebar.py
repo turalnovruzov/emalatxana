@@ -1075,7 +1075,7 @@ class EmptyListing(AppCase):
         self.assertEqual(self.app.cursor, ("session", "c"))
 
 class SessionCloseTmux(ClientTmux):
-    """The panel (%1); the slot (%2) showing session `a` through a viewer; `a`'s own pane (%5) and `b`'s (%3) hidden. Kills change what `panes` lists, as tmux would, and they and the slot's respawns go into the shared `log`."""
+    """The panel (%1); the slot (%2) showing session `a` through a viewer, as does another view's slot (%8); `a`'s own pane (%5) and `b`'s (%3) hidden. Kills and the slots' tags change what `panes` and `views` list, as tmux would, and kills and the slots' respawns go into the shared `log`."""
 
     def __init__(self, log):
         super().__init__()
@@ -1088,18 +1088,26 @@ class SessionCloseTmux(ClientTmux):
         ]
         self.kill_fails = False
         self.kill_ends = True
+        self.shows = {"%2": "a", "%8": "a"}
 
     def panes(self):
         return list(self.list)
+
+    def views(self):
+        return [View(SESSION, 1, "", None, 121, self.shows.get("%2", ""), False, "%2"),
+                View("emx-view-1", 1, "", None, 48, self.shows.get("%8", ""), False, "%8")]
 
     def respawn(self, pane, command, cwd=None):
         self.log.append(("respawn", pane))
 
     def set_pane_option(self, pane, name, value):
-        pass
+        if name == sidebar.ROLE:
+            self.list = [replace(p, role=value) if p.id == pane else p for p in self.list]
 
     def unset_pane_option(self, pane, name):
-        pass
+        if name == sidebar.VIEW_OPT:
+            self.shows.pop(pane, None)
+            self.list = [replace(p, view="") if p.id == pane else p for p in self.list]
 
     def kill_pane(self, pane):
         self.log.append(("kill", pane))
@@ -1186,11 +1194,12 @@ class CloseSession(AppCase):
         self.assertEqual(self.app.notice, "Closing emx-test-a…")
         self.assertIsNone(self.app.confirm)
         self.settle()
-        self.assertEqual(self.log, [("kill", "%5"), ("forget", "a"), ("respawn", "%2")])
+        # Every view showing it gets the placeholder before the kill, so none shows its viewer closing.
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a")])
         self.assertEqual(self.engine.threads, [True])
         self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a.", False))
         self.assertTrue(self.app.poller.wake.is_set())
-        self.assertEqual((self.app.main_pane.id, self.app.main_pane.role), ("%2", "placeholder"))
+        self.assertEqual([(p.id, p.role, p.view) for p in self.app.tmux.list if p.id == "%2"], [("%2", "placeholder", "")])
 
     def test_a_stopped_session_is_only_forgotten_and_its_dead_pane_and_the_slot_showing_it_close_after(self):
         self.app.tmux.list = [replace(p, dead=True) if p.id == "%5" else p for p in self.app.tmux.list]
@@ -1400,7 +1409,7 @@ class CloseSession(AppCase):
         drawn = self.drawn()
         self.assertEqual(drawn.count("closing…"), 3)
         self.settle()
-        self.assertEqual(self.log, [("kill", "%5"), ("forget", "a"), ("forget", "b"), ("kill", "%3"), ("respawn", "%2")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a"), ("forget", "b"), ("kill", "%3")])
         self.assertEqual((self.app.notice, self.app.notice_error), ("Closed emx-test-a. Closed emx-test-b.", False))
         self.poll(other)
         self.app.refresh()
@@ -1413,7 +1422,7 @@ class CloseSession(AppCase):
         self.listing = ([self.a], None)
         self.press(sidebar.CTRL_X)
         self.settle()
-        self.assertEqual(self.log, [("kill", "%5"), ("forget", "a"), ("respawn", "%2")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a")])
         self.assertEqual(self.app.notice, "Closed emx-test-a. emx-test-b isn't listed any more, so emx didn't close it.")
         self.assertTrue(self.app.notice_error)
         self.assertEqual(self.app.closing, {"a": True})
@@ -1451,7 +1460,7 @@ class CloseSession(AppCase):
         self.assertEqual(self.log, [])
         self.press(sidebar.CTRL_X)
         self.settle()
-        self.assertEqual(self.log, [("kill", "%5"), ("forget", "a"), ("kill", "%3"), ("forget", "b"), ("respawn", "%2")])
+        self.assertEqual(self.log, [("respawn", "%2"), ("respawn", "%8"), ("kill", "%5"), ("forget", "a"), ("kill", "%3"), ("forget", "b")])
 
     def test_the_help_shows_ctrl_x(self):
         self.assertIn("^x", " ".join(key for key, _ in sidebar.HELP))

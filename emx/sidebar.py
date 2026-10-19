@@ -293,11 +293,18 @@ class Listings:
             self.reading.discard(folder)
 
 
+def park_slot(tmux: Tmux, slot: str) -> None:
+    """Put the placeholder in a view's slot pane."""
+    tmux.respawn(slot, self_command("blank", PLACEHOLDER_TEXT))
+    tmux.set_pane_option(slot, ROLE, "placeholder")
+    tmux.unset_pane_option(slot, VIEW_OPT)
+
+
 class Closer(threading.Thread):
     """Closes confirmed sessions one after another off the main thread, each only after a fresh listing still shows it as he saw it.
 
     Closing ends the session and removes it from emx: a running one's pane
-    is killed (one in main is first swapped out for the placeholder, so the
+    is killed (every view showing it gets the placeholder first, so the
     layout keeps its two columns), and once a listing shows it no longer
     running its folder under emx's state folder goes. The conversation
     stays in Claude Code's history. `wait_for` holds the Interrupters of any
@@ -356,10 +363,18 @@ class Closer(threading.Thread):
         return True, core.closed_text(confirm)
 
     def end(self, sid: str) -> None:
-        """Kill the session's own pane. It sits in a hidden window, never in a view's, so no view loses its layout; a viewer showing it exits with it."""
-        for pane in self.engine.tmux.panes():
+        """Kill the session's own pane. It sits in a hidden window, never in a view's, so no view loses its layout.
+
+        Every view showing it gets the placeholder first, so none shows its
+        viewer's "has closed" line while the kill lands.
+        """
+        tmux = self.engine.tmux
+        for view in tmux.views():
+            if view.shows == sid and view.slot:
+                park_slot(tmux, view.slot)
+        for pane in tmux.panes():
             if pane.session == sid and pane.agent and not pane.dead:
-                self.engine.tmux.kill_pane(pane.id)
+                tmux.kill_pane(pane.id)
 
     def wait_until_ended(self, sid: str) -> bool:
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
@@ -2080,9 +2095,7 @@ class App:
 
     def park(self, slot: Pane) -> None:
         """Put the placeholder in the slot."""
-        self.tmux.respawn(slot.id, self_command("blank", PLACEHOLDER_TEXT))
-        self.tmux.set_pane_option(slot.id, ROLE, "placeholder")
-        self.tmux.unset_pane_option(slot.id, VIEW_OPT)
+        park_slot(self.tmux, slot.id)
         if slot.session:
             self.tmux.unset_pane_option(slot.id, SESSION_OPT)
         self.main_pane = replace(slot, role="placeholder", view="", session="", dead=False)
