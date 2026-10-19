@@ -1560,7 +1560,19 @@ class NarrowView(PrivateServer):
         Tmux(self.tmux.socket, view="emx-view-1").set_bar(sidebar.bar_format(parts))
 
     def click_status(self, column):
-        os.write(self.client_fds[self.phone], f"\x1b[<0;{column};22M\x1b[<0;{column};22m".encode())
+        # tmux works out the bar's ranges only when it draws the bar, and it stops drawing to a client
+        # whose terminal reads nothing; macOS's small pty buffer fills before the bar is drawn. So read
+        # the phone's output, as its terminal would, until the bar has been drawn, then tap.
+        fd = self.client_fds[self.phone]
+        self.phone_seen = getattr(self, "phone_seen", bytearray())
+
+        def bar_drawn():
+            while select.select([fd], [], [], 0)[0]:
+                self.phone_seen.extend(os.read(fd, 65536))
+            return b"sessions" in self.phone_seen
+
+        self.wait_for(bar_drawn, "the bar on the phone")
+        os.write(fd, f"\x1b[<0;{column};22M\x1b[<0;{column};22m".encode())
 
     def test_a_tap_on_back_in_the_bar_brings_the_panel_back_whole(self):
         self.back_bar()
