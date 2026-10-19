@@ -5045,6 +5045,11 @@ class Routines(unittest.TestCase):
                 "-x.timer loaded active waiting x\n")
         self.assertEqual(core.timer_units(text), ["backup-nightly.timer", "gone.timer"])
 
+    def test_timer_unit_files_take_the_name_column(self):
+        text = ("a.timer enabled enabled\nb.timer disabled enabled\nt@.timer disabled enabled\n"
+                "al.timer alias -\n-x.timer disabled enabled\n\nb.timer disabled enabled\n")
+        self.assertEqual(core.timer_unit_files(text), ["a.timer", "b.timer"])
+
     def test_show_blocks_key_by_id_whatever_their_order(self):
         text = "Id=backup-nightly.timer\nLoadState=loaded\nUnit=backup-job.service\n\nLoadState=not-found\nId=gone.timer\nUnit=\n"
         blocks = core.show_blocks(text)

@@ -1,4 +1,4 @@
-"""Reads every systemd user timer, with its journal. It only reads: `systemctl list-units` and `show`, `journalctl` and `systemd-analyze calendar`, never a verb that changes a unit."""
+"""Reads every systemd user timer, with its journal. It only reads: `systemctl list-units`, `list-unit-files` and `show`, `journalctl` and `systemd-analyze calendar`, never a verb that changes a unit."""
 
 from __future__ import annotations
 
@@ -53,16 +53,20 @@ def _slots(timer: dict, now: float, cache: dict) -> tuple:
 
 
 def read(now: float) -> tuple:
-    """(views, None), or (None, one line). No user timers is no routines, not an error."""
+    """(views, None), or (None, one line). No user timers is no routines, not an error. A failed `list-unit-files` comes back as the error beside the views: the loaded timers still show."""
     try:
         if shutil.which("systemctl") is None:
             return None, NO_SYSTEMD
         out, error = _run(["systemctl", "--user", "list-units", "--type=timer", "--all", "--plain", "--no-legend", "--no-pager"])
         if error:
             return None, error
-        asked = core.timer_units(out)
+        loaded_timers = core.timer_units(out)
+        files_out, files_error = _run(["systemctl", "--user", "list-unit-files", "--type=timer", "--plain", "--no-legend", "--no-pager"])
+        if files_error:
+            files_error = "Switched-off timers couldn't be read: " + files_error
+        asked = sorted(set(loaded_timers) | set(core.timer_unit_files(files_out or "")))
         if not asked:
-            return [], None
+            return [], files_error
         out, error = _run(["systemctl", "--user", "show", "--timestamp=unix", "-p", TIMER_PROPS, *asked])
         if error:
             return None, error
@@ -87,6 +91,6 @@ def read(now: float) -> tuple:
             slots, capped = _slots(timer, now, cache) if loaded else ([], False)
             views.append(core.routine_view(name, timer, services.get(unit), runs.get(unit, []), slots, now,
                                            capped=capped, journal_error=journal_error or ""))
-        return views, None
+        return views, files_error
     except Exception as exc:
         return None, core.error_line(exc)

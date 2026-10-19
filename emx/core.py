@@ -2004,6 +2004,19 @@ def timer_units(text: str) -> list:
     return sorted(units)
 
 
+def timer_unit_files(text: str) -> list:
+    """Timer names from `systemctl list-unit-files --plain` rows, sorted, once each. Templates and aliases are left out: a template name fails the whole `show`, and an alias comes back under its target's name."""
+    units = set()
+    for line in text.splitlines():
+        tokens = line.split()
+        if not tokens or not tokens[0].endswith(".timer") or tokens[0].startswith("-") or tokens[0].endswith("@.timer"):
+            continue
+        if len(tokens) > 1 and tokens[1] == "alias":
+            continue
+        units.add(tokens[0])
+    return sorted(units)
+
+
 def show_blocks(text: str) -> dict:
     """`systemctl show` output for several units as `Id -> {key: value}`; its blocks come in systemd's order, not the order asked for."""
     blocks = {}
