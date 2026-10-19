@@ -64,7 +64,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every start of `claude` for an existing session asks `core.attach_allowed` first
 
-1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane is swapped into main.
+1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane stays in its hidden window, and the view's slot shows it through a viewer.
 2. **Why**: resuming a stopped session starts it again, and he must be the only one who reopens a session that stopped, after an exit, a crash or a reboot (ADR 0001, kept by ADR 0005; Tural, 2026-10-13, "sure lets go with b").
 3. **Minimal example**:
    ```python
@@ -73,7 +73,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
        return None
    command, error = self.engine.resume_command(sid)
    ```
-4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means a live pane carrying both the session's key and the agent tag, never `state` alone. A new pane is tagged before it can be swapped into main, and one that can't be tagged is killed, or a second open would resume the same conversation again. The agent tag goes on before the session's key: a pane with a key and no agent tag is an old `claude attach` viewer, which the panel kills, and a listing can land between the two `set-option`s. Respawning a live session's pane ends that session, so nothing respawns a pane that is not dead, and a trigger other than `OPEN` that finds the session's pane dead or gone is refused even when its listing showed it running.
+4. **Gotcha**: the panel's rows can be a poll old, or older while listing fails. "Running" means a live pane carrying both the session's key and the agent tag, never `state` alone. A new pane is tagged before a view's slot can show it, and one that can't be tagged is killed, or a second open would resume the same conversation again. The agent tag goes on before the session's key: a pane with a key and no agent tag is an old `claude attach` viewer, which the panel kills, and a listing can land between the two `set-option`s. Respawning a live session's pane ends that session, so nothing respawns a pane that is not dead, and a trigger other than `OPEN` that finds the session's pane dead or gone is refused even when its listing showed it running.
 
 ### `claude` calls, git calls and filesystem scans never run on the curses thread
 
@@ -90,17 +90,39 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: the answer can be stale on arrival. Record what was asked (here the session and main-pane id), and drop the answer when that no longer holds. Keep one worker per kind at a time, so repeated keys don't stack calls; interrupts are one per session, so a second working row is interrupted while the first still is; folder listings are the other exception, one per folder under a cap, because a hung folder must not stop other folders being listed, and it keeps its slot until it returns. A listing or a poll that lands late moves the picker's rows, so a highlight is kept by path, not by row.
 
-### A tmux key binding that intercepts a key fails open, except ← in a session's pane
+### A tmux key binding that intercepts a key fails open, except ← in a slot showing a session
 
-1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding. The one exception is ← in a pane tagged with a session and an agent: there `bin/emx left` exits 0 only to let ← reach Claude Code, and every other outcome, a crash or a check that can't run included, selects the panel. Its format condition (both tags, cursor shown, panel in the window) never guesses the prompt's column; the check reads it from where the `❯` is drawn.
+1. **Rule**: a root binding first checks a cheap `if-shell -F` format condition. Only when that passes does it run `bin/emx <check>`, whose exit 0 means intercept. Every other outcome (a non-zero exit, an exception, an unknown socket, a target pane gone) sends the original key through with `send-keys`. The check's command lives in a user option, never inlined in the binding. The one exception is ← in a view's slot showing a session (`@emx_view` set): there `bin/emx left` exits 0 only to let ← reach Claude Code, and every other outcome, a crash or a check that can't run included, selects that view's panel. Its format condition (the slot's view tag, cursor shown, the panel in the window) never guesses the prompt's column; the check finds the session's own pane from the slot and reads the column from where the `❯` is drawn.
 2. **Why**: a broken check must cost him the shortcut, never a keypress. Keeping the command in an option avoids tmux quoting of paths. For ← the costs run the other way: Claude Code turns a ← it gets on an empty prompt into a fork of the conversation into its background service, so a broken check costs him ← in typed text instead.
-3. **Minimal example** (the ← binding as `list-keys` shows it, abridged):
+3. **Minimal example** (the ← binding as `list-keys` shows it on a real server, wrapped):
    ```
-   bind-key -n Left if-shell -F "#{&&:#{@emx_session},#{&&:#{@emx_agent},#{&&:#{cursor_flag},#{P:#{?#{==:#{pane_id},%1},1,}}}}}" \
-       "if-shell \"#{@emx_left} #{pane_id} …\" \"send-keys Left\" \"set-option -p -t %1 @emx_back 1 ; select-pane -t %1\"" \
+   bind-key -T root Left if-shell -F "#{&&:#{@emx_view},#{&&:#{cursor_flag},#{&&:#{==:#{window_panes},2},#{P:#{?#{==:#{@emx_role},sidebar},1,}}}}}" \
+       "if-shell \"#{@emx_left} #{pane_id} #{cursor_x} #{cursor_y} #{cursor_flag} #{pane_width}\" \"send-keys Left\" \"set-option -p -t :.+ @emx_back 1 ; select-pane -t :.+\"" \
        "send-keys Left"
    ```
 4. **Gotcha**: `if-shell` without `-b` holds that client's key queue until the check returns. That keeps keys in order but makes him wait, so keep the format condition tight and the check fast (about 50 ms); in a session's pane every ← with the cursor shown pays it. And a failed `select-pane` has no "else": it ends the command list and the key is gone, so a pane the binding targets is tested in the format condition first.
+
+### Root keys act on the window they are pressed in
+
+1. **Rule**: a root binding finds the panes it acts on relative to the pressing client's own window: `:.+` is the other pane of a view's two, and the binding is gated on the `VIEW_WINDOW` format (two panes, one of them the panel). No pane id is baked in at bind time, so every view's panel binds the same keys and binding again changes nothing. A key pressed in a slot passes the root table twice, once at the view's level and, when that level sends it on with `send-keys`, again inside the viewer on the session's own pane, whose window holds no panel. So the view's level either takes the key or passes it on, and the gate makes the inner pass send it straight to the pane.
+2. **Why**: each device has its own view, with its own panel and slot (ADR 0010). A pane id baked into a binding would make a key pressed on the phone act on the laptop's view.
+3. **Minimal example** (`bind_collapse`, as `list-keys` shows it):
+   ```
+   bind-key -T root C-q if-shell -F "#{&&:#{==:#{window_panes},2},#{P:#{?#{==:#{@emx_role},sidebar},1,}}}" \
+       "if-shell -F \"#{==:#{@emx_role},sidebar}\" \"resize-pane -Z -t :.+\" \"resize-pane -Z\"" "send-keys C-q"
+   ```
+4. **Gotcha**: the mouse goes through the viewer too. A viewer is a tmux client, which turns mouse reporting on in the slot, so tmux's own mouse bindings pass a click inward (`send-keys -M`) and act on the session's window, not the view's. A mouse binding that must act on the view takes the event at the view's level, gated on the slot's role (`bind_menu`).
+
+### An option lives on a view, on `emx`, or globally, by who must read it
+
+1. **Rule**: an option that belongs to one device's view is set on that view's session through `Tmux(view=…)` (`view_option`, `set_view_option`: `OPEN_OPT`, `REOPEN_OPT`, the bar, the focus report). One that belongs to the whole workspace is set on `=emx:` (`session_option`: `VERSION_OPT`, `HUSH_OPT`, `TERMINAL_OPT`). Anything a binding's format or check must see from inside a viewer is global (`-g`: `LEFT_OPT`, `PASTE_OPT`, `RELAY_PASTE_OPT`), as is what every view's panel must find the same (`MENU_OPT`, the stash of tmux's own right-click binding).
+2. **Why**: a format in a binding expands in the session the key lands in. Inside a viewer that is the session's own `emx-a-<key>`, which sees neither a view's options nor `emx`'s, only the global ones.
+3. **Minimal example**:
+   ```python
+   tmux.set_global_option(RELAY_PASTE_OPT, str(clock()))   # remote.follow: the Ctrl+V gate reads it inside a viewer
+   self.tmux.set_view_option(REOPEN_OPT, slot.view)        # this device's view only
+   ```
+4. **Gotcha**: an `emx follow` started before 2.10.0 keeps running on the server after an update and keeps stamping its paste offer on `emx`, where no viewer sees it, until he reconnects. The primary panel copies a live stamp to the global option (`carry_paste_stamp`). Moving an option to another scope needs the same bridge for whatever old process still writes the old one.
 
 ### Style-aware detectors are tested on styled captures
 
@@ -114,7 +136,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### emx closes a session only on a confirmed double Ctrl+X on its row or its project's header
 
-1. **Rule**: a session is ended and removed from emx only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids and names come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` kills a running session's own pane (one in main is first swapped out for the placeholder), waits for a listing that shows it not running, and then `engine.forget`s it, which removes its folder under emx's state folder and nothing of Claude's. No other key, trigger or automatic path ends or forgets a session.
+1. **Rule**: a session is ended and removed from emx only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids and names come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` kills a running session's own pane (every view showing it gets the placeholder first), waits for a listing that shows it not running, and then `engine.forget`s it, which removes its folder under emx's state folder and nothing of Claude's. No other key, trigger or automatic path ends or forgets a session.
 2. **Why**: closing ends his work in progress (Tural, 2026-10-13: "End it and remove it"). A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session. The conversation stays in Claude Code's own history.
 3. **Minimal example**:
    ```python
@@ -237,7 +259,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### A pref that mirrors a state tmux holds is written from what tmux reports, never from the key that changed it
 
-1. **Rule**: a pref that mirrors a state tmux holds is written from what tmux reports on the housekeep tick, never from the key that changed it. Hidden/shown is `#{window_zoomed_flag}`, adopted through `core.follow_zoom`; only `create_workspace` reads the pref back, at a fresh start.
+1. **Rule**: a pref that mirrors a state tmux holds is written from what tmux reports on the housekeep tick, never from the key that changed it. Hidden/shown is `#{window_zoomed_flag}`, adopted through `core.follow_zoom`; only `create_workspace` reads the pref back, at a fresh start, for the home view. Only the home view's panel (the primary) writes it; another view's hidden panel and width are its own and never saved.
 2. **Why**: many paths change the state without his key (Ctrl+\, the left arrow, `swap-pane -d`, the auto-restore `select-pane`), and they all mean "shown".
 3. **Minimal example**:
    ```python
