@@ -3021,7 +3021,8 @@ class App:
             return False
         return True
 
-    def handle_mouse(self) -> None:
+    def handle_mouse(self, busy: bool = False) -> None:
+        """`busy`: an input, a view or a close was open when the tap came, so a tap on the selected row opens no actions menu."""
         try:
             _, _, y, _, state = curses.getmouse()
         except curses.error:
@@ -3035,6 +3036,8 @@ class App:
             if item and item[0] == "entry":
                 self.history_view = item[1]
                 self.open_entry()
+            return
+        if busy and self.narrow and item and item == self.cursor and item[0] == "session":
             return
         if self.find is not None:
             # A header click would fold a group he cannot see folded until find closes.
@@ -3059,6 +3062,7 @@ class App:
         self.activate(item)
 
     def handle_key(self, key) -> None:
+        busy = self.input_open() or self.help or self.peeking or (self.menu is None and self.confirm is not None)
         if self.whats_new is not None and key != curses.KEY_RESIZE:
             if self.notice == self.whats_new:
                 self.say("")
@@ -3066,13 +3070,13 @@ class App:
         if key != curses.KEY_RESIZE:
             self.started_note = None
         # In the actions menu `x` is the close key, and a tap on its line is the menu's to judge.
-        in_menu = self.menu is not None
+        in_menu = self.menu is not None and not self.input_open()
         close_key = key == CTRL_X or (in_menu and key == "x")
         self.confirm = core.confirm_after_key(self.confirm, close_key, key == curses.KEY_RESIZE or (in_menu and key == curses.KEY_MOUSE))
         if self.peeking and key not in PEEK_KEYS and key != curses.KEY_RESIZE:
             self.peeking = False
         if key == curses.KEY_MOUSE:
-            self.handle_mouse()
+            self.handle_mouse(busy)
         elif key == curses.KEY_RESIZE:
             self.housekeep(fresh_list=False)
             if self.peeking and not self.peek_fits():
@@ -3080,8 +3084,6 @@ class App:
                 if not self.notice:
                     # A notice that took the room is kept rather than replaced by this one.
                     self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
-        elif self.menu is not None:
-            self.menu_key(key)
         elif self.prompt is not None:
             self.prompt_key(key)
         elif self.rename_edit is not None:
@@ -3092,6 +3094,8 @@ class App:
             self.history_key(key)
         elif self.routines_view is not None:
             self.routines_key(key)
+        elif self.menu is not None:
+            self.menu_key(key)
         elif self.help and self.narrow and key in HELP_SCROLL_KEYS:
             self.help_scroll = max(0, self.help_scroll + (-1 if key in (curses.KEY_UP, "k") else 1))
         elif self.help or key == "?":
@@ -3169,10 +3173,14 @@ class App:
             # The link is on screen all the same.
             pass
 
+    def input_open(self) -> bool:
+        """Whether a text input or a view that takes the keys is open, which the actions menu must never come between."""
+        return any(v is not None for v in (self.prompt, self.rename_edit, self.find, self.history_view, self.routines_view))
+
     def open_menu(self) -> None:
         """`a` on a phone, or a tap on the selected row: the session's actions in a box under its row, each a plain key or a tap."""
         s = self.session(self.cursor[1]) if self.cursor and self.cursor[0] == "session" else None
-        if s is None:
+        if s is None or self.input_open() or self.help:
             return
         self.menu = s.id
         self.peeking = False

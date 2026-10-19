@@ -8275,6 +8275,81 @@ class ActionsMenu(AppCase):
         self.tap(y)
         self.assertEqual(self.opened, [("a", core.OPEN)])
 
+    def tap_selected_row(self):
+        """A tap on the line the selected row was drawn on, after whatever was just opened."""
+        self.app.draw()
+        rows = [y for y, item in self.app.row_map.items() if item == self.app.cursor]
+        self.tap(rows[0] if rows else 2)
+
+    def assert_no_menu_and_no_action(self):
+        self.assertIsNone(self.app.menu)
+        self.assertEqual((self.closers, self.interrupts), ([], []))
+        self.assertNotIn("a", core.pinned_ids(self.app.prefs))
+
+    def type_after_a_tap(self, *opening):
+        for key in opening:
+            self.app.handle_key(key)
+        self.tap_selected_row()
+        self.assertIsNone(self.app.menu)
+        for key in "ixt":
+            self.app.handle_key(key)
+        self.assert_no_menu_and_no_action()
+        self.assertEqual(self.opened, [])
+
+    def test_with_the_message_prompt_open_a_tap_on_the_selected_row_leaves_the_letters_to_it(self):
+        self.type_after_a_tap("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("message", "ixt"))
+
+    def test_with_the_folder_prompt_open_a_tap_on_the_selected_row_leaves_the_letters_to_it(self):
+        self.type_after_a_tap("n", "\t")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("folder", "ixt"))
+
+    def test_while_renaming_a_tap_on_the_selected_row_leaves_the_letters_to_the_name(self):
+        self.type_after_a_tap(sidebar.CTRL_R)
+        self.assertEqual(self.app.rename_edit["id"], "a")
+        self.assertTrue(self.app.rename_edit["text"].endswith("ixt"), self.app.rename_edit["text"])
+
+    def test_with_find_open_a_tap_on_the_selected_row_leaves_the_letters_to_find(self):
+        self.type_after_a_tap("/")
+        self.assertEqual(self.app.find, "ixt")
+
+    def test_with_history_open_a_tap_opens_no_menu(self):
+        self.type_after_a_tap("N")
+        self.assertIsNotNone(self.app.history_view)
+
+    def test_with_help_open_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key("?")
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_while_peeking_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_with_a_close_armed_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key(sidebar.CTRL_X)
+        self.assertIsNotNone(self.app.confirm)
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_an_open_input_gets_its_keys_before_a_menu_left_open_under_it(self):
+        self.app.handle_key("n")
+        self.app.menu = "a"
+        for key in "ixtx":
+            self.app.handle_key(key)
+        self.assertEqual(self.app.prompt["text"], "ixtx")
+        self.assertIsNone(self.app.confirm)
+        self.assertEqual((self.closers, self.interrupts, self.opened), ([], [], []))
+
 
 class PollerReadsLinks(unittest.TestCase):
     """The poller reads a link only while a phone's panel wants them, from the session's own live agent pane's process."""
