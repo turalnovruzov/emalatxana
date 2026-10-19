@@ -647,7 +647,7 @@ class ShippedConf(unittest.TestCase):
         (line,) = [line for line in SHELL_CONF.splitlines() if line.startswith("bind -n MouseDown1Status ")]
         self.assertEqual(
             line,
-            "bind -n MouseDown1Status if -F '#{&&:#{==:#{mouse_status_range},back},#{!=:#{@emx_role},sidebar}}' 'select-pane -Z -t :.+'",
+            "bind -n MouseDown1Status if -F '#{&&:#{==:#{mouse_status_range},back},#{!=:#{@emx_role},sidebar}}' 'select-pane -t :.+ ; resize-pane -Z'",
         )
 
 
@@ -1511,6 +1511,21 @@ class NarrowView(PrivateServer):
         self.press("C-\\")
         time.sleep(0.3)
         self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+
+    def test_every_way_back_takes_the_whole_window_even_from_a_session_not_zoomed(self):
+        self.back_bar()
+        for way in ("C-\\", "C-q", "Left", "tap"):
+            with self.subTest(way=way):
+                self.tmux.select(self.panel)
+                self.tmux.select(self.slot)
+                self.assertEqual(self.show(self.slot, "#{window_zoomed_flag}"), "0")
+                if way == "tap":
+                    self.click_status(4)
+                else:
+                    self.wait_for(lambda: self.show(self.slot, "#{cursor_x}") == "2", "the slot's prompt")
+                    self.press(way)
+                self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
+                self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
 
     def test_the_collapse_key_from_the_session_brings_the_panel_back_whole_and_on_the_panel_does_nothing(self):
         self.press("C-q")

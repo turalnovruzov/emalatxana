@@ -98,8 +98,8 @@ _PANE_FORMAT = "\t".join(
 VIEW_WINDOW = "#{&&:#{==:#{window_panes},2},#{P:#{?#{==:#{" + ROLE + "},sidebar},1,}}}"
 # True in a phone's window (`core.narrow`), where the panel and the slot each take the whole window in turn.
 NARROW_WINDOW = "#{e|<:#{window_width}," + str(core.NARROW_BELOW) + "}"
-# The other pane of a view's window, taking the whole window as the one before did; selecting a pane without -Z unzooms.
-OTHER_ALONE = "select-pane -Z -t :.+"
+# The other pane of a view's window, then taking the whole window, zoomed before or not: selecting a pane unzooms, so the zoom comes after.
+OTHER_ALONE = "select-pane -t :.+ ; resize-pane -Z"
 # Selecting the pane already active, kept zoomed: does nothing, for a key that has nothing to do on a phone.
 STAY = "select-pane -Z -t :."
 
