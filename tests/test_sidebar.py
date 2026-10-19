@@ -7214,8 +7214,8 @@ class Routines(AppCase):
         self.gate.set()
         self.answer = ([core.RoutineView("backup-nightly", "passed", "done", ((1_800_000_000.0, core.PASSED, ""),), None)], None)
 
-        def read(path, now):
-            self.reads.append(path)
+        def read(now):
+            self.reads.append(now)
             self.gate.wait(5)
             return self.answer
 
@@ -7306,14 +7306,14 @@ class Routines(AppCase):
         drawn = " ".join(self.drawn())
         self.assertIn("Routines are read from systemd user timers", drawn)
 
-    def test_an_empty_list_names_the_file_to_fill(self):
+    def test_no_timers_says_so_and_names_no_file(self):
         self.answer = ([], None)
         self.app.scr = self.scr = TallScr(width=300)
         self.app.handle_key("R")
         self.settle()
         drawn = self.drawn()
-        self.assertIn(str(core.routines_path()), drawn)
-        self.assertTrue(str(core.routines_path()).startswith(os.environ["XDG_CONFIG_HOME"]))
+        self.assertIn(sidebar.ROUTINES_NONE, drawn)
+        self.assertFalse(any(os.environ["XDG_CONFIG_HOME"] in t for t in drawn), drawn)
 
     def test_the_view_rereads_after_the_interval_and_only_while_open(self):
         self.app.handle_key("R")

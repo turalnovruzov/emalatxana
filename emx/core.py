@@ -1794,23 +1794,14 @@ RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?",
 EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted"}
 
 
-def routines_path(env: Mapping | None = None) -> Path:
-    return prefs_path(env).parent / "routines"
-
-
-def routine_names(text: str) -> list:
-    names = []
+def timer_units(text: str) -> list:
+    """Unit names from `systemctl list-units --plain` rows: the first `.timer` token of each, sorted, once each."""
+    units = set()
     for line in text.splitlines():
-        name = line.strip()
-        if not name or name.startswith("#"):
-            continue
-        for suffix in (".timer", ".service"):
-            if name.endswith(suffix):
-                name = name[: -len(suffix)]
-                break
-        if name and name not in names:
-            names.append(name)
-    return names
+        unit = next((tok for tok in line.split() if tok.endswith(".timer")), None)
+        if unit and not unit.startswith("-"):
+            units.add(unit)
+    return sorted(units)
 
 
 def show_blocks(text: str) -> dict:
