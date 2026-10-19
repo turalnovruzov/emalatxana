@@ -6818,6 +6818,19 @@ class CollapseWiring(AppCase):
         self.tick(zoomed=True)
         self.assertNotIn("panel_collapsed", self.saved())
 
+    def test_a_follower_views_dragged_or_stepped_width_is_its_own_and_never_saved(self):
+        self.app.primary = False
+        self.app.applied = (161, 40)
+        self.tick(panel_width=60)
+        self.assertEqual(self.app.own_width, 60)
+        self.app.change_panel_width(-sidebar.core.WIDTH_STEP)
+        self.tick()
+        self.assertEqual(self.app.own_width, 55)
+        self.assertEqual(self.app.tmux.of("resize_width")[-1], ("resize_width", "%1", 55))
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+        self.assertNotEqual(self.saved()["panel_width"], 55)
+        self.assertNotEqual(self.saved()["panel_width"], 60)
+
     def test_binds_paste_once_with_the_relay_file(self):
         self.tick()
         self.tick()
@@ -7590,14 +7603,14 @@ class SlotTending(AppCase):
 class PrefsAcrossViews(AppCase):
     """Two views' panels share one prefs file; each keeps the other's changes."""
 
-    def test_a_pin_on_one_panel_and_a_width_on_the_other_both_land(self):
+    def test_a_pin_on_one_panel_and_a_side_on_the_other_both_land(self):
         other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")
         self.app.prefs = core.toggle_pin(self.app.prefs, KEY_A)
         self.app.save_prefs()
-        other.prefs = core.adjust_panel_width(other.prefs, 10)
+        other.prefs = core.flip_side(other.prefs)
         other.save_prefs()
         saved = core.load_prefs(self.app.prefs_file)
-        self.assertEqual((core.pinned_ids(saved), saved["panel_width"]), ({KEY_A}, 50))
+        self.assertEqual((core.pinned_ids(saved), saved["side"]), ({KEY_A}, "left"))
 
     def test_a_panel_takes_in_what_another_saved_and_keeps_its_own_unsaved_change(self):
         other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")

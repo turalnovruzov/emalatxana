@@ -1789,6 +1789,7 @@ class App:
         self.summaries_file = self.state / SUMMARIES_FILE
         self.summaries_mtime = None
         self.attached = None
+        self.own_width = None
         self.sessions = []
         self.placements = {}
         self.groups = []
@@ -2283,13 +2284,20 @@ class App:
             self.applied = None
             return
         if action == "adopt-panel":
-            self.prefs["panel_width"] = sidebar.width
-            self.save_prefs()
+            if self.primary:
+                self.prefs["panel_width"] = sidebar.width
+                self.save_prefs()
+            else:
+                self.own_width = sidebar.width
         if action is not None:
             self.apply_layout(sidebar)
 
+    def panel_width(self) -> int:
+        """The width this view's panel is kept at: the saved one, which is the laptop's, until another view's panel is given its own."""
+        return self.prefs["panel_width"] if self.primary or self.own_width is None else self.own_width
+
     def apply_layout(self, sidebar: Pane) -> None:
-        want = core.compute_layout(sidebar.window_width, self.prefs["panel_width"])
+        want = core.compute_layout(sidebar.window_width, self.panel_width())
         self.tmux.resize_width(sidebar.id, want.panel)
         sidebar, _ = self.layout_panes(self.my_panes())
         if sidebar:
@@ -2674,8 +2682,11 @@ class App:
         self.housekeep(fresh_list=False)
 
     def change_panel_width(self, delta: int) -> None:
-        self.prefs = core.adjust_panel_width(self.prefs, delta)
-        self.save_prefs()
+        if self.primary:
+            self.prefs = core.adjust_panel_width(self.prefs, delta)
+            self.save_prefs()
+        else:
+            self.own_width = core.adjust_panel_width({"panel_width": self.panel_width()}, delta)["panel_width"]
         self.applied = None
         self.housekeep(fresh_list=False)
 
