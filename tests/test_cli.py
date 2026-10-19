@@ -1,11 +1,15 @@
+import fcntl
 import io
 import json
 import os
+import pty
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 import uuid
@@ -958,6 +962,72 @@ class CreateWorkspace(unittest.TestCase):
     def test_starts_shown_by_default(self):
         cli.create_workspace(self.tmux)
         self.assertEqual(self.show("#{window_zoomed_flag}"), "0")
+
+    def launched(self, cols):
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": self.tmux.socket}), \
+                mock.patch.object(cli.shutil, "get_terminal_size", return_value=os.terminal_size((cols, 20))), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached) as execvpe:
+            with self.assertRaises(Attached):
+                cli.launch()
+        return execvpe.call_args.args[1]
+
+    def attach(self, view, cols):
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+                env["TERM"] = "xterm-256color"
+                os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={view}:"), env)
+            finally:
+                os._exit(127)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 20, cols, 0, 0))
+
+        def reap():
+            os.close(fd)
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+
+        self.addCleanup(reap)
+        deadline = time.monotonic() + 5
+        while True:
+            clients = self.tmux.run("list-clients", "-F", "#{client_name}\t#{client_session}").splitlines()
+            named = [c.split("\t")[0] for c in clients if c.endswith("\t" + view)]
+            if named:
+                return named[0]
+            if time.monotonic() > deadline:
+                self.fail(f"no client attached to {view}")
+            time.sleep(0.02)
+
+    def zoomed(self, view):
+        return self.tmux.run("display-message", "-p", "-t", f"={view}:", "#{window_zoomed_flag}").strip()
+
+    def test_a_narrow_terminal_starting_emx_gets_a_view_of_its_own_and_leaves_the_laptops_alone(self):
+        from emx import sidebar
+
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
+        saved = core.prefs_path().read_bytes()
+        argv = self.launched(48)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
+        self.assertEqual(sorted(self.tmux.view_names()), [SESSION, "emx-view-1"])
+        client = self.attach("emx-view-1", 48)
+        panel = self.tmux.run("list-panes", "-t", "=emx-view-1:", "-f", "#{==:#{@emx_role},sidebar}", "-F", "#{pane_id}").strip()
+        with mock.patch.dict(os.environ, {"TMUX_PANE": panel}):
+            self.assertEqual(sidebar.own_view(self.tmux.socket), "emx-view-1")
+        self.tmux.bind_collapse(sidebar.COLLAPSE_KEY)
+        self.tmux.run("send-keys", "-K", "-c", client, "C-q")
+        deadline = time.monotonic() + 5
+        while self.zoomed("emx-view-1") != "1" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual((self.zoomed("emx-view-1"), self.zoomed(SESSION)), ("1", "0"))
+        self.assertEqual(core.prefs_path().read_bytes(), saved)
+
+    def test_a_wide_terminal_starting_emx_gets_emx_itself(self):
+        argv = self.launched(200)
+        self.assertEqual(argv[-2:], ["-t", "=emx:"])
+        self.assertEqual(self.tmux.view_names(), [SESSION])
 
 
 class Version(unittest.TestCase):

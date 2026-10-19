@@ -227,10 +227,11 @@ def launch() -> int:
             refresh_workspace(tmux)
         except (TmuxError, OSError) as exc:
             print(f"emx: couldn't update the running workspace: {' '.join(str(exc).split())}", file=sys.stderr)
-        try:
-            view = attach_view(tmux)
-        except (TmuxError, OSError) as exc:
-            print(f"emx: couldn't open a view of its own: {' '.join(str(exc).split())}", file=sys.stderr)
+    # Also on the path that just made the workspace: a narrow terminal starting emx gets a view of its own, never the laptop's `emx`.
+    try:
+        view = attach_view(tmux)
+    except (TmuxError, OSError) as exc:
+        print(f"emx: couldn't open a view of its own: {' '.join(str(exc).split())}", file=sys.stderr)
     record_terminal(tmux)
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     os.execvpe("tmux", tmux.argv("attach-session", "-t", f"={view}:"), env)
