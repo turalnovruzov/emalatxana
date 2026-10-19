@@ -111,11 +111,11 @@ The house style for writing code in this repo: how *this* codebase does things, 
    bind-key -T root C-q if-shell -F "#{&&:#{==:#{window_panes},2},#{P:#{?#{==:#{@emx_role},sidebar},1,}}}" \
        "if-shell -F \"#{==:#{@emx_role},sidebar}\" \"resize-pane -Z -t :.+\" \"resize-pane -Z\"" "send-keys C-q"
    ```
-4. **Gotcha**: the mouse goes through the viewer too. A viewer is a tmux client, which turns mouse reporting on in the slot, so tmux's own mouse bindings pass a click inward (`send-keys -M`) and act on the session's window, not the view's. A mouse binding that must act on the view takes the event at the view's level, gated on the slot's role (`bind_menu`).
+4. **Gotcha**: the mouse goes through the viewer too. A viewer is a tmux client, which turns mouse reporting on in the slot, so tmux's own mouse bindings pass a click inward (`send-keys -M`) and act on the session's window, not the view's. A mouse binding that must act on the view takes the event at the view's level, gated on the slot's role and on the mouse flag of the pane the slot shows, never the slot's own, which the viewer always sets; a format cannot read another pane, so that flag is read by a shell check kept in a global option (`bind_menu`, `MENU_CHECK_OPT`).
 
 ### An option lives on a view, on `emx`, or globally, by who must read it
 
-1. **Rule**: an option that belongs to one device's view is set on that view's session through `Tmux(view=…)` (`view_option`, `set_view_option`: `OPEN_OPT`, `REOPEN_OPT`, the bar, the focus report). One that belongs to the whole workspace is set on `=emx:` (`session_option`: `VERSION_OPT`, `HUSH_OPT`, `TERMINAL_OPT`). Anything a binding's format or check must see from inside a viewer is global (`-g`: `LEFT_OPT`, `PASTE_OPT`, `RELAY_PASTE_OPT`), as is what every view's panel must find the same (`MENU_OPT`, the stash of tmux's own right-click binding).
+1. **Rule**: an option that belongs to one device's view is set on that view's session through `Tmux(view=…)` (`view_option`, `set_view_option`: `OPEN_OPT`, `REOPEN_OPT`, the bar, the focus report). One that belongs to the whole workspace is set on `=emx:` (`session_option`: `VERSION_OPT`, `HUSH_OPT`, `TERMINAL_OPT`). Anything a binding's format or check must see from inside a viewer is global (`-g`: `LEFT_OPT`, `PASTE_OPT`, `RELAY_PASTE_OPT`), as is what every view's panel must find the same (`MENU_OPT`, the stash of tmux's own right-click binding, and `MENU_CHECK_OPT`).
 2. **Why**: a format in a binding expands in the session the key lands in. Inside a viewer that is the session's own `emx-a-<key>`, which sees neither a view's options nor `emx`'s, only the global ones.
 3. **Minimal example**:
    ```python

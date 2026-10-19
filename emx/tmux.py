@@ -29,6 +29,7 @@ RELAY_PASTE_OPT = "@emx_relay_paste"
 VIEW_OPT = "@emx_view"
 REOPEN_OPT = "@emx_reopen"
 MENU_OPT = "@emx_pane_menu"
+MENU_CHECK_OPT = "@emx_pane_menu_check"
 AGENT_SESSION_PREFIX = "emx-a-"
 VIEW_PREFIX = "emx-view-"
 AGENT_KEY_ENV = "EMX_AGENT_KEY"
@@ -500,16 +501,22 @@ class Tmux:
         self.run("bind-key", "-n", key, "if-shell", "-F", held, decide, f"send-keys {key}")
 
     def bind_menu(self) -> None:
-        """Have a right-click in a view's slot open tmux's pane menu at this level, on the slot, as it opened on the session's own pane before 2.10.0; anywhere else tmux's own binding runs.
+        """Have a right-click in a view's slot do what it did on the session's own pane before 2.10.0: reach the session when its pane asked for the mouse, as Claude Code's does, else open tmux's pane menu at this level, on the slot; anywhere else tmux's own binding runs.
 
         The viewer is a tmux client, which turns mouse reporting on in the
-        slot, so tmux's default would pass the click to the viewer and open
-        the menu on the session's own window, where Split would split it. The
-        menu is the one tmux binds to M-MouseDown3Pane, read from this server
-        so it is the installed tmux's own; the default binding it falls back
-        to is kept in MENU_OPT the first time, so binding again from each
-        view's panel never wraps the wrapper. A tmux with no pane menu gets
-        no binding.
+        slot whatever the session asked for, so the slot's own flag says
+        nothing, and tmux's default would pass every click to the viewer and
+        open the menu on the session's own window, where Split would split
+        it. A format cannot read another pane, so MENU_CHECK_OPT, a shell
+        check given the slot's view key, reads the flag of the pane the slot
+        shows; it is kept in an option, as option values are not expanded
+        again, so its own format reaches tmux untouched. The check fails
+        toward tmux's default: when it cannot run or finds no session, the
+        click goes to the viewer. The menu is the one tmux binds to
+        M-MouseDown3Pane, read from this server so it is the installed tmux's
+        own; the default binding is kept in MENU_OPT the first time, so
+        binding again from each view's panel never wraps the wrapper. A tmux
+        with no pane menu gets no binding.
         """
         menu = self._root_binding("M-MouseDown3Pane")
         gate = f"#{{==:#{{{ROLE}}},viewer}}"
@@ -517,7 +524,14 @@ class Tmux:
         if not menu or not default or gate in default:
             return
         self.set_global_option(MENU_OPT, default)
-        self.run("bind-key", "-n", "MouseDown3Pane", "if-shell", "-F", "-t", "=", gate, menu, default)
+        shown = shlex.quote(f"={AGENT_SESSION_PREFIX}") + '"$1":'
+        check = (
+            f"f() {{ test \"$(tmux -L {shlex.quote(self.socket)} display-message -p -t {shown} "
+            f"'#{{mouse_any_flag}}' 2>/dev/null)\" = 0; }}; f"
+        )
+        self.run("set-option", "-g", MENU_CHECK_OPT, check)
+        here = f'if-shell -t = "#{{{MENU_CHECK_OPT}}} #{{q:{VIEW_OPT}}}" {{ {menu} }} {{ {default} }}'
+        self.run("bind-key", "-n", "MouseDown3Pane", "if-shell", "-F", "-t", "=", gate, here, default)
 
     def _root_binding(self, key: str) -> str:
         """The command `key` runs in the root table, as tmux lists it, "" when it has none."""

@@ -22,6 +22,12 @@ from emx.tmux import (
     AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
 )
 
+try:
+    from emx.tmux import MENU_CHECK_OPT
+except ImportError:
+    # Lets the menu tests run, and fail one by one, on code from before the check existed.
+    MENU_CHECK_OPT = None
+
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
 RECORDER = """
 import os, sys, tty
@@ -919,6 +925,8 @@ class EngineLive(unittest.TestCase):
 
 
 BRACKETED_RECORDER = RECORDER.replace('os.write(1, "\\u276f ".encode())', 'os.write(1, b"\\x1b[?2004h" + "\\u276f ".encode())')
+# Asks for every mouse event in SGR form, as Claude Code's fullscreen screen does.
+MOUSE_RECORDER = RECORDER.replace('os.write(1, "\\u276f ".encode())', 'os.write(1, b"\\x1b[?1003h\\x1b[?1006h" + "\\u276f ".encode())')
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -1114,8 +1122,8 @@ class Views(PrivateServer):
     def clients(self):
         return self.tmux.run("list-clients", "-F", "#{client_name}\t#{client_session}").splitlines()
 
-    def show_in(self, slot, key):
-        self.tmux.link_agent(self.window, key, "cat")
+    def show_in(self, slot, key, window=None):
+        self.tmux.link_agent(window or self.window, key, "cat")
         before = len(self.clients())
         self.tmux.respawn(slot, self.tmux.viewer_command(key))
         self.tmux.set_pane_option(slot, ROLE, "viewer")
@@ -1199,6 +1207,49 @@ class Views(PrivateServer):
         self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the view's window to split")
         self.assertEqual(self.show(self.agent, "#{window_panes}"), "1")
         self.assertEqual(self.show(self.main, "#{window_id}"), view_window)
+
+    def mouse_agent(self):
+        """A second session whose pane asks for the mouse; returns its key and pane."""
+        recorder = os.path.join(self.dir, "mouse_recorder.py")
+        with open(recorder, "w", encoding="utf-8") as fh:
+            fh.write(MOUSE_RECORDER)
+        key = str(uuid.uuid4())
+        pane = self.tmux.new_hidden_window(f"{sys.executable} -I {recorder} {self.keys('mouse_agent')}")
+        self.tmux.set_pane_option(pane, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(pane, SESSION_OPT, key)
+        self.wait_for(lambda: self.show(pane, "#{mouse_any_flag}") == "1", "the stand-in to ask for the mouse")
+        return key, pane
+
+    def test_a_right_click_in_a_slot_goes_to_a_session_that_asked_for_the_mouse_and_opens_no_menu(self):
+        self.tmux.bind_menu()
+        key, pane = self.mouse_agent()
+        self.show_in(self.main, key, self.show(pane, "#{window_id}"))
+        self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        left, top = int(self.show(self.main, "#{pane_left}")), int(self.show(self.main, "#{pane_top}"))
+        x, y = left + 5, top + 3
+        self.seen = b""
+        os.write(self.client_fd, f"\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m".encode())
+        # The press, not only the release, which tmux passes inward whatever the binding.
+        self.wait_for(lambda: re.search(rb"\x1b\[<2;\d+;\d+M", self.typed("mouse_agent")), "the click to reach the session")
+        os.write(self.client_fd, b"h")
+        self.wait_for(lambda: self.typed("mouse_agent").endswith(b"h"), "h to reach the session")
+        self.assertFalse(self.client_shows("Horizontal Split"))
+        self.assertEqual(self.show(self.main, "#{window_panes}"), "2")
+        self.assertEqual(self.show(pane, "#{window_panes}"), "1")
+
+    def test_the_menu_check_reads_the_shown_sessions_pane_not_the_slot(self):
+        self.assertIsNotNone(MENU_CHECK_OPT, "no check option")
+        self.tmux.bind_menu()
+        key, pane = self.mouse_agent()
+        self.show_in(self.main, self.key)
+        self.tmux.link_agent(self.show(pane, "#{window_id}"), key, "cat")
+        check = self.tmux.global_option(MENU_CHECK_OPT)
+
+        def menu_here(shown):
+            return subprocess.run(["sh", "-c", f"{check} {shown}"], capture_output=True).returncode == 0
+
+        self.assertEqual((menu_here(self.key), menu_here(key), menu_here(str(uuid.uuid4()))), (True, False, False))
 
     def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
         self.tmux.bind_menu()
