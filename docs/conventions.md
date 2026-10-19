@@ -149,7 +149,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Claude Code's own files are read read-only, tail-bounded, off the curses thread, for listed sessions only
 
-1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. A path a session's hooks reported is opened only when it lies under Claude's `projects` folder (after `realpath`) and is named `<that session's id>.jsonl`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` (and, for a listed session whose own file has no turn, the bounded tails, `CONTINUED_TAIL_BYTES`, of the `<session-id>.jsonl` files in that session's own project folder, to find its continued-in predecessor; cached per file stat, backed off on a miss) in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
+1. **Rule**: emx reads files Claude Code writes (under `CLAUDE_CONFIG_DIR`, else `~/.claude`) only from a worker thread, which the curses thread collects with `.take()`. A path a session's hooks reported is opened only when it lies under Claude's `projects` folder (after `realpath`) and is named `<that session's id>.jsonl`. It opens them `rb`, reads a bounded tail, or, for the name Tab asks for, a bounded head and tail of at most `NAME_READ_MAX_BYTES` (ADR 0003), and reads only files named after a `sessionId` (and, for a listed session whose own file has no turn, the bounded tails, `CONTINUED_TAIL_BYTES`, of the `<session-id>.jsonl` files in that session's own project folder, to find its continued-in predecessor; cached per file stat, backed off on a miss) in the latest listing that had any sessions (an empty listing is taken as a glitch, not as every session gone) that passes the id check (`core.is_session_id`). The one file it reads outside `projects` is `sessions/<pid>.json`, through `engine.bridge_link` only, for the pid of a live agent-tagged pane of emx's own: opened read-only with `O_NOFOLLOW|O_NONBLOCK` (a planted link or FIFO is refused, not followed or waited on), used only when `fstat` shows a regular file of this user's within the size bound, and only when its `pid` and `sessionId` match that pane's session; of it only `bridgeSessionId` is taken, and nothing else in that folder is listed or opened. `sidebar.py` gathers the bytes; `core.parse_transcript` turns them into a value and never raises.
 2. **Why**: the contract allows reading `~/.claude` and forbids writing, moving or deleting anything there. Transcripts run to many megabytes and grow while being read, and a read on the curses thread would freeze the panel.
 3. **Minimal example**:
    ```python
@@ -358,6 +358,19 @@ The house style for writing code in this repo: how *this* codebase does things, 
 2. **Why**: the text is untrusted (session, folder and tool names, Haiku output). In a tmux format `#(...)` runs a shell command, `#[...]` restyles, and `%` goes through strftime.
 3. **Minimal example**: ``sidebar.bar_format([(session_name, "muted", False)])``
 4. **Gotcha**: escape after cutting with `fit()`, never before, or a cut can split a doubled `##` and leave a lone `#`. Set the option on the session (`-t =emx:`), not globally.
+
+### Phone behaviour is gated on the window's width, never writes prefs, and the wide path is held by a golden
+
+1. **Rule**: anything that behaves differently on a phone is gated on `core.narrow(window_width)` in Python and on `NARROW_WINDOW` (the window narrower than `core.NARROW_BELOW`) in a tmux binding, with the laptop's behaviour as the other branch. A narrow view never writes prefs: zoom, hidden panel and widths saved are the laptop's. Before a change to a path the laptop also takes, what that path gives is captured from the previous release tag's code into a committed fixture, and a test holds the wide output to it byte for byte.
+2. **Why**: in #67 every attached device gets its own view, and the laptop looks and works as it did before. A width check in one place and the prefs shared by every view mean a phone can never move the laptop's layout, and a golden from the old tag catches a wide change that a test computed by the code under test would not.
+3. **Minimal example**:
+   ```python
+   if self.narrow:            # core.narrow(self.window_width)
+       self.tend_narrow(sidebar, main)
+   # binding: if-shell -F '{NARROW_WINDOW}' '{OTHER_ALONE}' 'select-pane -t :.+'
+   # golden: tests/fixtures/bar/wide-2.10.0.json, checked by WideBarIsUnchanged
+   ```
+4. **Gotcha**: `select-pane` unzooms the window, so on a phone the zoom comes after the select (`OTHER_ALONE`, `Tmux.show_alone`), never before. A golden is captured before the edit, from the tag, never regenerated from the branch.
 
 ## The contract for this file
 
