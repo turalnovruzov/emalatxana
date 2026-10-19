@@ -19,7 +19,7 @@ from unittest import mock
 
 from emx import cli, core, engine
 from emx.tmux import (
-    AGENT_OPT, BACK_OPT, HUSH_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
+    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
 )
 
 # Draws a prompt mark so the cursor sits where an empty Claude Code prompt puts it, then records every byte typed.
@@ -1168,6 +1168,58 @@ class Views(PrivateServer):
         self.tmux.claim_width(self.main, self.key)
         self.wait_for(lambda: self.show(self.agent, "#{window_width}") == mine, "the session to take this view's width back")
         self.assertEqual(self.show(self.main, "#{pane_pid}"), viewer)
+
+    def right_click_split(self, slot):
+        """Right-click inside `slot` through the client's terminal, then pick the menu's Horizontal Split."""
+        self.tmux.run("set-option", "-g", "mouse", "on")
+        left, top = int(self.show(slot, "#{pane_left}")), int(self.show(slot, "#{pane_top}"))
+        x, y = left + 5, top + 3
+        self.seen = b""
+        os.write(self.client_fd, f"\x1b[<2;{x};{y}M\x1b[<2;{x};{y}m".encode())
+        self.wait_for(lambda: self.client_shows("Horizontal Split"), "the pane menu")
+        os.write(self.client_fd, b"h")
+
+    def client_shows(self, text):
+        # The menu is drawn on the client, not in a pane, so read what reached the terminal.
+        chunks = []
+        while select.select([self.client_fd], [], [], 0.05)[0]:
+            try:
+                chunks.append(os.read(self.client_fd, 65536))
+            except OSError:
+                break
+        self.seen = getattr(self, "seen", b"") + b"".join(chunks)
+        return text.encode() in self.seen
+
+    def test_a_right_click_in_a_slot_opens_the_pane_menu_on_the_slot_not_on_the_sessions_window(self):
+        self.tmux.bind_menu()
+        self.show_in(self.main, self.key)
+        self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
+        view_window = self.show(self.main, "#{window_id}")
+        self.right_click_split(self.main)
+        self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the view's window to split")
+        self.assertEqual(self.show(self.agent, "#{window_panes}"), "1")
+        self.assertEqual(self.show(self.main, "#{window_id}"), view_window)
+
+    def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
+        self.tmux.bind_menu()
+        self.right_click_split(self.main)
+        self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the window to split")
+
+    def test_the_pane_menu_binding_is_tmuxs_own_menu_gated_on_the_slot_and_binding_again_changes_nothing(self):
+        default = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        self.tmux.bind_menu()
+        once = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        self.tmux.bind_menu()
+        self.assertEqual(self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane"), once)
+        self.assertIn("#{==:#{@emx_role},viewer}", once)
+        self.assertEqual(self.tmux.global_option(MENU_OPT), default.split("MouseDown3Pane", 1)[1].strip())
+        self.show_in(self.main, self.key)
+        gate = "#{==:#{@emx_role},viewer}"
+        self.assertEqual((self.show(self.main, gate), self.show(self.agent, gate), self.show(self.sidebar, gate)), ("1", "0", "0"))
+        listed = os.path.join(self.dir, "menu.conf")
+        with open(listed, "w", encoding="utf-8") as fh:
+            fh.write(once)
+        self.tmux.run("source-file", "-n", listed)
 
     def test_the_toggle_key_acts_only_in_the_view_it_is_pressed_in(self):
         self.tmux.bind_toggle("C-\\")

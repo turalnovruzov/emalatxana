@@ -2048,6 +2048,7 @@ class App:
         self.tmux.bind_collapse(COLLAPSE_KEY)
         self.tmux.bind_paste(PASTE_KEY, self_command("paste", socket, str(self.relay_file)))
         self.tmux.bind_copy(self_command("copied", socket))
+        self.tmux.bind_menu()
         self.bound = True
 
     def tend_slot(self, slot: Pane) -> None:

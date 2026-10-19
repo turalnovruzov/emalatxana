@@ -28,6 +28,7 @@ RELAY_PASTE_OPT = "@emx_relay_paste"
 # The session key a view's slot shows. Never SESSION_OPT: a pane with a key and no agent tag is a pre-2.0 viewer, which panels kill.
 VIEW_OPT = "@emx_view"
 REOPEN_OPT = "@emx_reopen"
+MENU_OPT = "@emx_pane_menu"
 AGENT_SESSION_PREFIX = "emx-a-"
 VIEW_PREFIX = "emx-view-"
 AGENT_KEY_ENV = "EMX_AGENT_KEY"
@@ -497,6 +498,35 @@ class Tmux:
         decide = f'if-shell "#{{{PASTE_OPT}}} #{{pane_id}} #{{{SESSION_OPT}}}" "" "send-keys {key}"'
         held = f"#{{&&:#{{{SESSION_OPT}}},#{{&&:#{{{AGENT_OPT}}},#{{{RELAY_PASTE_OPT}}}}}}}"
         self.run("bind-key", "-n", key, "if-shell", "-F", held, decide, f"send-keys {key}")
+
+    def bind_menu(self) -> None:
+        """Have a right-click in a view's slot open tmux's pane menu at this level, on the slot, as it opened on the session's own pane before 2.10.0; anywhere else tmux's own binding runs.
+
+        The viewer is a tmux client, which turns mouse reporting on in the
+        slot, so tmux's default would pass the click to the viewer and open
+        the menu on the session's own window, where Split would split it. The
+        menu is the one tmux binds to M-MouseDown3Pane, read from this server
+        so it is the installed tmux's own; the default binding it falls back
+        to is kept in MENU_OPT the first time, so binding again from each
+        view's panel never wraps the wrapper. A tmux with no pane menu gets
+        no binding.
+        """
+        menu = self._root_binding("M-MouseDown3Pane")
+        gate = f"#{{==:#{{{ROLE}}},viewer}}"
+        default = self.global_option(MENU_OPT) or self._root_binding("MouseDown3Pane")
+        if not menu or not default or gate in default:
+            return
+        self.set_global_option(MENU_OPT, default)
+        self.run("bind-key", "-n", "MouseDown3Pane", "if-shell", "-F", "-t", "=", gate, menu, default)
+
+    def _root_binding(self, key: str) -> str:
+        """The command `key` runs in the root table, as tmux lists it, "" when it has none."""
+        try:
+            out = self.run("list-keys", "-T", "root", key)
+        except TmuxError:
+            return ""
+        found = re.match(r"bind-key\s+(?:-r\s+)?-T\s+root\s+\S+\s+(.*)", out.strip(), re.S)
+        return found.group(1).strip() if found else ""
 
     def bind_copy(self, command: str) -> None:
         """Have every copy made in copy mode also run `command` with the copied text on its stdin.
