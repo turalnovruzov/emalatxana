@@ -28,10 +28,19 @@ CLAUDE_SID = "11111111-1111-4111-8111-111111111111"
 
 
 class FakeTmux:
-    def __init__(self, panes=None, fail_window=False):
-        self.windows, self.options, self.killed = [], [], []
+    def __init__(self, panes=None, fail_window=False, fail_link=False):
+        self.windows, self.options, self.killed, self.links = [], [], [], []
         self.listed = panes or []
         self.fail_window = fail_window
+        self.fail_link = fail_link
+
+    def window_of(self, pane):
+        return "@7"
+
+    def link_agent(self, window, key, inert):
+        if self.fail_link:
+            raise TmuxError("no such window")
+        self.links.append((window, key, inert))
 
     def new_hidden_window(self, command, cwd=None):
         if self.fail_window:
@@ -150,6 +159,19 @@ class EngineStore(StoreCase):
         self.assertEqual(words[4:6], ["--settings", os.path.join(self.key_dir(session.id), "settings.json")])
         self.assertEqual(words[-2:], ["--", "fix it"])
         self.assertEqual(tmux.options, [("%7", AGENT_OPT, "claude"), ("%7", SESSION_OPT, session.id)])
+
+    def test_start_links_the_tagged_pane_into_a_session_of_its_own_for_viewers(self):
+        tmux, (session, _) = self.start()
+        ((window, key, inert),) = tmux.links
+        self.assertEqual((window, key), ("@7", session.id))
+        self.assertEqual(shlex.split(inert)[-2:], ["blank", ""])
+
+    def test_a_link_failure_kills_the_window_and_removes_the_record(self):
+        tmux, (session, error) = self.start(tmux=FakeTmux(fail_link=True))
+        self.assertIsNone(session)
+        self.assertIn("Couldn't start", error)
+        self.assertEqual(tmux.killed, ["%7"])
+        self.assertEqual(os.listdir(os.path.join(self.state, "sessions")), [])
 
     def test_the_returned_session_is_running_and_starting(self):
         _, (session, _) = self.start()

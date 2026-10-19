@@ -94,7 +94,7 @@ def follow(path: Path, out, tmux, beat: float = core.RELAY_BEAT_SECONDS, tick: f
             handle.close()
         if paste:
             try:
-                tmux.set_session_option(RELAY_PASTE_OPT, "")
+                tmux.set_global_option(RELAY_PASTE_OPT, "")
             except (TmuxError, OSError):
                 pass
     return 0
@@ -119,7 +119,8 @@ def _stamp(tmux, clock, host: str | None = None, paste: bool = False) -> None:
             if host:
                 tmux.set_session_option(RELAY_HOST_OPT, core.relay_host_value(host, clock()))
             if paste:
-                tmux.set_session_option(RELAY_PASTE_OPT, str(clock()))
+                # Global, not on `emx`: Ctrl+V's gate runs in the viewer's own session too, which sees only global options.
+                tmux.set_global_option(RELAY_PASTE_OPT, str(clock()))
     except (TmuxError, OSError):
         pass
 

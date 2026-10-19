@@ -94,7 +94,7 @@ class CtrlVEndToEnd(PrivateServer):
 
     def listen(self):
         self.thread.start()
-        self.wait_for(lambda: self.tmux.session_option(RELAY_PASTE_OPT), "the laptop's stamp")
+        self.wait_for(lambda: self.tmux.global_option(RELAY_PASTE_OPT), "the laptop's stamp")
 
     def press(self):
         self.tmux.run("send-keys", "-K", "-c", self.client, "C-v")
@@ -134,7 +134,7 @@ class CtrlVEndToEnd(PrivateServer):
 
     def test_a_stale_stamp_passes_through(self):
         self.listen()
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time() - 20))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time() - 20))
         before = self.relay.read_text() if self.relay.exists() else ""
         self.press()
         self.wait_for(lambda: self.typed("main"), "the key in main")

@@ -452,6 +452,11 @@ def live_viewer(panes, sid: str):
     return next((p for p in panes if p.session == sid and p.agent and not p.dead), None)
 
 
+def live_or_dead_agent(panes, sid: str):
+    """The session's own pane, agent-tagged, whether its process runs or has ended (a dead pane stays, and can be resumed in), or None."""
+    return next((p for p in panes if p.session == sid and p.agent), None)
+
+
 def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None) -> str | None:
     """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
 
@@ -608,12 +613,14 @@ def type_gate(
     the check and the typing. It holds while the viewer is not in a mode,
     alive, still opened on `sid`, its cursor still where the checks saw it
     (`cursor_x` is the empty prompt's place unless given), and his focus is on the
-    panel: the panel is the active pane of the active window. tmux falls
+    panel: the panel is the active pane of the active window of its view.
+    The loop runs over every session, since the viewer's window is linked
+    into more than one and the panel may be in a view of its own. tmux falls
     back to another pane when the target is gone, hence the pane id test.
     """
     if not (_PANE_ID.fullmatch(viewer) and _PANE_ID.fullmatch(panel) and _PLAIN_ID.fullmatch(sid)):
         return None
-    panel_focused = f"#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}"
+    panel_focused = f"#{{S:#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}}}"
     tests = [
         f"#{{==:#{{pane_id}},{viewer}}}",
         "#{==:#{pane_in_mode},0}",
@@ -1599,6 +1606,73 @@ def needs_upgrade(stamp: str, current: str) -> bool:
     return not stamp or stamp != current
 
 
+NARROW_BELOW = 70
+
+
+def pick_view(views, cols: int, narrow_below: int = NARROW_BELOW) -> str:
+    """Which view session a client `cols` wide attaches to: `emx` itself for a wide one while no client has it, else the view no client has that was used last, else "new".
+
+    `views` are `tmux.View`s. A narrow client never gets `emx`: its panel
+    width and hidden panel are the laptop's.
+    """
+    if cols >= narrow_below and any(v.name == "emx" and not v.attached for v in views):
+        return "emx"
+    free = [v for v in views if v.name != "emx" and not v.attached]
+    return max(free, key=lambda v: v.used).name if free else "new"
+
+
+def new_view_name(names) -> str:
+    """The first `emx-view-<n>` no session has."""
+    taken = set(names)
+    n = 1
+    while f"emx-view-{n}" in taken:
+        n += 1
+    return f"emx-view-{n}"
+
+
+def open_target(views, narrow_below: int = NARROW_BELOW) -> str:
+    """The view a notification click opens its session in: the wide view with a client used most recently, else `emx`."""
+    wide = [v for v in views if v.attached and v.width >= narrow_below and v.activity is not None]
+    return max(wide, key=lambda v: v.activity).name if wide else "emx"
+
+
+def migration_plan(panes, linked) -> list:
+    """What moves a running workspace onto views, in order, with no session's pane ever killed: ops for `cli.refresh_workspace`.
+
+    `panes` are the panes of `emx`, `linked` the keys that already have their
+    own `emx-a-<key>` session. The window holding the panel is the home
+    view; a session's pane in it (2.9.0 swapped the open one in) goes back to
+    a hidden window in exchange for the placeholder, making one first when
+    none is left, and its key is noted to show again (`("reopen", key)`).
+    A spacer in a window with a session's pane is dropped, since linking
+    links the whole window. Then each session's pane gets its own session
+    (`("link", pane, key)`). Ops: ("placeholder",), ("swap", pane, other or
+    None for the one just made), ("reopen", key), ("drop", pane), ("link",
+    pane, key). An already moved workspace gives no ops.
+    """
+    panes = list(panes)
+    ops = []
+    home = {p.window for p in panes if p.role == "sidebar" and not p.session}
+    slot = next((p for p in panes if p.window in home and p.role != "sidebar"), None)
+    moving = slot is not None and bool(slot.agent and slot.session)
+    placeholder = next((p for p in panes if p.role == "placeholder" and p.window not in home and not p.session), None)
+    if moving:
+        if placeholder is None:
+            ops.append(("placeholder",))
+        ops.append(("swap", slot.id, placeholder.id if placeholder else None))
+        ops.append(("reopen", slot.session))
+    agent_windows = {p.window for p in panes if p.agent and p.session and p.window not in home}
+    if moving and placeholder is not None:
+        agent_windows.add(placeholder.window)
+    for p in panes:
+        if p.role == "spacer" and not p.session and p.window in agent_windows:
+            ops.append(("drop", p.id))
+    for p in panes:
+        if p.agent and p.session and p.session not in linked and is_session_id(p.session):
+            ops.append(("link", p.id, p.session))
+    return ops
+
+
 def relaunch_plan(panes, upgrade: bool) -> tuple:
     """What the launcher does to a running workspace: (sidebar_ids_to_respawn, spacer_ids_to_kill).
 
@@ -1704,6 +1778,13 @@ def prune_plan(on_disk, current: str, running) -> list:
     below = [v for v in _semver_sorted(on_disk) if parse_version(v) < now]
     keep = {below[-1], running} if below else {running}
     return [v for v in below if v not in keep]
+
+
+def views_quiet(views, now: float) -> tuple:
+    """(clients attached over every view, seconds since the most recent input on any of them or None when unknown), for `update_quiet`: a relaunch respawns every view's panel."""
+    attached = sum(v.attached for v in views)
+    seen = [max(0.0, now - v.activity) for v in views if v.attached and v.activity is not None]
+    return attached, min(seen) if seen else None
 
 
 def update_quiet(attached: int, idle, busy: bool) -> bool:
@@ -2130,9 +2211,27 @@ def load_prefs(path: Path) -> dict:
     return normalize_prefs(raw)
 
 
+def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
+    """The prefs to write when this panel read `base`, holds `mine`, and finds `disk` on file now: another view's panel may have written since.
+
+    Only the keys this panel changed since `base` take its value; every other
+    key keeps what is on disk. Two panels changing the same key between two
+    reads: the last write wins.
+    """
+    merged = dict(disk)
+    for key in set(base) | set(mine):
+        if mine.get(key) != base.get(key):
+            if key in mine:
+                merged[key] = mine[key]
+            else:
+                merged.pop(key, None)
+    return merged
+
+
 def save_prefs(path: Path, prefs: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    # Per process: each view's panel saves, and two must not share one temporary file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(normalize_prefs(prefs), indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
 
@@ -3427,6 +3526,41 @@ def in_front(sid: str, main_sid: str, main_id: str, attached: int, focus: str, a
         bool(main_sid) and sid == main_sid and attached > 0 and focus == "1"
         and bool(main_id) and active == main_id and idle is not None and idle <= AWAY_SECONDS
     )
+
+
+def in_front_any(sid: str, views, now: float) -> bool:
+    """Whether a notice for `sid` is skipped because he is looking at that session on some device.
+
+    `views` are `tmux.View`s and `now` is wall-clock seconds, as tmux gives a
+    client's activity. Some view must hold all of what `in_front` asks of the
+    one workspace: it shows `sid` in its slot, the slot (not the panel) is
+    active, a client is attached, its terminal last reported focus-in, and the
+    client had input within `AWAY_SECONDS`.
+    """
+    return any(
+        bool(sid) and v.shows == sid and v.slot_active and v.attached > 0 and v.focus == "1"
+        and v.activity is not None and now - v.activity <= AWAY_SECONDS
+        for v in views
+    )
+
+
+def summaries_record(found: dict) -> dict:
+    """What the primary panel writes to `summaries.json` for the other views' panels: each session's line and the state it is for, nothing else."""
+    return {sid: {"text": s.text, "state": s.category} for sid, s in found.items() if is_session_id(sid)}
+
+
+def summaries_from(raw) -> dict:
+    """The lines in a `summaries.json` the primary panel wrote, as `Summary`s; anything not shaped as `summaries_record` writes is dropped."""
+    if not isinstance(raw, dict):
+        return {}
+    found = {}
+    for sid, entry in raw.items():
+        if not is_session_id(sid) or not isinstance(entry, dict):
+            continue
+        text, state = entry.get("text"), entry.get("state")
+        if isinstance(text, str) and isinstance(state, str) and len(text) <= SUMMARY_LONG_CAP:
+            found[sid] = Summary(text, state, "", 0.0)
+    return found
 
 
 NOTICE_INSTRUCTION = (

@@ -2,6 +2,15 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.10.0 — 2026-10-18
+
+- Each device that opens emx gets its own view: its own panel, its own open session, its own hidden or shown panel and its own width. A phone and your laptop can be on at the same time without moving each other's layout.
+- The same session open on two devices at once has one width, that of the device you used last.
+- Two terminals on the same machine each get their own view too, instead of mirroring each other.
+- A phone or second terminal that goes away stops showing its session, and shows it again when it comes back. A phone that starts emx before your laptop does gets its own view too, so your laptop still finds its own layout.
+- Your laptop works as before: the session you had open stays open through the update and is on screen the moment you come back, at your laptop's width; closing a session shows the empty pane straight away; a right-click in a session goes to Claude as before when Claude uses the mouse (its full-screen view does), and otherwise opens the right-click menu where it did; and copying with the mouse, scrolling, clicking, Shift+Enter and colours are unchanged.
+- One difference on the laptop: when the right-click menu does open (in a session that doesn't use the mouse), its Kill and Respawn act on emx's view of the session and no longer end or restart the session itself.
+
 ## 2.9.0 — 2026-10-18
 
 - The bar shows the keys for whatever the cursor is on: the rest keys when nothing is selected or the panel is not in focus, a session's own keys by its state (answer when it needs input, interrupt while it works, pin when it is done), a project header's keys (fold, new here, close group), the peek's keys, and `n new session` when there are no sessions. A key shows only when it really does that now.

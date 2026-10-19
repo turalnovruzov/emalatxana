@@ -19,6 +19,10 @@ emx remote myserver
 
 Closing the window, closing the laptop or losing the connection leaves the server's emx and its sessions running. Run `emx remote myserver` again to come back. `q` in the panel leaves them running too. Plain `emx` shows only this machine's sessions.
 
+## Two devices at once
+
+The laptop and another device, a phone for example, can be on the same server's emx at the same time, each with a view of its own: its own panel, open session and width (`emx docs how-emx-works`). The same session open on both has the width of whichever you used last.
+
 ## Knowing you're on remote
 
 While you are in a server through `emx remote myserver`, the bar at the bottom of the window shows `⇄ myserver` in violet after the version, and your terminal's title reads `emx · myserver`. Both go when you leave. Someone looking at the server's own screen sees the mark too, while you are connected. An emx older than this feature, on either machine, shows no mark.

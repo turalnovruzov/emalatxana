@@ -1,21 +1,26 @@
+import fcntl
 import io
 import json
 import os
+import pty
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import emx
 from emx import __version__, cli, core
-from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError
+from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError, View
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
@@ -26,7 +31,7 @@ class Attached(Exception):
 
 
 class FakeTmux:
-    """A running workspace on old code whose config no longer sources."""
+    """A running workspace on old code whose config no longer sources; its one view, `emx`, has no client."""
 
     def __init__(self, socket, config=None):
         self.socket = socket
@@ -44,8 +49,17 @@ class FakeTmux:
     def set_session_option(self, name, value):
         self.options[name] = value
 
-    def panes(self):
+    def panes(self, session=SESSION):
         return [Pane("%1", "@1", False, "sidebar", "", 30, 200)]
+
+    def agent_keys(self):
+        return set()
+
+    def view_names(self):
+        return [SESSION]
+
+    def views(self):
+        return [View(SESSION, 0, "", None, 0, "", False, "%2")]
 
     def kill_pane(self, pane):
         pass
@@ -84,25 +98,49 @@ class FailingUpgrade(unittest.TestCase):
 class LeftCheck(unittest.TestCase):
     """`emx left` answers tmux's if-shell with an exit code, 0 only for ← to reach Claude Code; anything wrong means ← goes to the panel, silently, since Claude Code forks the conversation on a ← at an empty prompt."""
 
-    def run_check(self, args, lines=None, error=None):
+    KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+    def run_check(self, args, lines=None, error=None, shows=KEY, agents=None, cursor=(2, 5)):
+        """`args` name the slot; the check reads the prompt from the agent pane holding the key the slot shows."""
+        read = []
+        if agents is None:
+            agents = [Pane("%9", "@3", False, "", self.KEY, 30, 30, agent="claude")]
+
         def cursor_lines(tmux, pane, y):
+            read.append((pane, y))
             if error:
                 raise error
             return lines
 
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(cli.Tmux, "cursor_lines", cursor_lines), redirect_stdout(out), redirect_stderr(err):
+        with mock.patch.object(cli.Tmux, "cursor_lines", cursor_lines), \
+                mock.patch.object(cli.Tmux, "pane_view", lambda tmux, pane: shows), \
+                mock.patch.object(cli.Tmux, "panes", lambda tmux: agents), \
+                mock.patch.object(cli.Tmux, "prompt_probe", lambda tmux, pane: (cursor[0], cursor[1], True, 30, False)), \
+                redirect_stdout(out), redirect_stderr(err):
             code = cli.main(["left", *args])
         self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+        self.read = read
         return code
 
     def test_an_empty_prompt_answers_1_and_typed_text_0(self):
         lines = ["❯\xa0", "─" * 30]
         self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], lines), 1)
         self.assertEqual(self.run_check(["emx-test-unit", "%2", "2", "5", "1", "30"], ["❯ typed", "─" * 30]), 0)
+        self.assertEqual(self.read, [("%9", 5)])
 
     def test_an_empty_prompt_a_column_over_answers_1(self):
-        self.assertEqual(self.run_check(["emx-test-unit", "%2", "3", "5", "1", "30"], [" ❯\xa0", "─" * 30]), 1)
+        self.assertEqual(self.run_check(["emx-test-unit", "%2", "3", "5", "1", "30"], [" ❯\xa0", "─" * 30], cursor=(3, 5)), 1)
+
+    def test_a_slot_showing_no_live_session_answers_1_without_reading_a_screen(self):
+        typed = ["❯ typed", "─" * 30]
+        args = ["emx-test-unit", "%2", "2", "5", "1", "30"]
+        dead = [Pane("%9", "@3", True, "", self.KEY, 30, 30, agent="claude")]
+        viewer_only = [Pane("%9", "@3", False, "", self.KEY, 30, 30)]
+        for kwargs in ({"shows": ""}, {"shows": "s1"}, {"agents": []}, {"agents": dead}, {"agents": viewer_only}):
+            with self.subTest(**{k: repr(v) for k, v in kwargs.items()}):
+                self.assertEqual(self.run_check(args, typed, **kwargs), 1)
+                self.assertEqual(self.read, [])
 
     def test_anything_wrong_answers_1(self):
         good = ["%2", "2", "5", "1", "30"]
@@ -496,6 +534,46 @@ PASTE_ID = "20261018-120000-0a1b2c3d"
 PNG = core.PNG_SIGNATURE + b"rest of a picture"
 
 
+class Copied(unittest.TestCase):
+    """`emx copied` runs on every copy tmux makes; only one made in a viewer, whose session's environment names its key, is handed on."""
+
+    KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+    def run_copied(self, args, env, data=b"copied text"):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = mock.Mock(buffer=io.BytesIO(data))
+        with mock.patch.object(cli.Tmux, "hand_on_copy") as hand_on, mock.patch.object(cli.sys, "stdin", stdin), \
+                mock.patch.dict(os.environ, env), redirect_stdout(out), redirect_stderr(err):
+            if "EMX_AGENT_KEY" not in env:
+                os.environ.pop("EMX_AGENT_KEY", None)
+            code = cli.main(["copied", *args])
+        self.assertEqual((code, out.getvalue(), err.getvalue()), (0, "", ""))
+        return hand_on
+
+    def test_a_copy_in_a_viewer_is_handed_on_with_its_key(self):
+        hand_on = self.run_copied(["emx-test-unit"], {"EMX_AGENT_KEY": self.KEY})
+        hand_on.assert_called_once_with(self.KEY, b"copied text")
+
+    def test_anything_else_hands_on_nothing(self):
+        for args, env, data in (
+            (["emx-test-unit"], {}, b"x"),
+            (["emx-test-unit"], {"EMX_AGENT_KEY": "s1"}, b"x"),
+            (["default"], {"EMX_AGENT_KEY": self.KEY}, b"x"),
+            ([], {"EMX_AGENT_KEY": self.KEY}, b"x"),
+            (["emx-test-unit"], {"EMX_AGENT_KEY": self.KEY}, b""),
+        ):
+            with self.subTest(args=args, env=env, data=data):
+                self.run_copied(args, env, data).assert_not_called()
+
+    def test_a_failure_still_exits_0_silently(self):
+        out, err = io.StringIO(), io.StringIO()
+        stdin = mock.Mock(buffer=io.BytesIO(b"x"))
+        with mock.patch.object(cli.Tmux, "hand_on_copy", side_effect=TmuxError("gone")), mock.patch.object(cli.sys, "stdin", stdin), \
+                mock.patch.dict(os.environ, {"EMX_AGENT_KEY": self.KEY}), redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(cli.main(["copied", "emx-test-unit"]), 0)
+        self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+
 class PasteCheck(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -520,13 +598,13 @@ class PasteCheck(unittest.TestCase):
         return cli.main(["paste", socket, str(self.relay) if path is None else path, pane, sid])
 
     def test_a_fresh_stamp_writes_the_record_and_exits_0(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time()))
         self.assertEqual(self.check(pane="%7"), 0)
         record = core.parse_relay(self.relay.read_text().splitlines()[-1])
         self.assertEqual((record["kind"], record["pane"], record["sid"]), ("paste", "%7", PASTE_SID))
 
     def test_a_stale_stamp_exits_1_and_writes_nothing(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time() - 20))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time() - 20))
         self.assertEqual(self.check(), 1)
         self.assertFalse(self.relay.exists())
 
@@ -535,7 +613,7 @@ class PasteCheck(unittest.TestCase):
         self.assertFalse(self.relay.exists())
 
     def test_bad_arguments_exit_1_and_write_nothing(self):
-        self.tmux.set_session_option(RELAY_PASTE_OPT, str(time.time()))
+        self.tmux.set_global_option(RELAY_PASTE_OPT, str(time.time()))
         for kwargs in ({"socket": "default"}, {"socket": ""}, {"path": "relay.jsonl"}, {"pane": "12"}, {"sid": "x"}):
             with self.subTest(kwargs=kwargs):
                 self.assertEqual(self.check(**kwargs), 1)
@@ -718,11 +796,18 @@ class OpenRemote(unittest.TestCase):
 class OpenNoWindowTmux:
     instances = []
 
-    def __init__(self, socket, config=None):
+    def __init__(self, socket, config=None, view=SESSION):
         self.socket = socket
+        self.view = view
         self.options = {}
         self.exists = True
         OpenNoWindowTmux.instances.append(self)
+
+    def views(self):
+        return [View(SESSION, 0, "", None, 0, "", False, "%2")]
+
+    def set_view_option(self, name, value):
+        self.options[name] = value
 
     def has_session(self):
         return self.exists
@@ -762,7 +847,8 @@ class OpenNoWindow(unittest.TestCase):
     def test_it_sets_the_open_option_prints_nothing_and_opens_no_window(self):
         code, out, _ = self.run_main()
         self.assertEqual((code, out), (0, ""))
-        self.assertEqual(OpenNoWindowTmux.instances[0].options, {OPEN_OPT: SID})
+        written = [(t.view, t.options) for t in OpenNoWindowTmux.instances if t.options]
+        self.assertEqual(written, [(SESSION, {OPEN_OPT: SID})])
 
     def test_with_no_session_it_says_so_and_opens_no_window(self):
         code, out, err = self.run_main(exists=False)
@@ -877,6 +963,72 @@ class CreateWorkspace(unittest.TestCase):
         cli.create_workspace(self.tmux)
         self.assertEqual(self.show("#{window_zoomed_flag}"), "0")
 
+    def launched(self, cols):
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": self.tmux.socket}), \
+                mock.patch.object(cli.shutil, "get_terminal_size", return_value=os.terminal_size((cols, 20))), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached) as execvpe:
+            with self.assertRaises(Attached):
+                cli.launch()
+        return execvpe.call_args.args[1]
+
+    def attach(self, view, cols):
+        pid, fd = pty.fork()
+        if pid == 0:
+            try:
+                env = {k: v for k, v in os.environ.items() if k != "TMUX"}
+                env["TERM"] = "xterm-256color"
+                os.execvpe("tmux", self.tmux.argv("attach-session", "-t", f"={view}:"), env)
+            finally:
+                os._exit(127)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 20, cols, 0, 0))
+
+        def reap():
+            os.close(fd)
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+
+        self.addCleanup(reap)
+        deadline = time.monotonic() + 5
+        while True:
+            clients = self.tmux.run("list-clients", "-F", "#{client_name}\t#{client_session}").splitlines()
+            named = [c.split("\t")[0] for c in clients if c.endswith("\t" + view)]
+            if named:
+                return named[0]
+            if time.monotonic() > deadline:
+                self.fail(f"no client attached to {view}")
+            time.sleep(0.02)
+
+    def zoomed(self, view):
+        return self.tmux.run("display-message", "-p", "-t", f"={view}:", "#{window_zoomed_flag}").strip()
+
+    def test_a_narrow_terminal_starting_emx_gets_a_view_of_its_own_and_leaves_the_laptops_alone(self):
+        from emx import sidebar
+
+        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
+        saved = core.prefs_path().read_bytes()
+        argv = self.launched(48)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
+        self.assertEqual(sorted(self.tmux.view_names()), [SESSION, "emx-view-1"])
+        client = self.attach("emx-view-1", 48)
+        panel = self.tmux.run("list-panes", "-t", "=emx-view-1:", "-f", "#{==:#{@emx_role},sidebar}", "-F", "#{pane_id}").strip()
+        with mock.patch.dict(os.environ, {"TMUX_PANE": panel}):
+            self.assertEqual(sidebar.own_view(self.tmux.socket), "emx-view-1")
+        self.tmux.bind_collapse(sidebar.COLLAPSE_KEY)
+        self.tmux.run("send-keys", "-K", "-c", client, "C-q")
+        deadline = time.monotonic() + 5
+        while self.zoomed("emx-view-1") != "1" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual((self.zoomed("emx-view-1"), self.zoomed(SESSION)), ("1", "0"))
+        self.assertEqual(core.prefs_path().read_bytes(), saved)
+
+    def test_a_wide_terminal_starting_emx_gets_emx_itself(self):
+        argv = self.launched(200)
+        self.assertEqual(argv[-2:], ["-t", "=emx:"])
+        self.assertEqual(self.tmux.view_names(), [SESSION])
+
 
 class Version(unittest.TestCase):
     def test_version_prints_and_never_starts_tmux(self):
@@ -973,12 +1125,18 @@ class RelaunchTmux:
     def set_session_option(self, name, value):
         self.options[name] = value
 
-    def panes(self):
+    def panes(self, session=SESSION):
         return [
             Pane("%1", "@1", False, "sidebar", "", 30, 200),
             Pane("%2", "@1", False, "sidebar", SID, 170, 200),
             Pane("%3", "@2", False, "", SID, 200, 200),
         ]
+
+    def agent_keys(self):
+        return set()
+
+    def view_names(self):
+        return [SESSION]
 
     def kill_pane(self, pane):
         raise AssertionError(f"killed {pane}")
@@ -1358,6 +1516,138 @@ class HookCommand(unittest.TestCase):
     def test_usage_names_it_as_internal(self):
         self.assertIn("emx hook", cli.USAGE)
         self.assertIn("internal", cli.USAGE)
+
+
+MIG_A, MIG_B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+class MigratingTmux:
+    """A 2.9.0 workspace on this version's code (no upgrade due): session MIG_A's pane in the home view, MIG_B's hidden, the placeholder hidden, and `attached` clients on `emx`. Records what changes it."""
+
+    made = []
+
+    def __init__(self, socket, config=None, view=SESSION):
+        self.socket = socket
+        self.view = view
+        self.options = {VERSION_OPT: cli.code_version()}
+        self.ops = []
+        self.attached = 0
+        self.list = [
+            Pane("%1", "@1", False, "sidebar", "", 40, 200),
+            Pane("%5", "@1", False, "", MIG_A, 160, 200, agent="claude"),
+            Pane("%2", "@2", False, "placeholder", "", 160, 160),
+            Pane("%6", "@3", False, "", MIG_B, 160, 160, agent="claude"),
+        ]
+        MigratingTmux.made.append(self)
+
+    def argv(self, *args):
+        return ["tmux", "-L", self.socket, *args]
+
+    def has_session(self):
+        return True
+
+    def session_option(self, name):
+        return self.options.get(name, "")
+
+    def set_session_option(self, name, value):
+        self.ops.append(("set", name, value))
+        self.options[name] = value
+
+    def panes(self, session=SESSION):
+        return list(self.list) if session == SESSION else []
+
+    def agent_keys(self):
+        return {key for op, *rest in self.ops if op == "link" for key in rest[1:]}
+
+    def view_names(self):
+        return [SESSION]
+
+    def views(self):
+        return [View(SESSION, self.attached, "", None, 200, "", False, "%2")]
+
+    def window_of(self, pane):
+        return next(p.window for p in self.list if p.id == pane)
+
+    def swap(self, a, b):
+        self.ops.append(("swap", a, b))
+        where = {p.id: p.window for p in self.list}
+        self.list = [replace(p, window=where[b] if p.id == a else where[a] if p.id == b else p.window) for p in self.list]
+
+    def swap_keeping_size(self, a, b):
+        self.swap(a, b)
+
+    def link_agent(self, window, key, inert):
+        self.ops.append(("link", window, key))
+
+    def kill_pane(self, pane):
+        self.ops.append(("kill", pane))
+
+    def respawn(self, pane, command):
+        self.ops.append(("respawn", pane))
+
+    def run(self, *args):
+        self.ops.append(("run",) + args[:3])
+        return "emx\n" if args[0] == "list-sessions" else "%9\n"
+
+    def set_pane_option(self, pane, name, value):
+        pass
+
+    def source_config(self):
+        self.ops.append(("source",))
+
+
+class Migration(unittest.TestCase):
+    """`emx` and the auto update's `emx relaunch` move a running 2.9.0 workspace onto views the same way."""
+
+    def setUp(self):
+        MigratingTmux.made = []
+        for patch in (
+            mock.patch.object(cli, "Tmux", MigratingTmux),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+            mock.patch.dict(cli.os.environ, {"EMX_SOCKET": "emx-test-unit"}),
+            mock.patch.object(cli, "record_terminal", lambda tmux: None),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def launched(self, cols=200, attached=0):
+        original = MigratingTmux.views
+        MigratingTmux.views = lambda self: [View(SESSION, attached, "", None, 200, "", False, "%2")]
+        self.addCleanup(setattr, MigratingTmux, "views", original)
+        with mock.patch.object(cli.shutil, "get_terminal_size", return_value=os.terminal_size((cols, 22))), \
+                mock.patch.object(cli.os, "execvpe", side_effect=Attached) as execvpe:
+            with self.assertRaises(Attached):
+                cli.launch()
+        return MigratingTmux.made[0].ops, execvpe.call_args.args[1]
+
+    def migration(self, ops):
+        return [op for op in ops if op[0] in ("swap", "link", "kill", "set")]
+
+    def test_relaunch_runs_the_same_migration_as_launch(self):
+        ops, argv = self.launched()
+        self.assertEqual(cli.relaunch("emx-test-unit"), 0)
+        relaunched = MigratingTmux.made[-1].ops
+        expected = [("swap", "%5", "%2"), ("set", "@emx_reopen", MIG_A), ("link", "@2", MIG_A), ("link", "@3", MIG_B)]
+        self.assertEqual(self.migration(ops), expected)
+        self.assertEqual(self.migration(relaunched), expected)
+        self.assertEqual(argv[-2:], ["-t", "=emx:"])
+
+    def test_a_second_run_finds_nothing_to_do(self):
+        tmux = MigratingTmux("emx-test-unit")
+        cli.refresh_workspace(tmux)
+        first = len(tmux.ops)
+        cli.refresh_workspace(tmux)
+        self.assertEqual(self.migration(tmux.ops[first:]), [])
+
+    def test_a_narrow_terminal_gets_a_new_view_of_its_own(self):
+        ops, argv = self.launched(cols=48, attached=1)
+        made = [op for op in ops if op[:3] == ("run", "new-session", "-d")]
+        self.assertEqual(len(made), 1)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
+
+    def test_a_second_wide_terminal_gets_a_view_of_its_own(self):
+        _, argv = self.launched(cols=200, attached=1)
+        self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
 
 
 if __name__ == "__main__":
