@@ -96,6 +96,12 @@ _PANE_FORMAT = "\t".join(
 
 # True in a view's window, a panel and its slot: a loop over the window's panes, since tmux formats have no test for whether one pane exists.
 VIEW_WINDOW = "#{&&:#{==:#{window_panes},2},#{P:#{?#{==:#{" + ROLE + "},sidebar},1,}}}"
+# True in a phone's window (`core.narrow`), where the panel and the slot each take the whole window in turn.
+NARROW_WINDOW = "#{e|<:#{window_width}," + str(core.NARROW_BELOW) + "}"
+# The other pane of a view's window, taking the whole window as the one before did; selecting a pane without -Z unzooms.
+OTHER_ALONE = "select-pane -Z -t :.+"
+# Selecting the pane already active, kept zoomed: does nothing, for a key that has nothing to do on a phone.
+STAY = "select-pane -Z -t :."
 
 
 def _parse_panes(out: str) -> list:
@@ -422,6 +428,13 @@ class Tmux:
     def select(self, pane: str) -> None:
         self.run("select-pane", "-t", pane)
 
+    def show_alone(self, pane: str) -> None:
+        """Select `pane` and have it take its whole window, the other pane of the window hidden: a phone's view shows one at a time."""
+        self.run(
+            "if-shell", "-F", "-t", pane, "#{window_zoomed_flag}", f"select-pane -Z -t {pane}",
+            f"select-pane -t {pane} ; resize-pane -Z -t {pane}",
+        )
+
     def kill_pane(self, pane: str) -> None:
         self.run("kill-pane", "-t", pane)
 
@@ -438,9 +451,15 @@ class Tmux:
         of a view's two), so each view hides its own panel. Zooming also makes
         the slot the active pane, so from the panel the key lands in the
         session. Outside a view window the key goes through to the pane: in a
-        viewer the outer level has already taken it.
+        viewer the outer level has already taken it. On a phone, where the
+        panel and the session each take the whole window, it goes back from
+        the session to the panel and does nothing on the panel.
         """
-        here = f'if-shell -F "#{{==:#{{{ROLE}}},sidebar}}" "resize-pane -Z -t :.+" "resize-pane -Z"'
+        here = (
+            f'if-shell -F "#{{==:#{{{ROLE}}},sidebar}}" '
+            f'"if-shell -F \'{NARROW_WINDOW}\' \'{STAY}\' \'resize-pane -Z -t :.+\'" '
+            f'"if-shell -F \'{NARROW_WINDOW}\' \'{OTHER_ALONE}\' \'resize-pane -Z\'"'
+        )
         self.run("bind-key", "-n", key, "if-shell", "-F", VIEW_WINDOW, here, f"send-keys {key}")
 
     def bind_toggle(self, key: str) -> None:
@@ -450,11 +469,13 @@ class Tmux:
         drops any BACK_OPT mark a ← left behind before the panel could read
         it; the mark goes first, or the panel could see itself active and
         marked. Unsetting an option that is not set succeeds, so the drop never
-        ends the command list before the select.
+        ends the command list before the select. On a phone the panel comes
+        back taking the whole window, and on the panel the key does nothing:
+        the slot there holds no session.
         """
         here = (
-            f'if-shell -F "#{{==:#{{{ROLE}}},sidebar}}" "select-pane -t :.+" '
-            f'"set-option -p -u -t :.+ {BACK_OPT} ; select-pane -t :.+"'
+            f'if-shell -F "#{{==:#{{{ROLE}}},sidebar}}" "if-shell -F \'{NARROW_WINDOW}\' \'{STAY}\' \'select-pane -t :.+\'" '
+            f'"set-option -p -u -t :.+ {BACK_OPT} ; if-shell -F \'{NARROW_WINDOW}\' \'{OTHER_ALONE}\' \'select-pane -t :.+\'"'
         )
         self.run("bind-key", "-n", key, "if-shell", "-F", VIEW_WINDOW, here, f"send-keys {key}")
 
@@ -472,12 +493,14 @@ class Tmux:
         so inside a viewer, whose window holds no panel, it reaches Claude.
         The command is kept in an option, not in the binding, so its paths
         need no tmux quoting. Before selecting the panel the binding marks it
-        with BACK_OPT, which tells the panel focus came back by ←.
+        with BACK_OPT, which tells the panel focus came back by ←. On a phone
+        the panel comes back taking the whole window.
         """
         self.run("set-option", "-g", LEFT_OPT, check)
         decide = (
             f'if-shell "#{{{LEFT_OPT}}} #{{pane_id}} #{{cursor_x}} #{{cursor_y}} #{{cursor_flag}} #{{pane_width}}" '
-            f'"send-keys Left" "set-option -p -t :.+ {BACK_OPT} 1 ; select-pane -t :.+"'
+            f'"send-keys Left" "set-option -p -t :.+ {BACK_OPT} 1 ; '
+            f'if-shell -F \'{NARROW_WINDOW}\' \'{OTHER_ALONE}\' \'select-pane -t :.+\'"'
         )
         held = f"#{{&&:#{{{VIEW_OPT}}},#{{&&:#{{cursor_flag}},{VIEW_WINDOW}}}}}"
         self.run("bind-key", "-n", "Left", "if-shell", "-F", held, decide, "send-keys Left")

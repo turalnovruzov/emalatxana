@@ -637,9 +637,18 @@ class ShippedConf(unittest.TestCase):
             self.assertIn(line, SHELL_CONF)
         self.assertNotIn("status off", SHELL_CONF)
 
-    def test_the_status_line_mouse_keys_are_unbound(self):
+    def test_the_status_line_mouse_keys_are_unbound_but_a_click_on_the_back_range(self):
+        # 2.11.0: a click on a phone's `‹ sessions` goes back to the panel; every other status key stays unbound.
         for key in STATUS_KEYS:
+            if key == "MouseDown1Status":
+                continue
             self.assertIn(f"unbind -q -n {key}\n", SHELL_CONF)
+        self.assertNotIn("unbind -q -n MouseDown1Status", SHELL_CONF)
+        (line,) = [line for line in SHELL_CONF.splitlines() if line.startswith("bind -n MouseDown1Status ")]
+        self.assertEqual(
+            line,
+            "bind -n MouseDown1Status if -F '#{&&:#{==:#{mouse_status_range},back},#{!=:#{@emx_role},sidebar}}' 'select-pane -Z -t :.+'",
+        )
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -704,10 +713,12 @@ class Bar(PrivateServer):
             tmux.set_bar("x")
         self.assertEqual(run.call_args.args, ("set-option", "-t", "=emx:", "status-format[0]", "x"))
 
-    def test_no_status_mouse_key_is_bound_after_sourcing_twice(self):
+    def test_after_sourcing_twice_the_only_status_mouse_key_is_the_back_range_click(self):
         self.tmux.source_config()
-        keys = self.tmux.run("list-keys", "-T", "root")
-        self.assertNotIn("Status", keys)
+        keys = [line for line in self.tmux.run("list-keys", "-T", "root").splitlines() if "Status" in line]
+        self.assertEqual(len(keys), 1, keys)
+        self.assertEqual(keys[0].split()[3], "MouseDown1Status")
+        self.assertIn("#{==:#{mouse_status_range},back}", keys[0])
 
     def read_client_until(self, needle):
         seen = bytearray()
@@ -1450,6 +1461,105 @@ class MigratesA290Workspace(PrivateServer):
         self.tmux.respawn(slot.id, self.tmux.viewer_command(self.a))
         self.wait_for(lambda: "❯" in self.tmux.capture(slot.id), "the session's screen in the slot")
         self.assertEqual(self.processes(), self.before)
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class NarrowView(PrivateServer):
+    """A phone's view, 48 columns: the panel and the slot each take the whole window in turn, through the shipped config and emx's root keys."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmux.config = CONF
+        self.tmux.source_config()
+        recorder = os.path.join(self.dir, "recorder.py")
+        self.slot = self.tmux.run(
+            "new-session", "-d", "-s", "emx-view-1", "-x", "48", "-y", "22", "-P", "-F", "#{pane_id}",
+            f"{sys.executable} -I {recorder} {self.keys('slot')}",
+        ).strip()
+        self.panel = self.tmux.run(
+            "split-window", "-h", "-t", self.slot, "-P", "-F", "#{pane_id}", f"{sys.executable} -I {recorder} {self.keys('panel')}",
+        ).strip()
+        self.tmux.set_pane_option(self.panel, ROLE, "sidebar")
+        self.tmux.set_pane_option(self.slot, ROLE, "viewer")
+        self.tmux.set_pane_option(self.slot, VIEW_OPT, "s1")
+        self.phone = self.attach("emx-view-1", size=(48, 22))
+        self.wait_for(lambda: self.show(self.slot, "#{window_width}") == "48", "the phone's width")
+        self.tmux.bind_toggle("C-\\")
+        self.tmux.bind_collapse("C-q")
+        self.tmux.bind_left("false")
+        self.tmux.show_alone(self.slot)
+
+    def alone(self, pane):
+        return (self.show(pane, "#{pane_active}"), self.show(pane, "#{window_zoomed_flag}"), self.show(pane, "#{pane_width}"))
+
+    def press(self, key):
+        self.tmux.run("send-keys", "-K", "-c", self.phone, key)
+
+    def test_show_alone_selects_the_pane_taking_the_whole_window_zoomed_or_not(self):
+        self.assertEqual(self.alone(self.slot), ("1", "1", "48"))
+        self.tmux.show_alone(self.panel)
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+        self.tmux.run("resize-pane", "-Z", "-t", self.panel)
+        self.assertEqual(self.show(self.panel, "#{window_zoomed_flag}"), "0")
+        self.tmux.show_alone(self.slot)
+        self.assertEqual(self.alone(self.slot), ("1", "1", "48"))
+
+    def test_the_toggle_key_from_the_session_brings_the_panel_back_whole_and_on_the_panel_does_nothing(self):
+        self.press("C-\\")
+        self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+        self.press("C-\\")
+        time.sleep(0.3)
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+
+    def test_the_collapse_key_from_the_session_brings_the_panel_back_whole_and_on_the_panel_does_nothing(self):
+        self.press("C-q")
+        self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+        self.press("C-q")
+        time.sleep(0.3)
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+        self.assertEqual((self.typed("panel"), self.typed("slot")), (b"", b""))
+
+    def test_left_on_an_empty_prompt_brings_the_panel_back_whole_and_marks_it(self):
+        self.wait_for(lambda: self.show(self.slot, "#{cursor_x}") == "2", "the slot's prompt")
+        self.press("Left")
+        self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+        self.assertEqual(self.show(self.panel, "#{" + BACK_OPT + "}"), "1")
+        time.sleep(0.3)
+        self.assertEqual(self.typed("slot"), b"")
+
+    def test_the_laptops_wide_view_still_shows_both_panes_on_the_same_keys(self):
+        self.tmux.select(self.main)
+        self.tmux.run("send-keys", "-K", "-c", self.client, "C-\\")
+        self.wait_for(lambda: self.show(self.sidebar, "#{pane_active}") == "1", "the laptop's panel")
+        self.assertEqual(self.show(self.sidebar, "#{window_zoomed_flag}"), "0")
+        self.tmux.run("send-keys", "-K", "-c", self.client, "C-q")
+        self.wait_for(lambda: self.show(self.main, "#{window_zoomed_flag}") == "1", "the laptop's panel to hide")
+        self.assertEqual(self.show(self.main, "#{pane_active}"), "1")
+
+    def back_bar(self):
+        from emx import sidebar
+        parts = core.narrow_session_bar("phone-view", "Needs input", "needs", [(core.NEEDS_INPUT, 1)], 48)
+        Tmux(self.tmux.socket, view="emx-view-1").set_bar(sidebar.bar_format(parts))
+
+    def click_status(self, column):
+        os.write(self.client_fds[self.phone], f"\x1b[<0;{column};22M\x1b[<0;{column};22m".encode())
+
+    def test_a_tap_on_back_in_the_bar_brings_the_panel_back_whole(self):
+        self.back_bar()
+        self.click_status(4)
+        self.wait_for(lambda: self.show(self.panel, "#{pane_active}") == "1", "the panel")
+        self.assertEqual(self.alone(self.panel), ("1", "1", "48"))
+
+    def test_a_tap_elsewhere_on_the_bar_changes_nothing(self):
+        self.back_bar()
+        for column in (14, 30, 46):
+            self.click_status(column)
+        time.sleep(0.5)
+        self.assertEqual(self.alone(self.slot), ("1", "1", "48"))
+        self.assertEqual((self.typed("panel"), self.typed("slot")), (b"", b""))
 
 
 if __name__ == "__main__":

@@ -89,6 +89,30 @@ HELP = (
     ("?", "close this help"),
 )
 HELP_KEY_WIDTH = 13
+# A phone's help: every panel key that works there. The panel's side and width have no meaning on a screen showing one thing at a time.
+NARROW_HELP = (
+    ("↵ Enter", "open in the Claude app; with no link, here. On a header, fold"),
+    ("t →", "open here, in the terminal"),
+    ("‹ ← ^\\ ^q", "back to the sessions: tap ‹ sessions, or ← on an empty prompt"),
+    ("click", "a tap opens a session; on a header, folds"),
+    ("↑↓ j k", "move"),
+    ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
+    ("n", "new session where the cursor is; Tab there picks another folder"),
+    ("^x", "interrupt a working session; twice closes it"),
+    ("^f /", "find a session by name or folder"),
+    ("^t", "pin to the top (in emx; doesn't keep it running)"),
+    ("^r", "rename, via /rename in the session"),
+    ("^s", "by project / by state"),
+    ("N", "notifications: the last 20; Enter opens one"),
+    ("R", "routines: what ran in the past 24 hours; R or Esc back"),
+    ("m", "voice mode or notification mode"),
+    ("h", "stop the voice now (voice mode)"),
+    ("q", "detach; sessions keep running"),
+    ("?", "close this help; ↑↓ scroll it"),
+)
+NARROW_HELP_KEY_WIDTH = 11
+WIDE_ONLY_KEYS = ("s", "<", ">", ",", ".")
+HELP_SCROLL_KEYS = (curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 FOCUS_REPORTS_ON, FOCUS_REPORTS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
@@ -143,12 +167,17 @@ def session_tone(s) -> str:
 
 
 def bar_format(parts: list) -> str:
-    """The bar's tmux status-format: every `#` and `%` in a part is doubled, so text from a session can never run a command, style the bar or be read as a time."""
+    """The bar's tmux status-format: every `#` and `%` in a part is doubled, so text from a session can never run a command, style the bar or be read as a time.
+
+    A part may carry a fourth item, the name of the user range a click on it
+    lands in; names come from `core` (BACK_RANGE), never from a session.
+    """
     out = []
-    for text, tone, bold in parts:
+    for text, tone, bold, *where in parts:
         colour = TONES[tone][0]
         fg = "default" if colour < 0 else f"colour{colour}"
-        out.append(f"#[fg={fg},{'bold' if bold else 'nobold'}]" + text.replace("#", "##").replace("%", "%%"))
+        drawn = f"#[fg={fg},{'bold' if bold else 'nobold'}]" + text.replace("#", "##").replace("%", "%%")
+        out.append(f"#[range=user|{where[0]}]{drawn}#[norange]" if where else drawn)
     return "".join(out) + "#[default]"
 
 
@@ -1816,6 +1845,9 @@ class App:
         self.cursor = None
         self.wanted_cursor = None
         self.help = False
+        self.help_scroll = 0
+        self.was_narrow = False
+        self.slot_active = False
         self.palette = Palette()
         self.main_pane = None
         self.applied = None
@@ -1944,6 +1976,11 @@ class App:
     def view(self) -> str:
         return core.current_view(self.prefs)
 
+    @property
+    def narrow(self) -> bool:
+        """Whether this view's window is a phone's: the panel or a session, one at a time."""
+        return core.narrow(self.window_width)
+
     def collapsed(self) -> frozenset:
         return core.finding_collapsed(self.prefs, self.view(), bool(self.find))
 
@@ -2020,15 +2057,23 @@ class App:
                 self.window_width = sidebar.window_width
                 self.reset_ground(sidebar)
                 self.take_focus(sidebar)
-                # The hidden panel saved in prefs is the laptop's, the home view's; another view's stays its own.
-                if self.primary:
+                # The hidden panel saved in prefs is the laptop's, the home view's; another view's stays its own, and a phone's zoom hides no panel.
+                if self.primary and not self.narrow:
                     followed = core.follow_zoom(self.prefs, sidebar.zoomed)
                     if followed is not self.prefs:
                         self.prefs = followed
                         self.save_prefs()
             if sidebar and main:
-                self.reconcile_widths(sidebar)
-                self.tend_slot(main)
+                if self.narrow:
+                    self.tend_narrow(sidebar, main)
+                else:
+                    if self.was_narrow:
+                        self.leave_narrow(sidebar, main)
+                        sidebar, main = self.layout_panes(self.my_panes())
+                    if sidebar and main:
+                        self.reconcile_widths(sidebar)
+                self.was_narrow = self.narrow
+                self.tend_slot(self.main_pane)
             if fresh_list and self.primary:
                 self.close_stale(self.main_pane)
         except TmuxError as exc:
@@ -2039,6 +2084,35 @@ class App:
         self.check_open()
         self.time_whats_new()
         self.check_update()
+
+    def tend_narrow(self, sidebar: Pane, slot: Pane) -> None:
+        """On a phone the panel or the session takes the whole window, never both.
+
+        Back on the panel, the slot gets the placeholder, so the phone holds
+        no claim on that session's width while it shows the list. A slot
+        active with no session in it hands back to the panel. Nothing here
+        writes prefs: the hidden panel and the widths saved are the laptop's.
+        """
+        self.slot_active = slot.active and slot.role == "viewer"
+        if sidebar.active:
+            if slot.role == "viewer":
+                self.park(slot)
+            if not sidebar.zoomed:
+                self.tmux.show_alone(sidebar.id)
+        elif slot.active:
+            if slot.role != "viewer":
+                self.tmux.show_alone(sidebar.id)
+            elif not slot.zoomed:
+                self.tmux.show_alone(slot.id)
+
+    def leave_narrow(self, sidebar: Pane, slot: Pane) -> None:
+        """A phone turned wide, or a window widened: both panes again, laid out from prefs, the home view hiding its panel as the laptop last had it."""
+        self.slot_active = False
+        if sidebar.zoomed:
+            self.tmux.toggle_zoom(sidebar.id)
+        if self.primary and core.panel_collapsed(self.prefs):
+            self.tmux.toggle_zoom(slot.id)
+        self.applied = None
 
     def bind_keys(self) -> None:
         """emx's root keys, the same for every view: they act on the window they are pressed in, so binding them again changes nothing."""
@@ -2090,7 +2164,12 @@ class App:
             return
         self.tmux.set_view_option(REOPEN_OPT, "")
         held = core.live_or_dead_agent(self.tmux.panes(), key) if core.is_session_id(key) else None
-        if held is not None:
+        if held is None:
+            return
+        if self.narrow:
+            # A phone comes back to its panel: the session it showed is under the cursor, not opened.
+            self.cursor, self.wanted_cursor = ("session", key), ("session", key)
+        else:
             self.show(slot, key, held.window)
 
     def show(self, slot: Pane, key: str, window: str) -> None:
@@ -2282,6 +2361,9 @@ class App:
             return
         if sidebar:
             self.take_focus(sidebar)
+            if self.narrow:
+                # On a phone a focus change is the screen changing, panel for session or back: the slot and the bar follow now.
+                self.housekeep(fresh_list=False)
 
     def take_focus(self, sidebar: Pane) -> None:
         """Focus as tmux reports it. The ← binding marks the panel before selecting it; a mark is cleared as soon as it is seen, and moves the cursor only when the panel is active."""
@@ -2380,8 +2462,14 @@ class App:
                 if held is None:
                     self.say("The session's pane went away as it started; open it again.", error=True)
                     return
-            self.show(main, sid, held.window)
-            self.tmux.select(main.id)
+            if self.narrow:
+                # The slot takes the whole window first, so the viewer starts at the phone's width.
+                self.tmux.show_alone(main.id)
+                self.show(main, sid, held.window)
+                self.slot_active = True
+            else:
+                self.show(main, sid, held.window)
+                self.tmux.select(main.id)
             if trigger == core.OPEN:
                 self.opened[sid] = time.monotonic()
                 self.history = core.history_read(self.history, sid)
@@ -2691,6 +2779,8 @@ class App:
         self.poller.wake.set()
 
     def flip_side(self) -> None:
+        if self.narrow:
+            return
         try:
             sidebar, main = self.layout_panes(self.my_panes())
             if sidebar is None or main is None:
@@ -2705,6 +2795,8 @@ class App:
         self.housekeep(fresh_list=False)
 
     def change_panel_width(self, delta: int) -> None:
+        if self.narrow:
+            return
         if self.primary:
             self.prefs = core.adjust_panel_width(self.prefs, delta)
             self.save_prefs()
@@ -2924,9 +3016,12 @@ class App:
             self.history_key(key)
         elif self.routines_view is not None:
             self.routines_key(key)
+        elif self.help and self.narrow and key in HELP_SCROLL_KEYS:
+            self.help_scroll = max(0, self.help_scroll + (-1 if key in (curses.KEY_UP, "k") else 1))
         elif self.help or key == "?":
             # Any key closes the help, so Enter can't open a session hidden behind it.
             self.help = not self.help
+            self.help_scroll = 0
         elif self.peeking and key in PEEK_KEYS:
             self.peek_key(key)
         elif key == " ":
@@ -2941,6 +3036,8 @@ class App:
                 self.say(blocked)
             elif key in ENTER_KEYS or (self.cursor and self.cursor[0] == "session"):
                 self.activate(self.cursor)
+        elif key == "t" and self.narrow:
+            self.open_here()
         elif key == CTRL_S:
             self.toggle_view()
         elif key == CTRL_X:
@@ -2969,6 +3066,16 @@ class App:
             self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
+
+    def open_here(self) -> None:
+        """`t` on a phone: the session under the cursor, full width in the terminal; on a header, nothing."""
+        if not self.cursor or self.cursor[0] != "session":
+            return
+        blocked = core.open_blocked(self.starter is not None or self.awaiting_started_row(), self.cursor)
+        if blocked:
+            self.say(blocked)
+            return
+        self.activate(self.cursor)
 
     def open_history(self) -> None:
         """Opening the view marks nothing read: only opening a session does."""
@@ -3120,8 +3227,38 @@ class App:
             and self.prompt is None and self.find is None and self.rename_edit is None
         )
 
+    def narrow_hints(self) -> tuple:
+        """The key hints a phone's bar offers over its panel: the phone's own on a row or a header, the panel's own anywhere else."""
+        held = (self.confirm, self.history_view, self.routines_view, self.prompt, self.find, self.rename_edit)
+        if any(v is not None for v in held) or self.peeking or self.help or not self.loaded or not self.sessions:
+            return self.bar_hints()
+        if self.focused is False or self.cursor not in self.items():
+            return core.hint_variants(core.NARROW_REST_HINTS)
+        if self.cursor[0] == "group":
+            return core.hint_variants(core.narrow_header_hints(self.cursor[1] in self.collapsed()))
+        s = self.session(self.cursor[1])
+        if s is None:
+            return core.hint_variants(core.NARROW_REST_HINTS)
+        if s.id in self.closing:
+            return core.hint_variants(core.CLOSING_HINTS)
+        return core.hint_variants(core.NARROW_HINTS)
+
+    def narrow_bar(self) -> list:
+        counts = core.bar_counts(self.sessions)
+        key = self.main_session()
+        if self.slot_active and key:
+            s = self.session(key)
+            name, word, tone = (s.name, core.state_word(s), session_tone(s)) if s else (key[:8], "", "plain")
+            # The panel's pane is as tall as its window: the keyboard coming up on the phone shrinks both.
+            short = self.scr.getmaxyx()[0] < core.SHORT_BELOW
+            return core.narrow_session_bar(name, word, tone, counts, self.window_width, short, self.loaded)
+        return core.narrow_panel_bar(counts, self.narrow_hints(), self.window_width, self.loaded)
+
     def update_bar(self) -> None:
         if not self.window_width:
+            return
+        if self.narrow:
+            self.bar.push(bar_format(self.narrow_bar()))
             return
         tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         parts = core.bar_parts(
@@ -3295,6 +3432,9 @@ class App:
             self.put(y, 1, text, self.palette.attr(tone))
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
+        if self.narrow:
+            self.draw_narrow_help(top, bottom, width)
+            return
         self.put(top, 1, "Keys", curses.A_BOLD)
         y, x = top + 2, 1 + HELP_KEY_WIDTH
         for key, what in HELP:
@@ -3306,6 +3446,21 @@ class App:
                 self.put(y, x, line)
                 y += 1
 
+    def draw_narrow_help(self, top: int, bottom: int, width: int) -> None:
+        """A phone's help, scrolled by `help_scroll`: it is taller than the screen."""
+        self.put(top, 1, "Keys", curses.A_BOLD)
+        x = 1 + NARROW_HELP_KEY_WIDTH
+        rows = []
+        for key, what in NARROW_HELP:
+            for i, line in enumerate(textwrap.wrap(what, max(1, width - 1 - x))):
+                rows.append((key if i == 0 else "", line))
+        room = max(1, bottom - top - 2)
+        self.help_scroll = max(0, min(self.help_scroll, len(rows) - room))
+        for y, (key, line) in enumerate(rows[self.help_scroll:self.help_scroll + room], start=top + 2):
+            if key:
+                self.put(y, 1, key, self.palette.attr("accent"))
+            self.put(y, x, line)
+
     def list_layout(self, width: int, height: int = 0) -> tuple:
         """(lines, each session line's laid-out rows, every line's height in screen rows) for the list at `width`; a session row is at most `height` rows."""
         lines = self.lines()
@@ -3316,7 +3471,9 @@ class App:
             session = self.session(line[1]) if line and line[0] == "session" else None
             if session is not None:
                 armed = self.confirm if isinstance(self.confirm, core.Confirm) and self.confirm.id == session.id else None
-                inline = core.session_inline(session, not self.list_error) if line == self.cursor and self.focused is not False else None
+                # A row repeats the laptop's key for it; a phone's keys are in its bar.
+                selected = line == self.cursor and self.focused is not False and not self.narrow
+                inline = core.session_inline(session, not self.list_error) if selected else None
                 rows[line] = self.session_lines(session, width, now_ms, armed, group_of.get(session.id, ""), height, inline)
         return lines, rows, [len(rows.get(line, [None])) for line in lines]
 
