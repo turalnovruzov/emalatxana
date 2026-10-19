@@ -3,6 +3,7 @@
 - **Status**: Accepted
 - **Date**: 2026-10-18
 - **Amended**: 2026-10-18 (2.11.0), every user timer instead of a hand-edited list
+- **Amended**: 2026-10-19 (2.13.0), switched-off timers that are not loaded
 
 ## Context
 
@@ -10,11 +11,13 @@ Issue #51. Tural wanted a separate view of the routines that run on his server, 
 
 Amended in 2.11.0 after he saw the hand-edited list: *"There is two sorts of truth now every time we modify routines or add Now we have to go and change this file"*.
 
+Amended in 2.13.0: a timer that is switched off is not loaded, so `list-units` leaves it out. He saw it missing and said *"yes timer off is nice"* to showing it tagged `timer off`.
+
 ## Decision
 
 emx calls the OS's own tools as subprocesses, off the curses thread, and only ever to read:
 
-- `systemctl --user list-units --type=timer --all` for every user timer, then `systemctl --user show` for each and the service it names (`Unit=`): state, schedule, next time, last run.
+- `systemctl --user list-units --type=timer --all` for every loaded user timer and `systemctl --user list-unit-files --type=timer` for the ones that have a unit file but are not loaded (templates left out), then `systemctl --user show` for each and the service it names (`Unit=`): state, schedule, next time, last run.
 - `journalctl --user -o json` for the past 24 hours of those services. A run's outcome is read from systemd's own lifecycle messages, picked by message id and grouped by invocation id; what a script printed is never read.
 - `systemd-analyze calendar` for the scheduled times in the window, so a time with no run can be named.
 

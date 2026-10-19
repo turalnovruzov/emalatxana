@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.13.0 — 2026-10-19
+
+- The Routines view also shows user timers that are switched off and not loaded, tagged `timer off`, with their runs in the past 24 hours and no missed times.
+- If emx can't read the switched-off timers, it says so in red and still shows the others.
+- Template timers (`name@.timer`) are not shown.
+
 ## 2.12.0 — 2026-10-19
 
 - On a phone (a screen narrower than 70 columns) emx shows one thing at a time: the panel across the whole screen, or the session you opened. `‹ sessions` at the left of the bar, or `←` on an empty prompt, goes back to the panel. With the keyboard up the bar is one short line.
