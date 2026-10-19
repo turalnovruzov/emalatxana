@@ -5511,5 +5511,107 @@ class PickView(unittest.TestCase):
         self.assertEqual(core.open_target([]), "emx")
 
 
+class Narrow(unittest.TestCase):
+    def test_under_seventy_columns_is_narrow_and_an_unknown_width_is_not(self):
+        self.assertTrue(core.narrow(69))
+        self.assertTrue(core.narrow(48))
+        self.assertFalse(core.narrow(70))
+        self.assertFalse(core.narrow(200))
+        self.assertFalse(core.narrow(0))
+
+
+class AppLink(unittest.TestCase):
+    def test_a_bridge_id_is_letters_digits_and_underscores_8_to_64_long(self):
+        for good in ("session_01AbCdEfGhIjKlMnOpQrStUv", "a" * 8, "A_1" * 21 + "x"):
+            with self.subTest(good=good):
+                self.assertEqual(core.bridge_id(good), good)
+        for bad in ("a" * 7, "a" * 65, "session-01", "session_01/..", "session_01?x", "session_01\n", "séssion_01", "", None, 5):
+            with self.subTest(bad=bad):
+                self.assertIsNone(core.bridge_id(bad))
+
+    def test_the_link_is_the_claude_apps_code_url(self):
+        self.assertEqual(core.app_link("session_01AbCdEf"), "https://claude.ai/code/session_01AbCdEf")
+        self.assertIsNone(core.app_link("bad/id"))
+        self.assertIsNone(core.app_link(None))
+
+    def test_a_row_offers_the_app_only_for_an_agent_with_one(self):
+        self.assertEqual(core.app_line("claude", "https://claude.ai/code/session_01AbCdEf"), "link")
+        self.assertIsNone(core.app_line("claude", None))
+        self.assertEqual(core.app_line("codex", None), "no-app")
+        self.assertEqual(core.app_line("codex", "https://claude.ai/code/session_01AbCdEf"), "no-app")
+
+
+class NarrowBars(unittest.TestCase):
+    COUNTS = [(core.NEEDS_INPUT, 1), (core.WORKING, 1), (core.DONE, 1)]
+
+    def text(self, parts):
+        return "".join(p[0] for p in parts)
+
+    def width(self, parts):
+        return sum(core.display_width(p[0]) for p in parts)
+
+    def test_the_panel_bar_at_48_is_the_mark_the_counts_and_the_phones_keys(self):
+        parts = core.narrow_panel_bar(self.COUNTS, core.hint_variants(core.NARROW_HINTS), 48)
+        self.assertEqual(self.width(parts), 48)
+        self.assertEqual(self.text(parts).rstrip(), " ⚒ ✻1 ✻1 ✻1   ↵ open  n new  a actions  ?")
+        self.assertEqual(parts[1], (core.LOGO, "copper", False))
+
+    def test_with_a_link_the_keys_keep_their_place_and_the_counts_give_way(self):
+        parts = core.narrow_panel_bar(self.COUNTS, core.hint_variants(core.NARROW_LINK_HINTS), 48)
+        self.assertEqual(self.width(parts), 48)
+        self.assertEqual(self.text(parts).rstrip(), " ⚒  ↵ open in app  t here  a actions  ?")
+
+    def test_a_string_hint_is_one_muted_part(self):
+        parts = core.narrow_panel_bar([], (core.MENU_HINT,), 48)
+        self.assertEqual(self.text(parts).rstrip(), " ⚒  " + core.MENU_HINT)
+        self.assertIn((core.MENU_HINT, "muted", False), parts)
+
+    def test_a_narrower_bar_drops_keys_from_the_right_but_the_last(self):
+        parts = core.narrow_panel_bar(self.COUNTS, core.hint_variants(core.NARROW_HINTS), 30)
+        self.assertEqual(self.width(parts), 30)
+        self.assertTrue(self.text(parts).rstrip().endswith("?"), self.text(parts))
+        self.assertNotIn("a actions", self.text(parts))
+
+    def test_with_no_room_at_all_the_counts_are_cut_and_the_width_holds(self):
+        for width in (1, 5, 9):
+            with self.subTest(width=width):
+                self.assertEqual(self.width(core.narrow_panel_bar(self.COUNTS, core.hint_variants(core.NARROW_HINTS), width)), width)
+
+    def test_the_session_bar_starts_with_back_then_the_name_and_state_and_ends_with_the_counts(self):
+        parts = core.narrow_session_bar("phone-view", "Needs input", "needs", [(core.NEEDS_INPUT, 1)], 48)
+        text = self.text(parts)
+        self.assertEqual(self.width(parts), 48)
+        self.assertTrue(text.startswith(" ‹ sessions  phone-view · Needs input"), text)
+        self.assertTrue(text.endswith("✻1 "), text)
+        self.assertIn((core.BACK_LABEL, "accent", False, core.BACK_RANGE), parts)
+        self.assertIn(("phone-view", "plain", True), parts)
+        self.assertIn((" · Needs input", "needs", False), parts)
+        self.assertEqual([p[0] for p in parts if len(p) > 3], [core.BACK_LABEL])
+
+    def test_with_the_keyboard_up_the_bar_is_back_and_the_name_and_the_counts(self):
+        parts = core.narrow_session_bar("phone-view", "Needs input", "needs", [(core.NEEDS_INPUT, 1)], 48, short=True)
+        text = self.text(parts)
+        self.assertEqual(self.width(parts), 48)
+        self.assertTrue(text.startswith(" ‹ phone-view "), text)
+        self.assertNotIn("sessions", text)
+        self.assertNotIn("Needs input", text)
+        self.assertTrue(text.endswith("✻1 "), text)
+        self.assertEqual([p[0] for p in parts if len(p) > 3], ["‹ ", "phone-view"])
+
+    def test_a_long_name_loses_the_state_word_then_the_counts_then_is_cut(self):
+        name = "a-very-long-session-name"
+        parts = core.narrow_session_bar(name, "Working", "plain", self.COUNTS, 48)
+        self.assertEqual(self.width(parts), 48)
+        self.assertNotIn("Working", self.text(parts))
+        self.assertIn("✻1", self.text(parts))
+        parts = core.narrow_session_bar(name * 2, "Working", "plain", self.COUNTS, 48)
+        self.assertEqual(self.width(parts), 48)
+        self.assertNotIn("✻1", self.text(parts))
+        self.assertTrue(self.text(parts).startswith(" ‹ sessions  a-very"), self.text(parts))
+        for width in (3, 8, 12):
+            with self.subTest(width=width):
+                self.assertEqual(self.width(core.narrow_session_bar(name, "Working", "plain", self.COUNTS, width)), width)
+
+
 if __name__ == "__main__":
     unittest.main()

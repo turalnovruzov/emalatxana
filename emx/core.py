@@ -1191,6 +1191,118 @@ def _bar_cut_counts(count_parts: list, width: int) -> list:
     return left + [(" " * fill, "plain", False)] + kept + ([(" ", "plain", False)] if kept else [])
 
 
+_BRIDGE_ID = re.compile(r"[A-Za-z0-9_]{8,64}")
+APP_LINK_BASE = "https://claude.ai/code/"
+# The agents whose sessions the Claude app can open; any other's row says it opens in the terminal.
+APP_AGENTS = frozenset({"claude"})
+
+
+def bridge_id(value) -> str | None:
+    """`value` when it can be a Remote Control session id, safe to put in a link and on screen; else None."""
+    return value if isinstance(value, str) and _BRIDGE_ID.fullmatch(value) else None
+
+
+def app_link(bridge) -> str | None:
+    """The link that opens a Remote Control session in the Claude app."""
+    checked = bridge_id(bridge)
+    return APP_LINK_BASE + checked if checked else None
+
+
+def app_line(agent: str, link: str | None) -> str | None:
+    """What a phone shows under the selected row about the Claude app: "link" when the session has one, "no-app" when its agent has no app, else nothing."""
+    if agent not in APP_AGENTS:
+        return "no-app"
+    return "link" if link else None
+
+
+NARROW_HINTS = (("↵", "open"), ("n", "new"), ("a", "actions"), ("?", ""))
+NARROW_LINK_HINTS = (("↵", "open in app"), ("t", "here"), ("a", "actions"), ("?", ""))
+NARROW_REST_HINTS = (("n", "new"), ("?", ""))
+MENU_HINT = "tap a line or press its key · Esc closes"
+BACK_LABEL = "‹ sessions"
+BACK_SHORT = "‹"
+# The status-line range a tap on `‹ sessions` lands in; the tmux config binds a click there to the panel.
+BACK_RANGE = "back"
+
+
+def narrow_header_hints(collapsed: bool) -> tuple:
+    return (("↵", "unfold" if collapsed else "fold"), ("n", "new"), ("?", ""))
+
+
+def _parts_width(parts: list) -> int:
+    return sum(display_width(p[0]) for p in parts)
+
+
+def _narrow_hint_parts(hint) -> list:
+    """A hint variant as bar parts: a string is one muted part; in (key, label) pairs an empty label leaves the key alone, as `?` is drawn on a phone."""
+    if isinstance(hint, str):
+        return [(hint, "muted", False)]
+    parts = []
+    for i, (key, label) in enumerate(hint):
+        parts.append((("  " if i else "") + key, "muted", True))
+        if label:
+            parts.append((" " + label, "muted", False))
+    return parts
+
+
+def narrow_panel_bar(counts: list, hints: tuple, width: int, loaded: bool = True) -> list:
+    """The bar under a phone's panel, exactly `width` columns: the mark, the counts, then the first hint variant that fits, all from the left.
+
+    The hints come before the counts: a variant that does not fit beside the
+    counts is tried without them before a shorter variant is.
+    """
+    if width <= 0:
+        return []
+    if width < 3:
+        return [(LOGO if width == 1 else " " + LOGO, "copper", False)]
+    count_parts = _bar_count_parts(counts, loaded)
+    lead = [(" ", "plain", False), (LOGO, "copper", False)]
+    tries = [(h, with_counts) for h in hints for with_counts in (True, False)] + [(None, True), (None, False)]
+    for hint, with_counts in tries:
+        shown = bool(count_parts) and with_counts
+        left = lead + ([(" ", "plain", False)] + count_parts if shown else [])
+        if hint:
+            left = left + [("   " if shown else "  ", "plain", False)] + _narrow_hint_parts(hint)
+        fill = width - _parts_width(left)
+        if fill >= 1:
+            return left + [(" " * fill, "plain", False)]
+    return _bar_cut_counts(count_parts, width)
+
+
+def narrow_session_bar(name: str, word: str, tone: str, counts: list, width: int, short: bool = False, loaded: bool = True) -> list:
+    """The bar over a session a phone shows full width, exactly `width` columns: `‹ sessions`, the session's name and state word, the counts at the right.
+
+    `‹ sessions` is the BACK_RANGE range: a tap on it goes back to the panel.
+    With the keyboard up (`short`) it is `‹ <name>` and the counts, the
+    whole label tappable. As room runs out the state word goes, then the
+    counts, then the name is cut.
+    """
+    if width <= 0:
+        return []
+    count_parts = _bar_count_parts(counts, loaded)
+
+    def head(shown_name: str, with_word: bool) -> list:
+        if short:
+            return [(" ", "plain", False), (BACK_SHORT + " ", "accent", False, BACK_RANGE),
+                    (shown_name, "plain", True, BACK_RANGE)]
+        parts = [(" ", "plain", False), (BACK_LABEL, "accent", False, BACK_RANGE), ("  ", "plain", False),
+                 (shown_name, "plain", True)]
+        return parts + ([(" · " + word, tone, False)] if with_word and word else [])
+
+    for with_word, with_counts in ((True, True), (False, True), (False, False)):
+        left = head(name, with_word)
+        right = (count_parts if with_counts else []) + [(" ", "plain", False)]
+        fill = width - _parts_width(left) - _parts_width(right)
+        if fill >= 1:
+            return left + [(" " * fill, "plain", False)] + right
+    room = width - 1 - _parts_width(head("", False))
+    if room < 1:
+        label = fit(BACK_SHORT if short else BACK_LABEL, width)
+        return [(label, "accent", False, BACK_RANGE), (" " * (width - display_width(label)), "plain", False)]
+    left = head(fit(name, room), False)
+    return left + [(" " * (width - _parts_width(left)), "plain", False)]
+
+
 def parse_version(text) -> tuple | None:
     """(major, minor, patch) for a plain "X.Y.Z" semantic version, None for anything else."""
     if not isinstance(text, str) or not re.fullmatch(r"\d+\.\d+\.\d+", text):
@@ -1607,6 +1719,13 @@ def needs_upgrade(stamp: str, current: str) -> bool:
 
 
 NARROW_BELOW = 70
+# A narrow window this short has the phone's keyboard up: the bar over a session shrinks to one short line.
+SHORT_BELOW = 16
+
+
+def narrow(window_width: int) -> bool:
+    """Whether a view's window is a phone's, which shows the panel or a session, never both. A width not known yet (0) is not narrow."""
+    return 0 < window_width < NARROW_BELOW
 
 
 def pick_view(views, cols: int, narrow_below: int = NARROW_BELOW) -> str:

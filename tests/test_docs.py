@@ -43,7 +43,7 @@ def public_commands():
 
 
 def panel_key_tokens():
-    return {token for keys, _ in sidebar.HELP if keys for token in keys.split()}
+    return {token for keys, _ in sidebar.HELP + sidebar.NARROW_HELP if keys for token in keys.split()}
 
 
 def root_keys():

@@ -2,6 +2,15 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.12.0 — 2026-10-19
+
+- On a phone (a screen narrower than 70 columns) emx shows one thing at a time: the panel across the whole screen, or the session you opened. `‹ sessions` at the left of the bar, or `←` on an empty prompt, goes back to the panel. With the keyboard up the bar is one short line.
+- For a Claude session with Remote Control on, the selected row on the phone has a line "↗ open in the Claude app". `↵` shows the link for one tap and copies it to the phone's clipboard; `t` opens the session in the terminal instead. emx reads that link from the file Claude Code keeps for the session and changes nothing of Claude's.
+- `a` on the phone, or a tap on the selected row, opens the session's actions: open in the Claude app, open here, peek, rename, pin, interrupt, close. All plain keys or taps, no Ctrl; close asks once more with `x again to close`.
+- On the phone a tap on a row selects it, a session you start stays on the panel with the new row selected ("Started <name>.  ↵ open in app"), and `?` lists the phone's keys and scrolls.
+- `emx docs phone` explains it all.
+- Nothing changes on your laptop.
+
 ## 2.11.0 — 2026-10-18
 
 - The Routines view shows every systemd user timer on the machine; there is no list to keep. A new routine appears and a removed one disappears the next time the view reads, within a minute.

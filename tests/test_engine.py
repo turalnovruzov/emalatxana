@@ -508,6 +508,114 @@ class EngineHandle(StoreCase):
 SCANNED_WORDS = {"agents", "attach", "--bg"}
 
 
+class BridgeLink(unittest.TestCase):
+    """The Claude app's link is read from Claude's own `sessions/<pid>.json`, only for that pid and session, never written."""
+
+    BRIDGE = "session_01AbCdEfGhIjKlMnOpQrStUv"
+    PID = 4242
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self.home})
+        env.start()
+        self.addCleanup(env.stop)
+        self.folder = os.path.join(self.home, "sessions")
+        os.mkdir(self.folder)
+        self.path = os.path.join(self.folder, f"{self.PID}.json")
+
+    def write(self, **record):
+        data = {"pid": self.PID, "sessionId": CLAUDE_SID, "bridgeSessionId": self.BRIDGE, "kind": "interactive", **record}
+        with open(self.path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+    def test_a_matching_file_gives_the_apps_link(self):
+        self.write()
+        bridge = engine.bridge_link(self.PID, CLAUDE_SID)
+        self.assertEqual(bridge, self.BRIDGE)
+        self.assertEqual(core.app_link(bridge), "https://claude.ai/code/" + self.BRIDGE)
+
+    def test_another_pid_or_another_session_in_the_file_gives_none(self):
+        for record in ({"pid": self.PID + 1}, {"pid": str(self.PID)}, {"pid": True}, {"sessionId": OTHER}, {"sessionId": None}):
+            with self.subTest(record=record):
+                self.write(**record)
+                self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_a_pid_or_session_that_cannot_be_ones_reads_nothing(self):
+        self.write()
+        with mock.patch.object(engine.os, "open", side_effect=AssertionError("opened")):
+            for pid, sid in ((1, CLAUDE_SID), (0, CLAUDE_SID), (-5, CLAUDE_SID), (True, CLAUDE_SID), ("4242", CLAUDE_SID),
+                             (4242.0, CLAUDE_SID), (self.PID, "../x"), (self.PID, "")):
+                with self.subTest(pid=pid, sid=sid):
+                    self.assertIsNone(engine.bridge_link(pid, sid))
+
+    def test_a_symlink_at_the_path_is_not_followed(self):
+        real = os.path.join(self.home, "elsewhere.json")
+        with open(real, "w", encoding="utf-8") as fh:
+            json.dump({"pid": self.PID, "sessionId": CLAUDE_SID, "bridgeSessionId": self.BRIDGE}, fh)
+        os.symlink(real, self.path)
+        self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_a_fifo_at_the_path_gives_none_at_once_with_no_writer(self):
+        os.mkfifo(self.path)
+        done = []
+        reader = threading.Thread(target=lambda: done.append(engine.bridge_link(self.PID, CLAUDE_SID)), daemon=True)
+        reader.start()
+        reader.join(1.0)
+        self.assertFalse(reader.is_alive(), "the reader hung on a FIFO")
+        self.assertEqual(done, [None])
+
+    def test_a_file_over_64_kib_gives_none(self):
+        self.write(padding="x" * (64 * 1024))
+        self.assertGreater(os.path.getsize(self.path), engine.BRIDGE_FILE_MAX)
+        self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_a_file_owned_by_someone_else_gives_none(self):
+        self.write()
+        with mock.patch.object(engine.os, "getuid", return_value=os.getuid() + 1):
+            self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_a_bridge_id_that_could_reach_a_terminal_or_a_url_gives_none(self):
+        for bridge in ("session_a/b", "session_a?b=1", "session_\x1b[31m", "x" * 65, "short", "", None, 7, ["session_abcdefgh"]):
+            with self.subTest(bridge=bridge):
+                self.write(bridgeSessionId=bridge)
+                self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_a_missing_file_or_one_that_is_not_json_gives_none(self):
+        self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("[1, 2]")
+        self.assertIsNone(engine.bridge_link(self.PID, CLAUDE_SID))
+
+    def test_it_opens_only_the_pids_own_file_read_only_never_a_key_file(self):
+        self.write()
+        with open(os.path.join(self.folder, f"{self.PID}.0123abcd.key"), "w", encoding="utf-8") as fh:
+            fh.write("secret")
+        opened = []
+        real_open = os.open
+
+        def recording(path, flags, *args, **kwargs):
+            opened.append((str(path), flags))
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch.object(engine.os, "open", recording), \
+                mock.patch.object(builtins, "open", side_effect=AssertionError("builtins.open")), \
+                mock.patch.object(engine.os, "listdir", side_effect=AssertionError("listed")), \
+                mock.patch.object(engine.os, "scandir", side_effect=AssertionError("listed")):
+            self.assertEqual(engine.bridge_link(self.PID, CLAUDE_SID), self.BRIDGE)
+        self.assertEqual([p for p, _ in opened], [self.path])
+        (flags,) = [f for _, f in opened]
+        for bit in (os.O_WRONLY, os.O_RDWR, os.O_CREAT, os.O_TRUNC, os.O_APPEND):
+            self.assertFalse(flags & bit, bit)
+        for bit in (os.O_NOFOLLOW, os.O_NONBLOCK, os.O_CLOEXEC):
+            self.assertTrue(flags & bit, bit)
+        self.assertEqual(sorted(os.listdir(self.folder)), sorted([f"{self.PID}.json", f"{self.PID}.0123abcd.key"]))
+
+
 class NoBackgroundServiceCalls(unittest.TestCase):
     """No string in emx's code names a `claude agents`, `claude attach` or `claude --bg` call: emx holds every session itself. Docstrings are prose and are not scanned."""
 

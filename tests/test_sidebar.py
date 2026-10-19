@@ -4694,6 +4694,29 @@ class BarFormat(unittest.TestCase):
         self.assertTrue(out.endswith("#[default]"))
 
 
+WIDE_BAR_GOLDEN = Path(__file__).parent / "fixtures" / "bar" / "wide-2.10.0.json"
+
+
+class WideBarIsUnchanged(unittest.TestCase):
+    """The laptop's bar at 200 columns is byte-for-byte what 2.10.0 gave: the expected values were captured from tag v2.10.0's code, not from the code under test."""
+
+    def test_every_captured_case_gives_the_same_parts_and_the_same_tmux_format(self):
+        cases = json.loads(WIDE_BAR_GOLDEN.read_text("utf-8"))["cases"]
+        self.assertGreater(len(cases), 100)
+        for i, case in enumerate(cases):
+            a = case["args"]
+            latest = core.Entry(**a["latest"]) if a["latest"] else None
+            hints = tuple(tuple(tuple(p) for p in h) if isinstance(h, list) else h for h in a["hints"])
+            with self.subTest(case=i):
+                self.assertEqual(a["width"], 200)
+                parts = core.bar_parts(
+                    a["version"], [tuple(c) for c in a["counts"]], latest, a["now"], a["tag"], a["remote"], hints,
+                    a["width"], a["loaded"], a["notice_key"],
+                )
+                self.assertEqual([list(p) for p in parts], case["parts"])
+                self.assertEqual(sidebar.bar_format(parts), case["format"])
+
+
 class StatusBarPush(unittest.TestCase):
     def test_the_same_text_twice_is_one_call(self):
         tmux = mock.Mock()
@@ -7625,6 +7648,762 @@ class SlotTending(AppCase):
     def test_a_viewer_of_a_live_session_with_a_client_is_left_alone(self):
         self.app.attached = 1
         self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER)), [])
+
+
+PHONE_WIDTH = 48
+HELP_2_10_0 = (
+    ("→ Enter", "open the session and go to it"),
+    ("←", "back here, from an empty prompt"),
+    ("↑↓ j k", "move"),
+    ("Enter click", "fold a group; a click opens a session"),
+    ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
+    ("n", "new session where the cursor is; Tab there picks another folder"),
+    ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
+    ("^x", "interrupt a working session; twice closes it"),
+    ("", "on a project header, twice closes the group"),
+    ("^f /", "find a session by name or folder"),
+    ("^t", "pin to the top (in emx; doesn't keep it running)"),
+    ("^r", "rename, via /rename in the session; Tab there suggests a name"),
+    ("^s", "by project / by state"),
+    ("N", "notifications: the last 20; Enter opens one"),
+    ("R", "routines: what ran in the past 24 hours; R or Esc back"),
+    ("m", "voice mode or notification mode"),
+    ("h", "stop the voice now (voice mode)"),
+    ("s", "panel to the other side"),
+    ("< >", "narrower / wider panel"),
+    ("^\\", "jump to main and back"),
+    ("^q", "hide the panel; ^q again, ^\\ or ← brings it back"),
+    ("q", "detach; sessions keep running"),
+    ("?", "close this help"),
+)
+
+
+class PhoneTmux(ViewTmux):
+    """A phone's view, 48 columns: the panel (%1) and the slot (%2) with tmux's active and zoomed flags, changed as tmux would by the calls the panel makes."""
+
+    def __init__(self, view="emx-view-1", slot=None, panel_active=True, zoomed=True, width=PHONE_WIDTH, **kwargs):
+        super().__init__(view=view, slot=slot, **kwargs)
+        self.width = width
+        self.active = "%1" if panel_active else "%2"
+        self.zoomed = zoomed
+        self.slot_pane = replace(self.slot_pane, window_width=width)
+
+    def panes(self, session=SESSION):
+        sidebar_pane = Pane("%1", "@1", False, "sidebar", "", 24 if not self.zoomed or self.active != "%1" else self.width,
+                            self.width, self.active == "%1", False, self.zoomed)
+        slot = replace(self.slot_pane, active=self.active == "%2", zoomed=self.zoomed, window_width=self.width)
+        return [sidebar_pane, slot] + ([self.held] if self.held is not None else [])
+
+    def window_panes(self, pane):
+        return self.panes()[:2]
+
+    def show_alone(self, pane):
+        self.calls.append(("show_alone", pane))
+        self.active, self.zoomed = pane, True
+
+    def toggle_zoom(self, pane):
+        self.calls.append(("toggle_zoom", pane))
+        if self.zoomed:
+            self.zoomed = False
+        else:
+            self.active, self.zoomed = pane, True
+
+    def select(self, pane):
+        self.calls.append(("select", pane))
+        self.active, self.zoomed = pane, False
+
+    def respawn(self, pane, command, cwd=None):
+        super().respawn(pane, command, cwd)
+        if pane == "%2":
+            viewer = command.startswith("viewer ")
+            self.slot_pane = replace(self.slot_pane, role="viewer" if viewer else "placeholder", view=command[7:] if viewer else "")
+
+    def resize_width(self, pane, width):
+        self.calls.append(("resize_width", pane, width))
+
+
+class PhonePanel(AppCase):
+    """A narrow view shows its panel or a session, each taking the whole window, and never writes the laptop's prefs."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(height=22, width=PHONE_WIDTH)
+        self.app.scr = self.scr
+        self.app.me = "%1"
+        self.app.primary = False
+        self.app.bound = True
+        self.app.ground_reset = True
+        self.app.window_width = PHONE_WIDTH
+
+    def housekeep(self, tmux):
+        self.app.tmux = tmux
+        sidebar.App.housekeep(self.app, False)
+        return tmux.calls
+
+    def test_the_panel_unzoomed_on_a_phone_takes_the_whole_window(self):
+        tmux = PhoneTmux(zoomed=False)
+        self.assertIn(("show_alone", "%1"), self.housekeep(tmux))
+        self.assertTrue(self.app.narrow)
+
+    def test_back_on_the_panel_the_slot_gives_up_its_session(self):
+        tmux = PhoneTmux(slot=Pane("%2", "@1", False, "viewer", "", 24, PHONE_WIDTH, view=KEY_A))
+        calls = self.housekeep(tmux)
+        self.assertIn(("respawn", "%2", sidebar.self_command("blank", sidebar.PLACEHOLDER_TEXT)), calls)
+        self.assertEqual(self.app.main_session(), "")
+        self.assertFalse(self.app.slot_active)
+
+    def test_a_session_shown_takes_the_whole_window_and_the_bar_says_back(self):
+        tmux = PhoneTmux(slot=Pane("%2", "@1", False, "viewer", "", 24, PHONE_WIDTH, view=KEY_A), panel_active=False, zoomed=False)
+        self.assertIn(("show_alone", "%2"), self.housekeep(tmux))
+        self.assertTrue(self.app.slot_active)
+        self.app.sessions = [core.Session(KEY_A, "phone-view", "/p", "blocked", "", "", 1.0, True)]
+        self.app.loaded = True
+        text = self.bar(PHONE_WIDTH)
+        self.assertTrue(text.startswith(" ‹ sessions  phone-view · Needs input"), text)
+        self.assertIn("#[range=user|back]", self.app.bar.pushed[-1])
+
+    def test_with_the_keyboard_up_the_session_bar_is_one_short_line(self):
+        self.app.slot_active = True
+        self.app.main_pane = Pane("%2", "@1", False, "viewer", "", 48, PHONE_WIDTH, view=KEY_A)
+        self.app.sessions = [core.Session(KEY_A, "phone-view", "/p", "blocked", "", "", 1.0, True)]
+        self.app.loaded = True
+        self.scr.size = (core.SHORT_BELOW - 1, PHONE_WIDTH)
+        text = self.bar(PHONE_WIDTH)
+        self.assertTrue(text.startswith(" ‹ phone-view "), text)
+        self.assertNotIn("Needs input", text)
+        self.scr.size = (core.SHORT_BELOW, PHONE_WIDTH)
+        self.assertIn("‹ sessions", self.bar(PHONE_WIDTH))
+
+    def test_a_slot_active_with_nothing_in_it_hands_back_to_the_panel(self):
+        tmux = PhoneTmux(panel_active=False)
+        self.assertIn(("show_alone", "%1"), self.housekeep(tmux))
+
+    def test_a_phone_never_writes_the_prefs_on_zoom_or_widths_even_in_the_home_view(self):
+        self.app.primary = True
+        self.app.prefs = {**self.app.prefs, "panel_collapsed": False, "panel_width": 40}
+        saved = []
+        self.app.save_prefs = lambda: saved.append(dict(self.app.prefs))
+        for tmux in (PhoneTmux(view=SESSION), PhoneTmux(view=SESSION, zoomed=False), PhoneTmux(view=SESSION, panel_active=False)):
+            self.housekeep(tmux)
+        self.assertEqual(saved, [])
+        self.assertFalse(self.app.prefs["panel_collapsed"])
+        self.assertEqual(self.app.prefs["panel_width"], 40)
+        self.assertNotIn("resize_width", [c[0] for c in tmux.calls])
+
+    def test_turning_wide_shows_both_panes_again_laid_out_from_prefs(self):
+        self.housekeep(PhoneTmux())
+        tmux = PhoneTmux(width=120)
+        calls = self.housekeep(tmux)
+        self.assertEqual(calls[0], ("toggle_zoom", "%1"))
+        self.assertFalse(tmux.zoomed)
+        self.assertFalse(self.app.narrow)
+        self.assertIn(("resize_width", "%1", 40), calls)
+
+    def test_the_home_view_turning_wide_hides_its_panel_again_when_the_laptop_had_it_hidden(self):
+        self.app.primary = True
+        self.app.prefs = {**self.app.prefs, "panel_collapsed": True}
+        self.app.save_prefs = lambda: None
+        self.housekeep(PhoneTmux(view=SESSION))
+        tmux = PhoneTmux(view=SESSION, width=120)
+        calls = self.housekeep(tmux)
+        self.assertEqual(calls[:2], [("toggle_zoom", "%1"), ("toggle_zoom", "%2")])
+        self.assertEqual((tmux.active, tmux.zoomed), ("%2", True))
+
+    def test_a_wide_view_never_zooms_on_its_own(self):
+        self.app.window_width = 0
+        tmux = PhoneTmux(width=120, zoomed=False)
+        calls = self.housekeep(tmux)
+        self.assertNotIn("show_alone", [c[0] for c in calls])
+        self.assertNotIn("toggle_zoom", [c[0] for c in calls])
+
+    def test_opening_a_session_on_a_phone_takes_the_whole_window_before_the_viewer_starts(self):
+        tmux = PhoneTmux()
+        self.app.tmux = tmux
+        self.poll(core.Session(KEY_A, "alpha", "/p", "done", "", "", 1.0, True))
+        self.app.refresh()
+        self.app.housekeep = lambda fresh_list: None
+        sidebar.App.switch_to(self.app, KEY_A, core.OPEN)
+        names = [c[0] for c in tmux.calls]
+        self.assertLess(names.index("show_alone"), names.index("respawn"))
+        self.assertIn(("show_alone", "%2"), tmux.calls)
+        self.assertNotIn("select", names)
+        self.assertTrue(self.app.slot_active)
+
+    def test_a_phone_coming_back_finds_its_session_under_the_cursor_not_opened(self):
+        tmux = PhoneTmux(attached=1)
+        tmux.options[sidebar.REOPEN_OPT] = KEY_A
+        self.app.attached = 0
+        self.app.tmux = tmux
+        sidebar.App.tend_slot(self.app, tmux.slot_pane)
+        self.assertEqual(self.app.wanted_cursor, ("session", KEY_A))
+        self.assertNotIn("respawn", [c[0] for c in tmux.calls])
+
+    def test_the_panel_bar_offers_the_phones_keys(self):
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+        self.assertEqual(self.bar(PHONE_WIDTH).rstrip(), " ⚒ ✻1   ↵ open  n new  a actions  ?")
+        self.app.cursor = ("group", self.app.groups[0].key)
+        self.assertEqual(self.bar(PHONE_WIDTH).rstrip(), " ⚒ ✻1   ↵ fold  n new  ?")
+
+    def test_a_selected_row_repeats_no_laptop_key_on_a_phone(self):
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+        self.app.draw()
+        self.assertFalse(any("→ open" in line for line in self.scr.cells.values()), self.scr.cells)
+        self.app.window_width = 0
+        self.app.draw()
+        self.assertTrue(any("→ open" in line for line in self.scr.cells.values()), self.scr.cells)
+
+    def test_a_selected_header_repeats_no_laptop_key_on_a_phone(self):
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.focused = True
+        self.app.cursor = ("group", self.app.groups[0].key)
+        self.app.draw()
+        self.assertFalse(any("Enter fold" in line for line in self.scr.cells.values()), self.scr.cells)
+        self.app.window_width = 0
+        self.app.draw()
+        self.assertTrue(any("Enter fold" in line for line in self.scr.cells.values()), self.scr.cells)
+
+    def test_side_and_width_keys_do_nothing_on_a_phone(self):
+        before = dict(self.app.prefs)
+        self.app.tmux = PhoneTmux()
+        for key in ("s", "<", ">", ",", "."):
+            self.app.handle_key(key)
+        self.assertEqual(self.app.prefs, before)
+        self.assertEqual(self.app.tmux.calls, [])
+
+    def test_t_opens_the_session_here_and_on_a_header_does_nothing(self):
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+        self.app.handle_key("t")
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+        self.app.cursor = ("group", self.app.groups[0].key)
+        self.app.handle_key("t")
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+
+    def test_t_on_a_laptop_does_nothing(self):
+        self.app.window_width = 120
+        self.poll(session("a", "/p/alpha", "done"))
+        self.app.refresh()
+        self.app.cursor = ("session", "a")
+        self.app.handle_key("t")
+        self.assertEqual(self.opened, [])
+
+    def test_the_routines_view_fits_48_columns_and_R_or_esc_returns(self):
+        answer = ([core.RoutineView("a-very-long-routine-name-backup-nightly-and-more", "passed", "done",
+                                    tuple((1_800_000_000.0 + i, core.PASSED, "a long note about the run " * 3) for i in range(4)),
+                                    1_800_000_500.0, "a note that is far longer than the forty eight columns of a phone")], None)
+        with mock.patch.object(sidebar.routines, "read", lambda now: answer):
+            for back in ("R", "\x1b"):
+                with self.subTest(back=back):
+                    self.app.handle_key("R")
+                    self.app.routines_reader.join(5)
+                    self.app.refresh()
+                    self.app.draw()
+                    lines = [line for line in self.scr.cells.values()]
+                    self.assertIn(sidebar.ROUTINES_TITLE, " ".join(lines))
+                    self.assertTrue(any("a-very-long" in line for line in lines), lines)
+                    for line in lines:
+                        self.assertLessEqual(core.display_width(line), PHONE_WIDTH, line)
+                    self.app.handle_key(back)
+                    self.assertIsNone(self.app.routines_view)
+
+    def test_help_on_a_phone_lists_the_phones_keys_scrolls_one_line_and_closes_on_another_key(self):
+        self.app.handle_key("?")
+        self.assertTrue(self.app.help)
+        self.app.draw()
+        first = dict(self.scr.cells)
+        self.assertIn("↵ Enter", first[2])
+        self.app.handle_key(curses.KEY_DOWN)
+        self.assertEqual(self.app.help_scroll, 1)
+        self.app.draw()
+        self.assertEqual(self.scr.cells[2], first[3])
+        self.app.handle_key("k")
+        self.assertEqual(self.app.help_scroll, 0)
+        self.app.handle_key("q")
+        self.assertFalse(self.app.help)
+        self.assertEqual(self.opened, [])
+
+    def test_help_on_a_laptop_still_closes_on_any_key_and_is_2_10_0s(self):
+        self.assertEqual(sidebar.HELP, HELP_2_10_0)
+        self.app.window_width = 120
+        self.app.handle_key("?")
+        self.app.handle_key(curses.KEY_DOWN)
+        self.assertFalse(self.app.help)
+
+    def test_every_plain_key_of_the_laptops_help_but_the_wide_only_ones_is_in_the_phones(self):
+        laptop = {t for keys, _ in sidebar.HELP if keys for t in keys.split()}
+        phone = {t for keys, _ in sidebar.NARROW_HELP for t in keys.split()}
+        self.assertEqual(laptop - phone, {"s", "<", ">"})
+        self.assertTrue(set(sidebar.WIDE_ONLY_KEYS) >= {"s", "<", ">"})
+        self.assertEqual(phone - laptop, {"↵", "t", "‹", "a"})
+
+    def test_every_key_in_the_phones_help_does_something_on_a_phone(self):
+        root = {"‹", "←", "^\\", "^q"}
+        a, b = session("a", "/p/alpha", "done"), session("b", "/p/beta", "working")
+        checks = {
+            "↵": ("\n", lambda: self.opened), "Enter": ("\r", lambda: self.opened),
+            "t": ("t", lambda: self.opened), "→": (curses.KEY_RIGHT, lambda: self.opened),
+            "a": ("a", lambda: self.app.menu == "a"),
+            "click": (curses.KEY_MOUSE, lambda: self.app.cursor == ("session", "b") and not self.opened),
+            "↑↓": (curses.KEY_DOWN, lambda: self.app.cursor != ("session", "a")), "j": ("j", lambda: self.app.cursor != ("session", "a")),
+            "k": ("k", lambda: self.app.cursor != ("session", "a")), "space": (" ", lambda: self.app.peeking),
+            "n": ("n", lambda: self.app.prompt is not None), "^x": (sidebar.CTRL_X, lambda: self.app.confirm is not None),
+            "^f": (sidebar.CTRL_F, lambda: self.app.find is not None), "/": ("/", lambda: self.app.find is not None),
+            "^t": (sidebar.CTRL_T, lambda: "a" in core.pinned_ids(self.app.prefs)),
+            "^r": (sidebar.CTRL_R, lambda: self.app.rename_edit is not None), "^s": (sidebar.CTRL_S, lambda: self.app.view() == core.BY_STATE),
+            "N": ("N", lambda: self.app.history_view is not None), "R": ("R", lambda: self.app.routines_view is not None),
+            "m": ("m", lambda: self.app.mode() != core.NOTIFICATION_MODE), "h": ("h", lambda: self.silenced or self.app.mode() == core.NOTIFICATION_MODE),
+            "q": ("q", lambda: detached), "?": ("?", lambda: self.app.help),
+        }
+        tokens = {t for keys, _ in sidebar.NARROW_HELP for t in keys.split()}
+        self.assertEqual(tokens - set(checks), root)
+        for token, (key, done) in checks.items():
+            with self.subTest(key=token):
+                self.setUp()
+                self.scr.size = (40, PHONE_WIDTH)
+                detached = []
+                self.app.tmux = PhoneTmux()
+                self.app.tmux.detach = lambda: detached.append(True)
+                self.app.poller.notifier.authorize = lambda: None
+                self.poll(a, b)
+                self.app.refresh()
+                self.app.cursor, self.app.focused = ("session", "a"), True
+                if token == "h":
+                    self.app.prefs = {**self.app.prefs, "mode": core.VOICE_MODE}
+                    self.app.apply_mode()
+                self.app.draw()
+                y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
+                with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)), \
+                        mock.patch.object(sidebar.routines, "read", lambda path, now: ([], None)):
+                    self.app.handle_key(key)
+                self.assertTrue(done(), token)
+
+
+BRIDGE = "session_01AbCdEfGhIjKlMnOpQrStUv"
+APP_URL = "https://claude.ai/code/" + BRIDGE
+
+
+class ClaudeAppLink(AppCase):
+    """On a phone the selected Claude session with a known Remote Control link offers the Claude app; ↵ puts the link on screen for a tap."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(height=22, width=PHONE_WIDTH)
+        self.app.scr = self.scr
+        self.app.window_width = PHONE_WIDTH
+        self.app.tmux = PhoneTmux()
+        copies = self.copies = []
+        self.app.tmux.copy_to_client = copies.append
+        self.poll(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.app.links = {"a": BRIDGE}
+        self.app.poller.take_links = lambda: {"a": BRIDGE}
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+
+    def lines(self):
+        self.app.draw()
+        return [self.scr.cells[y] for y in sorted(self.scr.cells)]
+
+    def test_the_selected_row_gets_the_link_line_under_it(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if "emx-test-a" in line)
+        self.assertEqual(lines[at + 2].strip(), sidebar.APP_LINE)
+        link_y = next(y for y, item in self.app.row_map.items() if item == ("link", "a"))
+        self.assertEqual(self.scr.cells[link_y].strip(), sidebar.APP_LINE)
+        self.assertEqual(sum(sidebar.APP_LINE in line for line in lines), 1)
+
+    def test_a_row_not_selected_or_with_no_link_has_no_line(self):
+        self.app.cursor = ("session", "b")
+        self.assertFalse(any(sidebar.APP_LINE in line for line in self.lines()))
+        self.app.links = {}
+        self.app.cursor = ("session", "a")
+        self.assertFalse(any(sidebar.APP_LINE in line for line in self.lines()))
+
+    def test_enter_on_a_linked_session_shows_the_link_and_copies_it_and_opens_nothing(self):
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.copies, [APP_URL])
+        self.assertEqual(self.app.notice, "Tap the link to open emx-test-a in the Claude app.")
+        bottom = "".join(line.strip() for line in self.lines()[-4:])
+        self.assertIn(APP_URL, bottom)
+
+    def test_the_link_stays_whole_when_cut_at_the_edge(self):
+        self.app.handle_key("\n")
+        rows = [t for t, _ in self.app.bottom_lines(PHONE_WIDTH - 1, 22)]
+        self.assertEqual("".join(rows[-2:]), APP_URL)
+
+    def test_the_link_goes_with_its_notice(self):
+        self.app.handle_key("\n")
+        self.app.say("")
+        self.assertFalse(any(APP_URL[:20] in t for t, _ in self.app.bottom_lines(PHONE_WIDTH - 1, 22)))
+
+    def test_enter_with_no_link_opens_here_and_t_always_does(self):
+        self.app.cursor = ("session", "b")
+        self.app.handle_key("\n")
+        self.app.cursor = ("session", "a")
+        self.app.handle_key("t")
+        self.assertEqual(self.opened, [("b", core.OPEN), ("a", core.OPEN)])
+        self.assertEqual(self.copies, [])
+
+    def test_a_tap_on_the_link_line_opens_in_the_app(self):
+        self.lines()
+        y = next(y for y, item in self.app.row_map.items() if item == ("link", "a"))
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual((self.copies, self.opened), ([APP_URL], []))
+
+    def test_the_bar_offers_the_app_on_a_linked_row(self):
+        self.assertEqual(self.bar(PHONE_WIDTH).rstrip(), " ⚒ ✻1 ✻1   ↵ open in app  t here  a actions  ?")
+
+    def test_a_stopped_session_has_no_link(self):
+        self.poll(session("a", "/p/alpha", "stopped", pid=None), session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.assertIsNone(self.app.link_for(self.app.session("a")))
+
+    def test_a_wide_panel_draws_the_same_rows_with_a_link_known_or_not(self):
+        self.app.window_width = 120
+        self.scr.size = (22, 40)
+        with_link = self.lines()
+        self.app.links = {}
+        self.assertEqual(self.lines(), with_link)
+        self.app.links = {"a": BRIDGE}
+        self.app.handle_key("\n")
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+        self.assertEqual(self.copies, [])
+
+
+class ActionsMenu(AppCase):
+    """On a phone `a`, or a tap on the selected row, opens the session's actions under its row: plain keys or taps, close kept in emx."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(height=30, width=PHONE_WIDTH)
+        self.app.scr = self.scr
+        self.app.window_width = PHONE_WIDTH
+        self.app.tmux = PhoneTmux()
+        self.app.tmux.copy_to_client = lambda text: None
+        self.poll(session("a", "/p/alpha", "done"), session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.app.links = {"a": BRIDGE}
+        self.app.poller.take_links = lambda: dict(self.app.links)
+        self.app.focused = True
+        self.app.cursor = ("session", "a")
+        self.closers = []
+        self.interrupts = []
+        self.app.start_close = self.closers.append
+        self.app.start_interrupt = self.interrupts.append
+
+    def menu_rows(self):
+        self.app.draw()
+        return {item[1]: y for y, item in self.app.row_map.items() if item and item[0] == "menu"}
+
+    def tap(self, y):
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+
+    def test_a_opens_seven_lines_for_a_linked_session_and_six_without(self):
+        self.app.handle_key("a")
+        self.assertEqual(list(self.menu_rows()), ["↵", "t", "␣", "r", "p", "i", "x"])
+        cells = "\n".join(self.scr.cells[y] for y in sorted(self.scr.cells))
+        for text in ("╭─ emx-test-a ", "open in the Claude app", "open here, in the terminal", "peek", "rename", "pin to top",
+                     "interrupt", "close (it goes offline in the app)", "╰"):
+            self.assertIn(text, cells)
+        self.assertEqual(self.app.narrow_hints(), (core.MENU_HINT,))
+        self.app.handle_key("\x1b")
+        self.app.links = {}
+        self.app.handle_key("a")
+        self.assertEqual(list(self.menu_rows()), ["t", "␣", "r", "p", "i", "x"])
+        cells = "\n".join(self.scr.cells[y] for y in sorted(self.scr.cells))
+        self.assertNotIn("Claude app", cells)
+        self.assertNotIn("goes offline", cells)
+
+    def test_every_line_fits_the_phone(self):
+        self.app.handle_key("a")
+        self.menu_rows()
+        for line in self.scr.cells.values():
+            self.assertLessEqual(core.display_width(line), PHONE_WIDTH, line)
+
+    def test_p_pins_and_closes_the_box_and_says_unpin_next_time(self):
+        self.app.handle_key("a")
+        self.app.handle_key("p")
+        self.assertIn("a", core.pinned_ids(self.app.prefs))
+        self.assertIn("a", core.pinned_ids(core.load_prefs(core.prefs_path())))
+        self.assertIsNone(self.app.menu)
+        self.app.handle_key("a")
+        self.assertIn(("p", "unpin", ""), self.app.menu_lines(self.app.session("a")))
+
+    def test_x_once_arms_and_twice_closes_through_the_closer(self):
+        self.app.handle_key("a")
+        self.app.handle_key("x")
+        self.assertEqual(self.closers, [])
+        self.assertEqual(self.interrupts, [])
+        self.assertIsNotNone(self.app.menu)
+        self.assertIn(("x", sidebar.MENU_ARMED, ""), self.app.menu_lines(self.app.session("a")))
+        self.app.refresh()
+        self.assertIn("x", self.menu_rows())
+        self.assertIn("│ x  again to close", " ".join(self.scr.cells.values()))
+        self.app.handle_key("x")
+        self.assertEqual([c.id for c in self.closers], ["a"])
+        self.assertIsNone(self.app.menu)
+
+    def test_two_taps_on_the_x_line_close_too(self):
+        self.app.handle_key("a")
+        self.tap(self.menu_rows()["x"])
+        self.assertEqual(self.closers, [])
+        self.tap(self.menu_rows()["x"])
+        self.assertEqual([c.id for c in self.closers], ["a"])
+
+    def test_another_key_after_x_disarms(self):
+        self.app.handle_key("a")
+        self.app.handle_key("x")
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.confirm)
+        self.app.handle_key("a")
+        self.app.handle_key("x")
+        self.assertEqual(self.closers, [])
+
+    def test_esc_closes_the_box_doing_nothing(self):
+        self.app.handle_key("a")
+        self.app.handle_key("\x1b")
+        self.assertIsNone(self.app.menu)
+        self.assertEqual((self.opened, self.closers, self.interrupts), ([], [], []))
+        self.assertNotIn("a", core.pinned_ids(self.app.prefs))
+
+    def test_a_tap_on_the_t_line_opens_here(self):
+        self.app.handle_key("a")
+        self.tap(self.menu_rows()["t"])
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+        self.assertIsNone(self.app.menu)
+
+    def test_enter_opens_in_the_app_space_peeks_r_renames_i_interrupts(self):
+        copies = []
+        self.app.tmux.copy_to_client = copies.append
+        self.app.handle_key("a")
+        self.app.handle_key("\n")
+        self.assertEqual((copies, self.opened), ([APP_URL], []))
+        self.app.handle_key("a")
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.app.handle_key("\x1b")
+        self.app.handle_key("a")
+        self.app.handle_key("i")
+        self.assertEqual([s.id for s in self.interrupts], ["a"])
+        self.app.handle_key("a")
+        self.app.handle_key("r")
+        self.assertEqual(self.app.rename_edit["id"], "a")
+
+    def test_interrupt_with_nothing_to_interrupt_says_the_existing_message(self):
+        del self.app.start_interrupt
+        result = []
+
+        class Done(sidebar.Interrupter):
+            def run(self):
+                result.append(self.interrupt)
+                self.result = (True, core.nothing_to_interrupt_text(self.interrupt))
+
+        with mock.patch.object(sidebar, "Interrupter", Done):
+            self.app.handle_key("a")
+            self.app.handle_key("i")
+            self.app.interrupters["a"].join(5)
+            self.app.finish_interrupt()
+        self.assertEqual(self.app.notice, core.nothing_to_interrupt_text(core.Interrupt("a", "emx-test-a")))
+
+    def test_a_tap_on_another_row_selects_it_and_a_tap_on_the_selected_row_opens_the_menu(self):
+        self.app.draw()
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
+        self.tap(y)
+        self.assertEqual((self.app.cursor, self.app.menu, self.opened), (("session", "b"), None, []))
+        self.app.draw()
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
+        self.tap(y)
+        self.assertEqual((self.app.menu, self.opened), ("b", []))
+
+    def test_the_menu_goes_when_its_row_does(self):
+        self.app.handle_key("a")
+        self.poll(session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.assertIsNone(self.app.menu)
+
+    def test_a_new_session_from_the_phone_stays_on_the_panel_with_the_new_row_selected(self):
+        new = core.Session(KEY_A, "dark-toggle", "/p/alpha", "starting", "", "", 2.0, True, session_id=KEY_A)
+        done = sidebar.Starter(FakeEngine(), "/p/alpha", "add a dark mode toggle")
+        done.result = (new, None)
+        self.app.starter = done
+        self.app.say("Starting a session…")
+        self.app.finish_start()
+        self.assertEqual(self.opened, [])
+        self.assertEqual(self.app.notice, "")
+        self.assertEqual(self.app.wanted_cursor, ("session", KEY_A))
+        self.assertEqual(self.app.narrow_hints(), ("Started dark-toggle.  ↵ open",))
+        self.poll(new, session("b", "/p/alpha", "working"))
+        self.app.refresh()
+        self.app.links = {KEY_A: BRIDGE}
+        self.assertEqual(self.app.cursor, ("session", KEY_A))
+        self.assertEqual(self.app.narrow_hints(), ("Started dark-toggle.  ↵ open in app",))
+        self.assertIn("Started dark-toggle.  ↵ open in app", self.bar(PHONE_WIDTH))
+        self.app.handle_key("j")
+        self.assertIsNone(self.app.started_note)
+
+    def test_a_new_session_on_a_laptop_still_opens(self):
+        self.app.window_width = 120
+        new = core.Session(KEY_A, "dark-toggle", "/p/alpha", "starting", "", "", 2.0, True)
+        done = sidebar.Starter(FakeEngine(), "/p/alpha", "")
+        done.result = (new, None)
+        self.app.starter = done
+        self.app.finish_start()
+        self.assertEqual(self.opened, [(KEY_A, core.NEW, (new, True))])
+        self.assertIsNone(self.app.started_note)
+
+    def test_on_a_laptop_a_and_t_do_nothing_and_a_click_opens_the_session(self):
+        self.app.window_width = 120
+        self.scr.size = (30, 40)
+        before = dict(self.app.prefs)
+        for key in ("a", "t"):
+            self.app.handle_key(key)
+        self.assertEqual((self.app.menu, self.opened, self.app.prefs), (None, [], before))
+        self.app.draw()
+        self.assertFalse(any(item and item[0] in ("menu", "link") for item in self.app.row_map.values()))
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "a"))
+        self.tap(y)
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+
+    def tap_selected_row(self):
+        """A tap on the line the selected row was drawn on, after whatever was just opened."""
+        self.app.draw()
+        rows = [y for y, item in self.app.row_map.items() if item == self.app.cursor]
+        self.tap(rows[0] if rows else 2)
+
+    def assert_no_menu_and_no_action(self):
+        self.assertIsNone(self.app.menu)
+        self.assertEqual((self.closers, self.interrupts), ([], []))
+        self.assertNotIn("a", core.pinned_ids(self.app.prefs))
+
+    def type_after_a_tap(self, *opening):
+        for key in opening:
+            self.app.handle_key(key)
+        self.tap_selected_row()
+        self.assertIsNone(self.app.menu)
+        for key in "ixt":
+            self.app.handle_key(key)
+        self.assert_no_menu_and_no_action()
+        self.assertEqual(self.opened, [])
+
+    def test_with_the_message_prompt_open_a_tap_on_the_selected_row_leaves_the_letters_to_it(self):
+        self.type_after_a_tap("n")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("message", "ixt"))
+
+    def test_with_the_folder_prompt_open_a_tap_on_the_selected_row_leaves_the_letters_to_it(self):
+        self.type_after_a_tap("n", "\t")
+        self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("folder", "ixt"))
+
+    def test_while_renaming_a_tap_on_the_selected_row_leaves_the_letters_to_the_name(self):
+        self.type_after_a_tap(sidebar.CTRL_R)
+        self.assertEqual(self.app.rename_edit["id"], "a")
+        self.assertTrue(self.app.rename_edit["text"].endswith("ixt"), self.app.rename_edit["text"])
+
+    def test_with_find_open_a_tap_on_the_selected_row_leaves_the_letters_to_find(self):
+        self.type_after_a_tap("/")
+        self.assertEqual(self.app.find, "ixt")
+
+    def test_with_history_open_a_tap_opens_no_menu(self):
+        self.type_after_a_tap("N")
+        self.assertIsNotNone(self.app.history_view)
+
+    def test_with_help_open_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key("?")
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_while_peeking_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_with_a_close_armed_a_tap_on_the_selected_row_opens_no_menu(self):
+        self.app.handle_key(sidebar.CTRL_X)
+        self.assertIsNotNone(self.app.confirm)
+        self.tap_selected_row()
+        self.app.handle_key("i")
+        self.app.handle_key("x")
+        self.app.handle_key("x")
+        self.assert_no_menu_and_no_action()
+
+    def test_an_open_input_gets_its_keys_before_a_menu_left_open_under_it(self):
+        self.app.handle_key("n")
+        self.app.menu = "a"
+        for key in "ixtx":
+            self.app.handle_key(key)
+        self.assertEqual(self.app.prompt["text"], "ixtx")
+        self.assertIsNone(self.app.confirm)
+        self.assertEqual((self.closers, self.interrupts, self.opened), ([], [], []))
+
+
+class PollerReadsLinks(unittest.TestCase):
+    """The poller reads a link only while a phone's panel wants them, from the session's own live agent pane's process."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": tmp.name, "XDG_STATE_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        sessions = [core.Session(KEY_A, "alpha", "/p", "done", "", "", 1.0, True, session_id=CLAUDE_SID),
+                    core.Session("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "beta", "/p", "done", "", "", 1.0, True, session_id=KEY_A)]
+
+        class Tmux:
+            def panes(self):
+                return [Pane("%5", "@5", False, "", KEY_A, 80, 80, agent="claude", pid=4242),
+                        Pane("%6", "@6", False, "", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", 80, 80, pid=4343)]
+
+        self.sessions = sessions
+        self.poller = sidebar.Poller(FakeEngine(listing=(sessions, None), tmux=Tmux()))
+        self.reads = []
+
+        def read(pid, sid):
+            self.reads.append((pid, sid))
+            return BRIDGE if (pid, sid) == (4242, CLAUDE_SID) else None
+
+        patch = mock.patch.object(sidebar, "bridge_link", read)
+        patch.start()
+        self.addCleanup(patch.stop)
+        fetch = mock.patch.object(sidebar, "fetch_sessions", lambda engine: engine.list_sessions())
+        fetch.start()
+        self.addCleanup(fetch.stop)
+
+    def test_nothing_is_read_while_no_phone_wants_links(self):
+        self.poller.poll()
+        self.assertEqual((self.reads, self.poller.take_links()), ([], {}))
+
+    def test_a_wanted_link_comes_from_the_agent_panes_pid_and_claudes_session_id_only(self):
+        self.poller.links_wanted = True
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)])
+        self.assertEqual(self.poller.take_links(), {KEY_A: BRIDGE})
+
+    def test_an_unchanged_file_is_not_read_again(self):
+        self.poller.links_wanted = True
+        self.poller.poll()
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)])
+        folder = os.path.join(os.environ["CLAUDE_CONFIG_DIR"], "sessions")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "4242.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        self.poller.poll()
+        self.assertEqual(self.reads, [(4242, CLAUDE_SID)] * 2)
 
 
 class PrefsAcrossViews(AppCase):
