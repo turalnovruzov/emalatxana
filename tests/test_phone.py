@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import tempfile
 import threading
@@ -730,6 +731,155 @@ class Page(ServerCase):
 
     def test_a_script_gets_the_page_only_through_the_guard(self):
         self.assertEqual(self.request(path="/app.js", host="evil.example")[0], 400)
+
+
+class ScriptedTailnet(StubTailnet):
+    """A tailnet whose node() gives what the test sets."""
+
+    def __init__(self, answer):
+        super().__init__()
+        self.answer = answer
+
+    def node(self):
+        return self.answer
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def refused(port):
+    with socket.socket() as probe:
+        probe.settimeout(2)
+        return probe.connect_ex(("127.0.0.1", port)) != 0
+
+
+class Service(ApiCase):
+    def service(self, answer, port=None, **kwargs):
+        self.tailnet = ScriptedTailnet(answer)
+        service = phone.PhoneService(
+            FakeEngine([]), free_port() if port is None else port, self.state, self.home, self.prefs,
+            tailnet=self.tailnet, sleep=lambda seconds: None, **kwargs,
+        )
+        self.addCleanup(service.stop_serving)
+        return service
+
+    def said(self, service):
+        out = []
+        while (notice := service.take_notice()) is not None:
+            out.append(notice[0])
+        return out
+
+    def test_a_working_tailscale_binds_on_the_first_tick_and_writes_the_address(self):
+        service = self.service((NODE, None))
+        service.tick()
+        port = service.server.server_address[1]
+        self.assertFalse(refused(port))
+        url = f"http://devbox.example-tailnet.ts.net:{port}/"
+        self.assertEqual(phone.read_phone_file(self.state), {"url": url, "problem": None})
+        self.assertEqual(self.said(service), [f"Phone page: {url}"])
+
+    def test_the_address_notice_has_no_end_and_a_problem_notice_has_one(self):
+        service = self.service((NODE, None))
+        service.tick()
+        self.assertIsNone(service.take_notice()[1])
+        service.tailnet.answer = (None, phone.DOWN)
+        service.tick()
+        self.assertEqual(service.take_notice()[1], phone.PROBLEM_NOTICE_SECONDS)
+
+    def test_a_problem_is_written_and_said_once_until_it_changes(self):
+        service = self.service((None, phone.DOWN))
+        service.tick()
+        self.assertEqual(phone.read_phone_file(self.state), {"url": None, "problem": "down"})
+        self.assertEqual(self.said(service), [phone.PROBLEM_LINES[phone.DOWN]])
+        service.tick()
+        self.assertEqual(self.said(service), [])
+        service.tailnet.answer = (None, phone.MISSING)
+        service.tick()
+        self.assertEqual(self.said(service), [phone.PROBLEM_LINES[phone.MISSING]])
+
+    def test_a_later_down_stops_serving(self):
+        service = self.service((NODE, None))
+        service.tick()
+        port = service.server.server_address[1]
+        service.tailnet.answer = (None, phone.DOWN)
+        service.tick()
+        self.assertTrue(refused(port))
+        self.assertIsNone(service.server)
+
+    def test_a_changed_node_is_served_again_on_its_new_name(self):
+        service = self.service((NODE, None), port=free_port())
+        service.tick()
+        service.tailnet.answer = (NODE._replace(dns_name="other.example-tailnet.ts.net", short_name="other"), None)
+        service.tick()
+        self.assertIn("other.example-tailnet.ts.net", phone.read_phone_file(self.state)["url"])
+        self.assertEqual(len(self.said(service)), 2)
+
+    def test_a_port_that_is_taken_is_said_with_its_number(self):
+        with socket.socket() as taken:
+            taken.bind(("127.0.0.1", 0))
+            taken.listen()
+            port = taken.getsockname()[1]
+            service = self.service((NODE, None), port=port)
+            service.tick()
+        self.assertEqual(phone.read_phone_file(self.state), {"url": None, "problem": "busy"})
+        self.assertEqual(self.said(service), [f"Phone page off: port {port} is taken. Set EMX_PHONE_PORT to another."])
+
+    def test_a_relaunched_panel_does_not_say_again_what_the_file_already_says(self):
+        port = free_port()
+        first = self.service((NODE, None), port=port)
+        first.tick()
+        self.said(first)
+        first.stop_serving()
+        second = self.service((NODE, None), port=port)
+        second.tick()
+        self.assertEqual(self.said(second), [])
+        self.assertFalse(refused(port))
+
+    def test_the_service_is_busy_while_a_post_runs(self):
+        service = self.service((None, phone.DOWN))
+        self.assertFalse(service.busy())
+        service.api.acting = 1
+        self.assertTrue(service.busy())
+
+    def test_the_thread_ticks_until_stopped(self):
+        service = self.service((None, phone.DOWN), interval=0.01)
+        service.start()
+        deadline = time.monotonic() + 5
+        while not phone.read_phone_file(self.state) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service.stop()
+        service.join(5)
+        self.assertFalse(service.is_alive())
+        self.assertEqual(phone.read_phone_file(self.state)["problem"], "down")
+
+    def test_a_tick_that_raises_does_not_end_the_thread(self):
+        service = self.service((None, phone.DOWN), interval=0.01)
+        calls = []
+
+        def tick():
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        service.tick = tick
+        service.start()
+        deadline = time.monotonic() + 5
+        while len(calls) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        service.stop()
+        service.join(5)
+        self.assertGreaterEqual(len(calls), 3)
+
+
+class Port(unittest.TestCase):
+    def test_the_port_is_8787_unless_the_setting_is_a_valid_unprivileged_port(self):
+        for value, want in (("", 8787), ("abc", 8787), ("80", 8787), ("1023", 8787), ("70000", 8787), ("-5", 8787),
+                            ("1024", 1024), ("9000", 9000), ("65535", 65535)):
+            with self.subTest(value=value):
+                self.assertEqual(phone.phone_port({"EMX_PHONE_PORT": value}), want)
+        self.assertEqual(phone.phone_port({}), 8787)
 
 
 if __name__ == "__main__":

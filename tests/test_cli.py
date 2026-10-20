@@ -242,6 +242,68 @@ class Hush(unittest.TestCase):
 SID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
+class PhoneAddress(unittest.TestCase):
+    """`emx phone`, with no real tmux: the workspace "runs" when the fake has-session answers 0."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = os.path.join(tmp.name, "state")
+        for patch in (
+            mock.patch.dict(os.environ, {"TMUX_TMPDIR": tmp.name, "EMX_SOCKET": "emx-test-x", "XDG_STATE_HOME": self.state}),
+            mock.patch.object(cli.shutil, "which", return_value="/usr/bin/tmux"),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def write(self, data):
+        os.makedirs(os.path.join(self.state, "emx"))
+        with open(os.path.join(self.state, "emx", "phone.json"), "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+
+    def run_phone(self, server=True, args=()):
+        def record(argv, **kwargs):
+            ok = "has-session" not in argv or server
+            return subprocess.CompletedProcess(argv, 0 if ok else 1, "", "")
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("emx.tmux.subprocess.run", record), redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["phone", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_it_prints_the_address_the_running_workspace_serves(self):
+        self.write({"url": "http://devbox.example-tailnet.ts.net:8787/", "problem": None})
+        self.assertEqual(self.run_phone(), (0, "http://devbox.example-tailnet.ts.net:8787/\n", ""))
+
+    def test_it_says_why_the_page_is_not_up(self):
+        self.write({"url": None, "problem": "down"})
+        code, out, _ = self.run_phone()
+        self.assertEqual((code, out.strip()), (1, "Phone page off: Tailscale isn't connected. Run: sudo tailscale up"))
+
+    def test_the_busy_line_names_the_port_from_the_setting(self):
+        self.write({"url": None, "problem": "busy"})
+        with mock.patch.dict(os.environ, {"EMX_PHONE_PORT": "9001"}):
+            self.assertIn("port 9001 is taken", self.run_phone()[1])
+
+    def test_with_no_file_yet_it_asks_to_wait(self):
+        code, out, _ = self.run_phone()
+        self.assertEqual(code, 1)
+        self.assertIn("isn't up yet", out)
+
+    def test_with_no_workspace_it_says_so_and_ignores_a_stale_file(self):
+        self.write({"url": "http://devbox.example-tailnet.ts.net:8787/", "problem": None})
+        self.assertEqual(self.run_phone(server=False), (1, "", "emx isn't running here; start it with emx.\n"))
+
+    def test_a_default_socket_and_extra_arguments_are_refused(self):
+        with mock.patch.dict(os.environ, {"EMX_SOCKET": "default"}):
+            self.assertEqual(self.run_phone()[0], 2)
+        self.assertEqual(self.run_phone(args=("x",))[0], 2)
+
+    def test_it_is_a_public_command_and_the_port_setting_is_in_the_usage(self):
+        self.assertIn("| phone |", cli.USAGE.splitlines()[0])
+        self.assertIn("EMX_PHONE_PORT", cli.USAGE)
+
+
 class OpenSession(unittest.TestCase):
     """`emx open <sid>`, what a notification click runs. Every test runs with a temporary TMUX_TMPDIR and no real tmux or `open`."""
 

@@ -557,3 +557,129 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(status, data)
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = dispatch
+
+
+BUSY = "busy"
+DEFAULT_PORT = 8787
+PHONE_FILE = "phone.json"
+CHECK_SECONDS = 30
+BIND_TRIES = 3
+BIND_WAIT_SECONDS = 1.0
+PROBLEM_NOTICE_SECONDS = 15
+PROBLEM_LINES = {
+    MISSING: "Phone page off: Tailscale isn't installed here. emx docs phone says how to set it up.",
+    DOWN: "Phone page off: Tailscale isn't connected. Run: sudo tailscale up",
+    TAGGED: "Phone page off: this machine is a tagged Tailscale node, so emx can't tell it is yours.",
+    BUSY: "Phone page off: port {port} is taken. Set EMX_PHONE_PORT to another.",
+}
+
+
+def phone_port(env=None) -> int:
+    env = os.environ if env is None else env
+    try:
+        port = int(env.get("EMX_PHONE_PORT", ""))
+    except ValueError:
+        return DEFAULT_PORT
+    return port if 1024 <= port <= 65535 else DEFAULT_PORT
+
+
+def problem_line(problem: str, port: int) -> str:
+    return PROBLEM_LINES[problem].format(port=port)
+
+
+def read_phone_file(state) -> dict:
+    try:
+        with open(Path(state) / PHONE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+class PhoneService(threading.Thread):
+    """Serves the page while Tailscale is up, from a thread of the primary panel: checks every `CHECK_SECONDS`, binds this node's Tailscale IPv4 when it can, stops when Tailscale goes away or changes.
+
+    Each change in what it serves, or why it doesn't, is written to
+    `phone.json` and queued as one notice line for the panel, unless that file
+    already said the same (a relaunched panel does not announce it again).
+    """
+
+    def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
+                 sleep: Callable = time.sleep):
+        super().__init__(daemon=True)
+        self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
+        self.tailnet = tailnet or Tailnet()
+        self.api = PhoneApi(engine, home, state, prefs_path)
+        self.notices, self.lock = [], threading.Lock()
+        self.stopping = threading.Event()
+        self.server, self.node, self.recorded = None, None, None
+
+    def busy(self) -> bool:
+        return self.api.busy()
+
+    def take_notice(self) -> tuple | None:
+        """(line, seconds it stays up or None for until replaced), oldest first. A problem is said for a while; the address stays until another notice replaces it, since nobody may be attached when it first appears."""
+        with self.lock:
+            return self.notices.pop(0) if self.notices else None
+
+    def run(self) -> None:
+        while not self.stopping.is_set():
+            try:
+                self.tick()
+            except Exception:
+                pass
+            self.stopping.wait(self.interval)
+        self.stop_serving()
+
+    def stop(self) -> None:
+        self.stopping.set()
+
+    def tick(self) -> None:
+        node, problem = self.tailnet.node()
+        if node is None:
+            self.stop_serving()
+            self.record(None, problem)
+            return
+        if self.server is not None and node != self.node:
+            self.stop_serving()
+        if self.server is None:
+            self.bind(node)
+
+    def bind(self, node: Node) -> None:
+        server = None
+        for attempt in range(BIND_TRIES):
+            try:
+                server = PhoneServer((node.ip, self.port), Handler, node, self.tailnet, self.api)
+                break
+            except OSError:
+                if attempt + 1 < BIND_TRIES:
+                    self.sleep(BIND_WAIT_SECONDS)
+        if server is None:
+            self.record(None, BUSY)
+            return
+        self.server, self.node = server, node
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True).start()
+        self.record(f"http://{node.dns_name}:{server.server_address[1]}/", None)
+
+    def stop_serving(self) -> None:
+        server, self.server, self.node = self.server, None, None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+
+    def record(self, url: str | None, problem: str | None) -> None:
+        if (url, problem) == self.recorded:
+            return
+        self.recorded = (url, problem)
+        said = read_phone_file(self.state)
+        try:
+            self.state.mkdir(parents=True, exist_ok=True)
+            tmp = self.state / (PHONE_FILE + ".tmp")
+            tmp.write_text(json.dumps({"url": url, "problem": problem}), encoding="utf-8")
+            os.replace(tmp, self.state / PHONE_FILE)
+        except OSError:
+            pass
+        if (said.get("url"), said.get("problem")) == (url, problem):
+            return
+        with self.lock:
+            self.notices.append((f"Phone page: {url}", None) if url else (problem_line(problem, self.port), PROBLEM_NOTICE_SECONDS))

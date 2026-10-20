@@ -1961,6 +1961,7 @@ class App:
         self.whats_new = None
         self.whats_new_waits = False
         self.updater = Updater() if emx.ROOT and self.primary else None
+        self.phone = None
         self.on_disk = None
         self.majors_said = set()
         self.relaunched = {}
@@ -2148,6 +2149,21 @@ class App:
         self.check_open()
         self.time_whats_new()
         self.check_update()
+        self.check_phone()
+
+    def start_phone(self) -> None:
+        """The phone page is served from the primary panel only, so a workspace has one."""
+        if not self.primary:
+            return
+        from emx import phone
+
+        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file)
+        self.phone.start()
+
+    def check_phone(self) -> None:
+        notice = self.phone.take_notice() if self.phone is not None else None
+        if notice:
+            self.say(notice[0], seconds=notice[1])
 
     def tend_narrow(self, sidebar: Pane, slot: Pane) -> None:
         """On a phone the panel or the session takes the whole window, never both.
@@ -2277,7 +2293,8 @@ class App:
         """Whether something open in the panel, or a worker it started, would be lost to a switch onto a new version now."""
         held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view, self.routines_view,
                 self.starter, self.closer, self.renamer, self.namer, self.menu)
-        return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row()
+        phone_acting = self.phone is not None and self.phone.busy()
+        return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row() or phone_acting
 
     def check_update(self) -> None:
         """Announces a waiting major once, and once `current` has moved past this panel's code, starts the new code's relaunch at a quiet moment."""
@@ -4063,6 +4080,7 @@ class App:
         self.poller.start()
         if self.updater is not None:
             self.updater.start()
+        self.start_phone()
         while True:
             self.refresh()
             self.read_input()
