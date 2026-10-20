@@ -382,6 +382,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `test_the_stylesheet_has_no_colour_literal_of_its_own` holds the rule; the one allowed literal is the backdrop's `rgba(0, 0, 0, 0.55)`.
 
+### Every scrolling panel view records its extent and draws its own scroll bar
+
+1. **Rule**: a panel view that can be taller than its room records `self.extent = (total, height)` on every draw, rebuilds its rows one column narrower when `core.scroll_thumb(total, height, 0)` is not None, and ends with `draw_scroll_bar(...)`. The wheel clamps against the last frame's extent with `core.wheel_scroll`; the next draw clamps again.
+2. **Why**: the input handler has no layout of its own, and deciding the bar per frame never leaves a bar glyph under the rows (#82).
+3. **Minimal example**: `draw_routines` in `emx/sidebar.py`.
+4. **Gotcha**: a view that forgets to record its extent leaves it at `(0, 0)`, so the wheel silently does nothing there.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
