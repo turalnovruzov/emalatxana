@@ -41,3 +41,11 @@ Until 2.9.0 the workspace was one tmux session, `emx`, whose first window held t
 | `move-window` instead of `link-window` | Fewer windows in `emx` | A panel still running during the upgrade sees every session vanish | Rejected |
 | Viewer sessions with the mouse off, and the wheel bound to the session's own copy mode (the lead's first ruling) | The outer level keeps the mouse | Probed on 2026-10-18: a drag copied nothing and the wheel did not scroll the session's history, and `q` reached the session | Replaced by the mouse staying on one level down, which matched 2.9.0 on every item probed |
 | `set-clipboard on` | A viewer's copy reaches the terminal with no helper | Any program in a pane could write his laptop's clipboard | Rejected |
+
+## Amendment, 2026-10-20 (#84): set-clipboard on
+
+emx now sets `set-clipboard on` (2.15.1). Claude Code's own copies, which are not tmux copy mode, never reached his laptop through a nested emx. Tural, on #84: *"see what works. then implement what works. simple. dont implement untested stuff"*. Tested: a copy from a session viewed through a nested emx (a server's emx opened with `emx remote` inside the laptop's emx) reaches the terminal only when tmux has `set-clipboard on`; `allow-passthrough` added nothing and stays off. The `emx copied` and `copy-command` path stays for copy-mode copies from a viewer.
+
+The trade-off is accepted: any program in an emx pane, including one on a server shown through `emx remote`, can now write (not read) the terminal's clipboard. That is acceptable for a single-user tool whose panes are his own sessions.
+
+This supersedes the `set-clipboard` stays `external` clause in "Mouse and copy through a viewer" and the `set-clipboard on` row of the alternatives table (Rejected). Everything else in this record stands. Status stays Accepted.

@@ -585,10 +585,10 @@ class Tmux:
         """Have every copy made in copy mode also run `command` with the copied text on its stdin.
 
         A copy made inside a viewer is sent as the clipboard escape to the
-        viewer, not to his terminal, and the server ignores a pane's clipboard
-        escapes (`set-clipboard external`), so `command` hands it on to the
-        terminal showing that viewer. tmux runs it for every copy, so it must
-        do nothing for a copy made outside a viewer.
+        viewer, not to his terminal. With `set-clipboard on` tmux also
+        forwards a pane's own escape, but `command` is what hands a viewer's
+        copy-mode copy on to the terminal showing that viewer. tmux runs it
+        for every copy, so it must do nothing for a copy made outside a viewer.
         """
         self.run("set-option", "-s", "copy-command", command)
 

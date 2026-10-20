@@ -35,6 +35,8 @@ Your emx on the laptop itself is unchanged: Ctrl+V reaches Claude Code's own ima
 
 While you are connected through `emx remote`, anything running on the server as you can ask for the image on your laptop's clipboard; emx only types its path into the pane that asked.
 
+In the same way, anything running on the server as you can set your laptop's clipboard while `emx remote` is open; that is how copying from a server session reaches it.
+
 ## Notifications while connected
 
 The server's notifications reach your laptop, spoken or as emx's notification, in the mode set with `m` on the server's panel. Clicking one opens that session on the server's panel. While you are not connected nothing arrives; the Notifications list (`N`) keeps them. `h` on the server's panel also stops the laptop speaking.
