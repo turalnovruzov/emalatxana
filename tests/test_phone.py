@@ -544,7 +544,7 @@ class StateView(ApiCase):
         transcript = core.Transcript(latest="tool", tool="Bash: npm test", tool_at=1.0)
         with open(os.path.join(self.state, "summaries.json"), "w") as fh:
             json.dump({busy.id: {"text": "A Done line", "state": "done"}}, fh)
-        api = self.api(FakeEngine([busy]), transcripts=lambda: {busy.id: transcript})
+        api = self.api(FakeEngine([busy]), sources=phone.PanelSources(transcripts=lambda: {busy.id: transcript}))
         row = api.get("/api/state", "")[1]["groups"][0]["sessions"][0]
         self.assertEqual(row["detail"], core.session_summary(busy, transcript))
         self.assertIn("npm test", row["detail"])

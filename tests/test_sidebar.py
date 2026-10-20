@@ -7627,9 +7627,25 @@ class FollowerPanel(AppCase):
         with mock.patch.object(phone, "PhoneService") as service:
             primary.start_phone()
         service.assert_called_once()
-        self.assertEqual(service.call_args.kwargs["transcripts"], primary.poller.transcripts.snapshot)
+        sources = service.call_args.kwargs["sources"]
+        self.assertEqual(sources.transcripts, primary.poller.transcripts.snapshot)
+        self.assertEqual(sources.placements, primary.poller.resolver.snapshot)
+        self.assertEqual(sources.transcript_path, primary.poller.transcripts.path)
+        self.assertEqual(sources.claude, "claude")
+        first = sources.history()
+        primary.history = [core.Entry("a", core.NOTICE_DONE, "t", "x", 1.0)]
+        self.assertEqual((first, sources.history()), ([], primary.history))
         service.return_value.start.assert_called_once_with()
         self.assertIs(primary.phone, service.return_value)
+
+    def test_saving_prefs_holds_the_lock_the_phone_page_shares(self):
+        app = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        done = threading.Event()
+        worker = threading.Thread(target=lambda: (app.save_prefs(), done.set()), daemon=True)
+        with sidebar.PREFS_LOCK:
+            worker.start()
+            self.assertFalse(done.wait(0.3))
+        self.assertTrue(done.wait(5))
 
     def test_the_panel_waits_for_a_post_from_the_phone_before_an_update(self):
         app = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")

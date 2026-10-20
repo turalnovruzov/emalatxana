@@ -259,13 +259,24 @@ class RoutinesCache:
             self.answer, self.at = answer, self.clock()
 
 
+class PanelSources(NamedTuple):
+    """What the primary panel knows that the page shows too, read by callable; every field answers empty where there is no panel."""
+
+    transcripts: Callable = dict
+    placements: Callable = dict
+    transcript_path: Callable = lambda sid: None
+    history: Callable = list
+    major: Callable = lambda: None
+    claude: str = ""
+
+
 class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
     def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
-                 wait_running: Callable = sidebar.wait_until_running, transcripts: Callable = dict):
+                 wait_running: Callable = sidebar.wait_until_running, sources: PanelSources = PanelSources()):
         self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
-        self.transcripts = transcripts
+        self.sources = sources
         self.routines = RoutinesCache(read_routines)
         self.wait_running = wait_running
         self.action_lock = threading.Lock()
@@ -350,7 +361,7 @@ class PhoneApi:
             panes = self.engine.tmux.panes()
         except TmuxError:
             panes = []
-        summaries, transcripts, now_ms = self.summaries(), self.transcripts(), time.time() * 1000
+        summaries, transcripts, now_ms = self.summaries(), self.sources.transcripts(), time.time() * 1000
         by_folder = {}
         for s in sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0)):
             by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, transcripts, now_ms))
@@ -656,11 +667,11 @@ class PhoneService(threading.Thread):
     """
 
     def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
-                 sleep: Callable = time.sleep, transcripts: Callable | None = None):
+                 sleep: Callable = time.sleep, sources: PanelSources | None = None):
         super().__init__(daemon=True)
         self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
         self.tailnet = tailnet or Tailnet()
-        self.api = PhoneApi(engine, home, state, prefs_path, transcripts=transcripts or dict)
+        self.api = PhoneApi(engine, home, state, prefs_path, sources=sources or PanelSources())
         self.notices, self.lock = [], threading.Lock()
         self.stopping = threading.Event()
         self.server, self.node, self.recorded = None, None, None

@@ -2407,10 +2407,18 @@ def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
 
 def save_prefs(path: Path, prefs: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Per process: each view's panel saves, and two must not share one temporary file.
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(normalize_prefs(prefs), indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    # Per call: the panel's thread and the phone page's thread of one process save too, and no two may share a temporary file.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".prefs.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(normalize_prefs(prefs), indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def adjust_panel_width(prefs: dict, delta: int) -> dict:
@@ -2481,6 +2489,14 @@ def toggle_favourite(prefs: dict, folder: str) -> tuple[dict, bool]:
     if updated:
         new["favourite_folders"] = updated
     return new, on
+
+
+def favourite_hint(name: str, on: bool) -> str:
+    return f"★ {name} is a favourite" if on else f"{name} is no longer a favourite"
+
+
+def major_line(major: str) -> str:
+    return f"emx {major} available: run emx update"
 
 
 def opened_folder(cwd: str, placement: "Placement | None") -> str:
