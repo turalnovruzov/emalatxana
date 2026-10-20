@@ -129,6 +129,7 @@ CONFIRM_FOOTER = "^x to confirm"
 RENAME_FOOTER = "Tab suggest · Enter save · Esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
+FIND_NONE = "No session matches."
 FIND_HINT = "↑↓ move · Enter open · Esc clear"
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
@@ -2775,7 +2776,7 @@ class App:
         """Enter opens the session under the cursor, which typing keeps on the top match."""
         target = core.find_target(self.items(), self.cursor)
         if target is None:
-            self.say("No session matches.")
+            self.say(FIND_NONE)
             return
         blocked = core.open_blocked(self.starter is not None or self.awaiting_started_row(), target)
         if blocked:
@@ -3573,7 +3574,7 @@ class App:
             self.put(list_top + 2, 7, "n", curses.A_BOLD)
             self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
-            self.put(list_top, 1, "No session matches.", curses.A_DIM)
+            self.put(list_top, 1, FIND_NONE, curses.A_DIM)
         else:
             layout = self.list_layout(w, max(1, list_bottom - list_top))
             room = core.peek_room(h, w, len(bottom))

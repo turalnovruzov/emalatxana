@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import emx
 from emx import core, engine, phone, sidebar
 from emx.tmux import Pane, TmuxError
 
@@ -172,7 +173,7 @@ class WebAppFeel(ServerCase):
         self.assertGreaterEqual(int(re.search(r"font-size: (\d+)px", field).group(1)), 16)
         html, _ = self.page("/")
         controls = re.findall(r"<(?:input|textarea)\b[^>]*>", html)
-        self.assertEqual(len(controls), 4)
+        self.assertEqual(len(controls), 5)
         for control in controls:
             self.assertRegex(control, r'class="field[ "]')
 
@@ -552,7 +553,9 @@ class StateView(ApiCase):
     def test_the_look_carries_the_panels_frames_rate_arrows_and_closing_label(self):
         look = self.api(FakeEngine([])).get("/api/state", "")[1]["look"]
         self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
-                                "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL})
+                                "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL,
+                                "worktree_mark": core.WORKTREE_MARK, "find_none": "No session matches.",
+                                "open_gone": sidebar.OPEN_GONE})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")
@@ -582,6 +585,84 @@ class StateView(ApiCase):
                        sessions[1].id: {"text": "Stale line", "state": "done"}}, fh)
         rows = {r["name"]: r["detail"] for r in self.api(FakeEngine(sessions)).get("/api/state", "")[1]["groups"][0]["sessions"]}
         self.assertEqual(rows, {"a": "Fixed the rounding", "b": ""})
+
+
+class Grouping(ApiCase):
+    """The page groups, finds and labels as the panel does: its own core functions over the primary panel's placements."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo = self.path("Workspace", "emalatxana")
+        self.tree = self.path("Workspace", "emalatxana-67")
+        os.makedirs(self.tree)
+        self.plain = self.path("other", "place")
+        self.sessions = [
+            session("1", "in-repo", self.repo, "done", started=1000.0),
+            session("2", "in-tree", self.tree, "blocked", started=2000.0),
+            session("3", "plain", self.plain, "working", started=3000.0),
+        ]
+        self.placements = {
+            self.repo: core.Placement(self.repo), self.tree: core.Placement(self.repo, "feature/67"),
+            self.plain: core.Placement(self.plain),
+        }
+
+    def api(self, engine_=None, **kwargs):
+        kwargs.setdefault("sources", phone.PanelSources(placements=lambda: self.placements))
+        return super().api(engine_ or FakeEngine(self.sessions), **kwargs)
+
+    def snapshot(self, query=""):
+        return self.api().get("/api/state", query)[1]
+
+    def test_groups_are_the_panels_with_pinned_first(self):
+        with open(self.prefs, "w") as fh:
+            json.dump({"pinned": [self.sessions[2].id]}, fh)
+        panel = core.group_sessions(self.sessions, self.placements, core.PROJECT, frozenset({self.sessions[2].id}))
+        groups = self.snapshot()["groups"]
+        self.assertEqual([g["key"] for g in groups], [g.key for g in panel])
+        self.assertEqual(groups[0]["key"], core.PINNED)
+        self.assertEqual((groups[0]["label"], groups[0]["pinned"]), ("Pinned", True))
+        self.assertEqual([r["id"] for r in groups[0]["sessions"]], [self.sessions[2].id])
+        self.assertTrue(groups[0]["sessions"][0]["pinned"])
+        self.assertEqual([r["name"] for r in groups[1]["sessions"]], ["in-repo", "in-tree"])
+
+    def test_a_worktree_row_carries_its_branch_and_the_mark(self):
+        data = self.snapshot()
+        rows = {r["name"]: r for g in data["groups"] for r in g["sessions"]}
+        self.assertEqual(data["look"]["worktree_mark"], "⎇ ")
+        self.assertEqual((rows["in-tree"]["worktree"], rows["in-repo"]["worktree"], rows["plain"]["worktree"]), ("feature/67", "", ""))
+
+    def test_find_filters_as_the_panel_does(self):
+        everything = self.snapshot()
+        found = self.snapshot("find=emalatxana-6")
+        want = [s.id for s in core.find_matches(self.sessions, "emalatxana-6", self.home)]
+        self.assertEqual(sorted(r["id"] for g in found["groups"] for r in g["sessions"]), sorted(want))
+        self.assertEqual(len(want), 1)
+        self.assertTrue(found["finding"])
+        self.assertFalse(everything["finding"])
+        self.assertEqual(found["counts"], everything["counts"])
+
+    def test_a_find_that_matches_nothing_has_no_groups(self):
+        self.assertEqual(self.snapshot("find=zzz")["groups"], [])
+
+    def test_a_header_new_folder_is_default_folder(self):
+        with open(self.prefs, "w") as fh:
+            json.dump({"pinned": [self.sessions[2].id], "last_folder": self.tree}, fh)
+        by_key = {g["key"]: g for g in self.snapshot()["groups"]}
+        self.assertEqual(by_key[self.repo]["new_folder"], "~/Workspace/emalatxana")
+        self.assertEqual(by_key[core.PINNED]["new_folder"], "~/Workspace/emalatxana-67")
+        self.assertEqual({k: g["closable"] for k, g in by_key.items()}, {self.repo: True, core.PINNED: False})
+
+    def test_pinned_without_a_last_folder_has_no_new_folder(self):
+        with open(self.prefs, "w") as fh:
+            json.dump({"pinned": [self.sessions[2].id]}, fh)
+        pinned = self.snapshot()["groups"][0]
+        self.assertIsNone(pinned["new_folder"])
+
+    def test_the_snapshot_carries_the_unread_count_and_the_version(self):
+        history = [core.Entry("a", core.NOTICE_DONE, "t", "x", 1.0), core.Entry("b", core.NOTICE_DONE, "t", "x", 2.0, read=True)]
+        api = self.api(sources=phone.PanelSources(placements=lambda: self.placements, history=lambda: history))
+        data = api.get("/api/state", "")[1]
+        self.assertEqual((data["unread"], data["version"]), (1, emx.__version__))
 
 
 class RealListing(ApiCase):
@@ -672,6 +753,20 @@ class Folders(ApiCase):
         os.symlink("/etc", self.path("link"))
         self.assertFalse(phone.allowed_folder(self.path("link"), self.home, []))
         self.assertFalse(phone.allowed_folder(self.path("link", "ssl"), self.home, []))
+
+    def test_a_worktree_repo_root_is_allowed(self):
+        repo = os.path.join(self.dir, "elsewhere", "repo")
+        tree = os.path.join(self.dir, "elsewhere", "repo-tree")
+        os.makedirs(repo)
+        os.makedirs(tree)
+        placements = {tree: core.Placement(repo, "b")}
+        engine_ = FakeEngine([session("2", "t", tree, "done")])
+        api = self.api(engine_, sources=phone.PanelSources(placements=lambda: placements))
+        status, body = api.post("/api/new", {"folder": repo})
+        self.assertEqual((status, body["ok"]), (200, True))
+        self.assertEqual(engine_.started[-1][0], repo)
+        found = [f["path"] for f in api.get("/api/folders", "q=repo")[1]["folders"]]
+        self.assertIn(repo, found)
 
     def test_a_recent_folder_outside_home_is_offered_and_allowed(self):
         elsewhere = os.path.join(self.dir, "elsewhere", "proj-x")
@@ -860,7 +955,8 @@ class Routines(ApiCase):
 
     def test_an_error_from_the_reader_reaches_the_page(self):
         api = self.api(FakeEngine([]), read_routines=lambda now: (None, "systemd isn't here"))
-        self.assertEqual(api.get("/api/routines", "")[1], {"routines": [], "error": "systemd isn't here"})
+        self.assertEqual(api.get("/api/routines", "")[1], {
+            "routines": [], "error": "systemd isn't here", "title": sidebar.ROUTINES_TITLE, "none": sidebar.ROUTINES_NONE})
 
     def test_a_reader_that_raises_is_an_error_not_a_crash(self):
         def boom(now):
@@ -940,6 +1036,11 @@ class Page(ServerCase):
         self.assertIn("prefers-reduced-motion", js)
         css, _ = self.text("/app.css")
         self.assertIn("prefers-reduced-motion", css)
+
+    def test_the_script_holds_no_grouping_rule(self):
+        js, _ = self.text("/app.js")
+        self.assertNotIn(":pinned", js)
+        self.assertNotIn("Pinned", js)
 
     def test_the_pull_listens_without_passive_and_only_on_the_list(self):
         js, _ = self.text("/app.js")

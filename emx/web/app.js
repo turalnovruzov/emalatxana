@@ -6,6 +6,9 @@ const SUGGEST_DEBOUNCE_MS = 150;
 const TOAST_MS = 4000;
 const CONFIRM_MS = 2000;
 const FOLDED_KEY = "emx.collapsed";
+const VERSION_KEY = "emx.version";
+const MAJOR_KEY = "emx.major";
+const OFFERED_MAX = 10;
 const RESUMING = "resuming…";
 const PULL_ARM_PX = 60;
 const PULL_MAX_PX = 80;
@@ -26,6 +29,14 @@ let armTimer = null;
 let frameTimer = null;
 let frameTimerMs = 0;
 let folded = loadFolded();
+let findText = "";
+let findTimer = null;
+let loadedVersion = null;
+let folderSheet = null;
+let peekTimer = null;
+let noticesTimer = null;
+let updateSeen = null;
+let updateAsked = false;
 const closing = new Set();
 const resuming = new Set();
 
@@ -100,6 +111,22 @@ async function api(path, body) {
   }
 }
 
+function store(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    // No storage: this device asks again next time.
+  }
+}
+
+function stored(key) {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch (error) {
+    return "";
+  }
+}
+
 function toast(message) {
   const node = $("toast");
   node.textContent = message;
@@ -117,6 +144,10 @@ function findSession(id) {
   return null;
 }
 
+function findGroup(key) {
+  return data.groups.find((group) => group.key === key) || null;
+}
+
 function renderCounts() {
   const box = $("counts");
   clear(box);
@@ -127,7 +158,8 @@ function renderCounts() {
 }
 
 function renderFolder(group) {
-  const isFolded = folded.has(group.folder);
+  const isFolded = folded.has(group.key) && !data.finding;
+  const bar = el("div", "folder-bar");
   const header = el("button", "folder");
   header.type = "button";
   header.setAttribute("aria-expanded", String(!isFolded));
@@ -142,12 +174,21 @@ function renderFolder(group) {
   }
   header.append(path);
   if (isFolded) header.append(el("span", "muted count", String(group.sessions.length)));
-  header.addEventListener("click", () => toggleFolder(group.folder));
-  return header;
+  header.addEventListener("click", () => toggleFolder(group.key));
+  bar.append(header);
+  if (!group.pinned) {
+    const more = el("button", "more", "⋯");
+    more.type = "button";
+    more.setAttribute("aria-label", "More for " + group.label);
+    more.addEventListener("click", () => openFolderSheet(group.key));
+    bar.append(more);
+  }
+  return bar;
 }
 
-function toggleFolder(folder) {
-  if (!folded.delete(folder)) folded.add(folder);
+function toggleFolder(key) {
+  if (data.finding) return;
+  if (!folded.delete(key)) folded.add(key);
   saveFolded();
   renderList();
 }
@@ -167,7 +208,10 @@ function renderRow(session) {
     main.addEventListener("click", () => (session.running ? openSheet(session.id) : resume(session.id)));
   }
   const text = el("span", "text");
-  text.append(el("b", "name", session.name));
+  const names = el("span", "nameline");
+  names.append(el("b", "name", session.name));
+  if (session.worktree) names.append(el("span", "branch tone-path", data.look.worktree_mark + session.worktree));
+  text.append(names);
   const line = statusLine(session, linked);
   if (line) text.append(line);
   const spinning = session.spin && data.look && !reducedMotion();
@@ -199,6 +243,16 @@ function statusLine(session, linked) {
   return line;
 }
 
+function bottomRow(label, count, open) {
+  const row = el("button", "routines-row");
+  row.type = "button";
+  row.append(label);
+  if (count) row.append(" ", el("span", "tone-accent", String(count)));
+  row.append(" ›");
+  row.addEventListener("click", open);
+  return row;
+}
+
 function renderList() {
   const list = $("list");
   clear(list);
@@ -206,16 +260,16 @@ function renderList() {
     list.append(el("p", "empty", data.error));
     return;
   }
-  if (!data.groups.length) list.append(el("p", "empty", "No sessions yet. Tap + New."));
+  if (!data.groups.length) {
+    list.append(el("p", "empty", data.finding ? data.look.find_none : "No sessions yet. Tap + New."));
+  }
   for (const group of data.groups) {
     list.append(renderFolder(group));
-    if (folded.has(group.folder)) continue;
+    if (folded.has(group.key) && !data.finding) continue;
     for (const session of group.sessions) list.append(renderRow(session));
   }
-  const routines = el("button", "routines-row", "Routines ›");
-  routines.type = "button";
-  routines.addEventListener("click", openRoutines);
-  list.append(routines);
+  list.append(bottomRow("Notifications", data.unread, openNotices));
+  list.append(bottomRow("Routines", 0, openRoutines));
 }
 
 function render() {
@@ -223,6 +277,7 @@ function render() {
   renderList();
   syncFrameTimer();
   if (sheet && !findSession(sheet.id)) closeSheet();
+  if (folderSheet && !findGroup(folderSheet.key)) closeFolderSheet();
 }
 
 // Pull down at the top of the list: the indicator follows the finger at half speed, arms past PULL_ARM_PX, and holds while the state is fetched again.
@@ -283,12 +338,13 @@ async function onPullEnd() {
 async function poll() {
   if (document.visibilityState !== "visible") return;
   const seq = ++pollSeq;
-  const answer = await api("/api/state");
+  const answer = await api("/api/state" + (findText ? "?find=" + encodeURIComponent(findText) : ""));
   if (seq !== pollSeq) return;
   $("offline").hidden = answer !== null;
   if (answer === null || !Array.isArray(answer.counts)) return;
   data = answer;
   render();
+  noteVersion(answer.version);
 }
 
 function startPolling() {
@@ -312,11 +368,19 @@ function openSheet(id) {
   open.hidden = !linked;
   if (linked) open.href = session.link;
   $("sheet-resume").hidden = session.running;
+  $("sheet-pin").textContent = session.pinned ? "Unpin" : "Pin to top";
   $("sheet-close").textContent = "Close session";
-  $("sheet-menu").hidden = false;
-  $("sheet-edit").hidden = true;
+  showSheetPart("sheet-menu");
   $("sheet-layer").hidden = false;
   $("sheet-close").focus({ preventScroll: true });
+}
+
+function showSheetPart(id) {
+  for (const part of ["sheet-menu", "sheet-edit", "sheet-peekview"]) $(part).hidden = part !== id;
+  if (id !== "sheet-peekview") {
+    clearInterval(peekTimer);
+    peekTimer = null;
+  }
 }
 
 function disarmClose() {
@@ -328,6 +392,8 @@ function disarmClose() {
 function closeSheet() {
   disarmClose();
   sheet = null;
+  clearInterval(peekTimer);
+  peekTimer = null;
   $("sheet-layer").hidden = true;
 }
 
@@ -336,8 +402,8 @@ function startRename() {
   if (!found) return;
   disarmClose();
   $("rename-field").value = found.session.name;
-  $("sheet-menu").hidden = true;
-  $("sheet-edit").hidden = false;
+  sheet.offered = [];
+  showSheetPart("sheet-edit");
   $("rename-field").focus();
   $("rename-field").select();
 }
@@ -354,6 +420,64 @@ async function saveRename(event) {
   toast(answer ? answer.message : "emx didn't answer.");
   if (answer && answer.ok) closeSheet();
   poll();
+}
+
+async function loadPeek() {
+  if (!sheet) return;
+  const id = sheet.id;
+  const answer = await api("/api/peek?id=" + encodeURIComponent(id));
+  if (!sheet || sheet.id !== id || $("sheet-peekview").hidden) return;
+  const title = $("peek-title");
+  const box = $("peek-lines");
+  clear(box);
+  if (!answer || !answer.ok) {
+    title.textContent = "";
+    box.append(el("p", "muted", answer ? answer.message : "Can't reach emx"));
+    return;
+  }
+  title.textContent = answer.title;
+  title.className = "tone-" + answer.tone;
+  for (const line of answer.lines) {
+    box.append(el("div", "peek-line tone-" + line.tone + (line.code ? " code" : "") + (line.dim ? " dim" : ""), line.text));
+  }
+}
+
+function startPeek() {
+  if (!sheet) return;
+  disarmClose();
+  showSheetPart("sheet-peekview");
+  $("peek-title").textContent = "";
+  clear($("peek-lines"));
+  loadPeek();
+  peekTimer = setInterval(loadPeek, POLL_MS);
+}
+
+async function pinFromSheet() {
+  if (!sheet) return;
+  const id = sheet.id;
+  const answer = await api("/api/pin", { id });
+  toast(answer ? answer.message : "emx didn't answer.");
+  closeSheet();
+  poll();
+}
+
+async function suggestName() {
+  if (!sheet) return;
+  const id = sheet.id;
+  const button = $("rename-suggest");
+  button.disabled = true;
+  const label = button.textContent;
+  button.textContent = "Asking Haiku…";
+  const answer = await api("/api/suggest-name", { id, offered: sheet.offered });
+  button.disabled = false;
+  button.textContent = label;
+  if (!sheet || sheet.id !== id) return;
+  if (answer && answer.ok) {
+    $("rename-field").value = answer.name;
+    sheet.offered = sheet.offered.concat([answer.name]).slice(-OFFERED_MAX);
+  } else {
+    toast(answer ? answer.message : "emx didn't answer.");
+  }
 }
 
 async function closeSession() {
@@ -405,6 +529,7 @@ function renderSuggestions(folders) {
   clear(box);
   box.hidden = folders.length === 0;
   for (const folder of folders) {
+    const row = el("div", "suggestion-row");
     const button = el("button", "suggestion");
     button.type = "button";
     button.append(el("b", "", folder.base), el("span", "path", folder.shown));
@@ -413,8 +538,20 @@ function renderSuggestions(folders) {
       box.hidden = true;
       clear(box);
     });
-    box.append(button);
+    const star = el("button", "star " + (folder.favourite ? "tone-accent" : "tone-muted"), glyphText(folder.favourite ? "★" : "☆"));
+    star.type = "button";
+    star.setAttribute("aria-label", (folder.favourite ? "Unstar " : "Star ") + folder.shown);
+    star.setAttribute("aria-pressed", String(folder.favourite));
+    star.addEventListener("click", () => toggleStar(folder.path));
+    row.append(button, star);
+    box.append(row);
   }
+}
+
+async function toggleStar(path) {
+  const answer = await api("/api/favourite", { folder: path });
+  toast(answer ? answer.message : "emx didn't answer.");
+  suggest();
 }
 
 async function suggest() {
@@ -424,9 +561,9 @@ async function suggest() {
   renderSuggestions(answer.folders || []);
 }
 
-function openNew() {
+function openNew(folder) {
   $("new-layer").hidden = false;
-  $("new-folder").value = "";
+  $("new-folder").value = typeof folder === "string" ? folder : "";
   $("new-name").value = "";
   $("new-message").value = "";
   suggest();
@@ -452,12 +589,170 @@ async function startSession() {
   selectedId = answer.id;
   await poll();
   const started = findSession(answer.id);
-  if (started && folded.delete(started.group.folder)) {
+  if (started && folded.delete(started.group.key)) {
     saveFolded();
     renderList();
   }
   const row = document.querySelector('.row[data-id="' + answer.id + '"]');
   if (row) row.scrollIntoView({ block: "center" });
+}
+
+function openFolderSheet(key) {
+  const group = findGroup(key);
+  if (!group) return;
+  folderSheet = { key, armed: false, sent: null };
+  $("folder-name").textContent = group.label;
+  $("folder-count").textContent = group.sessions.length + (group.sessions.length === 1 ? " session" : " sessions");
+  $("folder-new").hidden = !group.new_folder;
+  $("folder-close").hidden = !group.closable;
+  $("folder-close").disabled = false;
+  $("folder-close").textContent = closeFolderLabel(group, false);
+  $("folder-layer").hidden = false;
+  $("folder-close").focus({ preventScroll: true });
+}
+
+function closeFolderLabel(group, armed) {
+  const count = group.sessions.length;
+  const what = count + (count === 1 ? " session" : " sessions");
+  return (armed ? "Tap again to close " : "Close ") + what;
+}
+
+function disarmFolder() {
+  clearTimeout(armTimer);
+  if (!folderSheet) return;
+  folderSheet.armed = false;
+  folderSheet.sent = null;
+  const group = findGroup(folderSheet.key);
+  if (group) $("folder-close").textContent = closeFolderLabel(group, false);
+}
+
+function closeFolderSheet() {
+  disarmFolder();
+  folderSheet = null;
+  $("folder-layer").hidden = true;
+}
+
+function newInFolder() {
+  const group = folderSheet && findGroup(folderSheet.key);
+  if (!group || !group.new_folder) return;
+  const folder = group.new_folder;
+  closeFolderSheet();
+  openNew(folder);
+}
+
+async function closeFolder() {
+  const group = folderSheet && findGroup(folderSheet.key);
+  if (!group) return;
+  const button = $("folder-close");
+  if (!folderSheet.armed) {
+    folderSheet.armed = true;
+    folderSheet.sent = group.sessions.map((session) => ({ id: session.id, running: session.running }));
+    button.textContent = closeFolderLabel(group, true);
+    armTimer = setTimeout(disarmFolder, CONFIRM_MS);
+    return;
+  }
+  clearTimeout(armTimer);
+  const sent = folderSheet.sent;
+  button.disabled = true;
+  for (const entry of sent) closing.add(entry.id);
+  render();
+  const answer = await api("/api/close-group", { key: group.key, find: findText, sessions: sent });
+  for (const entry of sent) closing.delete(entry.id);
+  toast(answer ? answer.message : "emx didn't answer.");
+  closeFolderSheet();
+  render();
+  poll();
+}
+
+function onFindInput() {
+  const text = $("find").value.trim();
+  $("find-clear").hidden = $("find").value === "";
+  clearTimeout(findTimer);
+  findTimer = setTimeout(() => {
+    findText = text;
+    poll();
+  }, SUGGEST_DEBOUNCE_MS);
+}
+
+function clearFind() {
+  $("find").value = "";
+  onFindInput();
+  $("find").focus();
+}
+
+function openScreen(id) {
+  $(id).hidden = false;
+}
+
+function noticeRow(entry) {
+  const found = findSession(entry.id);
+  const linked = found && found.session.link && APP_LINK.test(found.session.link);
+  let row;
+  if (linked) {
+    row = el("a", "notice");
+    row.href = found.session.link;
+    row.target = "_blank";
+    row.rel = "noopener";
+    row.addEventListener("click", closeNotices);
+  } else {
+    row = el("button", "notice");
+    row.type = "button";
+    row.addEventListener("click", () => openFromNotice(entry));
+  }
+  const tone = entry.read ? "muted" : entry.tone;
+  const head = el("span", "notice-head");
+  head.append(el("b", "tone-" + tone, glyphText(entry.mark) + " " + entry.title), el("span", "age muted", entry.age));
+  row.append(head, el("span", "notice-text" + (entry.read ? " muted" : ""), entry.text));
+  return row;
+}
+
+function openFromNotice(entry) {
+  const found = findSession(entry.id);
+  if (!entry.listed || !found) {
+    toast(data.look ? data.look.open_gone : "That session isn't listed any more.");
+    return;
+  }
+  closeNotices();
+  if (found.session.running) openSheet(entry.id);
+  else resume(entry.id);
+}
+
+async function loadNotices() {
+  const answer = await api("/api/notifications");
+  const box = $("notices-list");
+  clear(box);
+  if (!answer) {
+    box.append(el("p", "empty", "Can't reach emx"));
+    return;
+  }
+  $("notices-title").textContent = answer.title;
+  if (!answer.entries.length) box.append(el("p", "empty", answer.empty));
+  for (const entry of answer.entries) box.append(noticeRow(entry));
+}
+
+function openNotices() {
+  openScreen("notices-layer");
+  loadNotices();
+  clearInterval(noticesTimer);
+  noticesTimer = setInterval(loadNotices, POLL_MS);
+}
+
+function closeNotices() {
+  $("notices-layer").hidden = true;
+  clearInterval(noticesTimer);
+}
+
+function openRoutineSheet(routine) {
+  $("routine-name").textContent = routine.name;
+  const tag = $("routine-tag");
+  tag.textContent = routine.tag;
+  tag.className = "tone-" + routine.tone;
+  const box = $("routine-lines");
+  clear(box);
+  if (routine.error) box.append(el("div", "tone-error", routine.error));
+  for (const run of routine.runs) box.append(el("div", "", run));
+  if (routine.next) box.append(el("div", "small muted", routine.next));
+  $("routine-layer").hidden = false;
 }
 
 function renderRoutines(answer) {
@@ -467,16 +762,18 @@ function renderRoutines(answer) {
     box.append(el("p", "empty", "Can't reach emx"));
     return;
   }
+  $("routines-title").textContent = answer.title;
   if (answer.error) box.append(el("p", "empty tone-error", answer.error));
-  if (!answer.routines.length && !answer.error) box.append(el("p", "empty", "No routines."));
+  if (!answer.routines.length && !answer.error) box.append(el("p", "empty", answer.none));
   for (const routine of answer.routines) {
-    const item = el("div", "routine");
-    const head = el("div", "head");
+    const item = el("button", "routine");
+    item.type = "button";
+    const head = el("span", "head");
     head.append(el("b", "", routine.name), el("span", "tone-" + routine.tone, routine.tag));
     item.append(head);
-    if (routine.error) item.append(el("div", "error", routine.error));
-    if (routine.runs.length) item.append(el("div", "runs", routine.runs.join("   ")));
-    if (routine.next) item.append(el("div", "next", routine.next));
+    const latest = routine.runs.length ? routine.runs[0] + (routine.next ? "   " + routine.next : "") : routine.next;
+    if (latest) item.append(el("span", "next", latest));
+    item.addEventListener("click", () => openRoutineSheet(routine));
     box.append(item);
   }
 }
@@ -486,7 +783,7 @@ async function loadRoutines() {
 }
 
 function openRoutines() {
-  $("routines-layer").hidden = false;
+  openScreen("routines-layer");
   loadRoutines();
   clearInterval(routinesTimer);
   routinesTimer = setInterval(loadRoutines, ROUTINES_MS);
@@ -494,7 +791,48 @@ function openRoutines() {
 
 function closeRoutines() {
   $("routines-layer").hidden = true;
+  $("routine-layer").hidden = true;
   clearInterval(routinesTimer);
+}
+
+// A new version: reload once so a home-screen app runs the new script, then say what changed since this device last saw emx.
+function noteVersion(version) {
+  if (typeof version !== "string") return;
+  if (loadedVersion === null) loadedVersion = version;
+  else if (version !== loadedVersion) location.reload();
+  if (!updateAsked) {
+    updateAsked = true;
+    askUpdate();
+  }
+}
+
+async function askUpdate() {
+  const answer = await api("/api/whats-new?since=" + encodeURIComponent(stored(VERSION_KEY)));
+  if (!answer || !answer.ok) {
+    updateAsked = false;
+    return;
+  }
+  const major = answer.major && stored(MAJOR_KEY) !== answer.major ? answer : null;
+  if (!answer.show && !major) {
+    if (answer.record) store(VERSION_KEY, answer.version);
+    return;
+  }
+  updateSeen = answer;
+  $("update-heading").textContent = answer.show ? answer.heading : answer.major_line;
+  const box = $("update-text");
+  clear(box);
+  if (answer.show) box.append(el("div", "", answer.text));
+  if (major && answer.show) box.append(el("div", "tone-needs", answer.major_line));
+  $("update-layer").hidden = false;
+}
+
+function dismissUpdate() {
+  if (updateSeen) {
+    store(VERSION_KEY, updateSeen.version);
+    if (updateSeen.major) store(MAJOR_KEY, updateSeen.major);
+  }
+  updateSeen = null;
+  $("update-layer").hidden = true;
 }
 
 $("list").addEventListener("touchstart", onPullStart, { passive: true });
@@ -503,7 +841,7 @@ $("list").addEventListener("touchend", onPullEnd);
 $("list").addEventListener("touchcancel", onPullEnd);
 $("sheet-resume").addEventListener("click", resumeFromSheet);
 window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", () => { frameTimerMs = -1; render(); });
-$("open-new").addEventListener("click", openNew);
+$("open-new").addEventListener("click", () => openNew());
 $("new-cancel").addEventListener("click", closeNew);
 $("new-start").addEventListener("click", startSession);
 $("new-folder").addEventListener("input", () => {
@@ -513,12 +851,34 @@ $("new-folder").addEventListener("input", () => {
 $("sheet-backdrop").addEventListener("click", closeSheet);
 $("sheet-grab").addEventListener("click", closeSheet);
 $("sheet-rename").addEventListener("click", startRename);
-$("rename-back").addEventListener("click", () => { disarmClose(); $("sheet-edit").hidden = true; $("sheet-menu").hidden = false; });
+$("rename-back").addEventListener("click", () => { disarmClose(); showSheetPart("sheet-menu"); });
+$("peek-back").addEventListener("click", () => showSheetPart("sheet-menu"));
+$("sheet-peek").addEventListener("click", startPeek);
+$("sheet-pin").addEventListener("click", pinFromSheet);
+$("rename-suggest").addEventListener("click", suggestName);
 $("sheet-edit").addEventListener("submit", saveRename);
 $("sheet-close").addEventListener("click", closeSession);
 $("routines-back").addEventListener("click", closeRoutines);
+$("notices-back").addEventListener("click", closeNotices);
+$("find").addEventListener("input", onFindInput);
+$("find").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") $("find").blur();
+});
+$("find-clear").addEventListener("click", clearFind);
+$("find-clear").textContent = glyphText("✕");
+$("folder-backdrop").addEventListener("click", closeFolderSheet);
+$("folder-grab").addEventListener("click", closeFolderSheet);
+$("folder-new").addEventListener("click", newInFolder);
+$("folder-close").addEventListener("click", closeFolder);
+$("routine-backdrop").addEventListener("click", () => { $("routine-layer").hidden = true; });
+$("routine-grab").addEventListener("click", () => { $("routine-layer").hidden = true; });
+$("update-backdrop").addEventListener("click", dismissUpdate);
+$("update-grab").addEventListener("click", dismissUpdate);
+$("update-ok").addEventListener("click", dismissUpdate);
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && sheet) closeSheet();
+  if (event.key !== "Escape") return;
+  if (sheet) closeSheet();
+  else if (folderSheet) closeFolderSheet();
 });
 document.addEventListener("visibilitychange", () => { syncFrameTimer(); poll(); });
 // iOS Safari ignores user-scalable=no in a tab, so pinch is stopped here.
