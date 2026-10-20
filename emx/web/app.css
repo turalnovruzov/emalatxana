@@ -25,7 +25,8 @@ b { font-weight: 600; }
 }
 .brand { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; min-width: 0; flex: 1 1 0; }
 .mark { color: var(--copper); }
-.counts { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.counts { font-size: 13px; color: var(--muted); }
+.counts span { white-space: nowrap; }
 .button {
   flex-shrink: 0; white-space: nowrap;
   min-height: 44px; min-width: 44px; padding: 0 14px;

@@ -728,8 +728,12 @@ class Page(ServerCase):
 
     def test_the_new_button_never_shrinks_and_the_brand_wraps(self):
         css, _ = self.text("/app.css")
-        self.assertRegex(css, r"\.button \{[^}]*flex-shrink: 0; white-space: nowrap;")
-        self.assertRegex(css, r"\.brand \{[^}]*flex-wrap: wrap;")
+        rule = lambda selector: re.search(re.escape(selector) + r" \{([^}]*)\}", css).group(1)
+        for declaration in ("flex-shrink: 0", "white-space: nowrap"):
+            self.assertIn(declaration, rule(".button"))
+        self.assertIn("flex-wrap: wrap", rule(".brand"))
+        self.assertNotIn("white-space", rule(".counts"))
+        self.assertIn("white-space: nowrap", rule(".counts span"))
 
     def test_the_script_never_writes_html_and_the_inputs_turn_off_ios_capitals(self):
         js, _ = self.text("/app.js")
