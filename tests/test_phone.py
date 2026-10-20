@@ -1037,6 +1037,14 @@ class Page(ServerCase):
         css, _ = self.text("/app.css")
         self.assertIn("prefers-reduced-motion", css)
 
+    def test_the_new_controls_are_at_least_44px_and_stars_are_text_glyphs(self):
+        css, _ = self.text("/app.css")
+        js, _ = self.text("/app.js")
+        for selector in (r"\.star", r"\.folder-bar \.more", r"\.findbar \.plain-button"):
+            rule = re.search(selector + r" \{([^}]*)\}", css).group(1)
+            self.assertRegex(rule, r"(?:min-)?(?:width|height): 44px")
+        self.assertRegex(js, r'glyphText\(folder\.favourite \? "★" : "☆"\)')
+
     def test_the_script_holds_no_grouping_rule(self):
         js, _ = self.text("/app.js")
         self.assertNotIn(":pinned", js)
@@ -1234,6 +1242,391 @@ class Port(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(phone.phone_port({"EMX_PHONE_PORT": value}), want)
         self.assertEqual(phone.phone_port({}), 8787)
+
+
+class Peek(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.folder = self.path("Workspace", "emalatxana")
+        self.done = session("1", "alpha", self.folder, "done")
+
+    def peek(self, sid, transcripts=None, sessions=None):
+        sources = phone.PanelSources(transcripts=lambda: transcripts or {})
+        api = self.api(FakeEngine(sessions if sessions is not None else [self.done]), sources=sources)
+        return api.get("/api/peek", "id=" + sid)
+
+    def test_peek_is_peek_content(self):
+        transcript = core.Transcript(reply="All done, the tests pass.", answered=True, reply_at=time.time() * 1000 - 120000)
+        status, body = self.peek(self.done.id, {self.done.id: transcript})
+        want = core.peek_content(self.done, transcript, time.time() * 1000)
+        self.assertEqual(status, 200)
+        self.assertEqual((body["ok"], body["title"]), (True, want.title))
+        self.assertEqual([l["text"] for l in body["lines"]], [text for text, _ in want.lines])
+        self.assertEqual([l["tone"] for l in body["lines"]], [sidebar.PEEK_TONES[style] for _, style in want.lines])
+
+    def test_a_code_line_is_flagged_for_the_page(self):
+        waiting = session("2", "asking", self.folder, "blocked")
+        transcript = core.Transcript(latest="tool", pending=True, tool="Bash: npm test", tool_lines=("Run the tests?", "npm test"),
+                                     tool_about="Run the tests?", tool_at=1.0)
+        body = self.peek(waiting.id, {waiting.id: transcript}, [waiting])[1]
+        self.assertEqual([(l["text"], l["code"]) for l in body["lines"][:2]], [("Run the tests?", False), ("npm test", True)])
+
+    def test_peek_text_is_capped(self):
+        transcript = core.Transcript(reply="x" * 10000, answered=True, reply_at=1.0)
+        (line,) = self.peek(self.done.id, {self.done.id: transcript})[1]["lines"]
+        self.assertEqual(len(line["text"]), 4000)
+        self.assertTrue(line["text"].endswith("…"))
+
+    def test_peek_needs_a_session_id_and_a_listed_session(self):
+        self.assertEqual(self.peek("not-an-id")[0], 400)
+        self.assertEqual(self.peek("")[0], 400)
+        status, body = self.peek("b" * 8 + "-bbbb-4bbb-8bbb-" + "b" * 12)
+        self.assertEqual((status, body), (200, {"ok": False, "message": sidebar.OPEN_GONE}))
+
+
+class Pins(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.target = session("1", "alpha", self.path("Workspace", "emalatxana"), "done")
+        self.engine = FakeEngine([self.target])
+
+    def post(self, body):
+        return self.api(self.engine).post("/api/pin", body)
+
+    def test_pin_toggles_the_panels_pref_and_keeps_other_prefs(self):
+        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left", "favourite_folders": ["/a"]})
+        status, body = self.post({"id": self.target.id})
+        saved = core.load_prefs(Path(self.prefs))
+        self.assertEqual((status, body["ok"], body["pinned"], body["message"]), (200, True, True, "Pinned alpha."))
+        self.assertEqual((saved["pinned"], saved["side"], saved["favourite_folders"]), ([self.target.id], "left", ["/a"]))
+        body = self.post({"id": self.target.id})[1]
+        saved = core.load_prefs(Path(self.prefs))
+        self.assertEqual((body["pinned"], body["message"], saved.get("pinned", [])), (False, "Unpinned alpha.", []))
+        self.assertEqual((saved["side"], saved["favourite_folders"]), ("left", ["/a"]))
+
+    def test_pin_of_an_unlisted_session_writes_nothing(self):
+        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left"})
+        before = Path(self.prefs).read_bytes()
+        body = self.post({"id": "b" * 8 + "-bbbb-4bbb-8bbb-" + "b" * 12})[1]
+        self.assertEqual((body["ok"], body["message"]), (False, sidebar.OPEN_GONE))
+        self.assertEqual(Path(self.prefs).read_bytes(), before)
+        self.assertEqual(self.post({"id": "nope"})[0], 400)
+        self.assertEqual(Path(self.prefs).read_bytes(), before)
+
+
+class Names(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.target = session("1", "alpha", self.path("Workspace", "emalatxana"), "done")
+        self.engine = FakeEngine([self.target])
+        self.made = []
+
+    def namer(self, answer=("Fresh name", None, None), wait=None):
+        made = self.made
+
+        class Stub:
+            def __init__(self, claude, path, sid, current, unnamed, offered):
+                made.append((claude, path, sid, current, unnamed, offered))
+
+            def ask(self):
+                if wait:
+                    wait()
+                return answer
+
+        return Stub
+
+    def api(self, namer=None, **kwargs):
+        sources = phone.PanelSources(transcript_path=lambda sid: "/t/" + sid[:8], claude="claude")
+        return super().api(self.engine, namer=namer or self.namer(), sources=sources, **kwargs)
+
+    def test_suggest_name_goes_through_the_namer_with_what_the_page_offered(self):
+        status, body = self.api().post("/api/suggest-name", {"id": self.target.id, "offered": ["One", "Two"]})
+        self.assertEqual((status, body), (200, {"ok": True, "name": "Fresh name"}))
+        self.assertEqual(self.made, [("claude", "/t/11111111", self.target.id, "alpha", core.unnamed(self.target), ["One", "Two"])])
+        self.assertEqual(self.engine.tmux.writes, [])
+
+    def test_a_namer_failure_is_a_message_worded_for_the_page(self):
+        api = self.api(self.namer((None, sidebar.NAME_UNFIT, None)))
+        body = api.post("/api/suggest-name", {"id": self.target.id, "offered": []})[1]
+        self.assertEqual((body["ok"], body["message"]), (False, "Haiku's name didn't fit; tap Suggest for another."))
+        api = self.api(self.namer((None, sidebar.NAME_NO_REQUESTS, None)))
+        self.assertEqual(api.post("/api/suggest-name", {"id": self.target.id, "offered": []})[1]["message"], sidebar.NAME_NO_REQUESTS)
+
+    def test_suggest_name_refuses_a_bad_offered_list(self):
+        api = self.api()
+        for offered in (["x"] * 11, [1], "name", None, ["y" * 201]):
+            with self.subTest(offered=offered):
+                self.assertEqual(api.post("/api/suggest-name", {"id": self.target.id, "offered": offered})[0], 400)
+        self.assertEqual(api.post("/api/suggest-name", {"id": "bad", "offered": []})[0], 400)
+        self.assertEqual(self.made, [])
+
+    def test_suggest_name_of_an_unlisted_session_asks_nothing(self):
+        body = self.api().post("/api/suggest-name", {"id": "b" * 8 + "-bbbb-4bbb-8bbb-" + "b" * 12, "offered": []})[1]
+        self.assertEqual(body["message"], sidebar.OPEN_GONE)
+        self.assertEqual(self.made, [])
+
+    def test_suggest_name_does_not_hold_the_action_lock(self):
+        other = session("2", "beta", self.path("Workspace", "emalatxana"), "done", running=False)
+        self.engine.sessions = [self.target, other]
+        release, started = threading.Event(), threading.Event()
+
+        def wait():
+            started.set()
+            release.wait(5)
+
+        api = self.api(self.namer(wait=wait))
+        api.closer = lambda eng, targets, clear_dead_panes: mock.Mock(attempt=lambda finished: (True, "ok", {}))
+        thread = threading.Thread(target=api.post, args=("/api/suggest-name", {"id": self.target.id, "offered": []}), daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(5))
+        self.assertTrue(api.busy())
+        done = []
+        closer = threading.Thread(target=lambda: done.append(api.post("/api/rename", {"id": other.id, "name": other.name})), daemon=True)
+        closer.start()
+        closer.join(3)
+        self.assertEqual(len(done), 1)
+        busy = api.post("/api/suggest-name", {"id": self.target.id, "offered": []})[1]
+        self.assertEqual(busy["message"], "Still finishing an earlier Haiku call; tap Suggest again in a moment.")
+        release.set()
+        thread.join(5)
+        self.assertFalse(api.busy())
+
+
+class Folder(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.folder = self.path("Workspace", "emalatxana")
+        self.sessions = [
+            session("1", "alpha", self.folder, "done", running=False, started=1000.0),
+            session("2", "beta", self.folder, "working", started=2000.0),
+            session("3", "gamma", self.path("other", "place"), "done", started=3000.0),
+        ]
+        self.engine = FakeEngine(self.sessions)
+        self.closed = []
+
+    def closer(self, ok=True):
+        closed = self.closed
+
+        class Stub:
+            def __init__(self, engine_, targets, wait_for=(), panel="", clear_dead_panes=False):
+                closed.append((list(targets), clear_dead_panes))
+                self.targets = targets
+
+            def attempt(self, finished):
+                return ok, "Closed them.", {t.id: ok for t in self.targets}
+
+        return Stub
+
+    def api(self, **kwargs):
+        return super().api(self.engine, closer=self.closer(), **kwargs)
+
+    def body(self, sessions=None, **over):
+        sent = sessions if sessions is not None else [{"id": s.id, "running": s.running} for s in self.sessions[:2]]
+        return {"key": self.folder, "find": "", "sessions": sent, **over}
+
+    def test_close_group_closes_what_the_page_showed_through_the_closer(self):
+        status, body = self.api().post("/api/close-group", self.body())
+        self.assertEqual((status, body), (200, {"ok": True, "message": "Closed them."}))
+        ((targets, clear),) = self.closed
+        self.assertEqual([(t.id, t.name, t.running) for t in targets], [(s.id, s.name, s.running) for s in self.sessions[:2]])
+        self.assertTrue(clear)
+
+    def test_close_group_refuses_pinned_a_changed_set_and_a_changed_running_state(self):
+        api = self.api()
+        pinned = api.post("/api/close-group", self.body(key=core.PINNED))[1]
+        self.assertEqual((pinned["ok"], pinned["message"]), (False, "Pinned can't be closed as a folder; close its sessions one at a time."))
+        added = self.sessions + [session("4", "delta", self.folder, "done", started=4000.0)]
+        self.engine.sessions = added
+        self.assertEqual(api.post("/api/close-group", self.body())[1]["message"], "That folder changed; look again.")
+        self.engine.sessions = self.sessions[1:]
+        self.assertEqual(api.post("/api/close-group", self.body())[1]["message"], "That folder changed; look again.")
+        self.engine.sessions = self.sessions
+        flipped = [{"id": self.sessions[0].id, "running": True}, {"id": self.sessions[1].id, "running": True}]
+        self.assertFalse(api.post("/api/close-group", self.body(flipped))[1]["ok"])
+        self.assertFalse(api.post("/api/close-group", self.body(key=self.path("nowhere")))[1]["ok"])
+        self.assertEqual(self.closed, [])
+
+    def test_close_group_with_find_closes_only_the_matching_rows(self):
+        api = self.api()
+        only_alpha = [{"id": self.sessions[0].id, "running": False}]
+        self.assertTrue(api.post("/api/close-group", self.body(only_alpha, find="alpha"))[1]["ok"])
+        self.assertEqual([t.id for t in self.closed[0][0]], [self.sessions[0].id])
+        self.assertFalse(api.post("/api/close-group", self.body(find="alpha"))[1]["ok"])
+        self.assertEqual(len(self.closed), 1)
+
+    def test_close_group_validates_its_body(self):
+        api = self.api()
+        one = {"id": self.sessions[0].id, "running": False}
+        bad = [
+            {"find": "", "sessions": [one]},
+            self.body(key=7), self.body(find=3), self.body(find="x" * 201), self.body(sessions="nope"), self.body([]),
+            self.body([{"id": self.sessions[0].id, "running": 1}]), self.body([{"id": "bad", "running": False}]),
+            self.body([one, one]), self.body([{"id": f"{i:08d}-0000-4000-8000-{i:012d}", "running": False} for i in range(201)]),
+        ]
+        for body in bad:
+            with self.subTest(body=str(body)[:60]):
+                self.assertEqual(api.post("/api/close-group", body)[0], 400)
+        self.assertEqual(self.closed, [])
+
+    def test_a_failed_close_is_reported_not_hidden(self):
+        api = super().api(self.engine, closer=self.closer(ok=False))
+        body = api.post("/api/close-group", self.body())[1]
+        self.assertEqual(body["ok"], False)
+
+
+class Favourites(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.engine = FakeEngine([session("1", "a", self.path("Workspace", "emalatxana"), "done")])
+        self.budget = self.path("Workspace", "budget-tracker")
+
+    def post(self, folder):
+        return self.api(self.engine).post("/api/favourite", {"folder": folder})
+
+    def test_favourite_toggles_the_panels_pref(self):
+        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left"})
+        body = self.post(self.budget)[1]
+        self.assertEqual((body["ok"], body["on"], body["message"]), (True, True, "★ ~/Workspace/budget-tracker is a favourite"))
+        saved = core.load_prefs(Path(self.prefs))
+        self.assertEqual((saved["favourite_folders"], saved["side"]), ([self.budget], "left"))
+        rows = self.api(self.engine).get("/api/folders", "q=budget")[1]["folders"]
+        self.assertEqual([r["favourite"] for r in rows if r["path"] == self.budget], [True])
+        body = self.post("~/Workspace/budget-tracker")[1]
+        self.assertEqual((body["on"], body["message"]), (False, "~/Workspace/budget-tracker is no longer a favourite"))
+        saved = core.load_prefs(Path(self.prefs))
+        self.assertNotIn("favourite_folders", saved)
+        self.assertEqual(saved["side"], "left")
+
+    def test_favourite_refuses_a_folder_the_page_may_not_use(self):
+        outside = os.path.join(self.dir, "outside")
+        os.makedirs(outside)
+        core.save_prefs(Path(self.prefs), dict(core.DEFAULT_PREFS))
+        before = Path(self.prefs).read_bytes()
+        for folder in (outside, "/etc", self.path("missing")):
+            with self.subTest(folder=folder):
+                self.assertFalse(self.post(folder)[1]["ok"])
+        self.assertEqual(self.post(1)[0], 400)
+        self.assertEqual(self.post("x" * 4097)[0], 400)
+        self.assertEqual(Path(self.prefs).read_bytes(), before)
+        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "favourite_folders": [outside]})
+        body = self.post(outside)[1]
+        self.assertEqual((body["ok"], body["on"]), (True, False))
+
+    def test_new_records_the_folder_as_the_panel_does(self):
+        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "recent_folders": ["/old"]})
+        self.assertTrue(self.api(self.engine).post("/api/new", {"folder": self.budget})[1]["ok"])
+        saved = core.load_prefs(Path(self.prefs))
+        self.assertEqual((saved["last_folder"], saved["recent_folders"][:2]), (self.budget, [self.budget, "/old"]))
+
+    def test_a_start_that_failed_records_nothing(self):
+        api = self.api(self.engine, wait_running=lambda eng, sid: (None, "never ran"))
+        api.post("/api/new", {"folder": self.budget})
+        self.assertFalse(os.path.exists(self.prefs))
+
+
+class Notifications(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.sessions = [session("1", "a", self.path("Workspace", "emalatxana"), "done"), session("2", "b", self.path("Workspace", "emalatxana"), "blocked")]
+        now = time.monotonic()
+        self.history = [
+            core.Entry(self.sessions[1].id, core.NOTICE_NEEDS, "b · emalatxana", "Asks which file", now - 30),
+            core.Entry("c" * 8 + "-cccc-4ccc-8ccc-" + "c" * 12, core.NOTICE_DONE, "gone · emalatxana", "Finished", now - 600),
+            core.Entry(self.sessions[0].id, core.NOTICE_DONE, "a · emalatxana", "All done", now - 3000, read=True),
+        ]
+
+    def api(self, **kwargs):
+        sources = phone.PanelSources(history=lambda: self.history, **kwargs)
+        return super().api(FakeEngine(self.sessions), sources=sources)
+
+    def test_notifications_are_the_panels_history_newest_first(self):
+        data = self.api().get("/api/notifications", "")[1]
+        self.assertEqual((data["title"], data["unread"], data["empty"]), (core.HISTORY_TITLE, 2, sidebar.HISTORY_EMPTY))
+        self.assertEqual([e["id"] for e in data["entries"]], [e.id for e in self.history])
+        self.assertEqual([(e["read"], e["listed"]) for e in data["entries"]], [(False, True), (False, False), (True, True)])
+        self.assertEqual([(e["mark"], e["tone"]) for e in data["entries"]], [("●", "needs"), ("✓", "done"), ("✓", "done")])
+        self.assertEqual([e["title"] for e in data["entries"]][0], "b · emalatxana")
+        self.assertEqual(data["entries"][0]["age"], core.format_age(30))
+
+    def test_reading_notifications_changes_nothing(self):
+        before = list(self.history)
+        listed = self.history
+        self.api().get("/api/notifications", "")
+        self.api().get("/api/state", "")
+        self.assertIs(self.history, listed)
+        self.assertEqual(self.history, before)
+
+    def test_no_history_is_the_panels_empty_line(self):
+        self.history = []
+        data = self.api().get("/api/notifications", "")[1]
+        self.assertEqual((data["entries"], data["unread"]), ([], 0))
+
+
+class WhatsNew(ApiCase):
+    CHANGELOG = "# Changelog\n\n## 99.0.0 — soon\n\n- Newest line\n\n## 2.14.0 — then\n\n- Older line\n\n## 2.13.0\n\n- Oldest line\n"
+
+    def get(self, since, **kwargs):
+        sources = phone.PanelSources(**kwargs)
+        return super().api(FakeEngine([]), sources=sources, changelog=lambda: self.CHANGELOG).get("/api/whats-new", "since=" + since)
+
+    def test_whats_new_is_the_panels_text_since_the_version_given(self):
+        with mock.patch.object(emx, "__version__", "99.0.0"):
+            status, body = self.get("2.14.0")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["heading"], "emx updated to 99.0.0.")
+        self.assertEqual(body["text"], core.whats_new_since(self.CHANGELOG, "2.14.0", "99.0.0"))
+        self.assertIn("Newest line", body["text"])
+        self.assertNotIn("Older line", body["text"])
+        self.assertEqual((body["show"], body["record"]), (True, False))
+
+    def test_a_first_visit_records_and_says_nothing(self):
+        body = self.get("")[1]
+        self.assertEqual((body["show"], body["record"], body["text"]), (False, True, ""))
+
+    def test_the_same_or_a_newer_version_asks_for_nothing(self):
+        body = self.get(emx.__version__)[1]
+        self.assertEqual((body["show"], body["record"]), (False, False))
+        self.assertEqual(self.get("999.0.0")[1]["due"], None)
+
+    def test_a_since_that_is_not_a_version_is_refused(self):
+        for since in ("x", "1.2", "1.2.3; drop", "../etc"):
+            with self.subTest(since=since):
+                self.assertEqual(self.get(since)[0], 400)
+
+    def test_a_waiting_major_is_said_as_the_panel_says_it(self):
+        body = self.get("", major=lambda: "999.0.0")[1]
+        self.assertEqual((body["major"], body["major_line"]), ("999.0.0", core.major_line("999.0.0")))
+        self.assertEqual(self.get("")[1]["major_line"], "")
+
+
+class RoutineWords(ApiCase):
+    def test_routines_carry_the_panels_title_and_empty_line(self):
+        data = self.api(FakeEngine([]), read_routines=lambda now: ([], None)).get("/api/routines", "")[1]
+        self.assertEqual((data["title"], data["none"]), (sidebar.ROUTINES_TITLE, sidebar.ROUTINES_NONE))
+
+
+class NewRoutesAreGuarded(ServerCase):
+    GETS = ("/api/peek?id=" + KEY, "/api/notifications", "/api/whats-new?since=2.0.0")
+    POSTS = ("/api/pin", "/api/favourite", "/api/close-group", "/api/suggest-name")
+
+    def test_another_tailscale_user_is_refused_everywhere_with_no_session_data(self):
+        self.tailnet = StubTailnet(user=7777)
+        self.setUp()
+        for path in self.GETS:
+            with self.subTest(path=path):
+                status, body, _ = self.request(path=path)
+                self.assertEqual((status, b"secret" in body), (403, False))
+        for path in self.POSTS:
+            with self.subTest(path=path):
+                self.assertEqual(self.request("POST", path, {"id": KEY})[0], 403)
+        self.assertEqual(self.api.posts, [])
+
+    def test_a_post_without_this_pages_origin_is_refused_and_never_acts(self):
+        for path in self.POSTS:
+            with self.subTest(path=path):
+                self.assertEqual(self.request("POST", path, {"id": KEY}, origin=False)[0], 403)
+                self.assertEqual(self.request("POST", path, {"id": KEY}, headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.api.posts, [])
 
 
 if __name__ == "__main__":
