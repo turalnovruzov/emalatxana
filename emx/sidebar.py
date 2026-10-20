@@ -1877,6 +1877,33 @@ class Updater(threading.Thread):
         return result
 
 
+def resume_pane(engine, tmux, sid: str, cwd: str | None, dead: Pane | None) -> tuple:
+    """Continue session `sid` in its `dead` pane, else in a new hidden window, and return (pane id, None), or (None, why not).
+
+    A new pane is tagged before anything shows it, since the ← check and
+    `cursor_on_focus` read the tag; one that can't be tagged is killed, or a
+    second open would resume the same conversation again.
+    """
+    command, error = engine.resume_command(sid)
+    if error:
+        return None, error
+    if dead is not None:
+        tmux.respawn(dead.id, command, cwd=cwd)
+        return dead.id, None
+    pane_id = tmux.new_hidden_window(command, cwd=cwd)
+    try:
+        # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
+        tmux.set_pane_option(pane_id, AGENT_OPT, AGENT)
+        tmux.set_pane_option(pane_id, SESSION_OPT, sid)
+    except TmuxError:
+        try:
+            tmux.kill_pane(pane_id)
+        except TmuxError:
+            pass
+        raise
+    return pane_id, None
+
+
 class App:
     def __init__(self, scr, tmux: Tmux, claude: str):
         self.scr = scr
@@ -2169,7 +2196,9 @@ class App:
             return
         from emx import phone
 
-        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file)
+        self.phone = phone.PhoneService(
+            self.engine, phone.phone_port(), self.state, self.home, self.prefs_file, transcripts=self.poller.transcripts.snapshot,
+        )
         self.phone.start()
 
     def check_phone(self) -> None:
@@ -2588,26 +2617,10 @@ class App:
             shown = self.session(sid) or (checked[0] if checked else None)
             self.say(core.refusal(shown.name if shown else sid, trigger, True, shown), error=True)
             return None
-        command, error = self.engine.resume_command(sid)
+        shown = self.session(sid) or (checked[0] if checked else None)
+        pane_id, error = resume_pane(self.engine, self.tmux, sid, shown.cwd if shown is not None and shown.cwd else None, dead)
         if error:
             self.say(error, error=True)
-            return None
-        shown = self.session(sid) or (checked[0] if checked else None)
-        cwd = shown.cwd if shown is not None and shown.cwd else None
-        if dead is not None:
-            self.tmux.respawn(dead.id, command, cwd=cwd)
-            return dead.id
-        pane_id = self.tmux.new_hidden_window(command, cwd=cwd)
-        try:
-            # Agent first: a key alone marks an old `claude attach` viewer, which the panel kills.
-            self.tmux.set_pane_option(pane_id, AGENT_OPT, AGENT)
-            self.tmux.set_pane_option(pane_id, SESSION_OPT, sid)
-        except TmuxError:
-            try:
-                self.tmux.kill_pane(pane_id)
-            except TmuxError:
-                pass
-            raise
         return pane_id
 
     def confirm_attach(self, sid: str, trigger: str, checked: tuple | None = None) -> bool:
@@ -3847,7 +3860,7 @@ class App:
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int, label: str | None = None) -> None:
         if label is not None:
-            arrow = "▸" if group.key in self.collapsed() else "▾"
+            arrow = core.FOLDED if group.key in self.collapsed() else core.UNFOLDED
             self.put(y, 0, arrow, self.palette.attr("muted", selected))
             self.put(y, 2, core.fit(label, max(1, width - 3)), self.palette.attr("error", selected) | curses.A_BOLD)
             return
@@ -3902,7 +3915,7 @@ class App:
                 return pal.attr("stopped", selected) | curses.A_DIM | extra
             return pal.attr(tone, selected) | extra
 
-        glyph_tone = "idle" if core.idle(s) else "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
+        glyph_tone = core.glyph_tone(s)
         tones = {"name": "plain", "extra": "path", "status": session_tone(s), "sep": "muted", "detail": "muted", "age": "muted", "hint": "muted"}
         for i, parts in enumerate(rows):
             if y + i not in shown:

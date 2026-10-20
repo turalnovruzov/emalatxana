@@ -1,6 +1,10 @@
 [hidden] { display: none !important; }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--ground); color: var(--plain); }
+html, body {
+  margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
+  background: var(--ground); color: var(--plain);
+  touch-action: manipulation;
+}
 body {
   font-family: -apple-system, "SF Pro Text", system-ui, sans-serif;
   font-size: 15px;
@@ -9,6 +13,10 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 button, input, textarea { font: inherit; color: inherit; }
+button, a, .row, .folder, .top, .foot, .sheet-title {
+  -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+}
+input, textarea { -webkit-user-select: text; user-select: text; }
 a { color: var(--accent); }
 b { font-weight: 600; }
 .small { font-size: 13px; }
@@ -16,9 +24,16 @@ b { font-weight: 600; }
 .accent { color: var(--accent); }
 .centre { text-align: center; }
 
-.frame { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; }
+.frame {
+  height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+  padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
+}
+#list {
+  flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto;
+  -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+}
 .top {
-  display: flex; align-items: center; justify-content: space-between;
+  flex: none; display: flex; align-items: center; justify-content: space-between;
   padding: 14px 12px 10px 16px;
   padding-top: max(14px, env(safe-area-inset-top));
   border-bottom: 1px solid var(--border);
@@ -39,7 +54,12 @@ b { font-weight: 600; }
 .spacer { min-width: 60px; }
 .offline { margin: 0; padding: 8px 16px; font-size: 13px; color: var(--muted); }
 
-.folder { padding: 14px 16px 4px; font-size: 13px; color: var(--path); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 44px; padding: 10px 16px 0;
+  border: 0; background: transparent; text-align: left; font-size: 13px; color: var(--path);
+}
+.folder .fold, .folder .count { flex: none; }
+.folder .folder-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder .base { color: var(--plain); }
 .row { position: relative; display: flex; align-items: center; min-height: 52px; padding: 0 4px 0 16px; }
 .row.selected { background: var(--selected); }
@@ -63,19 +83,24 @@ b { font-weight: 600; }
 .tone-idle { color: var(--idle); }
 .tone-plain { color: var(--plain); }
 .tone-muted { color: var(--muted); }
-.tone-stopped, .stopped .name, .stopped .detail-text, .stopped .glyph, .stopped .age { color: var(--stopped); }
+.tone-stopped, .stopped .name, .stopped .glyph, .stopped .age { color: var(--stopped); }
 .tone-error { color: var(--error); }
-.glyph.tone-plain { color: var(--muted); }
+.pull {
+  flex: none; height: 0; overflow: hidden; display: flex; align-items: center; justify-content: center; gap: 8px;
+  color: var(--muted); transition: height 200ms ease-out;
+}
+.pull.dragging { transition: none; }
 .routines-row { width: 100%; text-align: left; border: 0; background: transparent; margin-top: 8px; padding: 0 16px; min-height: 52px; color: var(--plain); border-top: 1px solid var(--border); }
-.foot { margin-top: auto; padding: 10px 16px 26px; padding-bottom: max(26px, env(safe-area-inset-bottom)); font-size: 13px; color: var(--muted); opacity: 0.8; }
+.foot { flex: none; padding: 10px 16px 26px; padding-bottom: max(26px, env(safe-area-inset-bottom)); font-size: 13px; color: var(--muted); opacity: 0.8; }
 
 .layer { position: fixed; inset: 0; z-index: 10; }
 .backdrop { position: absolute; inset: 0; width: 100%; border: 0; background: rgba(0, 0, 0, 0.55); }
 .sheet {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 8px 12px 28px; padding-bottom: max(28px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right));
   border-radius: 16px 16px 0 0; background: var(--raised);
-  display: flex; flex-direction: column; gap: 6px; max-height: 90vh; overflow: auto;
+  display: flex; flex-direction: column; gap: 6px; max-height: 90vh; max-height: 90dvh; overflow-y: auto; overscroll-behavior: contain;
 }
 .grab { align-self: center; width: 36px; height: 12px; padding: 4px 0; border: 0; background: transparent; position: relative; margin-bottom: 6px; }
 .grab::after { content: ""; position: absolute; left: 0; right: 0; top: 4px; height: 4px; border-radius: 2px; background: var(--border); }
@@ -89,12 +114,13 @@ b { font-weight: 600; }
 a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 .item.danger { color: var(--error); }
 
-.screen { position: fixed; inset: 0; z-index: 20; background: var(--ground); overflow: auto; }
+.screen { position: fixed; inset: 0; z-index: 20; background: var(--ground); overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 .bar { position: sticky; top: 0; background: var(--ground); }
 .form { padding: 14px 16px 6px; display: flex; flex-direction: column; gap: 6px; }
 .spaced { padding-top: 10px; }
 .field {
-  min-height: 44px; width: 100%; padding: 0 12px; font-size: 16px;
+  min-height: 44px; width: 100%; padding: 0 12px; font-size: 16px; /* under 16px iOS zooms the page on focus */
   border: 1px solid var(--border); border-radius: 10px; background: var(--raised); color: var(--plain);
 }
 .field:focus { outline: none; border-color: var(--accent); }
@@ -118,4 +144,8 @@ a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
   position: fixed; left: 12px; right: 12px; z-index: 40;
   bottom: calc(12px + env(safe-area-inset-bottom));
   padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--raised);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pull { transition: none; }
 }

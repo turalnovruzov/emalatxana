@@ -38,7 +38,7 @@ SECURITY_HEADERS = (
     ("Referrer-Policy", "no-referrer"),
     (
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; "
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     ),
 )
@@ -202,6 +202,7 @@ STATIC = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
+MANIFEST_TYPE = "application/manifest+json; charset=utf-8"
 CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252}
 
 
@@ -212,6 +213,13 @@ def tokens_css() -> str:
     return ":root{" + "".join(f"--{name}:{value};" for name, value in colours.items()) + "}\n"
 
 
+def manifest_json() -> str:
+    """The home-screen app's manifest; its colours are the page's ground tone, like tokens.css."""
+    ground = core.xterm256_hex(CHROME_INDEX["ground"])
+    return json.dumps({"name": "emx", "short_name": "emx", "start_url": "/", "scope": "/", "display": "standalone",
+                       "background_color": ground, "theme_color": ground})
+
+
 TRUST_QUESTION = re.compile(r"trust this folder|do you trust", re.IGNORECASE)
 TRUST_DETAIL = "waiting to trust this folder: answer it in a terminal"
 COUNT_WORDS = {core.NEEDS_INPUT: "needs", core.WORKING: "working", core.DONE: "done", "idle": "idle"}
@@ -219,6 +227,7 @@ FOLDER_ROWS = 8
 FOLDER_CANDIDATES = 60
 ROUTINES_FRESH_SECONDS = 60
 ROUTINES_WAIT_SECONDS = 10
+STILL_FRAME = 2
 
 
 class RoutinesCache:
@@ -254,8 +263,9 @@ class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
     def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
-                 wait_running: Callable = sidebar.wait_until_running):
+                 wait_running: Callable = sidebar.wait_until_running, transcripts: Callable = dict):
         self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
+        self.transcripts = transcripts
         self.routines = RoutinesCache(read_routines)
         self.wait_running = wait_running
         self.action_lock = threading.Lock()
@@ -270,9 +280,14 @@ class PhoneApi:
         params = parse_qs(query)
         if path == "/tokens.css":
             return 200, tokens_css().encode(), "text/css; charset=utf-8"
+        if path == "/manifest.webmanifest":
+            return 200, manifest_json().encode(), MANIFEST_TYPE
         if path in STATIC:
             name, kind = STATIC[path]
-            return 200, (WEB / name).read_bytes(), kind
+            body = (WEB / name).read_bytes()
+            if name == "index.html":
+                body = body.replace(b"{{ground}}", core.xterm256_hex(CHROME_INDEX["ground"]).encode())
+            return 200, body, kind
         if path == "/api/state":
             return 200, self.snapshot()
         if path == "/api/folders":
@@ -282,7 +297,7 @@ class PhoneApi:
         return None
 
     def post(self, path: str, body: dict):
-        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close}
+        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume}
         action = actions.get(path)
         if action is None:
             return None
@@ -310,14 +325,21 @@ class PhoneApi:
         except TmuxError:
             return False
 
-    def row(self, s, panes, summaries, now_ms: float) -> dict:
+    def row(self, s, panes, summaries, transcripts: dict, now_ms: float) -> dict:
         pane = core.live_viewer(panes, s.id) if s.running else None
         link = core.app_link(bridge_link(pane.pid, s.session_id)) if pane is not None and pane.pid > 1 else None
-        detail = TRUST_DETAIL if self.waits_to_trust(s, pane) else core.row_detail(s, None, summaries.get(s.id))
+        stopped = core.category(s) == core.STOPPED
+        if stopped:
+            detail = ""
+        elif self.waits_to_trust(s, pane):
+            detail = TRUST_DETAIL
+        else:
+            detail = core.row_detail(s, transcripts.get(s.id), summaries.get(s.id))
         return {
             "id": s.id, "name": s.name, "word": core.state_word(s), "tone": core.session_tone(s),
-            "glyph": core.session_glyph(s, 2), "detail": detail, "age": core.session_age(s, now_ms),
-            "running": s.running, "link": link, "app": core.app_line(AGENT, link),
+            "glyph": core.session_glyph(s, STILL_FRAME), "glyph_tone": core.glyph_tone(s), "spin": core.spins(s),
+            "stopped": stopped, "status": not stopped, "detail": detail if detail.strip() else "",
+            "age": core.session_age(s, now_ms), "running": s.running, "link": link, "app": core.app_line(AGENT, link),
         }
 
     def snapshot(self) -> dict:
@@ -328,13 +350,15 @@ class PhoneApi:
             panes = self.engine.tmux.panes()
         except TmuxError:
             panes = []
-        summaries, now_ms = self.summaries(), time.time() * 1000
+        summaries, transcripts, now_ms = self.summaries(), self.transcripts(), time.time() * 1000
         by_folder = {}
         for s in sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0)):
-            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, now_ms))
+            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, transcripts, now_ms))
         folders = sorted(by_folder, key=lambda f: (os.path.basename(f.rstrip("/")).lower(), f))
         return {
             "error": None,
+            "look": {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
+                     "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL},
             "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
             "groups": [
                 {"folder": f, "label": core.tilde_path(f, self.home), "base": os.path.basename(f.rstrip("/")) or f, "sessions": by_folder[f]}
@@ -437,6 +461,32 @@ class PhoneApi:
         closer = sidebar.Closer(self.engine, (confirm,), clear_dead_panes=True)
         closed, message = closer.close_one(confirm)
         return 200, {"ok": closed, "message": message}
+
+    def resume(self, body: dict) -> tuple:
+        sid = body.get("id")
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": "That is not a session of emx's."}
+        session, _ = self.listed(sid)
+        if session is None:
+            return 200, {"ok": False, "message": "That session isn't listed any more."}
+        try:
+            held = core.live_or_dead_agent(self.engine.tmux.panes(), sid)
+        except TmuxError as exc:
+            return 200, {"ok": False, "message": core.error_line(exc)}
+        if session.running or (held is not None and not held.dead):
+            return 200, {"ok": True, "message": f"{session.name} is already running."}
+        if not core.attach_allowed(session, core.OPEN, True):
+            return 200, {"ok": False, "message": core.refusal(session.name, core.OPEN, True, session)}
+        try:
+            _, error = sidebar.resume_pane(self.engine, self.engine.tmux, sid, session.cwd or None, held)
+        except TmuxError as exc:
+            return 200, {"ok": False, "message": core.error_line(exc)}
+        if error:
+            return 200, {"ok": False, "message": error}
+        running, _ = self.wait_running(self.engine, sid)
+        if running is None:
+            return 200, {"ok": False, "message": f"emx resumed {session.name}, but it isn't listed running yet."}
+        return 200, {"ok": True, "message": f"Resumed {session.name}."}
 
     def routines_view(self) -> dict:
         views, error = self.routines.get()
@@ -606,11 +656,11 @@ class PhoneService(threading.Thread):
     """
 
     def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
-                 sleep: Callable = time.sleep):
+                 sleep: Callable = time.sleep, transcripts: Callable | None = None):
         super().__init__(daemon=True)
         self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
         self.tailnet = tailnet or Tailnet()
-        self.api = PhoneApi(engine, home, state, prefs_path)
+        self.api = PhoneApi(engine, home, state, prefs_path, transcripts=transcripts or dict)
         self.notices, self.lock = [], threading.Lock()
         self.stopping = threading.Event()
         self.server, self.node, self.recorded = None, None, None

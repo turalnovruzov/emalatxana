@@ -4726,6 +4726,52 @@ class WideBarIsUnchanged(unittest.TestCase):
                 self.assertEqual(sidebar.bar_format(parts), case["format"])
 
 
+ROWS_GOLDEN = Path(__file__).parent / "fixtures" / "rows" / "wide-2.14.0.json"
+
+
+class RowStub:
+    """Enough of the App for draw_session and draw_header, recording every put with the palette's (tone, selection) as one number."""
+
+    class Palette:
+        CODES = {"plain": 0, "muted": 1, "needs": 2, "done": 3, "stopped": 4, "accent": 5, "path": 6, "error": 7, "copper": 8, "remote": 9, "idle": 10}
+
+        def attr(self, tone, selected=None):
+            return self.CODES[tone] * 4 + {None: 0, "focused": 1}.get(selected, 2)
+
+    def __init__(self, view="state", collapsed=frozenset(), narrow=False):
+        self.palette = self.Palette()
+        self.puts = []
+        self._view, self._collapsed, self.narrow, self.focused = view, collapsed, narrow, True
+
+    def put(self, y, x, text, attr):
+        self.puts.append([y, x, text, attr])
+
+    def view(self):
+        return self._view
+
+    def collapsed(self):
+        return self._collapsed
+
+
+class RowsAreUnchanged(unittest.TestCase):
+    """The panel's rows and headers draw exactly what 2.14.0 drew: the expected puts were captured from tag v2.14.0's code, not from the code under test."""
+
+    def test_every_captured_case_draws_the_same_puts(self):
+        cases = json.loads(ROWS_GOLDEN.read_text("utf-8"))["cases"]
+        self.assertGreater(len(cases), 50)
+        for i, case in enumerate(cases):
+            app = RowStub(*([case["view"], frozenset([case["key"]]) if case["collapsed"] else frozenset(), case["narrow"]] if case["kind"] == "header" else []))
+            if case["kind"] == "session":
+                s = core.Session(id="id", name="the-name", cwd="/w", state=case["state"], status=case["status"], waiting_for="", started_at=1000.0, running=case["running"])
+                rows = core.row_lines(s.name, "", core.state_word(s), "did a thing", "5m", 40, core.category(s) == core.STOPPED)
+                sidebar.App.draw_session(app, 3, list(range(3, 3 + len(rows))), rows, s, case["selected"], case["in_main"], case["frame"])
+            else:
+                group = core.Group(key=case["key"], sessions=(core.Session(id="a", name="n", cwd="/w", state="done", status="", waiting_for=""),))
+                sidebar.App.draw_header(app, 2, group, case["selected"], False, 30, case["label"])
+            with self.subTest(case=i):
+                self.assertEqual(app.puts, case["puts"])
+
+
 class StatusBarPush(unittest.TestCase):
     def test_the_same_text_twice_is_one_call(self):
         tmux = mock.Mock()
@@ -7586,6 +7632,7 @@ class FollowerPanel(AppCase):
         with mock.patch.object(phone, "PhoneService") as service:
             primary.start_phone()
         service.assert_called_once()
+        self.assertEqual(service.call_args.kwargs["transcripts"], primary.poller.transcripts.snapshot)
         service.return_value.start.assert_called_once_with()
         self.assertIs(primary.phone, service.return_value)
 

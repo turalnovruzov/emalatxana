@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
+<meta name="theme-color" content="{{ground}}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="emx">
+<link rel="manifest" href="/manifest.webmanifest">
 <meta name="referrer" content="no-referrer">
 <title>emx</title>
 <link rel="stylesheet" href="/tokens.css">
@@ -17,8 +23,9 @@
     <button class="button" id="open-new" type="button">+ New</button>
   </header>
   <p class="offline" id="offline" hidden>Can't reach emx</p>
+  <div class="pull" id="pull" aria-hidden="true"><span id="pull-glyph"></span><span class="small muted" id="pull-text"></span></div>
   <main id="list"></main>
-  <footer class="foot">Tap a session to open it in the Claude app · ⋯ to rename or close</footer>
+  <footer class="foot">Tap a session to open it in the Claude app, or to resume a stopped one · ⋯ for more</footer>
 </div>
 
 <div class="layer" id="sheet-layer" hidden>
@@ -31,6 +38,7 @@
     </div>
     <div id="sheet-menu" class="sheet-items">
       <a class="item accent" id="sheet-open" target="_blank" rel="noopener" hidden>Open in Claude app ↗</a>
+      <button class="item accent" id="sheet-resume" type="button" hidden>Resume</button>
       <button class="item" id="sheet-rename" type="button">Rename</button>
       <button class="item danger" id="sheet-close" type="button">Close session</button>
       <div class="small muted centre">Tap outside to dismiss</div>
