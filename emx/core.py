@@ -110,6 +110,33 @@ WORKING_FRAMES = "·✢✳✶✻✶✳✢"
 GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
 
 
+# xterm-256 index of each tone; the panel draws it and the phone page turns it into hex with `xterm256_hex`, so the two cannot drift.
+TONE_INDEX = {
+    "muted": 245, "needs": 221, "done": 114, "stopped": 241, "accent": 75,
+    "path": 244, "error": 203, "copper": 173, "remote": 141, "idle": 103,
+}
+_ANSI_16 = (
+    "000000", "800000", "008000", "808000", "000080", "800080", "008080", "c0c0c0",
+    "808080", "ff0000", "00ff00", "ffff00", "0000ff", "ff00ff", "00ffff", "ffffff",
+)
+_CUBE_LEVELS = (0, 95, 135, 175, 215, 255)
+
+
+def xterm256_hex(index: int) -> str:
+    if index < 16:
+        return "#" + _ANSI_16[index]
+    if index < 232:
+        n = index - 16
+        r, g, b = (_CUBE_LEVELS[n // 36], _CUBE_LEVELS[n // 6 % 6], _CUBE_LEVELS[n % 6])
+        return f"#{r:02x}{g:02x}{b:02x}"
+    level = 8 + 10 * (index - 232)
+    return f"#{level:02x}{level:02x}{level:02x}"
+
+
+TONE_HEX = {tone: xterm256_hex(index) for tone, index in TONE_INDEX.items()}
+CATEGORY_TONE = {NEEDS_INPUT: "needs", WORKING: "plain", DONE: "done", STOPPED: "stopped"}
+
+
 def category(session: Session) -> str:
     """What the row shows, from `state` alone.
 
@@ -129,6 +156,10 @@ def idle(session: Session) -> bool:
 def interruptible(session: Session) -> bool:
     """Whether Esc would stop something: not while only background work runs, since Claude itself is at its prompt."""
     return session.running and session.state == "working" and not idle(session) and session.status != BACKGROUND
+
+
+def session_tone(session: Session) -> str:
+    return "idle" if idle(session) else CATEGORY_TONE[category(session)]
 
 
 def state_word(session: Session) -> str:
@@ -605,7 +636,7 @@ def left_listing_text(interrupt: Interrupt) -> str:
 
 
 def type_gate(
-    viewer: str, panel: str, sid: str, cursor_y: int, session_opt: str, cursor_x: int | None = None,
+    viewer: str, panel: str | None, sid: str, cursor_y: int, session_opt: str, cursor_x: int | None = None,
 ) -> str | None:
     """A tmux format, read on the viewer, that is true only while nothing checked before typing has changed; None when an id is not plain enough to put in one.
 
@@ -617,10 +648,11 @@ def type_gate(
     The loop runs over every session, since the viewer's window is linked
     into more than one and the panel may be in a view of its own. tmux falls
     back to another pane when the target is gone, hence the pane id test.
+    `panel=None` is for the phone page, which has no panel whose focus could
+    matter; every other test still holds.
     """
-    if not (_PANE_ID.fullmatch(viewer) and _PANE_ID.fullmatch(panel) and _PLAIN_ID.fullmatch(sid)):
+    if not (_PANE_ID.fullmatch(viewer) and _PLAIN_ID.fullmatch(sid) and (panel is None or _PANE_ID.fullmatch(panel))):
         return None
-    panel_focused = f"#{{S:#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}}}"
     tests = [
         f"#{{==:#{{pane_id}},{viewer}}}",
         "#{==:#{pane_in_mode},0}",
@@ -629,8 +661,10 @@ def type_gate(
         "#{==:#{cursor_flag},1}",
         f"#{{==:#{{cursor_x}},{PROMPT_TEXT_X if cursor_x is None else int(cursor_x)}}}",
         f"#{{==:#{{cursor_y}},{int(cursor_y)}}}",
-        f"#{{==:{panel_focused},1}}",
     ]
+    if panel is not None:
+        panel_focused = f"#{{S:#{{W:#{{P:#{{?#{{==:#{{pane_id}},{panel}}},#{{&&:#{{pane_active}},#{{window_active}}}},}}}}}}}}"
+        tests.append(f"#{{==:{panel_focused},1}}")
     gate = tests[-1]
     for test in reversed(tests[:-1]):
         gate = f"#{{&&:{test},{gate}}}"
@@ -993,7 +1027,7 @@ def bar_counts(sessions) -> list:
     return [(key, counts[key]) for key in BAR_COUNT_ORDER if counts[key]]
 
 
-_BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
+BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
 _BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
 
 
@@ -1114,7 +1148,7 @@ def _bar_count_parts(counts: list, loaded: bool) -> list:
     for key, number in counts:
         if parts:
             parts.append((" ", "plain", False))
-        parts.append((f"✻{number}", _BAR_COUNT_TONES[key], True))
+        parts.append((f"✻{number}", BAR_COUNT_TONES[key], True))
     return parts
 
 
@@ -2209,6 +2243,18 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
     return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
 
 
+def routine_words(view: RoutineView, now: float, local: Callable = time.localtime) -> tuple:
+    """(runs, next) for one routine: its runs newest first as "HH:MM ✓" tokens, and when it is next due ("" when it has no time)."""
+    runs = []
+    for at, kind, status in view.events:
+        mark = RUN_MARKS[kind] + (status if kind == FAILED else "")
+        runs.append(f"{time.strftime('%H:%M', local(at))} {mark}")
+    if view.next_at is None:
+        return runs, ""
+    pattern = "%H:%M" if abs(view.next_at - now) < ROUTINES_WINDOW else "%a %H:%M"
+    return runs, "next " + time.strftime(pattern, local(view.next_at))
+
+
 def routine_lines(view: RoutineView, width: int, now: float, local: Callable = time.localtime) -> list:
     """(text, tone) rows for one routine: name and tag, its runs newest first, then when it is next due."""
     tag = fit(view.tag, width)
@@ -2217,17 +2263,13 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     rows = [(name + " " * gap + tag, view.tone)]
     if view.error:
         rows += [("  " + line, "error") for line in wrap_words(view.error, max(1, width - 2))]
-    tokens = []
-    for at, kind, status in view.events:
-        stamp = time.strftime("%H:%M", local(at))
-        mark = RUN_MARKS[kind] + (status if kind == FAILED else "")
-        tokens.append(f"{stamp}\xa0{mark}".replace(" ", "\xa0"))
+    runs, upcoming = routine_words(view, now, local)
+    tokens = [run.replace(" ", "\xa0") for run in runs]
     if tokens:
         for line in wrap_words("  ".join(tokens), max(1, width - 2)):
             rows.append(("  " + line.replace("\xa0", " "), "muted"))
-    if view.next_at is not None:
-        pattern = "%H:%M" if abs(view.next_at - now) < ROUTINES_WINDOW else "%a %H:%M"
-        rows.append((fit("  next " + time.strftime(pattern, local(view.next_at)), width), "muted"))
+    if upcoming:
+        rows.append((fit("  " + upcoming, width), "muted"))
     elif view.note:
         rows.append((fit("  " + view.note, width), "muted"))
     return [(fit(text, width), tone) for text, tone in rows]
@@ -4137,6 +4179,14 @@ def test_session_name(env: Mapping | None = None) -> str:
     """`emx-test-<hex6>` under `EMX_SHOW_TEST_SESSIONS=1`, else "". emx writes it into its own record and hands it to `claude -n`, so hiding never depends on a flag of claude's."""
     env = os.environ if env is None else env
     return TEST_SESSION_PREFIX + uuid.uuid4().hex[:6] if env.get("EMX_SHOW_TEST_SESSIONS") == "1" else ""
+
+
+def test_prefixed(name: str, env: Mapping | None = None) -> str:
+    """`name` with the `emx-test-` prefix under `EMX_SHOW_TEST_SESSIONS=1`, so a live check never makes a session that shows in his emx; unchanged otherwise."""
+    env = os.environ if env is None else env
+    if env.get("EMX_SHOW_TEST_SESSIONS") == "1" and not name.startswith(TEST_SESSION_PREFIX):
+        return TEST_SESSION_PREFIX + name
+    return name
 
 
 def claude_launch_args(claude: str, sid: str, settings: str, message: str, name: str = "") -> list:

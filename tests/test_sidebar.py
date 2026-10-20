@@ -4557,6 +4557,10 @@ def nearest_256(r, g, b):
 
 
 class Tones(unittest.TestCase):
+    def test_the_panel_draws_the_indexes_the_phone_page_turns_into_hex(self):
+        self.assertEqual({tone: TONES[0] for tone, TONES in sidebar.TONES.items() if tone != "plain"}, core.TONE_INDEX)
+        self.assertEqual(sidebar.TONES["plain"], (-1, -1))
+
     def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
         self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
 
@@ -7564,6 +7568,39 @@ class FollowerPanel(AppCase):
             time.sleep(0.1)
         self.assertEqual(started, [poller.resolver, poller.transcripts])
         self.assertEqual(poller.started, [poller.resolver, poller.transcripts])
+
+    def test_a_follower_serves_no_phone_page_and_the_primary_serves_one(self):
+        from emx import phone
+
+        follower = self.follower()
+        with mock.patch.object(phone, "PhoneService") as service:
+            follower.start_phone()
+        service.assert_not_called()
+        self.assertIsNone(follower.phone)
+        primary = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        with mock.patch.object(phone, "PhoneService") as service:
+            primary.start_phone()
+        service.assert_called_once()
+        service.return_value.start.assert_called_once_with()
+        self.assertIs(primary.phone, service.return_value)
+
+    def test_the_panel_waits_for_a_post_from_the_phone_before_an_update(self):
+        app = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        self.assertFalse(app.update_busy())
+        app.phone = mock.Mock(busy=lambda: True)
+        self.assertTrue(app.update_busy())
+
+    def test_the_phone_pages_notices_reach_the_status_line(self):
+        app = sidebar.App(self.scr, tmux=ViewTmux(), claude="claude")
+        notices = [("Phone page: http://box:8787/", None), ("Phone page off: Tailscale isn't connected. Run: sudo tailscale up", 15)]
+        app.phone = mock.Mock(take_notice=lambda: notices.pop(0) if notices else None)
+        app.check_phone()
+        self.assertEqual((app.notice, app.notice_until), ("Phone page: http://box:8787/", None))
+        app.check_phone()
+        self.assertEqual(app.notice, "Phone page off: Tailscale isn't connected. Run: sudo tailscale up")
+        self.assertIsNotNone(app.notice_until)
+        app.check_phone()
+        self.assertEqual(app.notice, "Phone page off: Tailscale isn't connected. Run: sudo tailscale up")
 
     def test_the_primary_starts_every_worker(self):
         with mock.patch.object(emx, "ROOT", "/tmp/emx-test-root"):

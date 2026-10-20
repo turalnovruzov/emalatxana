@@ -1,8 +1,35 @@
 # Phone
 
-On a phone, emx shows one thing at a time: the panel, or the session you opened, each across the whole screen. For a Claude session it can send you to the Claude app, which suits a phone better than a terminal.
+Two ways to use emx from a phone. The **phone page** is a web page with your sessions, to check on them and to start, rename and close them; the Claude app does the work in a session. The **terminal layout** is emx itself over SSH, one screen at a time.
 
-## Connect
+## The phone page
+
+emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by folder, one row each: the state and a short line about what it is doing, and how long ago it started.
+
+- Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A row with no link opens the menu instead.
+- Tap `⋯` on a row for the menu: open in the Claude app, rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
+- `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The name and the first message are optional. The new session is shown selected in the list.
+- The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only.
+- A session waiting at Claude's own question about trusting a new folder shows as needs input, "waiting to trust this folder: answer it in a terminal". The page cannot answer that question.
+
+### Set it up once
+
+The page is reachable over Tailscale only, so it needs no password and opens nothing to the internet.
+
+1. On the machine that runs your emx, install Tailscale and connect it yourself: `sudo tailscale up`. emx never installs or changes Tailscale.
+2. On your iPhone, install the Tailscale app and sign in as the same user.
+3. On the machine, run `emx phone` for the address (for example `http://machine.your-tailnet.ts.net:8787/`) and open it in Safari. Safari says "Not Secure" because the address is plain http; the Tailscale tunnel already encrypts it.
+4. If a firewall such as `ufw` is on, let traffic in on the Tailscale interface: `sudo ufw allow in on tailscale0`.
+
+The page is served by the emx workspace itself, so it is up whenever your emx is, and again after emx updates itself. If Tailscale is missing or not connected, the panel says so once, in one line, and `emx phone` says it again. Set `EMX_PHONE_PORT` to use another port than 8787.
+
+### Who is let in
+
+Only your own devices. emx listens on the machine's Tailscale address and nowhere else, and asks Tailscale who each request comes from: the device must belong to the same Tailscale user as this machine, or it gets a refusal and sees nothing. Another person you share this machine with on a tailnet is refused. A machine that is a tagged Tailscale node is refused as a whole, since emx cannot tell whose it is. Requests from the machine itself must come from your own user.
+
+## The terminal layout: connect
+
+On a phone, emx shows one thing at a time: the panel, or the session you opened, each across the whole screen.
 
 Open your SSH app on the phone (Blink or Termius, for example), connect to the server that runs your emx, and run `emx` there. The phone gets a view of its own, so your laptop keeps its own panel, open session and width while the phone is on (`emx docs how-emx-works`). Nothing else needs to be set up: emx uses the SSH connection you already have and opens nothing else to the outside.
 

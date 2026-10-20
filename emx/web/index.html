@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>emx</title>
+<link rel="stylesheet" href="/tokens.css">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div class="frame">
+  <header class="top">
+    <div class="brand"><span class="mark">⚒</span><b>emalatxana</b><span class="counts" id="counts"></span></div>
+    <button class="button" id="open-new" type="button">+ New</button>
+  </header>
+  <p class="offline" id="offline" hidden>Can't reach emx</p>
+  <main id="list"></main>
+  <footer class="foot">Tap a session to open it in the Claude app · ⋯ to rename or close</footer>
+</div>
+
+<div class="layer" id="sheet-layer" hidden>
+  <button class="backdrop" id="sheet-backdrop" type="button" aria-label="Close menu"></button>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-name">
+    <button class="grab" id="sheet-grab" type="button" aria-label="Close menu"></button>
+    <div class="sheet-title">
+      <b id="sheet-name"></b><br>
+      <span class="small"><span id="sheet-word"></span> <span class="muted" id="sheet-where"></span></span>
+    </div>
+    <div id="sheet-menu" class="sheet-items">
+      <a class="item accent" id="sheet-open" target="_blank" rel="noopener" hidden>Open in Claude app ↗</a>
+      <button class="item" id="sheet-rename" type="button">Rename</button>
+      <button class="item danger" id="sheet-close" type="button">Close session</button>
+      <div class="small muted centre">Tap outside to dismiss</div>
+    </div>
+    <form id="sheet-edit" class="sheet-items" hidden>
+      <input class="field" id="rename-field" type="text" maxlength="100" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="New name">
+      <button class="item accent" id="rename-save" type="submit">Save</button>
+      <button class="item" id="rename-back" type="button">Back</button>
+    </form>
+  </div>
+</div>
+
+<div class="screen" id="new-layer" hidden>
+  <header class="top bar">
+    <button class="plain-button accent" id="new-cancel" type="button">Cancel</button>
+    <b>New session</b>
+    <button class="button solid" id="new-start" type="button">Start</button>
+  </header>
+  <div class="form">
+    <label class="small muted" for="new-folder">Folder</label>
+    <input class="field focus" id="new-folder" type="text" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" inputmode="url" enterkeyhint="search">
+  </div>
+  <div class="suggestions" id="new-suggestions" hidden></div>
+  <p class="small muted hint">Matches any part of a folder name; recent session folders first</p>
+  <div class="form">
+    <label class="small muted" for="new-name">Name (optional)</label>
+    <input class="field" id="new-name" type="text" placeholder="emx names it" maxlength="100" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+    <label class="small muted spaced" for="new-message">First message (optional)</label>
+    <textarea class="field area" id="new-message" rows="3" autocomplete="off"></textarea>
+  </div>
+</div>
+
+<div class="screen" id="routines-layer" hidden>
+  <header class="top bar">
+    <button class="plain-button accent" id="routines-back" type="button">‹ Sessions</button>
+    <b>Routines</b>
+    <span class="spacer"></span>
+  </header>
+  <div id="routines-list"></div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

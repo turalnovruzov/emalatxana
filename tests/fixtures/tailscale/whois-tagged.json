@@ -1,0 +1,18 @@
+{
+  "Node": {
+    "ID": 1,
+    "Name": "phone.example-tailnet.ts.net.",
+    "Addresses": [
+      "100.64.0.20/32"
+    ],
+    "User": 4242,
+    "Tags": [
+      "tag:server"
+    ]
+  },
+  "UserProfile": {
+    "ID": 4242,
+    "LoginName": "owner@example.invalid",
+    "DisplayName": "Owner"
+  }
+}

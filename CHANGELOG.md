@@ -2,6 +2,17 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.14.0 — 2026-10-20
+
+- emx serves a phone page: your sessions on a web page you open in Safari on your iPhone, in emx's own colours (yellow for needs input, green for done, lavender for idle), one compact row per session, grouped by folder. A tap on a row opens it in the Claude app.
+- `⋯` on a row opens a menu from the bottom: open in the Claude app, rename, close (a second tap within two seconds confirms). A tap on the shaded space outside it closes the menu.
+- `+ New` starts a session in any folder: type any part of a folder's name ("budget") and the folders that match appear; the name and a first message are optional. The new session is shown selected in the list.
+- A "Routines" row at the bottom of the list shows your server's routines, read-only.
+- The page is reachable over Tailscale only, and only by your own devices: emx binds the machine's Tailscale address, asks Tailscale who every request comes from, and refuses anyone who isn't you. No password, no extra setup beyond Tailscale itself. emx never installs or changes Tailscale.
+- It runs inside the workspace, so it is up whenever your emx is, and again after an update.
+- `emx phone` prints the page's address, or says why it isn't up. If Tailscale is missing or down, the panel says so once, in one line. `EMX_PHONE_PORT` changes the port (default 8787).
+- Closing a stopped session from the page also removes its leftover tmux pane, as closing it from the panel does.
+
 ## 2.13.0 — 2026-10-19
 
 - The Routines view also shows user timers that are switched off and not loaded, tagged `timer off`, with their runs in the past 24 hours and no missed times.

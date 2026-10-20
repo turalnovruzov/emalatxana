@@ -151,25 +151,22 @@ MAX_QUEUED_KEYS = 64
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
-    "muted": (245, curses.COLOR_WHITE),
-    "needs": (221, curses.COLOR_YELLOW),
-    "done": (114, curses.COLOR_GREEN),
-    "stopped": (241, curses.COLOR_WHITE),
-    "accent": (75, curses.COLOR_CYAN),
-    "path": (244, curses.COLOR_WHITE),
-    "error": (203, curses.COLOR_RED),
-    "copper": (173, curses.COLOR_YELLOW),
-    "remote": (141, curses.COLOR_MAGENTA),
-    "idle": (103, curses.COLOR_BLUE),
+    "muted": (core.TONE_INDEX["muted"], curses.COLOR_WHITE),
+    "needs": (core.TONE_INDEX["needs"], curses.COLOR_YELLOW),
+    "done": (core.TONE_INDEX["done"], curses.COLOR_GREEN),
+    "stopped": (core.TONE_INDEX["stopped"], curses.COLOR_WHITE),
+    "accent": (core.TONE_INDEX["accent"], curses.COLOR_CYAN),
+    "path": (core.TONE_INDEX["path"], curses.COLOR_WHITE),
+    "error": (core.TONE_INDEX["error"], curses.COLOR_RED),
+    "copper": (core.TONE_INDEX["copper"], curses.COLOR_YELLOW),
+    "remote": (core.TONE_INDEX["remote"], curses.COLOR_MAGENTA),
+    "idle": (core.TONE_INDEX["idle"], curses.COLOR_BLUE),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
 MENU_TONES = {"menu-frame": "muted", "menu-key": "accent", "menu-close": "error", "menu-note": "muted"}
-CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
-
-
-def session_tone(s) -> str:
-    return "idle" if core.idle(s) else CATEGORY_TONE[core.category(s)]
+CATEGORY_TONE = core.CATEGORY_TONE
+session_tone = core.session_tone
 
 
 def bar_format(parts: list) -> str:
@@ -349,10 +346,11 @@ class Closer(threading.Thread):
     closed}).
     """
 
-    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = ""):
+    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = "", clear_dead_panes: bool = False):
         super().__init__(daemon=True)
         self.engine, self.targets, self.wait_for = engine, tuple(targets), tuple(wait_for)
         self.panel = panel
+        self.clear_dead_panes = clear_dead_panes
         self.current = self.targets[0]
         self.result = None
 
@@ -392,6 +390,8 @@ class Closer(threading.Thread):
                 return False, f"tmux: {exc}"
             if not self.wait_until_ended(confirm.id):
                 return False, f"{confirm.name} is still running, so emx didn't remove it."
+        elif self.clear_dead_panes:
+            self.clear_dead(confirm.id)
         error = self.forget(confirm.id)
         if error:
             return False, error
@@ -410,6 +410,22 @@ class Closer(threading.Thread):
         for pane in tmux.panes():
             if pane.session == sid and pane.agent and not pane.dead:
                 tmux.kill_pane(pane.id)
+
+    def clear_dead(self, sid: str) -> None:
+        """A stopped session's exited pane stays (remain-on-exit) and keeps its `emx-a-<key>` session alive; killing the pane removes both. A tmux error doesn't stop the forget.
+
+        The panel leaves this off: it clears the dead pane itself once the close is done (`finish_close`). The phone page has no such step.
+        """
+        tmux = self.engine.tmux
+        try:
+            for view in tmux.views():
+                if view.shows == sid and view.slot:
+                    park_slot(tmux, view.slot)
+            for pane in tmux.panes():
+                if pane.session == sid and pane.agent and pane.dead:
+                    tmux.kill_pane(pane.id)
+        except TmuxError:
+            pass
 
     def wait_until_ended(self, sid: str) -> bool:
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
@@ -1945,6 +1961,7 @@ class App:
         self.whats_new = None
         self.whats_new_waits = False
         self.updater = Updater() if emx.ROOT and self.primary else None
+        self.phone = None
         self.on_disk = None
         self.majors_said = set()
         self.relaunched = {}
@@ -2132,6 +2149,21 @@ class App:
         self.check_open()
         self.time_whats_new()
         self.check_update()
+        self.check_phone()
+
+    def start_phone(self) -> None:
+        """The phone page is served from the primary panel only, so a workspace has one."""
+        if not self.primary:
+            return
+        from emx import phone
+
+        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file)
+        self.phone.start()
+
+    def check_phone(self) -> None:
+        notice = self.phone.take_notice() if self.phone is not None else None
+        if notice:
+            self.say(notice[0], seconds=notice[1])
 
     def tend_narrow(self, sidebar: Pane, slot: Pane) -> None:
         """On a phone the panel or the session takes the whole window, never both.
@@ -2261,7 +2293,8 @@ class App:
         """Whether something open in the panel, or a worker it started, would be lost to a switch onto a new version now."""
         held = (self.prompt, self.find, self.rename_edit, self.confirm, self.history_view, self.routines_view,
                 self.starter, self.closer, self.renamer, self.namer, self.menu)
-        return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row()
+        phone_acting = self.phone is not None and self.phone.busy()
+        return any(v is not None for v in held) or self.help or self.peeking or bool(self.interrupters) or self.awaiting_started_row() or phone_acting
 
     def check_update(self) -> None:
         """Announces a waiting major once, and once `current` has moved past this panel's code, starts the new code's relaunch at a quiet moment."""
@@ -4047,6 +4080,7 @@ class App:
         self.poller.start()
         if self.updater is not None:
             self.updater.start()
+        self.start_phone()
         while True:
             self.refresh()
             self.read_input()

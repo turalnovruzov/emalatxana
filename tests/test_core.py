@@ -568,6 +568,29 @@ class HintText(unittest.TestCase):
         )
 
 
+class ToneColours(unittest.TestCase):
+    def test_the_hex_of_each_xterm_index_is_the_colour_a_terminal_draws(self):
+        want = {221: "#ffd75f", 114: "#87d787", 103: "#8787af", 241: "#626262", 245: "#8a8a8a", 244: "#808080",
+                75: "#5fafff", 203: "#ff5f5f", 173: "#d7875f", 234: "#1c1c1c", 235: "#262626", 236: "#303030",
+                238: "#444444", 252: "#d0d0d0", 16: "#000000", 231: "#ffffff", 232: "#080808", 255: "#eeeeee",
+                0: "#000000", 15: "#ffffff"}
+        for index, hex_ in want.items():
+            with self.subTest(index=index):
+                self.assertEqual(core.xterm256_hex(index), hex_)
+
+    def test_every_tone_has_a_hex_from_its_index(self):
+        self.assertEqual(core.TONE_HEX["needs"], "#ffd75f")
+        self.assertEqual(set(core.TONE_HEX), set(core.TONE_INDEX))
+
+    def test_a_session_tone_follows_its_state(self):
+        def tone(state, status=""):
+            return core.session_tone(core.Session("s", "n", "/p", state, status, ""))
+        self.assertEqual(
+            [tone("working", "idle"), tone("blocked"), tone("working"), tone("done"), tone("stopped")],
+            ["idle", "needs", "plain", "done", "stopped"],
+        )
+
+
 class SessionHints(unittest.TestCase):
     def text(self, s, pinned=False):
         return core.hint_text(core.session_hints(s, pinned))
@@ -2490,6 +2513,16 @@ class RenameChecks(unittest.TestCase):
         for viewer, panel, sid in bad:
             with self.subTest(viewer=viewer, panel=panel, sid=sid):
                 self.assertIsNone(core.type_gate(viewer, panel, sid, 26, "@emx_session"))
+
+    def test_a_gate_without_a_panel_drops_only_the_focus_test(self):
+        gate = core.type_gate("%3", None, "abc", 26, "@emx_session")
+        self.assertIsInstance(gate, str)
+        self.assertNotIn("pane_active", gate)
+        for part in ("#{==:#{pane_id},%3}", "#{==:#{pane_dead},0}", "#{==:#{@emx_session},abc}", "#{==:#{cursor_y},26}"):
+            self.assertIn(part, gate)
+        self.assertIn("pane_active", core.type_gate("%3", "%1", "abc", 26, "@emx_session"))
+        self.assertIsNone(core.type_gate("%3", "", "abc", 26, "@emx_session"))
+        self.assertIsNone(core.type_gate("%3", None, "a b", 26, "@emx_session"))
 
     def test_the_gate_names_the_viewer_the_session_the_cursor_and_the_panel(self):
         gate = core.type_gate("%3", "%1", "abc", 26, "@emx_session")
@@ -5307,6 +5340,15 @@ class Routines(unittest.TestCase):
         self.assertEqual([body.index(s) for s in stamps], sorted(body.index(s) for s in stamps))
         for token in ("✗2", "⚠ missed", "✓"):
             self.assertIn(token, body)
+
+    def test_words_give_the_runs_and_the_next_time_the_lines_are_made_of(self):
+        events = ((self.NOW - 600, core.PASSED, ""), (self.NOW - 4200, core.FAILED, "2"))
+        view = core.RoutineView("backup-nightly", "failed · exit 2", "error", events, self.NOW + 7200)
+        runs, upcoming = core.routine_words(view, self.NOW, local=time.gmtime)
+        stamp = lambda s: time.strftime("%H:%M", time.gmtime(self.NOW + s))
+        self.assertEqual(runs, [f"{stamp(-600)} ✓", f"{stamp(-4200)} ✗2"])
+        self.assertEqual(upcoming, "next " + stamp(7200))
+        self.assertEqual(core.routine_words(core.RoutineView("a", "not due", "muted", (), None), self.NOW), ([], ""))
 
     def test_lines_show_the_journal_error_under_the_name(self):
         view = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),),

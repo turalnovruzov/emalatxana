@@ -32,7 +32,7 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | update [off | on] | uninstall]
+USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | phone | update [off | on] | uninstall]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
 emx install <url> is internal too: what install.sh runs to install emx from that repo's newest version tag.
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
@@ -50,12 +50,14 @@ first moving a running workspace onto this version of emx. --version prints the 
 docs prints the emx docs index (start there); docs <page> prints one page.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
+phone prints the address of the phone page this emx serves over Tailscale, or why it isn't up.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
 update off stops the automatic updates (emx update still updates when you run it); update on starts them again.
 uninstall removes the installed emx and its link; your prefs and emx's state are kept.
 Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
 EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
+EMX_PHONE_PORT is the port of the phone page (default 8787).
 EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell), EMX_SSH replaces ssh.
 EMX_CLIPBOARD_IMAGE is the command emx remote reads the laptop clipboard's image with (default osascript); it is given a file path to write a PNG to.
 EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command.
@@ -113,6 +115,33 @@ def docs_command(args: list) -> int:
         # Point stdout at devnull so the interpreter's exit flush does not raise a second time.
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
     return 0
+
+
+def phone_command(args: list) -> int:
+    from emx import phone
+
+    if args:
+        print(USAGE, file=sys.stderr)
+        return 2
+    socket = socket_name()
+    if socket is None:
+        print(SOCKET_REFUSAL, file=sys.stderr)
+        return 2
+    if shutil.which("tmux") is None:
+        print("emx needs tmux, and it is not on PATH.", file=sys.stderr)
+        return 1
+    if not Tmux(socket).has_session():
+        print("emx isn't running here; start it with emx.", file=sys.stderr)
+        return 1
+    said = phone.read_phone_file(core.state_path())
+    if isinstance(said.get("url"), str):
+        print(said["url"])
+        return 0
+    if said.get("problem") in phone.PROBLEM_LINES:
+        print(phone.problem_line(said["problem"], phone.phone_port()))
+    else:
+        print("The phone page isn't up yet; try again in a moment.")
+    return 1
 
 
 def socket_name() -> str | None:
@@ -757,6 +786,8 @@ def main(argv: list) -> int:
         return follow()
     if argv[0] == "install" and len(argv) == 2:
         return install_command(argv[1])
+    if argv[0] == "phone":
+        return phone_command(argv[1:])
     if argv[0] == "update":
         return update_command(argv[1:])
     if argv[0] == "uninstall" and len(argv) == 1:

@@ -13,6 +13,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `emx docs <page>` | Prints one docs page, for example `emx docs reference`. |
 | `emx hush` | Stops the voice now, without muting later notices. |
 | `emx remote` | `emx remote <host>` opens the emx running on a server over ssh (host from your SSH config); closing it leaves the server's sessions running. |
+| `emx phone` | Prints the address of the phone page, or why it isn't up. |
 | `emx update` | Installs the newest version now, a new major version included. |
 | `emx update off` | Stops the automatic updates. |
 | `emx update on` | Starts the automatic updates again. |
@@ -80,6 +81,7 @@ Environment variables, set before running `emx`.
 | `EMX_NOTIFY` | Replaces the notification helper's command. |
 | `EMX_NOTIFY_HOME` | The folder the notification helper is built in. |
 | `EMX_OPEN` | Replaces the `open` command. |
+| `EMX_PHONE_PORT` | The port of the phone page (default 8787; a number from 1024 to 65535). |
 | `EMX_REMOTE_COMMAND` | emx's command on the server for `emx remote` (default `emx`, run through its login shell). |
 | `EMX_CLIPBOARD_IMAGE` | The command `emx remote` reads the laptop clipboard's image with (default `osascript`); it is given a file path to write a PNG to. |
 | `EMX_SSH` | Replaces `ssh` for `emx remote`. |

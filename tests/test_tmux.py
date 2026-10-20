@@ -453,6 +453,16 @@ class TypeIf(PrivateServer):
         self.assertEqual(self.typed("main"), want)
         self.assertEqual(self.typed("sidebar"), b"")
 
+    def test_a_gate_without_a_panel_types_while_the_panel_is_not_focused(self):
+        self.tmux.select(self.main)
+        gate = core.type_gate(self.main, None, "s1", 0, SESSION_OPT)
+        self.assertEqual(self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT)), core.TYPED)
+        want = self.TEXT.encode("utf-8") + b"\r"
+        self.wait_for(lambda: len(self.typed("main")) >= len(want), "the line in main")
+        self.assertEqual(self.typed("main"), want)
+        panel_gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        self.assertNotEqual(self.tmux.type_if(self.main, panel_gate, "x", core.TYPED, core.gate_report(SESSION_OPT)), core.TYPED)
+
     def test_it_types_the_text_and_no_enter_when_asked_not_to(self):
         gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
         report = self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT), enter=False)
@@ -1608,6 +1618,49 @@ class NarrowView(PrivateServer):
         time.sleep(0.5)
         self.assertEqual(self.alone(self.slot), ("1", "1", "48"))
         self.assertEqual((self.typed("panel"), self.typed("slot")), (b"", b""))
+
+
+@unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+class ClosingAStoppedSession(PrivateServer):
+    """A session whose claude has exited leaves a dead pane and its `emx-a-<key>` session; closing it removes both."""
+
+    def setUp(self):
+        super().setUp()
+        from emx import sidebar
+
+        self.sidebar_module = sidebar
+        self.tmux.run("set-option", "-g", "remain-on-exit", "on")
+        self.key = str(uuid.uuid4())
+        self.agent = self.tmux.new_hidden_window("sleep 60")
+        self.tmux.set_pane_option(self.agent, AGENT_OPT, engine.AGENT)
+        self.tmux.set_pane_option(self.agent, SESSION_OPT, self.key)
+        self.window = self.show(self.agent, "#{window_id}")
+        self.state = os.path.join(self.dir, "state")
+        where = engine.session_folder(self.state, self.key)
+        os.makedirs(where)
+        record = {"key": self.key, "agent": engine.AGENT, "name": "gone", "cwd": self.dir, "session_id": self.key,
+                  "started_at": 1, "run_at": 1}
+        with open(os.path.join(where, "session.json"), "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        self.tmux.link_agent(self.window, self.key, "cat")
+        os.kill(int(self.show(self.agent, "#{pane_pid}")), 9)
+        self.wait_for(lambda: self.show(self.agent, "#{pane_dead}") == "1", "the agent's pane to die")
+
+    def close(self, **options):
+        confirm = core.Confirm(self.key, "gone", False, time.time())
+        closer = self.sidebar_module.Closer(engine.Engine(self.tmux, "claude", self.state), (confirm,), **options)
+        return closer.close_one(confirm)
+
+    def test_the_panels_own_close_leaves_the_dead_pane_to_its_later_step(self):
+        self.assertEqual(self.close(), (True, "Closed gone."))
+        self.assertIn(self.key, self.tmux.agent_keys())
+
+    def test_closing_removes_the_dead_pane_and_its_agent_session(self):
+        self.assertIn(self.key, self.tmux.agent_keys())
+        self.assertEqual(self.close(clear_dead_panes=True), (True, "Closed gone."))
+        self.assertNotIn(self.key, self.tmux.agent_keys())
+        self.assertFalse([p for p in self.tmux.panes() if p.session == self.key])
+        self.assertFalse(os.path.exists(engine.session_folder(self.state, self.key)))
 
 
 if __name__ == "__main__":

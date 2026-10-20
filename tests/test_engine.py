@@ -98,9 +98,9 @@ class StoreCase(unittest.TestCase):
 
 
 class EngineStore(StoreCase):
-    def start(self, tmux=None, folder=None, message="hello"):
+    def start(self, tmux=None, folder=None, message="hello", name=""):
         tmux = tmux or FakeTmux()
-        return tmux, engine.start(tmux, "claude", self.folder if folder is None else folder, message, state=self.state)
+        return tmux, engine.start(tmux, "claude", self.folder if folder is None else folder, message, state=self.state, name=name)
 
     def test_start_writes_the_record_and_a_private_settings_file(self):
         tmux, (session, error) = self.start()
@@ -212,6 +212,33 @@ class EngineStore(StoreCase):
             tmux, (session, _) = self.start()
         self.assertRegex(session.name, r"^emx-test-[0-9a-f]{6}$")
         self.assertIn("-n", shlex.split(tmux.windows[0][0]))
+
+    def test_a_given_name_is_the_record_name_and_goes_to_claude(self):
+        tmux, (session, _) = self.start(name="x")
+        self.assertEqual(session.name, "x")
+        with open(os.path.join(self.key_dir(session.id), "session.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["name"], "x")
+        words = shlex.split(tmux.windows[0][0])
+        self.assertEqual(words[words.index("-n") + 1], "x")
+
+    def test_a_given_name_keeps_the_test_prefix_under_the_env_flag(self):
+        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
+            _, (session, _) = self.start(name="x")
+            _, (kept, _) = self.start(name="emx-test-y")
+        self.assertEqual((session.name, kept.name), ("emx-test-x", "emx-test-y"))
+
+    def test_without_a_name_and_without_the_flag_the_record_has_no_name(self):
+        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": ""}):
+            tmux, (session, _) = self.start(name="")
+        self.assertNotIn("-n", shlex.split(tmux.windows[0][0]))
+        with open(os.path.join(self.key_dir(session.id), "session.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["name"], "")
+
+    def test_the_engine_passes_the_name_on(self):
+        tmux = FakeTmux()
+        handle = engine.Engine(tmux, "claude", self.state)
+        session, _ = handle.start(self.folder, "", "named")
+        self.assertEqual(session.name, "named")
 
     def test_forget_removes_only_that_sessions_folder(self):
         self.write_record(KEY)
