@@ -177,3 +177,7 @@ a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 .routine .next { display: block; }
 input[type="search"] { -webkit-appearance: none; appearance: none; }
 input[type="search"]::-webkit-search-cancel-button { display: none; }
+.tone-accent { color: var(--accent); }
+.folder-bar { padding-right: 4px; }
+#routine-layer, #update-layer { z-index: 30; }
+.notes { max-height: 50vh; max-height: 50dvh; overflow-y: auto; }

@@ -2,6 +2,7 @@
 
 - **Status**: Accepted; built in [#67](https://github.com/turalnovruzov/emalatxana/issues/67) (emx 2.14.0).
 - **Date**: 2026-10-20
+- **Amended**: 2.16.0 (#67): the page also writes the panel's shared prefs (pins, favourite folders, recent folders) under the panel's own prefs lock, and asks Haiku for a name through the panel's `Namer`, only when he taps Suggest. Every new route passes the same checks; nothing else about who is let in changes.
 
 ## Context
 
