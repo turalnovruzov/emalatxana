@@ -423,6 +423,16 @@ def session(n, name, cwd, state, status="", started=1000.0, running=True):
     return core.Session(sid, name, cwd, state, status, "", started, running, session_id=sid)
 
 
+def every_state(folder):
+    return [
+        session("1", "finished", folder, "done"), session("2", "asking", folder, "blocked"),
+        session("3", "paused", folder, "working", "idle"), session("4", "busy", folder, "working"),
+        session("5", "ended", folder, "stopped", running=False), session("6", "bg", folder, "working", "background"),
+        session("7", "odd", folder, "surprise"), session("8", "booting", folder, "starting"),
+        session("9", "cold", folder, "done", running=False),
+    ]
+
+
 class FakeTmux:
     def __init__(self, panes=(), screen=""):
         self.listed, self.screen = list(panes), screen
@@ -507,18 +517,9 @@ class StateView(ApiCase):
         })
         self.assertEqual((group["label"], group["base"]), ("~/Workspace/emalatxana", "emalatxana"))
 
-    def every_state(self, folder):
-        return [
-            session("1", "finished", folder, "done"), session("2", "asking", folder, "blocked"),
-            session("3", "paused", folder, "working", "idle"), session("4", "busy", folder, "working"),
-            session("5", "ended", folder, "stopped", running=False), session("6", "bg", folder, "working", "background"),
-            session("7", "odd", folder, "surprise"), session("8", "booting", folder, "starting"),
-            session("9", "cold", folder, "done", running=False),
-        ]
-
     def test_each_rows_look_is_the_panels(self):
         folder = self.path("Workspace", "emalatxana")
-        sessions = self.every_state(folder)
+        sessions = every_state(folder)
         with open(os.path.join(self.state, "summaries.json"), "w") as fh:
             json.dump({s.id: {"text": "Said something", "state": core.summary_state(s, None)} for s in sessions}, fh)
         data = self.api(FakeEngine(sessions)).get("/api/state", "")[1]
@@ -911,12 +912,54 @@ class Page(ServerCase):
         defined = set(re.findall(r"--([a-z]+):", self.text("/tokens.css")[0]))
         self.assertLessEqual(used, defined)
 
-    def test_the_stopped_detail_and_the_close_window_match_the_page_and_the_panel(self):
+    def test_the_stopped_row_has_no_detail_line_and_the_close_window_matches_the_panel(self):
         css, _ = self.text("/app.css")
         js, _ = self.text("/app.js")
-        self.assertIn(".stopped .detail-text", css)
-        self.assertNotIn(".stopped .detail,", css)
+        self.assertNotIn(".stopped .detail-text", css)
         self.assertEqual(int(re.search(r"CONFIRM_MS = (\d+)", js).group(1)), int(core.CONFIRM_SECONDS * 1000))
+
+    def test_the_script_holds_no_state_rule_of_its_own(self):
+        js, _ = self.text("/app.js")
+        for mark in "✢✳✶✻∙▸▾":
+            self.assertNotIn(mark, js)
+        self.assertNotIn("CLOSING_LABEL", js)
+        self.assertNotIn(core.CLOSING_LABEL, js)
+        self.assertEqual(re.findall(r'"(?:stopped|working|done|needs|idle)"', js), [])
+
+    def test_the_glyph_tone_is_data_not_a_css_special_case(self):
+        css, _ = self.text("/app.css")
+        self.assertNotRegex(css, r"\.glyph\.tone-")
+        folder = "/w"
+        tones = {core.glyph_tone(s) for s in every_state(folder)}
+        self.assertEqual(tones, {"idle", "muted", "needs", "done", "stopped"})
+        for tone in tones:
+            self.assertRegex(css, r"\.tone-%s\b" % tone)
+
+    def test_the_script_respects_reduced_motion(self):
+        js, _ = self.text("/app.js")
+        self.assertIn("prefers-reduced-motion", js)
+        css, _ = self.text("/app.css")
+        self.assertIn("prefers-reduced-motion", css)
+
+    def test_the_pull_listens_without_passive_and_only_on_the_list(self):
+        js, _ = self.text("/app.js")
+        moves = re.findall(r'(\S+)\.addEventListener\("touchmove", [^;]*;', js)
+        self.assertEqual(moves, ['$("list")'])
+        self.assertRegex(js, r'\$\("list"\)\.addEventListener\("touchmove", \w+, \{ passive: false \}\)')
+
+    def test_the_sheet_has_resume(self):
+        html, _ = self.text("/")
+        self.assertRegex(html, r'<button class="item accent" id="sheet-resume"[^>]*hidden>Resume</button>')
+
+    def test_glyphs_are_written_as_text_not_emoji(self):
+        js, _ = self.text("/app.js")
+        function = re.search(r"function glyphText\(\w+\) \{(.*?)\n\}", js, re.S).group(1)
+        self.assertIn("\\uFE0E", function)
+        writes = [line for line in js.splitlines() if re.search(r'"glyph tone-|"muted fold"|pull-glyph"\)\.textContent', line)]
+        self.assertGreaterEqual(len(writes), 3)
+        for line in writes:
+            self.assertIn("glyphText(", line)
+        self.assertNotIn("\uFE0E", js)
 
     def test_the_new_button_never_shrinks_and_the_brand_wraps(self):
         css, _ = self.text("/app.css")
