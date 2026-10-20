@@ -4181,6 +4181,14 @@ def test_session_name(env: Mapping | None = None) -> str:
     return TEST_SESSION_PREFIX + uuid.uuid4().hex[:6] if env.get("EMX_SHOW_TEST_SESSIONS") == "1" else ""
 
 
+def test_prefixed(name: str, env: Mapping | None = None) -> str:
+    """`name` with the `emx-test-` prefix under `EMX_SHOW_TEST_SESSIONS=1`, so a live check never makes a session that shows in his emx; unchanged otherwise."""
+    env = os.environ if env is None else env
+    if env.get("EMX_SHOW_TEST_SESSIONS") == "1" and not name.startswith(TEST_SESSION_PREFIX):
+        return TEST_SESSION_PREFIX + name
+    return name
+
+
 def claude_launch_args(claude: str, sid: str, settings: str, message: str, name: str = "") -> list:
     """The interactive `claude` for a new session: `sid` is its session id, `settings` the file holding emx's hooks. A message that starts with `-` goes after `--`."""
     args = [claude, "--session-id", sid, "--settings", settings]

@@ -153,12 +153,12 @@ def set_verdict(key: str, stop_key: str, verdict: str, state=None) -> tuple:
     return True, None
 
 
-def start(tmux: Tmux, claude: str, folder: str, message: str, state=None) -> tuple:
-    """Start `claude` as a new session in `folder`: (Session, None), or (None, error) with nothing left behind."""
+def start(tmux: Tmux, claude: str, folder: str, message: str, state=None, name: str = "") -> tuple:
+    """Start `claude` as a new session in `folder`: (Session, None), or (None, error) with nothing left behind. Without a `name`, a throwaway test session gets its `emx-test-` one; with one, it keeps the prefix under `EMX_SHOW_TEST_SESSIONS=1`."""
     state = core.state_path() if state is None else state
     if not os.path.isdir(folder):
         return None, f"The folder {folder} doesn't exist."
-    key, name, now = str(uuid.uuid4()), core.test_session_name(), _now_ms()
+    key, name, now = str(uuid.uuid4()), core.test_prefixed(name) if name else core.test_session_name(), _now_ms()
     where = session_folder(state, key)
     pane = None
     try:
@@ -358,8 +358,8 @@ class Engine:
     def list_sessions(self) -> tuple:
         return list_sessions(self.tmux, self.state)
 
-    def start(self, folder: str, message: str) -> tuple:
-        return start(self.tmux, self.claude, folder, message, self.state)
+    def start(self, folder: str, message: str, name: str = "") -> tuple:
+        return start(self.tmux, self.claude, folder, message, self.state, name)
 
     def resume_command(self, key: str) -> tuple:
         return resume_command(key, self.claude, self.state)

@@ -389,6 +389,8 @@ class Closer(threading.Thread):
                 return False, f"tmux: {exc}"
             if not self.wait_until_ended(confirm.id):
                 return False, f"{confirm.name} is still running, so emx didn't remove it."
+        else:
+            self.clear_dead(confirm.id)
         error = self.forget(confirm.id)
         if error:
             return False, error
@@ -407,6 +409,19 @@ class Closer(threading.Thread):
         for pane in tmux.panes():
             if pane.session == sid and pane.agent and not pane.dead:
                 tmux.kill_pane(pane.id)
+
+    def clear_dead(self, sid: str) -> None:
+        """A stopped session's exited pane stays (remain-on-exit) and keeps its `emx-a-<key>` session alive; killing the pane removes both. A tmux error doesn't stop the forget."""
+        tmux = self.engine.tmux
+        try:
+            for view in tmux.views():
+                if view.shows == sid and view.slot:
+                    park_slot(tmux, view.slot)
+            for pane in tmux.panes():
+                if pane.session == sid and pane.agent and pane.dead:
+                    tmux.kill_pane(pane.id)
+        except TmuxError:
+            pass
 
     def wait_until_ended(self, sid: str) -> bool:
         deadline = time.monotonic() + LISTED_WAIT_SECONDS
