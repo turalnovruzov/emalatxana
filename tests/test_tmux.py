@@ -1646,14 +1646,18 @@ class ClosingAStoppedSession(PrivateServer):
         os.kill(int(self.show(self.agent, "#{pane_pid}")), 9)
         self.wait_for(lambda: self.show(self.agent, "#{pane_dead}") == "1", "the agent's pane to die")
 
-    def close(self):
+    def close(self, **options):
         confirm = core.Confirm(self.key, "gone", False, time.time())
-        closer = self.sidebar_module.Closer(engine.Engine(self.tmux, "claude", self.state), (confirm,))
+        closer = self.sidebar_module.Closer(engine.Engine(self.tmux, "claude", self.state), (confirm,), **options)
         return closer.close_one(confirm)
+
+    def test_the_panels_own_close_leaves_the_dead_pane_to_its_later_step(self):
+        self.assertEqual(self.close(), (True, "Closed gone."))
+        self.assertIn(self.key, self.tmux.agent_keys())
 
     def test_closing_removes_the_dead_pane_and_its_agent_session(self):
         self.assertIn(self.key, self.tmux.agent_keys())
-        self.assertEqual(self.close(), (True, "Closed gone."))
+        self.assertEqual(self.close(clear_dead_panes=True), (True, "Closed gone."))
         self.assertNotIn(self.key, self.tmux.agent_keys())
         self.assertFalse([p for p in self.tmux.panes() if p.session == self.key])
         self.assertFalse(os.path.exists(engine.session_folder(self.state, self.key)))

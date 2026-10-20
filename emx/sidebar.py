@@ -346,10 +346,11 @@ class Closer(threading.Thread):
     closed}).
     """
 
-    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = ""):
+    def __init__(self, engine: Engine, targets: tuple, wait_for: tuple = (), panel: str = "", clear_dead_panes: bool = False):
         super().__init__(daemon=True)
         self.engine, self.targets, self.wait_for = engine, tuple(targets), tuple(wait_for)
         self.panel = panel
+        self.clear_dead_panes = clear_dead_panes
         self.current = self.targets[0]
         self.result = None
 
@@ -389,7 +390,7 @@ class Closer(threading.Thread):
                 return False, f"tmux: {exc}"
             if not self.wait_until_ended(confirm.id):
                 return False, f"{confirm.name} is still running, so emx didn't remove it."
-        else:
+        elif self.clear_dead_panes:
             self.clear_dead(confirm.id)
         error = self.forget(confirm.id)
         if error:
@@ -411,7 +412,10 @@ class Closer(threading.Thread):
                 tmux.kill_pane(pane.id)
 
     def clear_dead(self, sid: str) -> None:
-        """A stopped session's exited pane stays (remain-on-exit) and keeps its `emx-a-<key>` session alive; killing the pane removes both. A tmux error doesn't stop the forget."""
+        """A stopped session's exited pane stays (remain-on-exit) and keeps its `emx-a-<key>` session alive; killing the pane removes both. A tmux error doesn't stop the forget.
+
+        The panel leaves this off: it clears the dead pane itself once the close is done (`finish_close`). The phone page has no such step.
+        """
         tmux = self.engine.tmux
         try:
             for view in tmux.views():
