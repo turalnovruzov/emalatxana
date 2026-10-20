@@ -89,6 +89,7 @@ b { font-weight: 600; }
 .sheet {
   position: absolute; left: 0; right: 0; bottom: 0;
   padding: 8px 12px 28px; padding-bottom: max(28px, env(safe-area-inset-bottom));
+  padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right));
   border-radius: 16px 16px 0 0; background: var(--raised);
   display: flex; flex-direction: column; gap: 6px; max-height: 90vh; max-height: 90dvh; overflow-y: auto; overscroll-behavior: contain;
 }
@@ -104,7 +105,8 @@ b { font-weight: 600; }
 a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 .item.danger { color: var(--error); }
 
-.screen { position: fixed; inset: 0; z-index: 20; background: var(--ground); overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+.screen { position: fixed; inset: 0; z-index: 20; background: var(--ground); overflow-x: hidden; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 .bar { position: sticky; top: 0; background: var(--ground); }
 .form { padding: 14px 16px 6px; display: flex; flex-direction: column; gap: 6px; }
 .spaced { padding-top: 10px; }

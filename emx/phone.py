@@ -282,7 +282,10 @@ class PhoneApi:
             return 200, manifest_json().encode(), MANIFEST_TYPE
         if path in STATIC:
             name, kind = STATIC[path]
-            return 200, (WEB / name).read_bytes(), kind
+            body = (WEB / name).read_bytes()
+            if name == "index.html":
+                body = body.replace(b"{{ground}}", core.xterm256_hex(CHROME_INDEX["ground"]).encode())
+            return 200, body, kind
         if path == "/api/state":
             return 200, self.snapshot()
         if path == "/api/folders":

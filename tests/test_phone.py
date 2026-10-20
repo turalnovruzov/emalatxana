@@ -152,6 +152,10 @@ class WebAppFeel(ServerCase):
             self.assertIn(f'<meta name="{name}" content="{value}">', html)
         self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', html)
 
+    def test_the_page_file_holds_no_hex_colour(self):
+        source = (phone.WEB / "index.html").read_text()
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", source), [])
+
     def test_the_stylesheet_fixes_the_shell_and_scrolls_only_inside(self):
         css, _ = self.page("/app.css")
         flat = re.sub(r"\s+", " ", css)
