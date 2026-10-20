@@ -13,8 +13,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from emx import core, engine, phone
-from emx.tmux import Pane
+from emx import core, engine, phone, sidebar
+from emx.tmux import Pane, TmuxError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tailscale"
 OWNER = 4242
@@ -199,6 +199,11 @@ class Posts(ServerCase):
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, origin=False)[0], 403)
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, headers={"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, headers={"Origin": "null"})[0], 403)
+        self.assertEqual(self.api.posts, [])
+
+    def test_resume_is_refused_without_this_pages_origin(self):
+        self.assertEqual(self.request("POST", "/api/resume", {"id": KEY}, origin=False)[0], 403)
+        self.assertEqual(self.request("POST", "/api/resume", {"id": KEY}, headers={"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.api.posts, [])
 
     def test_a_post_must_be_json(self):
@@ -418,15 +423,42 @@ def session(n, name, cwd, state, status="", started=1000.0, running=True):
     return core.Session(sid, name, cwd, state, status, "", started, running, session_id=sid)
 
 
+def every_state(folder):
+    return [
+        session("1", "finished", folder, "done"), session("2", "asking", folder, "blocked"),
+        session("3", "paused", folder, "working", "idle"), session("4", "busy", folder, "working"),
+        session("5", "ended", folder, "stopped", running=False), session("6", "bg", folder, "working", "background"),
+        session("7", "odd", folder, "surprise"), session("8", "booting", folder, "starting"),
+        session("9", "cold", folder, "done", running=False),
+    ]
+
+
 class FakeTmux:
     def __init__(self, panes=(), screen=""):
         self.listed, self.screen = list(panes), screen
+        self.writes = []
+        self.tag_error = False
 
     def panes(self):
         return self.listed
 
     def capture(self, pane):
         return self.screen
+
+    def respawn(self, pane, command, cwd=None):
+        self.writes.append(("respawn", pane, command, cwd))
+
+    def new_hidden_window(self, command, cwd=None):
+        self.writes.append(("window", command, cwd))
+        return "%42"
+
+    def set_pane_option(self, pane, name, value):
+        if self.tag_error:
+            raise TmuxError("no such pane")
+        self.writes.append(("tag", pane, name, value))
+
+    def kill_pane(self, pane):
+        self.writes.append(("kill", pane))
 
 
 class FakeEngine:
@@ -436,6 +468,9 @@ class FakeEngine:
 
     def list_sessions(self):
         return self.sessions, None
+
+    def resume_command(self, sid):
+        return f"claude --resume {sid}", None
 
     def start(self, folder, message, name=""):
         self.started.append((folder, message, name))
@@ -481,6 +516,43 @@ class StateView(ApiCase):
             "busy": ("Working", "plain", "✳"), "ended": ("Stopped", "stopped", "∙"),
         })
         self.assertEqual((group["label"], group["base"]), ("~/Workspace/emalatxana", "emalatxana"))
+
+    def test_each_rows_look_is_the_panels(self):
+        folder = self.path("Workspace", "emalatxana")
+        sessions = every_state(folder)
+        with open(os.path.join(self.state, "summaries.json"), "w") as fh:
+            json.dump({s.id: {"text": "Said something", "state": core.summary_state(s, None)} for s in sessions}, fh)
+        data = self.api(FakeEngine(sessions)).get("/api/state", "")[1]
+        rows = {r["id"]: r for r in data["groups"][0]["sessions"]}
+        self.assertEqual(len(rows), len(sessions))
+        for s in sessions:
+            row = rows[s.id]
+            lines = core.row_lines(s.name, "", row["word"], row["detail"], row["age"], 1000, core.category(s) == core.STOPPED)
+            with self.subTest(state=s.state, status=s.status, running=s.running):
+                self.assertEqual(row["glyph_tone"], core.glyph_tone(s))
+                self.assertEqual(row["spin"], core.spins(s))
+                self.assertEqual(len(lines) > 1, row["status"])
+                if row["status"]:
+                    self.assertEqual(lines[1][0][1], row["word"])
+                    self.assertEqual(lines[-1][-1][1], row["detail"])
+                else:
+                    self.assertEqual((row["detail"], row["stopped"]), ("", True))
+
+    def test_a_working_rows_detail_comes_from_its_transcript(self):
+        folder = self.path("Workspace", "emalatxana")
+        busy = session("4", "busy", folder, "working")
+        transcript = core.Transcript(latest="tool", tool="Bash: npm test", tool_at=1.0)
+        with open(os.path.join(self.state, "summaries.json"), "w") as fh:
+            json.dump({busy.id: {"text": "A Done line", "state": "done"}}, fh)
+        api = self.api(FakeEngine([busy]), transcripts=lambda: {busy.id: transcript})
+        row = api.get("/api/state", "")[1]["groups"][0]["sessions"][0]
+        self.assertEqual(row["detail"], core.session_summary(busy, transcript))
+        self.assertIn("npm test", row["detail"])
+
+    def test_the_look_carries_the_panels_frames_rate_arrows_and_closing_label(self):
+        look = self.api(FakeEngine([])).get("/api/state", "")[1]["look"]
+        self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
+                                "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")
@@ -690,6 +762,66 @@ class Actions(ApiCase):
         self.assertEqual([(t.id, t.name, t.running) for t in targets], [(self.target.id, "alpha", True)])
         self.assertTrue(clear)
 
+    def stopped_session(self):
+        stopped = session("5", "ended", self.folder, "stopped", running=False)
+        self.engine = FakeEngine([stopped])
+        return stopped
+
+    def test_resume_of_a_stopped_session_with_a_dead_pane_respawns_it_there(self):
+        stopped = self.stopped_session()
+        self.engine.tmux = FakeTmux([Pane("%7", "@7", True, "", stopped.id, 80, 80, agent="claude")])
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": True, "message": "Resumed ended."})
+        self.assertEqual(self.engine.tmux.writes, [("respawn", "%7", f"claude --resume {stopped.id}", self.folder)])
+
+    def test_resume_with_no_pane_makes_a_window_tagged_agent_then_key(self):
+        stopped = self.stopped_session()
+        self.assertTrue(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [
+            ("window", f"claude --resume {stopped.id}", self.folder),
+            ("tag", "%42", phone.sidebar.AGENT_OPT, phone.sidebar.AGENT),
+            ("tag", "%42", phone.sidebar.SESSION_OPT, stopped.id),
+        ])
+
+    def test_resume_never_touches_a_live_pane_or_a_running_session(self):
+        stopped = self.stopped_session()
+        self.engine.tmux = FakeTmux([Pane("%7", "@7", False, "", stopped.id, 80, 80, agent="claude")])
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": True, "message": "ended is already running."})
+        self.engine = FakeEngine([self.target])
+        self.assertTrue(self.post("/api/resume", {"id": self.target.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [])
+        self.assertEqual(self.engine.tmux.listed, [])
+
+    def test_resume_of_a_session_no_longer_listed_or_a_failed_listing_starts_nothing(self):
+        stopped = self.stopped_session()
+        self.assertFalse(self.post("/api/resume", {"id": OTHER})[1]["ok"])
+        self.engine.list_sessions = lambda: (None, "tmux is not answering")
+        self.assertFalse(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.engine.list_sessions = lambda: ([stopped], None)
+        self.engine.tmux.panes = mock.Mock(side_effect=TmuxError("gone"))
+        self.assertFalse(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [])
+
+    def test_resume_needs_a_session_id(self):
+        for body in ({"id": "../x"}, {}, {"id": 5}):
+            with self.subTest(body=body):
+                self.assertEqual(self.post("/api/resume", body)[0], 400)
+        self.assertEqual(self.engine.tmux.writes, [])
+
+    def test_resume_reports_one_that_did_not_come_up(self):
+        stopped = self.stopped_session()
+        api = self.api(self.engine, wait_running=lambda eng, sid: (None, "never"))
+        body = api.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": False, "message": "emx resumed ended, but it isn't listed running yet."})
+
+    def test_an_untaggable_window_is_killed(self):
+        stopped = self.stopped_session()
+        self.engine.tmux.tag_error = True
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertFalse(body["ok"])
+        self.assertEqual(self.engine.tmux.writes[-1], ("kill", "%42"))
+
     def test_close_of_a_session_no_longer_listed_does_nothing(self):
         body = self.post("/api/close", {"id": OTHER, "running": True})[1]
         self.assertFalse(body["ok"])
@@ -780,12 +912,54 @@ class Page(ServerCase):
         defined = set(re.findall(r"--([a-z]+):", self.text("/tokens.css")[0]))
         self.assertLessEqual(used, defined)
 
-    def test_the_stopped_detail_and_the_close_window_match_the_page_and_the_panel(self):
+    def test_the_stopped_row_has_no_detail_line_and_the_close_window_matches_the_panel(self):
         css, _ = self.text("/app.css")
         js, _ = self.text("/app.js")
-        self.assertIn(".stopped .detail-text", css)
-        self.assertNotIn(".stopped .detail,", css)
+        self.assertNotIn(".stopped .detail-text", css)
         self.assertEqual(int(re.search(r"CONFIRM_MS = (\d+)", js).group(1)), int(core.CONFIRM_SECONDS * 1000))
+
+    def test_the_script_holds_no_state_rule_of_its_own(self):
+        js, _ = self.text("/app.js")
+        for mark in "✢✳✶✻∙▸▾":
+            self.assertNotIn(mark, js)
+        self.assertNotIn("CLOSING_LABEL", js)
+        self.assertNotIn(core.CLOSING_LABEL, js)
+        self.assertEqual(re.findall(r'"(?:stopped|working|done|needs|idle)"', js), [])
+
+    def test_the_glyph_tone_is_data_not_a_css_special_case(self):
+        css, _ = self.text("/app.css")
+        self.assertNotRegex(css, r"\.glyph\.tone-")
+        folder = "/w"
+        tones = {core.glyph_tone(s) for s in every_state(folder)}
+        self.assertEqual(tones, {"idle", "muted", "needs", "done", "stopped"})
+        for tone in tones:
+            self.assertRegex(css, r"\.tone-%s\b" % tone)
+
+    def test_the_script_respects_reduced_motion(self):
+        js, _ = self.text("/app.js")
+        self.assertIn("prefers-reduced-motion", js)
+        css, _ = self.text("/app.css")
+        self.assertIn("prefers-reduced-motion", css)
+
+    def test_the_pull_listens_without_passive_and_only_on_the_list(self):
+        js, _ = self.text("/app.js")
+        moves = re.findall(r'(\S+)\.addEventListener\("touchmove", [^;]*;', js)
+        self.assertEqual(moves, ['$("list")'])
+        self.assertRegex(js, r'\$\("list"\)\.addEventListener\("touchmove", \w+, \{ passive: false \}\)')
+
+    def test_the_sheet_has_resume(self):
+        html, _ = self.text("/")
+        self.assertRegex(html, r'<button class="item accent" id="sheet-resume"[^>]*hidden>Resume</button>')
+
+    def test_glyphs_are_written_as_text_not_emoji(self):
+        js, _ = self.text("/app.js")
+        function = re.search(r"function glyphText\(\w+\) \{(.*?)\n\}", js, re.S).group(1)
+        self.assertIn("\\uFE0E", function)
+        writes = [line for line in js.splitlines() if re.search(r'"glyph tone-|"muted fold"|pull-glyph"\)\.textContent', line)]
+        self.assertGreaterEqual(len(writes), 3)
+        for line in writes:
+            self.assertIn("glyphText(", line)
+        self.assertNotIn("\uFE0E", js)
 
     def test_the_new_button_never_shrinks_and_the_brand_wraps(self):
         css, _ = self.text("/app.css")
