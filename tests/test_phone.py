@@ -3,6 +3,7 @@ import http.client
 import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -677,6 +678,58 @@ class Routines(ApiCase):
         api.get("/api/routines", "")
         api.get("/api/routines", "")
         self.assertEqual(len(calls), 1)
+
+
+class Page(ServerCase):
+    def setUp(self):
+        super().setUp()
+        self.server.api = phone.PhoneApi(FakeEngine([]), "/nonexistent-home", "/nonexistent-state", "/nonexistent-prefs")
+
+    def text(self, path):
+        status, body, response = self.request(path=path)
+        self.assertEqual(status, 200, path)
+        return body.decode(), response
+
+    def test_the_page_is_html_that_names_its_script_and_style_and_carries_none_inline(self):
+        html, response = self.text("/")
+        self.assertTrue(response.getheader("Content-Type").startswith("text/html"))
+        self.assertIn('src="/app.js"', html)
+        self.assertIn('href="/app.css"', html)
+        self.assertIn('href="/tokens.css"', html)
+        self.assertNotRegex(html, r"<script(?![^>]*\bsrc=)[^>]*>")
+        self.assertNotRegex(html, r"<script[^>]*>\s*[^\s<]")
+        self.assertNotRegex(html, r"\sstyle=")
+        self.assertNotRegex(html, r"\son[a-z]+=")
+
+    def test_the_tokens_are_the_panels_colours(self):
+        css, response = self.text("/tokens.css")
+        self.assertTrue(response.getheader("Content-Type").startswith("text/css"))
+        for want in ("--needs:#ffd75f", "--done:#87d787", "--idle:#8787af", "--stopped:#626262", "--muted:#8a8a8a",
+                     "--accent:#5fafff", "--error:#ff5f5f", "--copper:#d7875f", "--ground:#1c1c1c", "--selected:#303030"):
+            self.assertIn(want, css)
+
+    def test_the_stylesheet_has_no_colour_literal_of_its_own(self):
+        css, _ = self.text("/app.css")
+        self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,6}\b", css), [])
+        self.assertEqual(re.findall(r"\b(?:rgb|hsl)a?\((?!0, 0, 0, 0\.55\))", css), [])
+        used = set(re.findall(r"var\(--([a-z]+)\)", css))
+        defined = set(re.findall(r"--([a-z]+):", self.text("/tokens.css")[0]))
+        self.assertLessEqual(used, defined)
+
+    def test_the_script_never_writes_html_and_the_inputs_turn_off_ios_capitals(self):
+        js, _ = self.text("/app.js")
+        self.assertNotIn("innerHTML", js)
+        self.assertNotIn("outerHTML", js)
+        self.assertNotIn("insertAdjacentHTML", js)
+        self.assertNotIn("eval(", js)
+        html, _ = self.text("/")
+        for field in ("new-folder", "new-name", "rename-field"):
+            tag = re.search(r'<input[^>]*id="%s"[^>]*>' % field, html).group(0)
+            for attribute in ('autocapitalize="none"', 'autocorrect="off"', 'spellcheck="false"'):
+                self.assertIn(attribute, tag, field)
+
+    def test_a_script_gets_the_page_only_through_the_guard(self):
+        self.assertEqual(self.request(path="/app.js", host="evil.example")[0], 400)
 
 
 if __name__ == "__main__":

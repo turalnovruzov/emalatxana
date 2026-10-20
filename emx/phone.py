@@ -196,6 +196,22 @@ def allowed_folder(path: str, home: str, known) -> bool:
     return any(r != "/" and (real == r or real.startswith(r + "/")) for r in roots)
 
 
+WEB = Path(__file__).parent / "web"
+STATIC = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
+CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252}
+
+
+def tokens_css() -> str:
+    """The page's colours, all from the panel's own tone indexes, so they cannot drift from it."""
+    colours = {tone: core.TONE_HEX[tone] for tone in ("needs", "done", "idle", "stopped", "muted", "path", "accent", "error", "copper")}
+    colours.update({name: core.xterm256_hex(index) for name, index in CHROME_INDEX.items()})
+    return ":root{" + "".join(f"--{name}:{value};" for name, value in colours.items()) + "}\n"
+
+
 TRUST_QUESTION = re.compile(r"trust this folder|do you trust", re.IGNORECASE)
 TRUST_DETAIL = "waiting to trust this folder: answer it in a terminal"
 COUNT_WORDS = {core.NEEDS_INPUT: "needs", core.WORKING: "working", core.DONE: "done", "idle": "idle"}
@@ -252,6 +268,11 @@ class PhoneApi:
 
     def get(self, path: str, query: str):
         params = parse_qs(query)
+        if path == "/tokens.css":
+            return 200, tokens_css().encode(), "text/css; charset=utf-8"
+        if path in STATIC:
+            name, kind = STATIC[path]
+            return 200, (WEB / name).read_bytes(), kind
         if path == "/api/state":
             return 200, self.snapshot()
         if path == "/api/folders":
