@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.16.0 — 2026-10-20
+
+- The mouse wheel scrolls the panel: the session list, Notifications, Routines and the key help.
+- Scrolling leaves the selection where it is, even when it scrolls out of view; `↑` or `↓` brings it back.
+- Scrolling doesn't close a peek, clear a notice or disarm a close confirm.
+- A thin scroll bar at the panel's right edge shows where you are, only while there is more than fits.
+
 ## 2.15.0 — 2026-10-20
 
 - The phone page shows each state as the panel does: the same mark, colour, word and line of detail for working, needs input, done, idle and stopped. A working row no longer looks done: its mark is muted, and it moves through the panel's frames at the panel's pace (it stays still when your phone asks for reduced motion).

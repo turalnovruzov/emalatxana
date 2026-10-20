@@ -67,6 +67,7 @@ HELP = (
     ("→ Enter", "open the session and go to it"),
     ("←", "back here, from an empty prompt"),
     ("↑↓ j k", "move"),
+    ("wheel", "scroll; the selection stays, ↑↓ brings it back"),
     ("Enter click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
@@ -148,6 +149,14 @@ FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
+WHEEL_ROWS = 3
+# ncurses 5 mouse ABI (macOS system python) has no BUTTON5; wheel-down arrives as the REPORT_MOUSE_POSITION bit.
+# ALL_MOUSE_EVENTS leaves that bit out, so the mouse mask must add WHEEL_DOWN or ncurses drops the event (see `mouse_mask`).
+WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", curses.REPORT_MOUSE_POSITION)
+
+
+def mouse_mask():
+    return curses.ALL_MOUSE_EVENTS | WHEEL_DOWN
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
@@ -161,6 +170,7 @@ TONES = {
     "copper": (core.TONE_INDEX["copper"], curses.COLOR_YELLOW),
     "remote": (core.TONE_INDEX["remote"], curses.COLOR_MAGENTA),
     "idle": (core.TONE_INDEX["idle"], curses.COLOR_BLUE),
+    "border": (core.TONE_INDEX["border"], curses.COLOR_WHITE),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
@@ -1948,6 +1958,8 @@ class App:
         self.row_actions = {}
         self.menu_at = None
         self.scroll = 0
+        self.extent = (0, 0)
+        self.held = None
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state), primary=self.primary)
         self.apply_mode()
@@ -3067,10 +3079,10 @@ class App:
             return False
         return True
 
-    def handle_mouse(self, busy: bool = False) -> None:
+    def handle_mouse(self, busy: bool = False, event: tuple | None = None) -> None:
         """`busy`: an input, a view or a close was open when the tap came, so a tap on the selected row opens no actions menu."""
         try:
-            _, _, y, _, state = curses.getmouse()
+            _, _, y, _, state = event or curses.getmouse()
         except curses.error:
             return
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
@@ -3107,7 +3119,36 @@ class App:
             return
         self.activate(item)
 
+    def wheel(self, delta: int) -> None:
+        """Scroll the open view by `delta` rows, leaving the selection where it is; the next draw does not pull the view back to it."""
+        total, height = self.extent
+        if self.history_view is not None:
+            self.history_scroll = core.wheel_scroll(self.history_scroll, delta, total, height)
+            self.held = ("history", self.history_view)
+        elif self.routines_view is not None:
+            self.routines_view = core.wheel_scroll(self.routines_view, delta, total, height)
+        elif self.help:
+            self.help_scroll = core.wheel_scroll(self.help_scroll, delta, total, height)
+        else:
+            self.scroll = core.wheel_scroll(self.scroll, delta, total, height)
+            self.held = ("list", self.cursor)
+
     def handle_key(self, key) -> None:
+        event = None
+        if key == curses.KEY_MOUSE:
+            try:
+                event = curses.getmouse()
+            except curses.error:
+                event = None
+            # A wheel turn is not a keypress: it must not close a peek, clear a notice or disarm a confirm.
+            if event and event[4] & curses.BUTTON4_PRESSED:
+                self.wheel(-WHEEL_ROWS)
+                return
+            if event and event[4] & WHEEL_DOWN:
+                self.wheel(WHEEL_ROWS)
+                return
+        if key != curses.KEY_RESIZE:
+            self.held = None
         busy = self.input_open() or self.help or self.peeking or (self.menu is None and self.confirm is not None)
         if self.whats_new is not None and key != curses.KEY_RESIZE:
             if self.notice == self.whats_new:
@@ -3122,7 +3163,7 @@ class App:
         if self.peeking and key not in PEEK_KEYS and key != curses.KEY_RESIZE:
             self.peeking = False
         if key == curses.KEY_MOUSE:
-            self.handle_mouse(busy)
+            self.handle_mouse(busy, event)
         elif key == curses.KEY_RESIZE:
             self.housekeep(fresh_list=False)
             if self.peeking and not self.peek_fits():
@@ -3547,6 +3588,7 @@ class App:
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
+        self.extent = (0, 0)
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 0, h - len(bottom)
         if self.history_view is not None:
@@ -3569,6 +3611,9 @@ class App:
             layout = self.list_layout(w, max(1, list_bottom - list_top))
             room = core.peek_room(h, w, len(bottom))
             peek_rows = self.draw_peek(list_bottom, w, room, self.cursor_rows(layout)) if self.peeking else 0
+            list_height = max(1, list_bottom - peek_rows - list_top)
+            if core.scroll_thumb(sum(layout[2]), list_height, 0) is not None:
+                w, layout = w - 1, self.list_layout(w - 1, max(1, list_bottom - list_top))
             self.draw_list(list_top, list_bottom - peek_rows, w, layout)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
@@ -3617,11 +3662,18 @@ class App:
             self.put(top + 1, 1, HISTORY_EMPTY, curses.A_DIM)
             return
         self.history_view = max(0, min(self.history_view, len(self.history) - 1))
+        top, height = top + 1, max(1, bottom - top - 1)
         rows = core.history_rows(self.history, time.monotonic(), max(1, width - 2))
+        if core.scroll_thumb(sum(len(r) for r in rows), height, 0) is not None:
+            width -= 1
+            rows = core.history_rows(self.history, time.monotonic(), max(1, width - 2))
         lines = [("entry", i) for i in range(len(rows))]
         heights = [len(r) for r in rows]
-        top, height = top + 1, max(1, bottom - top - 1)
-        self.history_scroll = core.list_window(heights, self.history_view, self.history_scroll, height)
+        at = -1 if self.held == ("history", self.history_view) else self.history_view
+        if at >= 0:
+            self.held = None
+        self.history_scroll = core.list_window(heights, at, self.history_scroll, height)
+        self.extent = (sum(heights), height)
         self.row_map = core.row_hits(lines, heights, self.history_scroll, top, height)
         y = top - self.history_scroll
         for i, entry in enumerate(self.history):
@@ -3638,6 +3690,7 @@ class App:
                         attr = self.palette.attr("plain", selected)
                     self.put(y, 1, text, attr)
                 y += 1
+        self.draw_scroll_bar(top, height, sum(heights), self.history_scroll, width)
 
     def routine_rows(self, width: int) -> list:
         """(text, tone) for each row of the view, or the one message that stands in for them."""
@@ -3658,41 +3711,47 @@ class App:
 
     def draw_routines(self, top: int, bottom: int, width: int) -> None:
         self.put(top, 1, ROUTINES_TITLE, curses.A_BOLD)
-        rows = self.routine_rows(width)
         top, height = top + 1, max(1, bottom - top - 1)
+        rows = self.routine_rows(width)
+        if core.scroll_thumb(len(rows), height, 0) is not None:
+            width -= 1
+            rows = self.routine_rows(width)
         self.routines_view = core.list_window([1] * len(rows), -1, self.routines_view, height)
+        self.extent = (len(rows), height)
         for y, (text, tone) in enumerate(rows[self.routines_view:self.routines_view + height], start=top):
             self.put(y, 1, text, self.palette.attr(tone))
+        self.draw_scroll_bar(top, height, len(rows), self.routines_view, width)
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
-        if self.narrow:
-            self.draw_narrow_help(top, bottom, width)
-            return
+        """The key help, scrolled by `help_scroll`: it can be taller than the screen."""
+        table, key_width = (NARROW_HELP, NARROW_HELP_KEY_WIDTH) if self.narrow else (HELP, HELP_KEY_WIDTH)
         self.put(top, 1, "Keys", curses.A_BOLD)
-        y, x = top + 2, 1 + HELP_KEY_WIDTH
-        for key, what in HELP:
-            lines = textwrap.wrap(what, max(1, width - 1 - x))
-            if y + len(lines) > bottom:
-                break
-            self.put(y, 1, key, self.palette.attr("accent"))
-            for line in lines:
-                self.put(y, x, line)
-                y += 1
+        x, room = 1 + key_width, max(1, bottom - top - 2)
 
-    def draw_narrow_help(self, top: int, bottom: int, width: int) -> None:
-        """A phone's help, scrolled by `help_scroll`: it is taller than the screen."""
-        self.put(top, 1, "Keys", curses.A_BOLD)
-        x = 1 + NARROW_HELP_KEY_WIDTH
-        rows = []
-        for key, what in NARROW_HELP:
-            for i, line in enumerate(textwrap.wrap(what, max(1, width - 1 - x))):
-                rows.append((key if i == 0 else "", line))
-        room = max(1, bottom - top - 2)
+        def help_rows(width: int) -> list:
+            return [(key if i == 0 else "", line) for key, what in table
+                    for i, line in enumerate(textwrap.wrap(what, max(1, width - 1 - x)))]
+
+        rows = help_rows(width)
+        if core.scroll_thumb(len(rows), room, 0) is not None:
+            width -= 1
+            rows = help_rows(width)
         self.help_scroll = max(0, min(self.help_scroll, len(rows) - room))
+        self.extent = (len(rows), room)
         for y, (key, line) in enumerate(rows[self.help_scroll:self.help_scroll + room], start=top + 2):
             if key:
                 self.put(y, 1, key, self.palette.attr("accent"))
             self.put(y, x, line)
+        self.draw_scroll_bar(top + 2, room, len(rows), self.help_scroll, width)
+
+    def draw_scroll_bar(self, top: int, height: int, total: int, scroll: int, x: int) -> None:
+        thumb = core.scroll_thumb(total, height, scroll)
+        if thumb is None:
+            return
+        start, length = thumb
+        for i in range(height):
+            on = start <= i < start + length
+            self.put(top + i, x, "┃" if on else "│", self.palette.attr("muted" if on else "border"))
 
     def list_layout(self, width: int, height: int = 0) -> tuple:
         """(lines, each session line's laid-out rows, every line's height in screen rows) for the list at `width`; a session row is at most `height` rows."""
@@ -3768,7 +3827,12 @@ class App:
         groups = {g.key: g for g in self.groups}
         frame = int(time.monotonic() / FRAME_SECONDS)
         at = lines.index(self.cursor) if self.cursor in lines else 0
+        if self.held == ("list", self.cursor):
+            at = -1
+        else:
+            self.held = None
         self.scroll = core.list_window(heights, at, self.scroll, height)
+        self.extent = (sum(heights), height)
         self.row_map = core.row_hits(lines, heights, self.scroll, top, height)
         y = top - self.scroll
         for line, rows_taken in zip(lines, heights):
@@ -3792,6 +3856,7 @@ class App:
             elif line in rows:
                 session = self.session(line[1])
                 self.draw_session(first, shown, rows[line], session, selected, session.id == main_sid, frame)
+        self.draw_scroll_bar(top, height, sum(heights), self.scroll, width)
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int, label: str | None = None) -> None:
         if label is not None:
@@ -4109,7 +4174,7 @@ def setup_curses(scr) -> None:
         pass
     scr.keypad(True)
     scr.timeout(KEY_WAIT_MS)
-    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    curses.mousemask(mouse_mask())
     curses.mouseinterval(0)
 
 
@@ -4139,7 +4204,7 @@ class Palette:
                 self.pairs[tone][bar] = 3 * i + j
 
     def attr(self, tone: str, bar: str | None = None) -> int:
-        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped") else 0
+        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped", "border") else 0
         if bar and not self.rich:
             extra |= curses.A_REVERSE | (curses.A_DIM if bar == "unfocused" else 0)
         if not self.colored:

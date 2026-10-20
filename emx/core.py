@@ -114,7 +114,7 @@ FOLDED, UNFOLDED = "▸", "▾"
 # xterm-256 index of each tone; the panel draws it and the phone page turns it into hex with `xterm256_hex`, so the two cannot drift.
 TONE_INDEX = {
     "muted": 245, "needs": 221, "done": 114, "stopped": 241, "accent": 75,
-    "path": 244, "error": 203, "copper": 173, "remote": 141, "idle": 103,
+    "path": 244, "error": 203, "copper": 173, "remote": 141, "idle": 103, "border": 238,
 }
 _ANSI_16 = (
     "000000", "800000", "008000", "808000", "000080", "800080", "008080", "c0c0c0",
@@ -1633,6 +1633,21 @@ def list_window(heights: list, at: int, scroll: int, height: int) -> int:
         return scroll
     top = sum(heights[:at])
     return min(max(scroll, top + heights[at] - height), top)
+
+
+def wheel_scroll(scroll: int, delta: int, total: int, height: int) -> int:
+    return max(0, min(scroll + delta, total - height))
+
+
+def scroll_thumb(total: int, height: int, scroll: int) -> tuple[int, int] | None:
+    """(start, length) in rows of a scroll bar's thumb, or None when the content fits or the view is too short for a bar."""
+    if total <= height or height < 2:
+        return None
+    length = max(1, min(height - 1, height * height // total))
+    scroll = max(0, min(scroll, total - height))
+    span = total - height
+    start = (2 * scroll * (height - length) + span) // (2 * span)
+    return start, length
 
 
 def row_hits(lines: list, heights: list, scroll: int, top: int, height: int) -> dict:
