@@ -5,6 +5,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -8543,7 +8544,7 @@ class WheelCase(AppCase):
         return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
 
     def wheel(self, down=True, times=1):
-        state = curses.BUTTON5_PRESSED if down else curses.BUTTON4_PRESSED
+        state = sidebar.WHEEL_DOWN if down else curses.BUTTON4_PRESSED
         with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, 3, 0, state)):
             for _ in range(times):
                 self.app.handle_key(curses.KEY_MOUSE)
@@ -8553,6 +8554,14 @@ class WheelCase(AppCase):
 
 
 class WheelScroll(WheelCase):
+    def test_wheel_down_on_the_ncurses_5_mouse_abi(self):
+        probe = "import curses; del curses.BUTTON5_PRESSED; from emx import sidebar; print(sidebar.WHEEL_DOWN == curses.REPORT_MOUSE_POSITION)"
+        out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent)
+        self.assertEqual(out.stdout.strip(), "True", out.stderr)
+        with mock.patch.object(sidebar, "WHEEL_DOWN", curses.REPORT_MOUSE_POSITION):
+            self.wheel()
+        self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+
     def test_wheel_down_scrolls_three_rows_and_the_selection_stays(self):
         first = self.app.cursor
         self.assertEqual(self.app.scroll, 0)
@@ -8636,7 +8645,7 @@ class WheelScroll(WheelCase):
     def test_a_click_queued_behind_a_wheel_maps_through_the_frame_he_saw(self):
         self.app.draw()
         y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
-        events = [(0, 10, 3, 0, curses.BUTTON5_PRESSED), (0, 10, y, 0, curses.BUTTON1_CLICKED)]
+        events = [(0, 10, 3, 0, sidebar.WHEEL_DOWN), (0, 10, y, 0, curses.BUTTON1_CLICKED)]
         self.scr.keys = [curses.KEY_MOUSE, curses.KEY_MOUSE]
         with mock.patch.object(sidebar.curses, "getmouse", side_effect=events):
             self.app.read_input()

@@ -150,6 +150,8 @@ KEY_WAIT_MS = 200
 REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
 WHEEL_ROWS = 3
+# ncurses 5 mouse ABI (macOS system python) has no BUTTON5; wheel-down arrives as the REPORT_MOUSE_POSITION bit.
+WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", curses.REPORT_MOUSE_POSITION)
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
@@ -3124,7 +3126,7 @@ class App:
             if event and event[4] & curses.BUTTON4_PRESSED:
                 self.wheel(-WHEEL_ROWS)
                 return
-            if event and event[4] & getattr(curses, "BUTTON5_PRESSED", 0):
+            if event and event[4] & WHEEL_DOWN:
                 self.wheel(WHEEL_ROWS)
                 return
         if key != curses.KEY_RESIZE:
