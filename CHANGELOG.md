@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.16.1 — 2026-10-20
+
+- Copying text in a session reaches your computer's clipboard on its own, including on a server through `emx remote`, and keeps working after the server restarts, with no tmux setting to set by hand. Both your computer and the server need emx 2.16.1 for it to work.
+
 ## 2.16.0 — 2026-10-20
 
 - The mouse wheel scrolls the panel: the session list, Notifications, Routines and the key help.
