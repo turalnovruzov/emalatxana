@@ -7985,7 +7985,8 @@ class PhonePanel(AppCase):
         self.app.handle_key(curses.KEY_DOWN)
         self.assertEqual(self.app.help_scroll, 1)
         self.app.draw()
-        self.assertEqual(self.scr.cells[2], first[3])
+        # The last column is the scroll bar, whose thumb moves with the scroll.
+        self.assertEqual(self.scr.cells[2][:-1], first[3][:-1])
         self.app.handle_key("k")
         self.assertEqual(self.app.help_scroll, 0)
         self.app.handle_key("q")
@@ -8521,6 +8522,215 @@ class PasteStampCarried(AppCase):
                 self.app.tmux = StampTmux(stamp)
                 self.app.carry_paste_stamp(now)
                 self.assertEqual(self.app.tmux.stamps["global"], "")
+
+
+class WheelCase(AppCase):
+    """A list of five sessions, one folder each, on a 9-row screen: it overflows, so it scrolls and shows the bar."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(9, 40)
+        self.app.scr = self.scr
+        self.app.palette = TonePalette()
+        self.poll(*[session(c, f"/p/{name}") for c, name in zip("abcde", ("alpha", "beta", "gamma", "delta", "epsilon"))])
+        self.app.refresh()
+
+    def screen(self):
+        return [self.scr.cells.get(y, "") for y in range(self.scr.size[0])]
+
+    def rows_of(self, sid):
+        return sorted(y for y, item in self.app.row_map.items() if item == ("session", sid))
+
+    def wheel(self, down=True, times=1):
+        state = curses.BUTTON5_PRESSED if down else curses.BUTTON4_PRESSED
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, 3, 0, state)):
+            for _ in range(times):
+                self.app.handle_key(curses.KEY_MOUSE)
+
+    def total(self):
+        return self.app.extent[0]
+
+
+class WheelScroll(WheelCase):
+    def test_wheel_down_scrolls_three_rows_and_the_selection_stays(self):
+        first = self.app.cursor
+        self.assertEqual(self.app.scroll, 0)
+        self.assertIn(first, self.app.row_map.values())
+        self.wheel()
+        self.app.draw()
+        self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+        self.assertEqual(self.app.cursor, first)
+        self.assertNotIn(first, self.app.row_map.values())
+
+    def test_wheel_up_at_the_top_stays_at_the_top(self):
+        self.wheel(down=False)
+        self.app.draw()
+        self.assertEqual(self.app.scroll, 0)
+
+    def test_many_wheel_downs_stop_at_the_end(self):
+        self.wheel(times=50)
+        self.app.draw()
+        total, height = self.app.extent
+        self.assertGreater(total, height)
+        self.assertEqual(self.app.scroll, total - height)
+
+    def test_the_arrow_after_a_wheel_moves_the_selection_and_brings_it_into_view(self):
+        self.wheel(times=50)
+        self.app.draw()
+        self.app.handle_key(curses.KEY_DOWN)
+        self.app.draw()
+        self.assertIn(self.app.cursor, self.app.row_map.values())
+        self.assertEqual(self.app.cursor, self.app.items()[1])
+
+    def test_the_up_arrow_on_the_first_item_brings_it_back(self):
+        self.app.cursor = self.app.items()[0]
+        self.app.draw()
+        self.wheel(times=50)
+        self.app.draw()
+        self.assertNotIn(self.app.cursor, self.app.row_map.values())
+        self.app.handle_key(curses.KEY_UP)
+        self.app.draw()
+        self.assertIn(self.app.cursor, self.app.row_map.values())
+
+    def test_a_poll_and_redraw_keep_the_scroll(self):
+        self.wheel()
+        self.app.draw()
+        self.poll(*self.app.sessions)
+        self.app.refresh()
+        self.app.draw()
+        self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+
+    def test_a_wheel_does_not_close_a_peek(self):
+        self.scr.size = (16, 40)
+        self.poll(*[session(c, f"/p/{c}dir") for c in "abcdefgh"])
+        self.app.refresh()
+        self.app.draw()
+        self.app.handle_key(" ")
+        self.assertTrue(self.app.peeking)
+        self.wheel()
+        self.app.draw()
+        self.assertTrue(self.app.peeking)
+        self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+        self.assertTrue(any(row.startswith("╭─") for row in self.screen()), self.screen())
+
+    def test_a_wheel_leaves_the_whats_new_and_the_started_note(self):
+        self.app.whats_new = self.app.notice = "2.15.0: new"
+        self.app.started_note = ("a", "x")
+        self.wheel()
+        self.assertEqual((self.app.whats_new, self.app.notice, self.app.started_note), ("2.15.0: new", "2.15.0: new", ("a", "x")))
+
+    def test_a_wheel_keeps_an_armed_confirm(self):
+        self.app.confirm = core.Confirm("a", "emx-test-a", True, time.monotonic())
+        armed = self.app.confirm
+        self.wheel()
+        self.assertIs(self.app.confirm, armed)
+        self.app.confirm = None
+
+    def test_a_wheel_does_not_close_the_help(self):
+        self.app.handle_key("?")
+        self.assertTrue(self.app.help)
+        self.wheel()
+        self.assertTrue(self.app.help)
+
+    def test_a_click_queued_behind_a_wheel_maps_through_the_frame_he_saw(self):
+        self.app.draw()
+        y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
+        events = [(0, 10, 3, 0, curses.BUTTON5_PRESSED), (0, 10, y, 0, curses.BUTTON1_CLICKED)]
+        self.scr.keys = [curses.KEY_MOUSE, curses.KEY_MOUSE]
+        with mock.patch.object(sidebar.curses, "getmouse", side_effect=events):
+            self.app.read_input()
+        self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+        self.assertEqual(self.opened, [("b", core.OPEN)])
+
+    def test_a_click_without_a_wheel_still_works_through_handle_mouse(self):
+        self.app.draw()
+        y = self.rows_of("a")[0]
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 10, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_mouse()
+        self.assertEqual(self.opened, [("a", core.OPEN)])
+
+
+class ScrollBar(WheelCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = AttrScr(9, 40)
+        self.app.scr = self.scr
+        self.app.draw()
+
+    def column(self):
+        return [self.scr.cells.get(y, "").ljust(40)[39] for y in range(9)]
+
+    def test_the_bar_fills_the_last_column_with_the_thumb_at_the_top(self):
+        col = self.column()
+        self.assertTrue(set(col) <= {"│", "┃"}, col)
+        self.assertEqual(col[0], "┃")
+        self.assertNotEqual(col[-1], "┃")
+
+    def test_at_the_end_the_thumb_is_at_the_bottom(self):
+        self.wheel(times=50)
+        self.app.draw()
+        col = self.column()
+        self.assertEqual((col[0], col[-1]), ("│", "┃"))
+
+    def test_track_is_border_and_thumb_is_muted(self):
+        palette = TonePalette()
+        for y, x, text, attr in self.scr.drawn:
+            if x == 39 and text == "│":
+                self.assertEqual(attr, palette.attr("border"))
+            if x == 39 and text == "┃":
+                self.assertEqual(attr, palette.attr("muted"))
+        self.assertTrue(any(x == 39 and text == "┃" for _, x, text, _ in self.scr.drawn))
+        self.assertTrue(any(x == 39 and text == "│" for _, x, text, _ in self.scr.drawn))
+
+    def test_nothing_is_drawn_under_the_bar(self):
+        self.app.cursor = self.app.items()[1]
+        for _ in range(3):
+            self.app.draw()
+            self.assertTrue(all(self.scr.cells.get(y, "").ljust(40)[38] == " " for y in range(9)), self.scr.cells)
+            self.app.handle_key(curses.KEY_DOWN)
+
+    def test_a_list_that_fits_has_no_bar_and_keeps_its_width(self):
+        self.scr.size = (30, 40)
+        self.app.draw()
+        for y in range(30):
+            self.assertNotIn(self.scr.cells.get(y, "").ljust(40)[39], "│┃")
+        self.assertLessEqual(self.app.extent[0], self.app.extent[1])
+
+    def test_notifications_scroll_without_moving_the_selected_entry_and_show_the_bar(self):
+        self.app.history = [core.Entry("a", core.NOTICE_DONE, f"a · alpha{i}", f"Alpha finished task {i}.", time.monotonic() - 70) for i in range(12)]
+        self.app.handle_key("N")
+        self.app.draw()
+        self.assertEqual(self.column()[1], "┃")
+        self.wheel()
+        self.app.draw()
+        self.assertEqual(self.app.history_scroll, sidebar.WHEEL_ROWS)
+        self.assertEqual(self.app.history_view, 0)
+        self.assertNotIn(("entry", 0), self.app.row_map.values())
+        self.app.handle_key(curses.KEY_DOWN)
+        self.app.draw()
+        self.assertIn(("entry", 1), self.app.row_map.values())
+
+    def test_routines_scroll_three_rows_and_show_the_bar(self):
+        self.app.routines_view = 0
+        self.app.routines_error = "x " * 400
+        self.app.draw()
+        self.assertEqual(self.column()[1], "┃")
+        self.wheel()
+        self.app.draw()
+        self.assertEqual(self.app.routines_view, sidebar.WHEEL_ROWS)
+
+    def test_the_wide_help_scrolls_on_a_short_screen_and_keys_still_close_it(self):
+        self.app.handle_key("?")
+        self.app.draw()
+        self.assertEqual(self.column()[2], "┃")
+        before = self.scr.cells[2]
+        self.wheel()
+        self.app.draw()
+        self.assertTrue(self.app.help)
+        self.assertEqual(self.app.help_scroll, sidebar.WHEEL_ROWS)
+        self.assertNotEqual(self.scr.cells[2][:-1], before[:-1])
+        self.app.handle_key("x")
+        self.assertFalse(self.app.help)
 
 
 if __name__ == "__main__":
