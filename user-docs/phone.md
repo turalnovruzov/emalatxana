@@ -6,8 +6,12 @@ Two ways to use emx from a phone. The **phone page** is a web page with your ses
 
 emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by folder, one row each: the state and a short line about what it is doing, and how long ago it started.
 
+- Each row looks as the panel's does: the same mark, colours, state word and line about what it is doing. The Working mark moves through the panel's frames (it stays still when your phone asks for reduced motion). A stopped session is one dim line.
 - Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A row with no link opens the menu instead.
-- Tap `⋯` on a row for the menu: open in the Claude app, rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
+- Tap a stopped row to resume it, as Enter does in the panel: it reads `resuming…`, then shows its state. `Resume` is also in the menu of any session that is not running.
+- Tap a folder's name to fold it or unfold it. A folded folder shows how many sessions it holds. Folds are kept in this browser, per device, and do not change the panel.
+- Pull down at the top of the list to refresh it. The page also updates by itself every few seconds.
+- Tap `⋯` on a row for the menu: open in the Claude app, resume (when it is not running), rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
 - `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The name and the first message are optional. The new session is shown selected in the list.
 - The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only.
 - A session waiting at Claude's own question about trusting a new folder shows as needs input, "waiting to trust this folder: answer it in a terminal". The page cannot answer that question.

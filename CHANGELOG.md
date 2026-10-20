@@ -2,6 +2,15 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.15.0 — 2026-10-20
+
+- The phone page shows each state as the panel does: the same mark, colour, word and line of detail for working, needs input, done, idle and stopped. A working row no longer looks done: its mark is muted, and it moves through the panel's frames at the panel's pace (it stays still when your phone asks for reduced motion).
+- A stopped row is one dim line, as in the panel. Tap it to resume it, as Enter does in the panel; the row reads `resuming…`, then shows its state, and a tap opens the app once the link is there. `Resume` is also in the `⋯` menu of a session that is not running.
+- Tap a folder on the phone page to fold it: an arrow shows the state, and a folded folder shows how many sessions it holds. Folds are kept per device, in the browser, and do not fold the panel.
+- Pull down at the top of the list to refresh it, with an animated mark. The page still updates by itself every few seconds.
+- A row being closed reads `closing…`, as in the panel.
+- From now on a change to what emx shows or does in the panel or on the phone page carries the matching change to the other.
+
 ## 2.14.1 — 2026-10-20
 
 - The phone page now behaves like an app: pinch and double-tap zoom are off, focusing a field no longer zooms the page, and the page itself no longer shifts or bounces. Only the session list (and the menus and the New screen) scroll, inside a fixed frame that keeps clear of the notch and the home bar.

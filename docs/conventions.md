@@ -64,7 +64,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### Every start of `claude` for an existing session asks `core.attach_allowed` first
 
-1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane stays in its hidden window, and the view's slot shows it through a viewer.
+1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, or his tap on Resume or a stopped row on the phone page (`PhoneApi.resume`, judged on a fresh listing), may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane stays in its hidden window, and the view's slot shows it through a viewer.
 2. **Why**: resuming a stopped session starts it again, and he must be the only one who reopens a session that stopped, after an exit, a crash or a reboot (ADR 0001, kept by ADR 0005; Tural, 2026-10-13, "sure lets go with b").
 3. **Minimal example**:
    ```python
@@ -378,9 +378,16 @@ The house style for writing code in this repo: how *this* codebase does things, 
 2. **Why**: the page must look like the panel in emx's own colours (#67); one index per colour means a change to a tone reaches both, and a literal in the stylesheet would drift from the panel unseen.
 3. **Minimal example**:
    ```css
-   .stopped .detail-text { color: var(--stopped); }   /* --stopped: #626262, from TONE_INDEX["stopped"] = 241 */
+   .stopped .glyph { color: var(--stopped); }   /* --stopped: #626262, from TONE_INDEX["stopped"] = 241 */
    ```
 4. **Gotcha**: `test_the_stylesheet_has_no_colour_literal_of_its_own` holds the rule; the one allowed literal is the backdrop's `rgba(0, 0, 0, 0.55)`.
+
+### What the panel and the phone page both show of a session comes from one core function
+
+1. **Rule**: the glyph, glyph tone, whether it spins, state word, tone, detail, age, whether the row is a stopped one-liner, the Working frames and their rate, the fold arrows and the closing label reach the page already computed by the core function the panel draws with, in `PhoneApi.row` and the snapshot's `look`. `emx/web/app.js` holds no state name, glyph or tone rule. A cue only the page can give, such as `TRUST_DETAIL` or "waiting for the app link", is allowed where the page cannot do what the panel does.
+2. **Why**: Tural saw Working rows read as Done on the page and said the signs and colours did not match the terminal (#67, Decided 32); one source per rule means they cannot drift again.
+3. **Minimal example**: ``"glyph_tone": core.glyph_tone(s)`` in the row, read in the script as ``"glyph tone-" + session.glyph_tone``.
+4. **Gotcha**: the animation's frame index is the clock's, shared by every row, and reduced motion keeps the still frame. Every glyph the page writes ends in U+FE0E, or iOS can draw the Working star as a green emoji. Changing what a laptop path draws needs a golden first, from the previous tag (`tests/fixtures/rows/wide-2.14.0.json`, `RowsAreUnchanged`).
 
 ## The contract for this file
 
