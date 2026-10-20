@@ -297,7 +297,7 @@ class PhoneApi:
         return None
 
     def post(self, path: str, body: dict):
-        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close}
+        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume}
         action = actions.get(path)
         if action is None:
             return None
@@ -461,6 +461,32 @@ class PhoneApi:
         closer = sidebar.Closer(self.engine, (confirm,), clear_dead_panes=True)
         closed, message = closer.close_one(confirm)
         return 200, {"ok": closed, "message": message}
+
+    def resume(self, body: dict) -> tuple:
+        sid = body.get("id")
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": "That is not a session of emx's."}
+        session, _ = self.listed(sid)
+        if session is None:
+            return 200, {"ok": False, "message": "That session isn't listed any more."}
+        try:
+            held = core.live_or_dead_agent(self.engine.tmux.panes(), sid)
+        except TmuxError as exc:
+            return 200, {"ok": False, "message": core.error_line(exc)}
+        if session.running or (held is not None and not held.dead):
+            return 200, {"ok": True, "message": f"{session.name} is already running."}
+        if not core.attach_allowed(session, core.OPEN, True):
+            return 200, {"ok": False, "message": core.refusal(session.name, core.OPEN, True, session)}
+        try:
+            _, error = sidebar.resume_pane(self.engine, self.engine.tmux, sid, session.cwd or None, held)
+        except TmuxError as exc:
+            return 200, {"ok": False, "message": core.error_line(exc)}
+        if error:
+            return 200, {"ok": False, "message": error}
+        running, _ = self.wait_running(self.engine, sid)
+        if running is None:
+            return 200, {"ok": False, "message": f"emx resumed {session.name}, but it isn't listed running yet."}
+        return 200, {"ok": True, "message": f"Resumed {session.name}."}
 
     def routines_view(self) -> dict:
         views, error = self.routines.get()

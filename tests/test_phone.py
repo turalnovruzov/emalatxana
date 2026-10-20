@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from emx import core, engine, phone, sidebar
-from emx.tmux import Pane
+from emx.tmux import Pane, TmuxError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tailscale"
 OWNER = 4242
@@ -199,6 +199,11 @@ class Posts(ServerCase):
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, origin=False)[0], 403)
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, headers={"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.request("POST", "/api/close", {"id": "x"}, headers={"Origin": "null"})[0], 403)
+        self.assertEqual(self.api.posts, [])
+
+    def test_resume_is_refused_without_this_pages_origin(self):
+        self.assertEqual(self.request("POST", "/api/resume", {"id": KEY}, origin=False)[0], 403)
+        self.assertEqual(self.request("POST", "/api/resume", {"id": KEY}, headers={"Origin": "http://evil.example"})[0], 403)
         self.assertEqual(self.api.posts, [])
 
     def test_a_post_must_be_json(self):
@@ -421,12 +426,29 @@ def session(n, name, cwd, state, status="", started=1000.0, running=True):
 class FakeTmux:
     def __init__(self, panes=(), screen=""):
         self.listed, self.screen = list(panes), screen
+        self.writes = []
+        self.tag_error = False
 
     def panes(self):
         return self.listed
 
     def capture(self, pane):
         return self.screen
+
+    def respawn(self, pane, command, cwd=None):
+        self.writes.append(("respawn", pane, command, cwd))
+
+    def new_hidden_window(self, command, cwd=None):
+        self.writes.append(("window", command, cwd))
+        return "%42"
+
+    def set_pane_option(self, pane, name, value):
+        if self.tag_error:
+            raise TmuxError("no such pane")
+        self.writes.append(("tag", pane, name, value))
+
+    def kill_pane(self, pane):
+        self.writes.append(("kill", pane))
 
 
 class FakeEngine:
@@ -436,6 +458,9 @@ class FakeEngine:
 
     def list_sessions(self):
         return self.sessions, None
+
+    def resume_command(self, sid):
+        return f"claude --resume {sid}", None
 
     def start(self, folder, message, name=""):
         self.started.append((folder, message, name))
@@ -735,6 +760,66 @@ class Actions(ApiCase):
         ((targets, clear),) = made
         self.assertEqual([(t.id, t.name, t.running) for t in targets], [(self.target.id, "alpha", True)])
         self.assertTrue(clear)
+
+    def stopped_session(self):
+        stopped = session("5", "ended", self.folder, "stopped", running=False)
+        self.engine = FakeEngine([stopped])
+        return stopped
+
+    def test_resume_of_a_stopped_session_with_a_dead_pane_respawns_it_there(self):
+        stopped = self.stopped_session()
+        self.engine.tmux = FakeTmux([Pane("%7", "@7", True, "", stopped.id, 80, 80, agent="claude")])
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": True, "message": "Resumed ended."})
+        self.assertEqual(self.engine.tmux.writes, [("respawn", "%7", f"claude --resume {stopped.id}", self.folder)])
+
+    def test_resume_with_no_pane_makes_a_window_tagged_agent_then_key(self):
+        stopped = self.stopped_session()
+        self.assertTrue(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [
+            ("window", f"claude --resume {stopped.id}", self.folder),
+            ("tag", "%42", phone.sidebar.AGENT_OPT, phone.sidebar.AGENT),
+            ("tag", "%42", phone.sidebar.SESSION_OPT, stopped.id),
+        ])
+
+    def test_resume_never_touches_a_live_pane_or_a_running_session(self):
+        stopped = self.stopped_session()
+        self.engine.tmux = FakeTmux([Pane("%7", "@7", False, "", stopped.id, 80, 80, agent="claude")])
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": True, "message": "ended is already running."})
+        self.engine = FakeEngine([self.target])
+        self.assertTrue(self.post("/api/resume", {"id": self.target.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [])
+        self.assertEqual(self.engine.tmux.listed, [])
+
+    def test_resume_of_a_session_no_longer_listed_or_a_failed_listing_starts_nothing(self):
+        stopped = self.stopped_session()
+        self.assertFalse(self.post("/api/resume", {"id": OTHER})[1]["ok"])
+        self.engine.list_sessions = lambda: (None, "tmux is not answering")
+        self.assertFalse(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.engine.list_sessions = lambda: ([stopped], None)
+        self.engine.tmux.panes = mock.Mock(side_effect=TmuxError("gone"))
+        self.assertFalse(self.post("/api/resume", {"id": stopped.id})[1]["ok"])
+        self.assertEqual(self.engine.tmux.writes, [])
+
+    def test_resume_needs_a_session_id(self):
+        for body in ({"id": "../x"}, {}, {"id": 5}):
+            with self.subTest(body=body):
+                self.assertEqual(self.post("/api/resume", body)[0], 400)
+        self.assertEqual(self.engine.tmux.writes, [])
+
+    def test_resume_reports_one_that_did_not_come_up(self):
+        stopped = self.stopped_session()
+        api = self.api(self.engine, wait_running=lambda eng, sid: (None, "never"))
+        body = api.post("/api/resume", {"id": stopped.id})[1]
+        self.assertEqual(body, {"ok": False, "message": "emx resumed ended, but it isn't listed running yet."})
+
+    def test_an_untaggable_window_is_killed(self):
+        stopped = self.stopped_session()
+        self.engine.tmux.tag_error = True
+        body = self.post("/api/resume", {"id": stopped.id})[1]
+        self.assertFalse(body["ok"])
+        self.assertEqual(self.engine.tmux.writes[-1], ("kill", "%42"))
 
     def test_close_of_a_session_no_longer_listed_does_nothing(self):
         body = self.post("/api/close", {"id": OTHER, "running": True})[1]
