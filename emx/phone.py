@@ -38,7 +38,7 @@ SECURITY_HEADERS = (
     ("Referrer-Policy", "no-referrer"),
     (
         "Content-Security-Policy",
-        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; "
+        "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; "
         "base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     ),
 )
@@ -202,6 +202,7 @@ STATIC = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
+MANIFEST_TYPE = "application/manifest+json; charset=utf-8"
 CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252}
 
 
@@ -210,6 +211,13 @@ def tokens_css() -> str:
     colours = {tone: core.TONE_HEX[tone] for tone in ("needs", "done", "idle", "stopped", "muted", "path", "accent", "error", "copper")}
     colours.update({name: core.xterm256_hex(index) for name, index in CHROME_INDEX.items()})
     return ":root{" + "".join(f"--{name}:{value};" for name, value in colours.items()) + "}\n"
+
+
+def manifest_json() -> str:
+    """The home-screen app's manifest; its colours are the page's ground tone, like tokens.css."""
+    ground = core.xterm256_hex(CHROME_INDEX["ground"])
+    return json.dumps({"name": "emx", "short_name": "emx", "start_url": "/", "scope": "/", "display": "standalone",
+                       "background_color": ground, "theme_color": ground})
 
 
 TRUST_QUESTION = re.compile(r"trust this folder|do you trust", re.IGNORECASE)
@@ -270,6 +278,8 @@ class PhoneApi:
         params = parse_qs(query)
         if path == "/tokens.css":
             return 200, tokens_css().encode(), "text/css; charset=utf-8"
+        if path == "/manifest.webmanifest":
+            return 200, manifest_json().encode(), MANIFEST_TYPE
         if path in STATIC:
             name, kind = STATIC[path]
             return 200, (WEB / name).read_bytes(), kind

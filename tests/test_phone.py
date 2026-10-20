@@ -38,7 +38,9 @@ class StubApi:
         self.posts = []
 
     def get(self, path, query):
-        return (200, {"ok": True, "state": "secret-session-data"}) if path == "/api/state" else None
+        if path == "/api/state":
+            return 200, {"ok": True, "state": "secret-session-data"}
+        return phone.PhoneApi.get(self, path, query) if not path.startswith("/api/") else None
 
     def post(self, path, body):
         self.posts.append((path, body))
@@ -131,6 +133,61 @@ class Guard(ServerCase):
     def test_an_unknown_path_is_404_only_after_the_guard(self):
         self.assertEqual(self.request(path="/nope")[0], 404)
         self.assertEqual(self.request(path="/nope", host="evil.example")[0], 400)
+
+
+class WebAppFeel(ServerCase):
+    def page(self, path):
+        status, body, response = self.request(path=path)
+        self.assertEqual(status, 200)
+        return body.decode(), response
+
+    def test_the_page_cannot_be_zoomed_and_is_a_home_screen_app(self):
+        html, _ = self.page("/")
+        viewport = re.search(r'<meta name="viewport" content="([^"]*)"', html).group(1)
+        for part in ("width=device-width", "maximum-scale=1", "user-scalable=no", "viewport-fit=cover"):
+            self.assertIn(part, viewport)
+        for name, value in (("apple-mobile-web-app-capable", "yes"), ("mobile-web-app-capable", "yes"),
+                            ("apple-mobile-web-app-status-bar-style", "black-translucent"), ("apple-mobile-web-app-title", "emx"),
+                            ("theme-color", core.xterm256_hex(phone.CHROME_INDEX["ground"]))):
+            self.assertIn(f'<meta name="{name}" content="{value}">', html)
+        self.assertIn('<link rel="manifest" href="/manifest.webmanifest">', html)
+
+    def test_the_stylesheet_fixes_the_shell_and_scrolls_only_inside(self):
+        css, _ = self.page("/app.css")
+        flat = re.sub(r"\s+", " ", css)
+        for declaration in ("overflow: hidden", "overscroll-behavior: none", "touch-action: manipulation", "height: 100dvh",
+                            "overscroll-behavior: contain", "-webkit-overflow-scrolling: touch", "-webkit-touch-callout: none",
+                            "-webkit-user-select: none", "env(safe-area-inset-top)", "env(safe-area-inset-bottom)",
+                            "-webkit-tap-highlight-color: transparent"):
+            self.assertIn(declaration, flat)
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}\b|rgb\(", re.sub(r"rgba\(0, 0, 0, [0-9.]+\)", "", css)))
+
+    def test_every_input_is_at_least_16px_so_focus_does_not_zoom(self):
+        css, _ = self.page("/app.css")
+        field = re.search(r"\.field \{([^}]*)\}", css).group(1)
+        self.assertGreaterEqual(int(re.search(r"font-size: (\d+)px", field).group(1)), 16)
+        html, _ = self.page("/")
+        controls = re.findall(r"<(?:input|textarea)\b[^>]*>", html)
+        self.assertEqual(len(controls), 4)
+        for control in controls:
+            self.assertRegex(control, r'class="field[ "]')
+
+    def test_the_script_stops_the_pinch_gestures(self):
+        js, _ = self.page("/app.js")
+        self.assertIn("gesturestart", js)
+        self.assertIn("preventDefault", js)
+
+    def test_the_manifest_is_served_as_a_standalone_app_and_only_through_the_guard(self):
+        body, response = self.page("/manifest.webmanifest")
+        manifest = json.loads(body)
+        self.assertEqual((manifest["name"], manifest["display"], manifest["start_url"]), ("emx", "standalone", "/"))
+        self.assertEqual(manifest["theme_color"], core.xterm256_hex(phone.CHROME_INDEX["ground"]))
+        self.assertTrue(response.getheader("Content-Type").startswith("application/manifest+json"))
+        self.assertIn("manifest-src 'self'", response.getheader("Content-Security-Policy"))
+        self.assertEqual(self.request(path="/manifest.webmanifest", host="evil.example")[0], 400)
+        self.tailnet = StubTailnet(user=7777)
+        self.setUp()
+        self.assertEqual(self.request(path="/manifest.webmanifest")[0], 403)
 
 
 class Posts(ServerCase):
