@@ -7,7 +7,7 @@ Two ways to use emx from a phone. The **phone page** is a web page with your ses
 emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by folder, one row each: the state and a short line about what it is doing, and how long ago it started.
 
 - Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A row with no link opens the menu instead.
-- Tap `⋯` on a row for the menu: open in the Claude app, rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`.
+- Tap `⋯` on a row for the menu: open in the Claude app, rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
 - `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The name and the first message are optional. The new session is shown selected in the list.
 - The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only.
 - A session waiting at Claude's own question about trusting a new folder shows as needs input, "waiting to trust this folder: answer it in a terminal". The page cannot answer that question.

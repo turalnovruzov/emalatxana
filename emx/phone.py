@@ -506,7 +506,8 @@ class Handler(BaseHTTPRequestHandler):
         if peer[0] == node.ip and self.server.peer_uid(peer, self.server.server_address[:2]) != os.getuid():
             return self.refuse(403)
         host = (self.headers.get("Host") or "").lower()
-        if host not in self.hosts():
+        name, _, port = host.rpartition(":")
+        if (name.removesuffix(".") + ":" + port) not in self.hosts():
             return self.refuse(400)
         if method not in ("GET", "POST"):
             return self.refuse(405)

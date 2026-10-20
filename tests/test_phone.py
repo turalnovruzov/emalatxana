@@ -117,9 +117,11 @@ class Guard(ServerCase):
         self.assertEqual(self.request(host="evil.example")[0], 400)
         self.assertEqual(self.request(host=f"evil.example:{self.port}")[0], 400)
         self.assertEqual(self.request(host=None, headers={"Host": None})[0], 400)
-        for host in (f"devbox.example-tailnet.ts.net:{self.port}", f"DevBox.Example-Tailnet.TS.net:{self.port}", f"devbox:{self.port}"):
+        for host in (f"devbox.example-tailnet.ts.net:{self.port}", f"DevBox.Example-Tailnet.TS.net:{self.port}", f"devbox:{self.port}",
+                     f"devbox.example-tailnet.ts.net.:{self.port}"):
             with self.subTest(host=host):
                 self.assertEqual(self.request(host=host)[0], 200)
+        self.assertEqual(self.request(host=f"devbox..:{self.port}")[0], 400)
 
     def test_methods_other_than_get_and_post_are_405(self):
         for method in ("PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
@@ -716,6 +718,18 @@ class Page(ServerCase):
         used = set(re.findall(r"var\(--([a-z]+)\)", css))
         defined = set(re.findall(r"--([a-z]+):", self.text("/tokens.css")[0]))
         self.assertLessEqual(used, defined)
+
+    def test_the_stopped_detail_and_the_close_window_match_the_page_and_the_panel(self):
+        css, _ = self.text("/app.css")
+        js, _ = self.text("/app.js")
+        self.assertIn(".stopped .detail-text", css)
+        self.assertNotIn(".stopped .detail,", css)
+        self.assertEqual(int(re.search(r"CONFIRM_MS = (\d+)", js).group(1)), int(core.CONFIRM_SECONDS * 1000))
+
+    def test_the_new_button_never_shrinks_and_the_brand_wraps(self):
+        css, _ = self.text("/app.css")
+        self.assertRegex(css, r"\.button \{[^}]*flex-shrink: 0; white-space: nowrap;")
+        self.assertRegex(css, r"\.brand \{[^}]*flex-wrap: wrap;")
 
     def test_the_script_never_writes_html_and_the_inputs_turn_off_ios_capitals(self):
         js, _ = self.text("/app.js")

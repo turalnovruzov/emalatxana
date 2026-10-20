@@ -4,6 +4,7 @@ const POLL_MS = 3000;
 const ROUTINES_MS = 30000;
 const SUGGEST_DEBOUNCE_MS = 150;
 const TOAST_MS = 4000;
+const CONFIRM_MS = 2000;
 const APP_LINK = /^https:\/\/claude\.ai\/code\/[A-Za-z0-9_-]+$/;
 
 const $ = (id) => document.getElementById(id);
@@ -16,6 +17,7 @@ let routinesTimer = null;
 let suggestTimer = null;
 let suggestSeq = 0;
 let toastTimer = null;
+let armTimer = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -138,7 +140,7 @@ async function poll() {
   const answer = await api("/api/state");
   if (seq !== pollSeq) return;
   $("offline").hidden = answer !== null;
-  if (answer === null) return;
+  if (answer === null || !Array.isArray(answer.counts)) return;
   data = answer;
   render();
 }
@@ -170,7 +172,14 @@ function openSheet(id) {
   $("sheet-close").focus({ preventScroll: true });
 }
 
+function disarmClose() {
+  clearTimeout(armTimer);
+  if (sheet) sheet.armed = false;
+  $("sheet-close").textContent = "Close session";
+}
+
 function closeSheet() {
+  disarmClose();
   sheet = null;
   $("sheet-layer").hidden = true;
 }
@@ -178,6 +187,7 @@ function closeSheet() {
 function startRename() {
   const found = sheet && findSession(sheet.id);
   if (!found) return;
+  disarmClose();
   $("rename-field").value = found.session.name;
   $("sheet-menu").hidden = true;
   $("sheet-edit").hidden = false;
@@ -207,8 +217,10 @@ async function closeSession() {
   if (!sheet.armed) {
     sheet.armed = true;
     button.textContent = "Tap again to close";
+    armTimer = setTimeout(disarmClose, CONFIRM_MS);
     return;
   }
+  clearTimeout(armTimer);
   button.disabled = true;
   const answer = await api("/api/close", { id: sheet.id, running: found.session.running });
   button.disabled = false;
@@ -319,7 +331,7 @@ $("new-folder").addEventListener("input", () => {
 $("sheet-backdrop").addEventListener("click", closeSheet);
 $("sheet-grab").addEventListener("click", closeSheet);
 $("sheet-rename").addEventListener("click", startRename);
-$("rename-back").addEventListener("click", () => { $("sheet-edit").hidden = true; $("sheet-menu").hidden = false; });
+$("rename-back").addEventListener("click", () => { disarmClose(); $("sheet-edit").hidden = true; $("sheet-menu").hidden = false; });
 $("sheet-edit").addEventListener("submit", saveRename);
 $("sheet-close").addEventListener("click", closeSession);
 $("routines-back").addEventListener("click", closeRoutines);

@@ -5,7 +5,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 ## 2.14.0 — 2026-10-20
 
 - emx serves a phone page: your sessions on a web page you open in Safari on your iPhone, in emx's own colours (yellow for needs input, green for done, lavender for idle), one compact row per session, grouped by folder. A tap on a row opens it in the Claude app.
-- `⋯` on a row opens a menu from the bottom: open in the Claude app, rename, close (a second tap confirms). A tap on the shaded space outside it closes the menu.
+- `⋯` on a row opens a menu from the bottom: open in the Claude app, rename, close (a second tap within two seconds confirms). A tap on the shaded space outside it closes the menu.
 - `+ New` starts a session in any folder: type any part of a folder's name ("budget") and the folders that match appear; the name and a first message are optional. The new session is shown selected in the list.
 - A "Routines" row at the bottom of the list shows your server's routines, read-only.
 - The page is reachable over Tailscale only, and only by your own devices: emx binds the machine's Tailscale address, asks Tailscale who every request comes from, and refuses anyone who isn't you. No password, no extra setup beyond Tailscale itself. emx never installs or changes Tailscale.

@@ -23,10 +23,11 @@ b { font-weight: 600; }
   padding-top: max(14px, env(safe-area-inset-top));
   border-bottom: 1px solid var(--border);
 }
-.brand { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.brand { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; min-width: 0; flex: 1 1 0; }
 .mark { color: var(--copper); }
 .counts { font-size: 13px; color: var(--muted); white-space: nowrap; }
 .button {
+  flex-shrink: 0; white-space: nowrap;
   min-height: 44px; min-width: 44px; padding: 0 14px;
   border: 1px solid var(--border); border-radius: 10px;
   background: var(--raised); color: var(--plain); font-weight: 600;
@@ -61,7 +62,7 @@ b { font-weight: 600; }
 .tone-idle { color: var(--idle); }
 .tone-plain { color: var(--plain); }
 .tone-muted { color: var(--muted); }
-.tone-stopped, .stopped .name, .stopped .detail, .stopped .glyph, .stopped .age { color: var(--stopped); }
+.tone-stopped, .stopped .name, .stopped .detail-text, .stopped .glyph, .stopped .age { color: var(--stopped); }
 .tone-error { color: var(--error); }
 .glyph.tone-plain { color: var(--muted); }
 .routines-row { width: 100%; text-align: left; border: 0; background: transparent; margin-top: 8px; padding: 0 16px; min-height: 52px; color: var(--plain); border-top: 1px solid var(--border); }
