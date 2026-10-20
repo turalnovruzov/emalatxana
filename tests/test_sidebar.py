@@ -8555,10 +8555,10 @@ class WheelCase(AppCase):
 
 class WheelScroll(WheelCase):
     def test_wheel_down_on_the_ncurses_5_mouse_abi(self):
-        probe = "import curses; del curses.BUTTON5_PRESSED; from emx import sidebar; print(sidebar.WHEEL_DOWN == curses.REPORT_MOUSE_POSITION)"
+        probe = "import curses; curses.__dict__.pop('BUTTON5_PRESSED', None); from emx import sidebar; print(sidebar.WHEEL_DOWN == curses.REPORT_MOUSE_POSITION)"
         out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent)
         self.assertEqual(out.stdout.strip(), "True", out.stderr)
-        probe = "import curses; del curses.BUTTON5_PRESSED; from emx import sidebar; print(bool(sidebar.mouse_mask() & curses.REPORT_MOUSE_POSITION))"
+        probe = "import curses; curses.__dict__.pop('BUTTON5_PRESSED', None); from emx import sidebar; print(bool(sidebar.mouse_mask() & curses.REPORT_MOUSE_POSITION))"
         out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent)
         self.assertEqual(out.stdout.strip(), "True", out.stderr)
         with mock.patch.object(sidebar, "WHEEL_DOWN", curses.REPORT_MOUSE_POSITION):
