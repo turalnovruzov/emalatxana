@@ -2,6 +2,18 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.17.0 — 2026-10-20
+
+- The phone page groups sessions as the panel does: one group per repository, with a `Pinned` group on top. A session in a git worktree sits under its repository and shows `⎇ <branch>` after its name.
+- `⋯` on a session now also has `Peek` (the last part of its conversation, as the panel's Space shows it, refreshed while open) and `Pin to top` or `Unpin`. Pins are the panel's own, so the Pinned group is the same on both.
+- `Rename` has a `Suggest` button: Haiku suggests a name and puts it in the field; nothing is renamed until you tap Save.
+- `⋯` on a folder's header has `New session here` and `Close N sessions` (a second tap within two seconds confirms; Pinned has no `⋯`).
+- In the New screen a star next to each folder makes it a favourite, shared with the panel's `★`, and a session started from the page now counts as a recent folder, as in the panel.
+- A Find field at the top of the list filters sessions by name or folder, as the panel's `^f`.
+- A `Notifications` row shows the panel's past needs-input and done notices, newest first, unread in colour; tap one to open that session.
+- Tap a routine to see its runs one per line, its error and when it is next due (no run output).
+- After emx updates, the page says `emx updated to X.` with what changed since the version this device last saw, and says when a new major version is waiting; the page reloads itself once to run the new version.
+
 ## 2.16.1 — 2026-10-20
 
 - Copying text in a session reaches your computer's clipboard on its own, including on a server through `emx remote`, and keeps working after the server restarts, with no tmux setting to set by hand. Both your computer and the server need emx 2.16.1 for it to work.

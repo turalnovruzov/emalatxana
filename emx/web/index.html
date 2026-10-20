@@ -22,6 +22,10 @@
     <div class="brand"><span class="mark">⚒</span><b>emalatxana</b><span class="counts" id="counts"></span></div>
     <button class="button" id="open-new" type="button">+ New</button>
   </header>
+  <div class="findbar">
+    <input class="field" id="find" type="search" placeholder="Find a session" maxlength="200" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="search" aria-label="Find a session">
+    <button class="plain-button muted" id="find-clear" type="button" aria-label="Clear find" hidden></button>
+  </div>
   <p class="offline" id="offline" hidden>Can't reach emx</p>
   <div class="pull" id="pull" aria-hidden="true"><span id="pull-glyph"></span><span class="small muted" id="pull-text"></span></div>
   <main id="list"></main>
@@ -39,15 +43,62 @@
     <div id="sheet-menu" class="sheet-items">
       <a class="item accent" id="sheet-open" target="_blank" rel="noopener" hidden>Open in Claude app ↗</a>
       <button class="item accent" id="sheet-resume" type="button" hidden>Resume</button>
+      <button class="item" id="sheet-peek" type="button">Peek</button>
       <button class="item" id="sheet-rename" type="button">Rename</button>
+      <button class="item" id="sheet-pin" type="button">Pin to top</button>
       <button class="item danger" id="sheet-close" type="button">Close session</button>
       <div class="small muted centre">Tap outside to dismiss</div>
     </div>
     <form id="sheet-edit" class="sheet-items" hidden>
       <input class="field" id="rename-field" type="text" maxlength="100" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" aria-label="New name">
+      <button class="item" id="rename-suggest" type="button">Suggest</button>
       <button class="item accent" id="rename-save" type="submit">Save</button>
       <button class="item" id="rename-back" type="button">Back</button>
     </form>
+    <div id="sheet-peekview" class="sheet-items" hidden>
+      <b id="peek-title"></b>
+      <div id="peek-lines" class="peek-lines"></div>
+      <button class="item" id="peek-back" type="button">Back</button>
+    </div>
+  </div>
+</div>
+
+<div class="layer" id="folder-layer" hidden>
+  <button class="backdrop" id="folder-backdrop" type="button" aria-label="Close menu"></button>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="folder-name">
+    <button class="grab" id="folder-grab" type="button" aria-label="Close menu"></button>
+    <div class="sheet-title">
+      <b id="folder-name"></b><br>
+      <span class="small muted" id="folder-count"></span>
+    </div>
+    <div class="sheet-items">
+      <button class="item accent" id="folder-new" type="button">New session here</button>
+      <button class="item danger" id="folder-close" type="button">Close sessions</button>
+      <div class="small muted centre">Tap outside to dismiss</div>
+    </div>
+  </div>
+</div>
+
+<div class="layer" id="routine-layer" hidden>
+  <button class="backdrop" id="routine-backdrop" type="button" aria-label="Close"></button>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="routine-name">
+    <button class="grab" id="routine-grab" type="button" aria-label="Close"></button>
+    <div class="sheet-title">
+      <b id="routine-name"></b> <span id="routine-tag"></span>
+    </div>
+    <div class="sheet-items" id="routine-lines"></div>
+  </div>
+</div>
+
+<div class="layer" id="update-layer" hidden>
+  <button class="backdrop" id="update-backdrop" type="button" aria-label="Close"></button>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="update-heading">
+    <button class="grab" id="update-grab" type="button" aria-label="Close"></button>
+    <div class="sheet-title"><b id="update-heading"></b></div>
+    <div class="sheet-items">
+      <div class="notes" id="update-text"></div>
+      <button class="item accent" id="update-ok" type="button">Got it</button>
+    </div>
   </div>
 </div>
 
@@ -74,10 +125,19 @@
 <div class="screen" id="routines-layer" hidden>
   <header class="top bar">
     <button class="plain-button accent" id="routines-back" type="button">‹ Sessions</button>
-    <b>Routines</b>
+    <b id="routines-title"></b>
     <span class="spacer"></span>
   </header>
   <div id="routines-list"></div>
+</div>
+
+<div class="screen" id="notices-layer" hidden>
+  <header class="top bar">
+    <button class="plain-button accent" id="notices-back" type="button">‹ Sessions</button>
+    <b id="notices-title"></b>
+    <span class="spacer"></span>
+  </header>
+  <div id="notices-list"></div>
 </div>
 
 <div class="toast" id="toast" role="status" hidden></div>

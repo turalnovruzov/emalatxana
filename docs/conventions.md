@@ -136,7 +136,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 ### emx closes a session only on a confirmed double Ctrl+X on its row or its project's header, or a double `x` in its phone actions menu
 
-1. **Rule**: a session is ended and removed from emx only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, or a second `x` (key or tap) in that session's phone actions menu, or a second tap on Close session in the phone page's sheet while it stays open, within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids and names come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` kills a running session's own pane (every view showing it gets the placeholder first), waits for a listing that shows it not running, and then `engine.forget`s it, which removes its folder under emx's state folder and nothing of Claude's. No other key, trigger or automatic path ends or forgets a session.
+1. **Rule**: a session is ended and removed from emx only when `core.press_close` hands back what the first press armed: a second Ctrl+X on the same session row, or the same project header, or a second `x` (key or tap) in that session's phone actions menu, or a second tap on Close session in the phone page's sheet while it stays open, or a second tap on Close N sessions in the phone page's folder sheet (the page sends the ids and running states it showed, and the server rebuilds the group from a fresh listing and refuses with `core.confirm_holds` when either changed; it never closes only the overlap), within `CONFIRM_SECONDS` of the first, with what the first press took still listed in the same running state (`core.confirm_holds`). A row arms a `Confirm`; a project header arms a `GroupConfirm` holding a `Confirm` for every session in the group, folded ones too; Pinned and the state groups never arm. The ids and names come from what the first press took, never from the cursor at the second. A worker (`Closer`) then closes each target in turn: it takes a fresh listing, and only if `core.close_still_applies` kills a running session's own pane (every view showing it gets the placeholder first), waits for a listing that shows it not running, and then `engine.forget`s it, which removes its folder under emx's state folder and nothing of Claude's. No other key, trigger or automatic path ends or forgets a session.
 2. **Why**: closing ends his work in progress (Tural, 2026-10-13: "End it and remove it"). A stray key, a cursor the poll just moved, or a row a poll out of date must never cost him a session. The conversation stays in Claude Code's own history.
 3. **Minimal example**:
    ```python
@@ -395,6 +395,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 2. **Why**: the input handler has no layout of its own, and deciding the bar per frame never leaves a bar glyph under the rows (#82).
 3. **Minimal example**: `draw_routines` in `emx/sidebar.py`.
 4. **Gotcha**: a view that forgets to record its extent leaves it at `(0, 0)`, so the wheel silently does nothing there.
+
+### Every prefs write from the panel's process is a load-change-save under `sidebar.PREFS_LOCK`
+
+1. **Rule**: every write to the prefs file from the panel's process is a load-change-save under `sidebar.PREFS_LOCK`, through `App.save_prefs` or `PhoneApi.update_prefs`, and `core.save_prefs` writes through a per-call `mkstemp` temp file.
+2. **Why**: the panel's thread and the page's thread share one process, and a write between the other's read and replace would drop its change (#67).
+3. **Minimal example**: ``PhoneApi.update_prefs(lambda p: (core.toggle_pin(p, sid), None))``
+4. **Gotcha**: another view's panel process is not under this lock.
 
 ## The contract for this file
 

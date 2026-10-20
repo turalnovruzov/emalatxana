@@ -124,10 +124,13 @@ CTRL_F = "\x06"
 CTRL_T = "\x14"
 CTRL_R = "\x12"
 CTRL_U = "\x15"
+# Held around every read-modify-write of the prefs file in this process, by the panel and by the phone page, so neither replaces the file between the other's read and write.
+PREFS_LOCK = threading.Lock()
 CONFIRM_FOOTER = "^x to confirm"
 RENAME_FOOTER = "Tab suggest · Enter save · Esc cancel"
 NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
+FIND_NONE = "No session matches."
 FIND_HINT = "↑↓ move · Enter open · Esc clear"
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
@@ -2040,8 +2043,9 @@ class App:
     def save_prefs(self) -> None:
         """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept."""
         try:
-            merged = core.merge_prefs(self.prefs_base, self.prefs, core.load_prefs(self.prefs_file))
-            core.save_prefs(self.prefs_file, merged)
+            with PREFS_LOCK:
+                merged = core.merge_prefs(self.prefs_base, self.prefs, core.load_prefs(self.prefs_file))
+                core.save_prefs(self.prefs_file, merged)
         except OSError as exc:
             self.say(f"Couldn't save prefs: {exc}", error=True)
             return
@@ -2196,9 +2200,15 @@ class App:
             return
         from emx import phone
 
-        self.phone = phone.PhoneService(
-            self.engine, phone.phone_port(), self.state, self.home, self.prefs_file, transcripts=self.poller.transcripts.snapshot,
+        sources = phone.PanelSources(
+            transcripts=self.poller.transcripts.snapshot,
+            placements=self.poller.resolver.snapshot,
+            transcript_path=self.poller.transcripts.path,
+            history=lambda: self.history,
+            major=lambda: max(tuple(self.majors_said), key=core.parse_version, default=None),
+            claude=self.claude,
         )
+        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file, sources=sources)
         self.phone.start()
 
     def check_phone(self) -> None:
@@ -2346,7 +2356,7 @@ class App:
             self.on_disk, major, _ = taken
             if major and major not in self.majors_said:
                 self.majors_said.add(major)
-                self.say(f"emx {major} available: run emx update")
+                self.say(core.major_line(major))
         socket = getattr(self.tmux, "socket", None)
         if not self.on_disk or self.on_disk == emx.RUNNING or not socket:
             return
@@ -2778,7 +2788,7 @@ class App:
         """Enter opens the session under the cursor, which typing keeps on the top match."""
         target = core.find_target(self.items(), self.cursor)
         if target is None:
-            self.say("No session matches.")
+            self.say(FIND_NONE)
             return
         blocked = core.open_blocked(self.starter is not None or self.awaiting_started_row(), target)
         if blocked:
@@ -2996,7 +3006,7 @@ class App:
         self.prefs, on = core.toggle_favourite(self.prefs, target)
         self.save_prefs()
         name = core.tilde_path(target, self.home)
-        hint = f"★ {name} is a favourite" if on else f"{name} is no longer a favourite"
+        hint = core.favourite_hint(name, on)
         still_listed = target in {r.path for r in self.suggestions()}
         self.prompt.update(picked=target if still_listed else None, hint=hint)
 
@@ -3606,7 +3616,7 @@ class App:
             self.put(list_top + 2, 7, "n", curses.A_BOLD)
             self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
-            self.put(list_top, 1, "No session matches.", curses.A_DIM)
+            self.put(list_top, 1, FIND_NONE, curses.A_DIM)
         else:
             layout = self.list_layout(w, max(1, list_bottom - list_top))
             room = core.peek_room(h, w, len(bottom))

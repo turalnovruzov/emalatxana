@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 from urllib.parse import parse_qs
 
+import emx
 from emx import core, routines, sidebar
+from emx.cli import read_changelog
 from emx.engine import AGENT, bridge_link
 from emx.tmux import TmuxError
 
@@ -228,6 +230,18 @@ FOLDER_CANDIDATES = 60
 ROUTINES_FRESH_SECONDS = 60
 ROUTINES_WAIT_SECONDS = 10
 STILL_FRAME = 2
+FIND_MAX = 200
+PEEK_TEXT_MAX = 4000
+GROUP_MAX = 200
+NAME_OFFERED_TEXT_MAX = 200
+NOT_A_SESSION = "That is not a session of emx's."
+GONE = sidebar.OPEN_GONE
+FOLDER_CHANGED = "That folder changed; look again."
+PINNED_FOLDER_REFUSAL = "Pinned can't be closed as a folder; close its sessions one at a time."
+FOLDER_GONE = "That folder isn't listed any more."
+FIND_NONE = sidebar.FIND_NONE
+NAME_BUSY = "Still finishing an earlier Haiku call; tap Suggest again in a moment."
+NAME_UNFIT_PAGE = "Haiku's name didn't fit; tap Suggest for another."
 
 
 class RoutinesCache:
@@ -259,13 +273,26 @@ class RoutinesCache:
             self.answer, self.at = answer, self.clock()
 
 
+class PanelSources(NamedTuple):
+    """What the primary panel knows that the page shows too, read by callable; every field answers empty where there is no panel."""
+
+    transcripts: Callable = dict
+    placements: Callable = dict
+    transcript_path: Callable = lambda sid: None
+    history: Callable = list
+    major: Callable = lambda: None
+    claude: str = ""
+
+
 class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
     def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
-                 wait_running: Callable = sidebar.wait_until_running, transcripts: Callable = dict):
+                 wait_running: Callable = sidebar.wait_until_running, sources: PanelSources = PanelSources(),
+                 namer: Callable = sidebar.Namer, closer: Callable = sidebar.Closer, changelog: Callable = read_changelog):
         self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
-        self.transcripts = transcripts
+        self.sources, self.namer, self.closer, self.changelog = sources, namer, closer, changelog
+        self.name_lock = threading.Lock()
         self.routines = RoutinesCache(read_routines)
         self.wait_running = wait_running
         self.action_lock = threading.Lock()
@@ -288,22 +315,34 @@ class PhoneApi:
             if name == "index.html":
                 body = body.replace(b"{{ground}}", core.xterm256_hex(CHROME_INDEX["ground"]).encode())
             return 200, body, kind
+        first = lambda name: (params.get(name) or [""])[0]
         if path == "/api/state":
-            return 200, self.snapshot()
+            return 200, self.snapshot(first("find"))
         if path == "/api/folders":
-            return 200, {"folders": self.folders((params.get("q") or [""])[0])}
+            return 200, {"folders": self.folders(first("q"))}
         if path == "/api/routines":
             return 200, self.routines_view()
+        if path == "/api/peek":
+            return self.peek(first("id"))
+        if path == "/api/notifications":
+            return 200, self.notifications()
+        if path == "/api/whats-new":
+            return self.whats_new(first("since"))
         return None
 
     def post(self, path: str, body: dict):
-        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume}
+        actions = {
+            "/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume,
+            "/api/pin": self.pin, "/api/favourite": self.favourite, "/api/close-group": self.close_group,
+        }
         action = actions.get(path)
-        if action is None:
+        if action is None and path != "/api/suggest-name":
             return None
         with self.count_lock:
             self.acting += 1
         try:
+            if action is None:
+                return self.suggest_name(body)
             with self.action_lock:
                 return action(body)
         finally:
@@ -325,7 +364,7 @@ class PhoneApi:
         except TmuxError:
             return False
 
-    def row(self, s, panes, summaries, transcripts: dict, now_ms: float) -> dict:
+    def row(self, s, panes, summaries, transcripts: dict, now_ms: float, placement=None, pinned: bool = False) -> dict:
         pane = core.live_viewer(panes, s.id) if s.running else None
         link = core.app_link(bridge_link(pane.pid, s.session_id)) if pane is not None and pane.pid > 1 else None
         stopped = core.category(s) == core.STOPPED
@@ -340,30 +379,47 @@ class PhoneApi:
             "glyph": core.session_glyph(s, STILL_FRAME), "glyph_tone": core.glyph_tone(s), "spin": core.spins(s),
             "stopped": stopped, "status": not stopped, "detail": detail if detail.strip() else "",
             "age": core.session_age(s, now_ms), "running": s.running, "link": link, "app": core.app_line(AGENT, link),
+            "worktree": placement.worktree if placement is not None else "", "pinned": pinned,
         }
 
-    def snapshot(self) -> dict:
+    def grouped(self, sessions, find: str, prefs: dict) -> list:
+        """The panel's groups for the sessions that match `find`: by repository, Pinned on top."""
+        shown = core.find_matches(sessions, find, self.home)
+        return core.group_sessions(shown, self.sources.placements(), core.PROJECT, core.pinned_ids(prefs))
+
+    def snapshot(self, find: str = "") -> dict:
+        find = find.strip()[:FIND_MAX]
         sessions, error = self.engine.list_sessions()
         if sessions is None:
-            return {"error": error, "counts": [], "groups": []}
+            return {"error": error, "counts": [], "groups": [], "unread": 0, "version": emx.__version__}
         try:
             panes = self.engine.tmux.panes()
         except TmuxError:
             panes = []
-        summaries, transcripts, now_ms = self.summaries(), self.transcripts(), time.time() * 1000
-        by_folder = {}
-        for s in sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0)):
-            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, transcripts, now_ms))
-        folders = sorted(by_folder, key=lambda f: (os.path.basename(f.rstrip("/")).lower(), f))
+        prefs = core.load_prefs(self.prefs_path)
+        placements = self.sources.placements()
+        pinned = core.pinned_ids(prefs)
+        summaries, transcripts, now_ms = self.summaries(), self.sources.transcripts(), time.time() * 1000
+        panel_groups, groups = self.grouped(sessions, find, prefs), []
+        for g in panel_groups:
+            start = core.default_folder(("group", g.key), panel_groups, sessions, core.PROJECT, prefs.get("last_folder", ""))
+            groups.append({
+                "key": g.key, "pinned": g.key == core.PINNED, "closable": core.group_closable(core.PROJECT, g.key),
+                "label": core.PINNED_LABEL if g.key == core.PINNED else core.tilde_path(g.key, self.home),
+                "base": core.PINNED_LABEL if g.key == core.PINNED else os.path.basename(g.key.rstrip("/")) or g.key,
+                "new_folder": core.tilde_path(start, self.home) if start else None,
+                "sessions": [
+                    self.row(s, panes, summaries, transcripts, now_ms, placements.get(s.cwd), s.id in pinned) for s in g.sessions
+                ],
+            })
         return {
-            "error": None,
+            "error": None, "finding": bool(find), "version": emx.__version__,
             "look": {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
-                     "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL},
+                     "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL, "worktree_mark": core.WORKTREE_MARK,
+                     "find_none": FIND_NONE, "open_gone": GONE},
             "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
-            "groups": [
-                {"folder": f, "label": core.tilde_path(f, self.home), "base": os.path.basename(f.rstrip("/")) or f, "sessions": by_folder[f]}
-                for f in folders
-            ],
+            "unread": core.history_unread(self.sources.history()),
+            "groups": groups,
         }
 
     def known_folders(self, sessions) -> tuple:
@@ -375,12 +431,18 @@ class PhoneApi:
             prefs.get("recent_folders", []), core.favourite_folders(prefs),
         )
 
+    def allowed_roots(self, sessions) -> list:
+        """Every folder the page may start in or below: the picker's three sources and the repository each session's folder belongs to, so a worktree's header can start a session in its repo."""
+        placements = self.sources.placements()
+        repos = [placements[s.cwd].repo for s in sessions or [] if s.cwd in placements]
+        return [*(f for group in self.known_folders(sessions) for f in group), *repos]
+
     def folders(self, text: str) -> list:
         """Up to eight folders for the typed text, found as the panel's picker finds them (a bare word matches any part of a path), minus any the page may not use."""
         sessions, _ = self.engine.list_sessions()
         in_use, recent, favourites = self.known_folders(sessions)
-        known = [*in_use, *recent, *favourites]
-        roots = core.repo_roots(in_use + recent, {})
+        known = self.allowed_roots(sessions)
+        roots = core.repo_roots(in_use + recent, self.sources.placements())
         text = text.strip()[:200]
         if "$" in text:
             return []
@@ -394,9 +456,11 @@ class PhoneApi:
         rows = core.folder_suggestions(
             text, in_use, recent, listed, self.home, limit=FOLDER_CANDIDATES, roots=roots, favourites=favourites,
         )
+        starred = {os.path.normpath(f) for f in favourites}
         shown = [r for r in rows if allowed_folder(r.path, self.home, known) and os.path.isdir(r.path)]
         return [
-            {"path": r.path, "shown": r.shown, "base": os.path.basename(r.path.rstrip("/")) or r.path}
+            {"path": r.path, "shown": r.shown, "base": os.path.basename(r.path.rstrip("/")) or r.path,
+             "favourite": os.path.normpath(r.path) in starred}
             for r in shown[:FOLDER_ROWS]
         ]
 
@@ -420,7 +484,7 @@ class PhoneApi:
         sessions, _ = self.engine.list_sessions()
         if not os.path.isdir(folder):
             return 200, {"ok": False, "message": "That isn't a folder on this machine."}
-        if not allowed_folder(folder, self.home, [f for group in self.known_folders(sessions) for f in group]):
+        if not allowed_folder(folder, self.home, self.allowed_roots(sessions)):
             return 200, {"ok": False, "message": "emx only starts sessions in your home folder or in folders it already knows."}
         if not all(core.name_char_allowed(c) for c in name):
             return 200, {"ok": False, "message": "A name can't hold control characters or line breaks."}
@@ -432,6 +496,10 @@ class PhoneApi:
         session, error = self.wait_running(self.engine, started.id)
         if session is None:
             return 200, {"ok": False, "id": started.id, "message": error}
+        try:
+            self.update_prefs(lambda prefs: (core.remember_folder(prefs, folder), None))
+        except OSError:
+            pass
         return 200, {"ok": True, "id": started.id, "message": f"Started {started.name}."}
 
     def rename(self, body: dict) -> tuple:
@@ -488,6 +556,150 @@ class PhoneApi:
             return 200, {"ok": False, "message": f"emx resumed {session.name}, but it isn't listed running yet."}
         return 200, {"ok": True, "message": f"Resumed {session.name}."}
 
+    def update_prefs(self, change: Callable):
+        """`change(prefs)` returns (new prefs, answer); it is read, changed and written under the lock the panel's own saves hold, so neither drops the other's change."""
+        with sidebar.PREFS_LOCK:
+            prefs = core.load_prefs(self.prefs_path)
+            new, answer = change(prefs)
+            if new is not prefs:
+                core.save_prefs(self.prefs_path, new)
+        return answer
+
+    def peek(self, sid: str) -> tuple:
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        session, _ = self.listed(sid)
+        if session is None:
+            return 200, {"ok": False, "message": GONE}
+        peek = core.peek_content(session, self.sources.transcripts().get(sid), time.time() * 1000)
+        cut = lambda text: text if len(text) <= PEEK_TEXT_MAX else text[:PEEK_TEXT_MAX - 1] + "…"
+        return 200, {
+            "ok": True, "title": peek.title,
+            "tone": "muted" if core.category(session) == core.STOPPED else core.session_tone(session),
+            "lines": [{"text": cut(text), "tone": sidebar.PEEK_TONES[style], "dim": style == "dim", "code": style == "code"}
+                      for text, style in peek.lines],
+        }
+
+    def pin(self, body: dict) -> tuple:
+        sid = body.get("id")
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        session, _ = self.listed(sid)
+        if session is None:
+            return 200, {"ok": False, "message": GONE}
+
+        def toggle(prefs):
+            new = core.toggle_pin(prefs, sid)
+            return new, (core.pin_notice(new, session), sid in core.pinned_ids(new))
+
+        try:
+            message, pinned = self.update_prefs(toggle)
+        except OSError as exc:
+            return 200, {"ok": False, "message": f"Couldn't save prefs: {exc}"}
+        return 200, {"ok": True, "pinned": pinned, "message": message}
+
+    def favourite(self, body: dict) -> tuple:
+        text = body.get("folder")
+        if not isinstance(text, str) or not text.strip() or len(text) > 4096:
+            return 400, {"ok": False, "message": "Pick a folder."}
+        folder = self.resolve(text)
+        sessions, _ = self.engine.list_sessions()
+        allowed = lambda: os.path.isdir(folder) and allowed_folder(folder, self.home, self.allowed_roots(sessions))
+
+        def toggle(prefs):
+            starred = folder in {os.path.normpath(f) for f in core.favourite_folders(prefs)}
+            if not starred and not allowed():
+                return prefs, None
+            new, on = core.toggle_favourite(prefs, folder)
+            return new, on
+
+        try:
+            on = self.update_prefs(toggle)
+        except OSError as exc:
+            return 200, {"ok": False, "message": f"Couldn't save prefs: {exc}"}
+        if on is None:
+            return 200, {"ok": False, "message": "emx only stars folders in your home folder or folders it already knows."}
+        return 200, {"ok": True, "on": on, "message": core.favourite_hint(core.tilde_path(folder, self.home), on)}
+
+    def close_group(self, body: dict) -> tuple:
+        key, find, sent = body.get("key"), body.get("find"), body.get("sessions")
+        valid = (
+            isinstance(key, str) and isinstance(find, str) and len(find) <= FIND_MAX
+            and isinstance(sent, list) and 0 < len(sent) <= GROUP_MAX
+            and all(isinstance(e, dict) and core.is_session_id(e.get("id")) and type(e.get("running")) is bool for e in sent)
+        )
+        if not valid or len({e["id"] for e in sent}) != len(sent):
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        if not core.group_closable(core.PROJECT, key):
+            return 200, {"ok": False, "message": PINNED_FOLDER_REFUSAL}
+        sessions, error = self.engine.list_sessions()
+        if sessions is None:
+            return 200, {"ok": False, "message": error or "Couldn't list sessions."}
+        group = next((g for g in self.grouped(sessions, find, core.load_prefs(self.prefs_path)) if g.key == key), None)
+        if group is None:
+            return 200, {"ok": False, "message": FOLDER_GONE}
+        if {s.id for s in group.sessions} != {e["id"] for e in sent}:
+            return 200, {"ok": False, "message": FOLDER_CHANGED}
+        now = time.time()
+        running = {e["id"]: e["running"] for e in sent}
+        confirm = core.GroupConfirm(key, tuple(core.Confirm(s.id, s.name, running[s.id], now) for s in group.sessions), now)
+        if not core.confirm_holds(confirm, ("group", key), group, now):
+            return 200, {"ok": False, "message": FOLDER_CHANGED}
+        closed, message, _ = self.closer(self.engine, core.close_targets(confirm), clear_dead_panes=True).attempt({})
+        return 200, {"ok": closed, "message": message}
+
+    def suggest_name(self, body: dict) -> tuple:
+        sid, offered = body.get("id"), body.get("offered")
+        valid = (
+            core.is_session_id(sid) and isinstance(offered, list) and len(offered) <= core.NAME_OFFERED_MAX
+            and all(isinstance(o, str) and len(o) <= NAME_OFFERED_TEXT_MAX for o in offered)
+        )
+        if not valid:
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        session, _ = self.listed(sid)
+        if session is None:
+            return 200, {"ok": False, "message": GONE}
+        if not self.name_lock.acquire(blocking=False):
+            return 200, {"ok": False, "message": NAME_BUSY}
+        try:
+            try:
+                namer = self.namer(self.sources.claude, self.sources.transcript_path(sid), sid, session.name, core.unnamed(session), offered)
+                name, error, _ = namer.ask()
+            except Exception as exc:
+                name, error = None, f"asking for a name failed: {core.error_line(exc)}"
+        finally:
+            self.name_lock.release()
+        if name:
+            return 200, {"ok": True, "name": name}
+        return 200, {"ok": False, "message": NAME_UNFIT_PAGE if error == sidebar.NAME_UNFIT else error}
+
+    def notifications(self) -> dict:
+        history = self.sources.history()
+        live = {s.id for s in (self.engine.list_sessions()[0] or [])}
+        now = time.monotonic()
+        return {
+            "title": core.HISTORY_TITLE, "empty": sidebar.HISTORY_EMPTY, "unread": core.history_unread(history),
+            "entries": [
+                {"id": e.id, "title": e.title, "text": e.text, "mark": core.HISTORY_MARKS.get(e.kind, "·"),
+                 "tone": sidebar.CATEGORY_TONE.get(e.kind, "plain"), "age": core.format_age(now - e.at),
+                 "read": e.read, "listed": e.id in live}
+                for e in history
+            ],
+        }
+
+    def whats_new(self, since: str) -> tuple:
+        if since and core.parse_version(since) is None:
+            return 400, {"ok": False, "message": "That is not a version."}
+        version = emx.__version__
+        due = core.whats_new_due(since or None, version)
+        major = self.sources.major()
+        text = core.whats_new_since(self.changelog(), since, version) if due == core.SHOW_NEW else ""
+        return 200, {
+            "ok": True, "due": due, "show": bool(text), "record": due is not None and not text,
+            "version": version, "heading": core.updated_heading(version), "text": text,
+            "major": major, "major_line": core.major_line(major) if major else "",
+        }
+
     def routines_view(self) -> dict:
         views, error = self.routines.get()
         now, out = time.time(), []
@@ -497,7 +709,7 @@ class PhoneApi:
                 "name": view.name, "tag": view.tag, "tone": view.tone, "error": view.error,
                 "runs": runs, "next": upcoming or view.note,
             })
-        return {"routines": out, "error": error}
+        return {"routines": out, "error": error, "title": sidebar.ROUTINES_TITLE, "none": sidebar.ROUTINES_NONE}
 
 
 class PhoneServer(ThreadingHTTPServer):
@@ -656,11 +868,11 @@ class PhoneService(threading.Thread):
     """
 
     def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
-                 sleep: Callable = time.sleep, transcripts: Callable | None = None):
+                 sleep: Callable = time.sleep, sources: PanelSources | None = None):
         super().__init__(daemon=True)
         self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
         self.tailnet = tailnet or Tailnet()
-        self.api = PhoneApi(engine, home, state, prefs_path, transcripts=transcripts or dict)
+        self.api = PhoneApi(engine, home, state, prefs_path, sources=sources or PanelSources())
         self.notices, self.lock = [], threading.Lock()
         self.stopping = threading.Event()
         self.server, self.node, self.recorded = None, None, None

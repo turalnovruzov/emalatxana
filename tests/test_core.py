@@ -1388,6 +1388,38 @@ class RecentFolders(unittest.TestCase):
         self.assertEqual(core.present_folders(["/a", "/b", "/c"], {"/a": False, "/b": True}), ["/b", "/c"])
 
 
+class SavePrefs(unittest.TestCase):
+    def test_two_threads_saving_at_once_leave_valid_prefs(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "prefs.json"
+            errors = []
+
+            def save(tag):
+                try:
+                    for i in range(50):
+                        core.save_prefs(path, {**core.DEFAULT_PREFS, "pinned": [f"{tag}{i}"]})
+                except Exception as exc:
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=save, args=(tag,)) for tag in "ab"]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(len(json.loads(path.read_text(encoding="utf-8"))["pinned"]), 1)
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["prefs.json"])
+
+
+class FavouriteHint(unittest.TestCase):
+    def test_the_hint_is_the_panels_text(self):
+        self.assertEqual(core.favourite_hint("~/x", True), "★ ~/x is a favourite")
+        self.assertEqual(core.favourite_hint("~/x", False), "~/x is no longer a favourite")
+        self.assertEqual(core.major_line("3.0.0"), "emx 3.0.0 available: run emx update")
+
+
 class FavouriteFolders(unittest.TestCase):
     def test_toggle_adds_then_removes_and_normalizes(self):
         prefs = dict(core.DEFAULT_PREFS)

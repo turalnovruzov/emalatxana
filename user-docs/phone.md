@@ -4,16 +4,24 @@ Two ways to use emx from a phone. The **phone page** is a web page with your ses
 
 ## The phone page
 
-emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by folder, one row each: the state and a short line about what it is doing, and how long ago it started.
+emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by repository with Pinned on top, one row each: the state and a short line about what it is doing, and how long ago it started.
 
 - Each row looks as the panel's does: the same mark, colours, state word and line about what it is doing. The Working mark moves through the panel's frames (it stays still when your phone asks for reduced motion). A stopped session is one dim line.
 - Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A stopped row resumes on tap (below), and a running row with no link yet opens the menu instead.
 - Tap a stopped row to resume it, as Enter does in the panel: it reads `resuming…`, then shows its state. `Resume` is also in the menu of any session that is not running.
+- A session in a git worktree shows `⎇ <branch>` after its name, and sits under its repository, as in the panel.
 - Tap a folder's name to fold it or unfold it. A folded folder shows how many sessions it holds. Folds are kept in this browser, per device, and do not change the panel.
 - Pull down at the top of the list to refresh it. The page also updates by itself every few seconds.
-- Tap `⋯` on a row for the menu: open in the Claude app, resume (when it is not running), rename, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
-- `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The name and the first message are optional. The new session is shown selected in the list.
-- The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only.
+- Tap `⋯` on a row for the menu: open in the Claude app, resume (when it is not running), peek, rename, pin to top or unpin, close. Tap the shaded space outside the menu to close it. Close asks once more: `Tap again to close`, within two seconds.
+- `Peek` shows the last part of the session's conversation, as Space does in the panel, and refreshes while it is open.
+- `Pin to top` and `Unpin` are the panel's own pins: the Pinned group at the top is the same on the page and in the panel.
+- `Rename` has a `Suggest` button that asks Haiku for a name and puts it in the field; only `Save` renames. Tap it again for another.
+- `⋯` on a folder's header has `New session here` and `Close N sessions`. Close asks once more, within two seconds. Pinned has no `⋯`, and is never closed as a folder.
+- The field at the top finds sessions by name or folder, as `^f` does in the panel; every group opens while you find, and the `✕` clears it.
+- `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The star next to a folder makes it a favourite, shared with the panel's `★`. The name and the first message are optional. The new session is shown selected in the list, and its folder becomes a recent one.
+- The `Notifications` row at the bottom lists the panel's past needs-input and done notices, newest first, unread ones in colour with their count on the row. Tap one to open that session.
+- The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only. Tap a routine to see each of its runs, its error and when it is next due.
+- After emx updates, the page says `emx updated to X.` with what changed since the version this device last saw, and `emx X available: run emx update` when a new major version is waiting. The page reloads itself once to run the new version.
 - A session waiting at Claude's own question about trusting a new folder shows as needs input, "waiting to trust this folder: answer it in a terminal". The page cannot answer that question.
 
 The page acts as an app: no pinch or double-tap zoom, no zoom when you tap a field, and the page does not shift or bounce; only the list and the menus scroll. To use it full screen, open it in Safari, tap Share, then Add to Home Screen, and open it from the new `emx` icon (leave "Open as Web App" on). The icon is Safari's picture of the page; emx has no icon of its own yet.
