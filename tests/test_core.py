@@ -568,6 +568,34 @@ class HintText(unittest.TestCase):
         )
 
 
+def glyph_states():
+    return [
+        core.Session(id="s", name="n", cwd="/w", state=state, status=status, waiting_for="")
+        for state, status in (("done", ""), ("blocked", ""), ("starting", ""), ("working", ""), ("working", "idle"),
+                              ("working", "background"), ("surprise", ""), ("stopped", ""))
+    ]
+
+
+class GlyphLook(unittest.TestCase):
+    def test_glyph_tone_is_idle_muted_or_the_category_tone(self):
+        for s in glyph_states():
+            want = "idle" if core.idle(s) else "muted" if core.category(s) == core.WORKING else core.CATEGORY_TONE[core.category(s)]
+            with self.subTest(state=s.state, status=s.status):
+                self.assertEqual(core.glyph_tone(s), want)
+        by_state = {(s.state, s.status): core.glyph_tone(s) for s in glyph_states()}
+        self.assertEqual(by_state[("working", "idle")], "idle")
+        self.assertEqual(by_state[("working", "")], "muted")
+        self.assertEqual(by_state[("surprise", "")], "muted")
+        self.assertEqual(by_state[("blocked", "")], "needs")
+        self.assertEqual(by_state[("done", "")], "done")
+        self.assertEqual(by_state[("stopped", "")], "stopped")
+
+    def test_a_session_spins_exactly_when_its_glyph_changes_between_frames(self):
+        for s in glyph_states():
+            with self.subTest(state=s.state, status=s.status):
+                self.assertEqual(core.spins(s), len({core.session_glyph(s, f) for f in range(8)}) > 1)
+
+
 class ToneColours(unittest.TestCase):
     def test_the_hex_of_each_xterm_index_is_the_colour_a_terminal_draws(self):
         want = {221: "#ffd75f", 114: "#87d787", 103: "#8787af", 241: "#626262", 245: "#8a8a8a", 244: "#808080",

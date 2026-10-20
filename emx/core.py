@@ -108,6 +108,7 @@ SUMMARY_WORDS = {NEEDS_INPUT: "waiting", WORKING: "working", DONE: "done", STOPP
 _STATE_CATEGORY = {"blocked": NEEDS_INPUT, "working": WORKING, "done": DONE, "starting": NEEDS_INPUT}
 WORKING_FRAMES = "·✢✳✶✻✶✳✢"
 GLYPHS = {NEEDS_INPUT: "✻", DONE: "✻", STOPPED: "∙"}
+FOLDED, UNFOLDED = "▸", "▾"
 
 
 # xterm-256 index of each tone; the panel draws it and the phone page turns it into hex with `xterm256_hex`, so the two cannot drift.
@@ -169,6 +170,17 @@ def state_word(session: Session) -> str:
     if cat != WORKING or session.state == "working":
         return CATEGORY_LABELS[cat]
     return session.state or session.status or CATEGORY_LABELS[WORKING]
+
+
+def glyph_tone(session: Session) -> str:
+    """The tone of the row's glyph: Working reads muted and an interrupted row idle, so a spinning mark never takes Done's colour."""
+    cat = category(session)
+    return "idle" if idle(session) else "muted" if cat == WORKING else CATEGORY_TONE[cat]
+
+
+def spins(session: Session) -> bool:
+    """Whether the row's glyph changes from frame to frame."""
+    return category(session) == WORKING and not idle(session)
 
 
 def glyph(cat: str, frame: int) -> str:
@@ -1638,7 +1650,7 @@ def header_layout(view: str, key: str, count: int, collapsed: bool, width: int, 
     state's label and there is no dir.
     """
     usable = width - 1
-    arrow = "▸" if collapsed else "▾"
+    arrow = FOLDED if collapsed else UNFOLDED
     count_text = str(count) if collapsed else ""
     room = usable - 2 - (1 + len(count_text) if count_text else 0)
     if room <= 0:

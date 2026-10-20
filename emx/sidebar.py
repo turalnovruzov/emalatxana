@@ -3782,7 +3782,7 @@ class App:
 
     def draw_header(self, y: int, group, selected: str | None, bold: bool, width: int, label: str | None = None) -> None:
         if label is not None:
-            arrow = "▸" if group.key in self.collapsed() else "▾"
+            arrow = core.FOLDED if group.key in self.collapsed() else core.UNFOLDED
             self.put(y, 0, arrow, self.palette.attr("muted", selected))
             self.put(y, 2, core.fit(label, max(1, width - 3)), self.palette.attr("error", selected) | curses.A_BOLD)
             return
@@ -3837,7 +3837,7 @@ class App:
                 return pal.attr("stopped", selected) | curses.A_DIM | extra
             return pal.attr(tone, selected) | extra
 
-        glyph_tone = "idle" if core.idle(s) else "muted" if cat == core.WORKING else CATEGORY_TONE[cat]
+        glyph_tone = core.glyph_tone(s)
         tones = {"name": "plain", "extra": "path", "status": session_tone(s), "sep": "muted", "detail": "muted", "age": "muted", "hint": "muted"}
         for i, parts in enumerate(rows):
             if y + i not in shown:
