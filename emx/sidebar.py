@@ -151,25 +151,22 @@ MAX_QUEUED_KEYS = 64
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
-    "muted": (245, curses.COLOR_WHITE),
-    "needs": (221, curses.COLOR_YELLOW),
-    "done": (114, curses.COLOR_GREEN),
-    "stopped": (241, curses.COLOR_WHITE),
-    "accent": (75, curses.COLOR_CYAN),
-    "path": (244, curses.COLOR_WHITE),
-    "error": (203, curses.COLOR_RED),
-    "copper": (173, curses.COLOR_YELLOW),
-    "remote": (141, curses.COLOR_MAGENTA),
-    "idle": (103, curses.COLOR_BLUE),
+    "muted": (core.TONE_INDEX["muted"], curses.COLOR_WHITE),
+    "needs": (core.TONE_INDEX["needs"], curses.COLOR_YELLOW),
+    "done": (core.TONE_INDEX["done"], curses.COLOR_GREEN),
+    "stopped": (core.TONE_INDEX["stopped"], curses.COLOR_WHITE),
+    "accent": (core.TONE_INDEX["accent"], curses.COLOR_CYAN),
+    "path": (core.TONE_INDEX["path"], curses.COLOR_WHITE),
+    "error": (core.TONE_INDEX["error"], curses.COLOR_RED),
+    "copper": (core.TONE_INDEX["copper"], curses.COLOR_YELLOW),
+    "remote": (core.TONE_INDEX["remote"], curses.COLOR_MAGENTA),
+    "idle": (core.TONE_INDEX["idle"], curses.COLOR_BLUE),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
 MENU_TONES = {"menu-frame": "muted", "menu-key": "accent", "menu-close": "error", "menu-note": "muted"}
-CATEGORY_TONE = {core.NEEDS_INPUT: "needs", core.WORKING: "plain", core.DONE: "done", core.STOPPED: "stopped"}
-
-
-def session_tone(s) -> str:
-    return "idle" if core.idle(s) else CATEGORY_TONE[core.category(s)]
+CATEGORY_TONE = core.CATEGORY_TONE
+session_tone = core.session_tone
 
 
 def bar_format(parts: list) -> str:

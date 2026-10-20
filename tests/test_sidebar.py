@@ -4557,6 +4557,10 @@ def nearest_256(r, g, b):
 
 
 class Tones(unittest.TestCase):
+    def test_the_panel_draws_the_indexes_the_phone_page_turns_into_hex(self):
+        self.assertEqual({tone: TONES[0] for tone, TONES in sidebar.TONES.items() if tone != "plain"}, core.TONE_INDEX)
+        self.assertEqual(sidebar.TONES["plain"], (-1, -1))
+
     def test_copper_is_the_nearest_256_colour_to_d08a4a(self):
         self.assertEqual(sidebar.TONES["copper"][0], nearest_256(0xD0, 0x8A, 0x4A))
 

@@ -453,6 +453,16 @@ class TypeIf(PrivateServer):
         self.assertEqual(self.typed("main"), want)
         self.assertEqual(self.typed("sidebar"), b"")
 
+    def test_a_gate_without_a_panel_types_while_the_panel_is_not_focused(self):
+        self.tmux.select(self.main)
+        gate = core.type_gate(self.main, None, "s1", 0, SESSION_OPT)
+        self.assertEqual(self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT)), core.TYPED)
+        want = self.TEXT.encode("utf-8") + b"\r"
+        self.wait_for(lambda: len(self.typed("main")) >= len(want), "the line in main")
+        self.assertEqual(self.typed("main"), want)
+        panel_gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
+        self.assertNotEqual(self.tmux.type_if(self.main, panel_gate, "x", core.TYPED, core.gate_report(SESSION_OPT)), core.TYPED)
+
     def test_it_types_the_text_and_no_enter_when_asked_not_to(self):
         gate = core.type_gate(self.main, self.sidebar, "s1", 0, SESSION_OPT)
         report = self.tmux.type_if(self.main, gate, self.TEXT, core.TYPED, core.gate_report(SESSION_OPT), enter=False)
