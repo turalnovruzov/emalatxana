@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.17.1 — 2026-10-22
+
+- Nothing changes in how emx works. The repo is now public, so its CI runs on GitHub's free runners again.
+
 ## 2.17.0 — 2026-10-20
 
 - The phone page groups sessions as the panel does: one group per repository, with a `Pinned` group on top. A session in a git worktree sits under its repository and shows `⎇ <branch>` after its name.
