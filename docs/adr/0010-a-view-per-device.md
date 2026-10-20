@@ -44,7 +44,7 @@ Until 2.9.0 the workspace was one tmux session, `emx`, whose first window held t
 
 ## Amendment, 2026-10-20 (#84): set-clipboard on
 
-emx now sets `set-clipboard on` (2.15.1). Claude Code's own copies, which are not tmux copy mode, never reached his laptop through a nested emx. Tural, on #84: *"see what works. then implement what works. simple. dont implement untested stuff"*. Tested: a copy from a session viewed through a nested emx (a server's emx opened with `emx remote` inside the laptop's emx) reaches the terminal only when tmux has `set-clipboard on`; `allow-passthrough` added nothing and stays off. The `emx copied` and `copy-command` path stays for copy-mode copies from a viewer.
+emx now sets `set-clipboard on` (2.15.1). Claude Code's own copies, which are not tmux copy mode, never reached his laptop through a nested emx. Tural, on #84: *"see what works. then implement what works. simple. dont implement untested stuff"*. Tested: a copy from a session viewed through a nested emx (a server's emx opened with `emx remote` inside the laptop's emx) reaches the terminal only when tmux has `set-clipboard on`; `allow-passthrough` added nothing and stays off. The `emx copied` and `copy-command` path stays for copy-mode copies from a viewer. With `on`, such a copy is now delivered to the terminal twice with the same text, and leaves two identical tmux buffers (proved live on private sockets); this is harmless and left as is.
 
 The trade-off is accepted: any program in an emx pane, including one on a server shown through `emx remote`, can now write (not read) the terminal's clipboard. That is acceptable for a single-user tool whose panes are his own sessions.
 

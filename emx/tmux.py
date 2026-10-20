@@ -321,7 +321,7 @@ class Tmux:
             if done.returncode != 0:
                 raise TmuxError(done.stderr.decode("utf-8", "replace").strip() or "tmux load-buffer failed")
         # Sending a buffer that has a name would make it a named one, which a plain paste skips; so each send made a new
-        # automatic buffer, and all but the newest of them, and the copy's own, are dropped: one buffer holds the copy, as before.
+        # automatic buffer, and all but the newest of them, and the copy's own, are dropped.
         added = self.run("list-buffers", "-F", "#{buffer_name}").split()[1:len(clients)]
         for name in added + ([copy] if copy else []):
             self.run("delete-buffer", "-b", name)
@@ -585,10 +585,10 @@ class Tmux:
         """Have every copy made in copy mode also run `command` with the copied text on its stdin.
 
         A copy made inside a viewer is sent as the clipboard escape to the
-        viewer, not to his terminal. With `set-clipboard on` tmux also
-        forwards a pane's own escape, but `command` is what hands a viewer's
-        copy-mode copy on to the terminal showing that viewer. tmux runs it
-        for every copy, so it must do nothing for a copy made outside a viewer.
+        viewer, not to his terminal. With `set-clipboard on` tmux forwards
+        that escape too, so `command` is a second delivery of the same text
+        for a viewer's copy-mode copy. tmux runs it for every copy, so it
+        must do nothing for a copy made outside a viewer.
         """
         self.run("set-option", "-s", "copy-command", command)
 
