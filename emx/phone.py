@@ -227,6 +227,7 @@ FOLDER_ROWS = 8
 FOLDER_CANDIDATES = 60
 ROUTINES_FRESH_SECONDS = 60
 ROUTINES_WAIT_SECONDS = 10
+STILL_FRAME = 2
 
 
 class RoutinesCache:
@@ -262,8 +263,9 @@ class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
     def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
-                 wait_running: Callable = sidebar.wait_until_running):
+                 wait_running: Callable = sidebar.wait_until_running, transcripts: Callable = dict):
         self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
+        self.transcripts = transcripts
         self.routines = RoutinesCache(read_routines)
         self.wait_running = wait_running
         self.action_lock = threading.Lock()
@@ -323,14 +325,21 @@ class PhoneApi:
         except TmuxError:
             return False
 
-    def row(self, s, panes, summaries, now_ms: float) -> dict:
+    def row(self, s, panes, summaries, transcripts: dict, now_ms: float) -> dict:
         pane = core.live_viewer(panes, s.id) if s.running else None
         link = core.app_link(bridge_link(pane.pid, s.session_id)) if pane is not None and pane.pid > 1 else None
-        detail = TRUST_DETAIL if self.waits_to_trust(s, pane) else core.row_detail(s, None, summaries.get(s.id))
+        stopped = core.category(s) == core.STOPPED
+        if stopped:
+            detail = ""
+        elif self.waits_to_trust(s, pane):
+            detail = TRUST_DETAIL
+        else:
+            detail = core.row_detail(s, transcripts.get(s.id), summaries.get(s.id))
         return {
             "id": s.id, "name": s.name, "word": core.state_word(s), "tone": core.session_tone(s),
-            "glyph": core.session_glyph(s, 2), "detail": detail, "age": core.session_age(s, now_ms),
-            "running": s.running, "link": link, "app": core.app_line(AGENT, link),
+            "glyph": core.session_glyph(s, STILL_FRAME), "glyph_tone": core.glyph_tone(s), "spin": core.spins(s),
+            "stopped": stopped, "status": not stopped, "detail": detail if detail.strip() else "",
+            "age": core.session_age(s, now_ms), "running": s.running, "link": link, "app": core.app_line(AGENT, link),
         }
 
     def snapshot(self) -> dict:
@@ -341,13 +350,15 @@ class PhoneApi:
             panes = self.engine.tmux.panes()
         except TmuxError:
             panes = []
-        summaries, now_ms = self.summaries(), time.time() * 1000
+        summaries, transcripts, now_ms = self.summaries(), self.transcripts(), time.time() * 1000
         by_folder = {}
         for s in sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0)):
-            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, now_ms))
+            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, transcripts, now_ms))
         folders = sorted(by_folder, key=lambda f: (os.path.basename(f.rstrip("/")).lower(), f))
         return {
             "error": None,
+            "look": {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
+                     "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL},
             "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
             "groups": [
                 {"folder": f, "label": core.tilde_path(f, self.home), "base": os.path.basename(f.rstrip("/")) or f, "sessions": by_folder[f]}
@@ -619,11 +630,11 @@ class PhoneService(threading.Thread):
     """
 
     def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
-                 sleep: Callable = time.sleep):
+                 sleep: Callable = time.sleep, transcripts: Callable | None = None):
         super().__init__(daemon=True)
         self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
         self.tailnet = tailnet or Tailnet()
-        self.api = PhoneApi(engine, home, state, prefs_path)
+        self.api = PhoneApi(engine, home, state, prefs_path, transcripts=transcripts or dict)
         self.notices, self.lock = [], threading.Lock()
         self.stopping = threading.Event()
         self.server, self.node, self.recorded = None, None, None

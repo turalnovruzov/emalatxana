@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from emx import core, engine, phone
+from emx import core, engine, phone, sidebar
 from emx.tmux import Pane
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tailscale"
@@ -481,6 +481,52 @@ class StateView(ApiCase):
             "busy": ("Working", "plain", "✳"), "ended": ("Stopped", "stopped", "∙"),
         })
         self.assertEqual((group["label"], group["base"]), ("~/Workspace/emalatxana", "emalatxana"))
+
+    def every_state(self, folder):
+        return [
+            session("1", "finished", folder, "done"), session("2", "asking", folder, "blocked"),
+            session("3", "paused", folder, "working", "idle"), session("4", "busy", folder, "working"),
+            session("5", "ended", folder, "stopped", running=False), session("6", "bg", folder, "working", "background"),
+            session("7", "odd", folder, "surprise"), session("8", "booting", folder, "starting"),
+            session("9", "cold", folder, "done", running=False),
+        ]
+
+    def test_each_rows_look_is_the_panels(self):
+        folder = self.path("Workspace", "emalatxana")
+        sessions = self.every_state(folder)
+        with open(os.path.join(self.state, "summaries.json"), "w") as fh:
+            json.dump({s.id: {"text": "Said something", "state": core.summary_state(s, None)} for s in sessions}, fh)
+        data = self.api(FakeEngine(sessions)).get("/api/state", "")[1]
+        rows = {r["id"]: r for r in data["groups"][0]["sessions"]}
+        self.assertEqual(len(rows), len(sessions))
+        for s in sessions:
+            row = rows[s.id]
+            lines = core.row_lines(s.name, "", row["word"], row["detail"], row["age"], 1000, core.category(s) == core.STOPPED)
+            with self.subTest(state=s.state, status=s.status, running=s.running):
+                self.assertEqual(row["glyph_tone"], core.glyph_tone(s))
+                self.assertEqual(row["spin"], core.spins(s))
+                self.assertEqual(len(lines) > 1, row["status"])
+                if row["status"]:
+                    self.assertEqual(lines[1][0][1], row["word"])
+                    self.assertEqual(lines[-1][-1][1], row["detail"])
+                else:
+                    self.assertEqual((row["detail"], row["stopped"]), ("", True))
+
+    def test_a_working_rows_detail_comes_from_its_transcript(self):
+        folder = self.path("Workspace", "emalatxana")
+        busy = session("4", "busy", folder, "working")
+        transcript = core.Transcript(latest="tool", tool="Bash: npm test", tool_at=1.0)
+        with open(os.path.join(self.state, "summaries.json"), "w") as fh:
+            json.dump({busy.id: {"text": "A Done line", "state": "done"}}, fh)
+        api = self.api(FakeEngine([busy]), transcripts=lambda: {busy.id: transcript})
+        row = api.get("/api/state", "")[1]["groups"][0]["sessions"][0]
+        self.assertEqual(row["detail"], core.session_summary(busy, transcript))
+        self.assertIn("npm test", row["detail"])
+
+    def test_the_look_carries_the_panels_frames_rate_arrows_and_closing_label(self):
+        look = self.api(FakeEngine([])).get("/api/state", "")[1]["look"]
+        self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
+                                "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")

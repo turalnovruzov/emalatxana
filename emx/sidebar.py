@@ -2157,7 +2157,9 @@ class App:
             return
         from emx import phone
 
-        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file)
+        self.phone = phone.PhoneService(
+            self.engine, phone.phone_port(), self.state, self.home, self.prefs_file, transcripts=self.poller.transcripts.snapshot,
+        )
         self.phone.start()
 
     def check_phone(self) -> None:

@@ -7627,6 +7627,7 @@ class FollowerPanel(AppCase):
         with mock.patch.object(phone, "PhoneService") as service:
             primary.start_phone()
         service.assert_called_once()
+        self.assertEqual(service.call_args.kwargs["transcripts"], primary.poller.transcripts.snapshot)
         service.return_value.start.assert_called_once_with()
         self.assertIs(primary.phone, service.return_value)
 
