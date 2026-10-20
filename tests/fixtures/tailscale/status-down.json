@@ -1,0 +1,15 @@
+{
+  "Version": "1.0.0",
+  "BackendState": "Stopped",
+  "Self": {
+    "ID": "nFAKE1CNTRL",
+    "HostName": "devbox",
+    "DNSName": "DevBox.example-tailnet.ts.net.",
+    "UserID": 4242,
+    "TailscaleIPs": [
+      "100.64.0.10",
+      "fd7a:115c:a1e0::1"
+    ],
+    "Online": true
+  }
+}
