@@ -33,6 +33,7 @@ When **not** to write one:
 | [0008](./0008-emx-installs-and-updates-itself-from-git.md) | emx installs and updates itself from the repo's version tags, with git | Accepted |
 | [0009](./0009-routines-read-from-systemd.md) | The routines view reads systemd user timers with systemd's own tools, read-only | Accepted |
 | [0010](./0010-a-view-per-device.md) | Each device gets its own view, which shows a session by attaching to it | Accepted |
+| [0011](./0011-the-phone-page-over-tailscale.md) | The phone page is served by the primary panel, over Tailscale, to the machine's owner only | Accepted |
 
 ---
 
