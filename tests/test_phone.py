@@ -1079,6 +1079,14 @@ class Page(ServerCase):
         self.assertNotIn("white-space", rule(".counts"))
         self.assertIn("white-space: nowrap", rule(".counts span"))
 
+    def test_peek_and_names_are_written_as_text(self):
+        js, _ = self.text("/app.js")
+        for name in ("loadPeek", "suggestName", "noticeRow", "askUpdate", "openRoutineSheet"):
+            body = re.search(r"function %s\(.*?\n\}\n" % name, js, re.S).group(0)
+            self.assertNotRegex(body, r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(")
+        self.assertRegex(js, r"el\(\"div\", \"peek-line[^\n]*line\.text\)")
+        self.assertIn('$("rename-field").value = answer.name', js)
+
     def test_the_script_never_writes_html_and_the_inputs_turn_off_ios_capitals(self):
         js, _ = self.text("/app.js")
         self.assertNotIn("innerHTML", js)
