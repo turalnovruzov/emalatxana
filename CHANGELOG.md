@@ -11,7 +11,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - The page is reachable over Tailscale only, and only by your own devices: emx binds the machine's Tailscale address, asks Tailscale who every request comes from, and refuses anyone who isn't you. No password, no extra setup beyond Tailscale itself. emx never installs or changes Tailscale.
 - It runs inside the workspace, so it is up whenever your emx is, and again after an update.
 - `emx phone` prints the page's address, or says why it isn't up. If Tailscale is missing or down, the panel says so once, in one line. `EMX_PHONE_PORT` changes the port (default 8787).
-- Closing a session that had already stopped also removes its leftover tmux pane.
+- Closing a stopped session from the page also removes its leftover tmux pane, as closing it from the panel does.
 
 ## 2.13.0 — 2026-10-19
 
