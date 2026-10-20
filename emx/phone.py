@@ -18,7 +18,13 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Callable, NamedTuple
+from urllib.parse import parse_qs
+
+from emx import core, routines, sidebar
+from emx.engine import AGENT, bridge_link
+from emx.tmux import TmuxError
 
 MISSING, DOWN, TAGGED = "missing", "down", "tagged"
 MAX_BODY = 16 * 1024
@@ -181,6 +187,246 @@ def read_proc_net() -> str:
         except OSError:
             pass
     return text
+
+
+def allowed_folder(path: str, home: str, known) -> bool:
+    """Whether the page may offer or start a session in `path`: under $HOME, or one of `known` (session, recent and favourite folders) or below one. Symlinks are resolved first, so a link under $HOME to elsewhere does not count."""
+    real = os.path.realpath(path)
+    roots = [os.path.realpath(home)] + [os.path.realpath(k) for k in known if k]
+    return any(r != "/" and (real == r or real.startswith(r + "/")) for r in roots)
+
+
+TRUST_QUESTION = re.compile(r"trust this folder|do you trust", re.IGNORECASE)
+TRUST_DETAIL = "waiting to trust this folder: answer it in a terminal"
+COUNT_WORDS = {core.NEEDS_INPUT: "needs", core.WORKING: "working", core.DONE: "done", "idle": "idle"}
+FOLDER_ROWS = 8
+FOLDER_CANDIDATES = 60
+ROUTINES_FRESH_SECONDS = 60
+ROUTINES_WAIT_SECONDS = 10
+
+
+class RoutinesCache:
+    """Routines read on a thread of their own: three systemd tools can be slow, and the page asks every few seconds. The first call waits for the first answer."""
+
+    def __init__(self, read: Callable, clock: Callable = time.time):
+        self.read, self.clock = read, clock
+        self.lock = threading.Lock()
+        self.answer, self.at, self.thread = None, 0.0, None
+
+    def get(self) -> tuple:
+        with self.lock:
+            if self.answer is None or self.clock() - self.at >= ROUTINES_FRESH_SECONDS:
+                if self.thread is None or not self.thread.is_alive():
+                    self.thread = threading.Thread(target=self.refresh, daemon=True)
+                    self.thread.start()
+            first, thread = self.answer is None, self.thread
+        if first:
+            thread.join(ROUTINES_WAIT_SECONDS)
+        with self.lock:
+            return self.answer or (None, "Still reading the routines.")
+
+    def refresh(self) -> None:
+        try:
+            answer = self.read(self.clock())
+        except Exception as exc:
+            answer = (None, core.error_line(exc))
+        with self.lock:
+            self.answer, self.at = answer, self.clock()
+
+
+class PhoneApi:
+    """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
+
+    def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
+                 wait_running: Callable = sidebar.wait_until_running):
+        self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
+        self.routines = RoutinesCache(read_routines)
+        self.wait_running = wait_running
+        self.action_lock = threading.Lock()
+        self.count_lock = threading.Lock()
+        self.acting = 0
+
+    def busy(self) -> bool:
+        """True while a POST runs, so the panel does not relaunch for an update under it."""
+        return self.acting > 0
+
+    def get(self, path: str, query: str):
+        params = parse_qs(query)
+        if path == "/api/state":
+            return 200, self.snapshot()
+        if path == "/api/folders":
+            return 200, {"folders": self.folders((params.get("q") or [""])[0])}
+        if path == "/api/routines":
+            return 200, self.routines_view()
+        return None
+
+    def post(self, path: str, body: dict):
+        actions = {"/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close}
+        action = actions.get(path)
+        if action is None:
+            return None
+        with self.count_lock:
+            self.acting += 1
+        try:
+            with self.action_lock:
+                return action(body)
+        finally:
+            with self.count_lock:
+                self.acting -= 1
+
+    def summaries(self) -> dict:
+        try:
+            with open(self.state / sidebar.SUMMARIES_FILE, encoding="utf-8") as fh:
+                return core.summaries_from(json.load(fh))
+        except (OSError, ValueError):
+            return {}
+
+    def waits_to_trust(self, session, pane) -> bool:
+        if session.state != "starting" or pane is None:
+            return False
+        try:
+            return TRUST_QUESTION.search(self.engine.tmux.capture(pane.id)) is not None
+        except TmuxError:
+            return False
+
+    def row(self, s, panes, summaries, now_ms: float) -> dict:
+        pane = core.live_viewer(panes, s.id) if s.running else None
+        link = core.app_link(bridge_link(pane.pid, s.session_id)) if pane is not None and pane.pid > 1 else None
+        detail = TRUST_DETAIL if self.waits_to_trust(s, pane) else core.row_detail(s, None, summaries.get(s.id))
+        return {
+            "id": s.id, "name": s.name, "word": core.state_word(s), "tone": core.session_tone(s),
+            "glyph": core.session_glyph(s, 2), "detail": detail, "age": core.session_age(s, now_ms),
+            "running": s.running, "link": link, "app": core.app_line(AGENT, link),
+        }
+
+    def snapshot(self) -> dict:
+        sessions, error = self.engine.list_sessions()
+        if sessions is None:
+            return {"error": error, "counts": [], "groups": []}
+        try:
+            panes = self.engine.tmux.panes()
+        except TmuxError:
+            panes = []
+        summaries, now_ms = self.summaries(), time.time() * 1000
+        by_folder = {}
+        for s in sorted(sessions, key=lambda s: (s.started_at is None, s.started_at or 0.0)):
+            by_folder.setdefault(s.cwd, []).append(self.row(s, panes, summaries, now_ms))
+        folders = sorted(by_folder, key=lambda f: (os.path.basename(f.rstrip("/")).lower(), f))
+        return {
+            "error": None,
+            "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
+            "groups": [
+                {"folder": f, "label": core.tilde_path(f, self.home), "base": os.path.basename(f.rstrip("/")) or f, "sessions": by_folder[f]}
+                for f in folders
+            ],
+        }
+
+    def known_folders(self, sessions) -> tuple:
+        """(folders with sessions, recent, favourites) as the panel's picker takes them; sessions newest first."""
+        prefs = core.load_prefs(self.prefs_path)
+        newest = sorted(sessions or [], key=lambda s: -(s.started_at or 0.0))
+        return (
+            core.session_folders(newest, [], core.PROJECT),
+            prefs.get("recent_folders", []), core.favourite_folders(prefs),
+        )
+
+    def folders(self, text: str) -> list:
+        """Up to eight folders for the typed text, found as the panel's picker finds them (a bare word matches any part of a path), minus any the page may not use."""
+        sessions, _ = self.engine.list_sessions()
+        in_use, recent, favourites = self.known_folders(sessions)
+        known = [*in_use, *recent, *favourites]
+        roots = core.repo_roots(in_use + recent, {})
+        text = text.strip()[:200]
+        if "$" in text:
+            return []
+        listed = {}
+        for folder in core.folders_to_list(text, in_use, recent, self.home, roots):
+            if "/" in text and not allowed_folder(folder, self.home, known):
+                continue
+            names = sidebar.list_subdirs(folder)
+            if names is not None:
+                listed[folder] = names
+        rows = core.folder_suggestions(
+            text, in_use, recent, listed, self.home, limit=FOLDER_CANDIDATES, roots=roots, favourites=favourites,
+        )
+        shown = [r for r in rows if allowed_folder(r.path, self.home, known) and os.path.isdir(r.path)]
+        return [
+            {"path": r.path, "shown": r.shown, "base": os.path.basename(r.path.rstrip("/")) or r.path}
+            for r in shown[:FOLDER_ROWS]
+        ]
+
+    def listed(self, sid: str):
+        sessions, _ = self.engine.list_sessions()
+        return core.checked_row(sessions, sid)
+
+    def resolve(self, text: str) -> str:
+        """The folder typed, with `~` and relative paths taken from home. Variables are not expanded: the server's environment is not his to read through a folder field."""
+        text = text.strip()
+        if text == "~" or text.startswith("~/"):
+            text = self.home.rstrip("/") + text[1:]
+        return os.path.normpath(os.path.join(self.home, text))
+
+    def new(self, body: dict) -> tuple:
+        text = lambda key: body.get(key) if isinstance(body.get(key), str) else ""
+        name, message = text("name").strip(), text("message")
+        if not text("folder").strip():
+            return 200, {"ok": False, "message": "Pick a folder."}
+        folder = self.resolve(text("folder"))
+        sessions, _ = self.engine.list_sessions()
+        if not os.path.isdir(folder):
+            return 200, {"ok": False, "message": "That isn't a folder on this machine."}
+        if not allowed_folder(folder, self.home, [f for group in self.known_folders(sessions) for f in group]):
+            return 200, {"ok": False, "message": "emx only starts sessions in your home folder or in folders it already knows."}
+        if not all(core.name_char_allowed(c) for c in name):
+            return 200, {"ok": False, "message": "A name can't hold control characters or line breaks."}
+        if core.typed_length(name) > core.RENAME_MAX:
+            return 200, {"ok": False, "message": f"A name can be at most {core.RENAME_MAX} characters."}
+        started, error = self.engine.start(folder, message, name)
+        if started is None:
+            return 200, {"ok": False, "message": error or "Couldn't start the session."}
+        session, error = self.wait_running(self.engine, started.id)
+        if session is None:
+            return 200, {"ok": False, "id": started.id, "message": error}
+        return 200, {"ok": True, "id": started.id, "message": f"Started {started.name}."}
+
+    def rename(self, body: dict) -> tuple:
+        sid, name = body.get("id"), body.get("name")
+        if not core.is_session_id(sid) or not isinstance(name, str):
+            return 400, {"ok": False, "message": "That is not a session of emx's."}
+        session, fresh = self.listed(sid)
+        if not fresh or session is None:
+            return 200, {"ok": False, "message": "That session isn't listed any more."}
+        name = name.strip()
+        rename, error = core.rename_request(sid, session.name, core.test_prefixed(name) if name else name)
+        if error:
+            return 200, {"ok": False, "message": error}
+        if rename is None:
+            return 200, {"ok": True, "message": "Unchanged."}
+        done, message, _ = sidebar.Renamer(self.engine, self.engine.tmux, rename, None).attempt()
+        return 200, {"ok": done, "message": message}
+
+    def close(self, body: dict) -> tuple:
+        sid, running = body.get("id"), body.get("running")
+        if not core.is_session_id(sid) or type(running) is not bool:
+            return 400, {"ok": False, "message": "That is not a session of emx's."}
+        session, fresh = self.listed(sid)
+        if not fresh or session is None:
+            return 200, {"ok": False, "message": "That session isn't listed any more."}
+        confirm = core.Confirm(sid, session.name, running, time.time())
+        closer = sidebar.Closer(self.engine, (confirm,), clear_dead_panes=True)
+        closed, message = closer.close_one(confirm)
+        return 200, {"ok": closed, "message": message}
+
+    def routines_view(self) -> dict:
+        views, error = self.routines.get()
+        now, out = time.time(), []
+        for view in views or []:
+            runs, upcoming = core.routine_words(view, now)
+            out.append({
+                "name": view.name, "tag": view.tag, "tone": view.tone, "error": view.error,
+                "runs": runs, "next": upcoming or view.note,
+            })
+        return {"routines": out, "error": error}
 
 
 class PhoneServer(ThreadingHTTPServer):

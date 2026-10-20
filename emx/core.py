@@ -1027,7 +1027,7 @@ def bar_counts(sessions) -> list:
     return [(key, counts[key]) for key in BAR_COUNT_ORDER if counts[key]]
 
 
-_BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
+BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
 _BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
 
 
@@ -1148,7 +1148,7 @@ def _bar_count_parts(counts: list, loaded: bool) -> list:
     for key, number in counts:
         if parts:
             parts.append((" ", "plain", False))
-        parts.append((f"✻{number}", _BAR_COUNT_TONES[key], True))
+        parts.append((f"✻{number}", BAR_COUNT_TONES[key], True))
     return parts
 
 

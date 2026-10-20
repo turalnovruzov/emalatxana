@@ -4,11 +4,15 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from emx import phone
+from emx import core, engine, phone
+from emx.tmux import Pane
 
 FIXTURES = Path(__file__).parent / "fixtures" / "tailscale"
 OWNER = 4242
@@ -338,6 +342,341 @@ class ProcGuard(ServerCase):
 
     def test_the_guard_refuses_a_peer_with_no_row(self):
         self.assertEqual(self.request()[0], 403)
+
+
+KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def session(n, name, cwd, state, status="", started=1000.0, running=True):
+    sid = f"{n}{n}{n}{n}{n}{n}{n}{n}-{n}{n}{n}{n}-4{n}{n}{n}-8{n}{n}{n}-{n * 12}"
+    return core.Session(sid, name, cwd, state, status, "", started, running, session_id=sid)
+
+
+class FakeTmux:
+    def __init__(self, panes=(), screen=""):
+        self.listed, self.screen = list(panes), screen
+
+    def panes(self):
+        return self.listed
+
+    def capture(self, pane):
+        return self.screen
+
+
+class FakeEngine:
+    def __init__(self, sessions, tmux=None):
+        self.sessions, self.tmux = sessions, tmux or FakeTmux()
+        self.started = []
+
+    def list_sessions(self):
+        return self.sessions, None
+
+    def start(self, folder, message, name=""):
+        self.started.append((folder, message, name))
+        return session("9", name or "new", folder, "starting"), None
+
+
+class ApiCase(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = os.path.realpath(tmp.name)
+        self.home = os.path.join(self.dir, "home")
+        self.state = os.path.join(self.dir, "state")
+        self.prefs = os.path.join(self.dir, "prefs.json")
+        for folder in ("Workspace/budget-tracker", "Workspace/emalatxana", "other/place"):
+            os.makedirs(os.path.join(self.home, folder))
+        os.makedirs(self.state)
+        env = mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def api(self, engine_, **kwargs):
+        kwargs.setdefault("wait_running", lambda eng, sid: (object(), None))
+        return phone.PhoneApi(engine_, self.home, self.state, self.prefs, **kwargs)
+
+    def path(self, *parts):
+        return os.path.join(self.home, *parts)
+
+
+class StateView(ApiCase):
+    def test_each_kind_of_session_has_emxs_word_and_tone(self):
+        folder = self.path("Workspace", "emalatxana")
+        sessions = [
+            session("1", "finished", folder, "done"), session("2", "asking", folder, "blocked"),
+            session("3", "paused", folder, "working", "idle"), session("4", "busy", folder, "working"),
+            session("5", "ended", folder, "stopped", running=False),
+        ]
+        data = self.api(FakeEngine(sessions)).get("/api/state", "")[1]
+        (group,) = data["groups"]
+        rows = {r["name"]: (r["word"], r["tone"], r["glyph"]) for r in group["sessions"]}
+        self.assertEqual(rows, {
+            "finished": ("Done", "done", "✻"), "asking": ("Needs input", "needs", "✻"), "paused": ("Idle", "idle", "✻"),
+            "busy": ("Working", "plain", "✳"), "ended": ("Stopped", "stopped", "∙"),
+        })
+        self.assertEqual((group["label"], group["base"]), ("~/Workspace/emalatxana", "emalatxana"))
+
+    def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
+        folder = self.path("Workspace", "emalatxana")
+        sessions = [session("1", "a", folder, "done"), session("2", "b", folder, "blocked"), session("3", "c", folder, "working"),
+                    session("4", "d", folder, "working"), session("5", "e", folder, "stopped", running=False)]
+        counts = self.api(FakeEngine(sessions)).get("/api/state", "")[1]["counts"]
+        self.assertEqual([(c["key"], c["number"], c["tone"]) for c in counts],
+                         [("needs", 1, "needs"), ("working", 2, "muted"), ("done", 1, "done")])
+
+    def test_sessions_group_by_folder_in_name_order_oldest_first(self):
+        a, b = self.path("Workspace", "emalatxana"), self.path("Workspace", "budget-tracker")
+        sessions = [session("1", "late", a, "done", started=3000.0), session("2", "other", b, "done"), session("3", "early", a, "done", started=2000.0)]
+        groups = self.api(FakeEngine(sessions)).get("/api/state", "")[1]["groups"]
+        self.assertEqual([(g["base"], [r["name"] for r in g["sessions"]]) for g in groups],
+                         [("budget-tracker", ["other"]), ("emalatxana", ["early", "late"])])
+
+    def test_a_failed_listing_is_an_error_the_page_can_show(self):
+        eng = FakeEngine(None)
+        eng.list_sessions = lambda: (None, "tmux is not answering")
+        self.assertEqual(self.api(eng).get("/api/state", "")[1]["error"], "tmux is not answering")
+
+    def test_a_summary_for_the_rows_state_is_its_detail_and_one_for_another_state_is_not(self):
+        folder = self.path("Workspace", "emalatxana")
+        sessions = [session("1", "a", folder, "done"), session("2", "b", folder, "blocked")]
+        with open(os.path.join(self.state, "summaries.json"), "w") as fh:
+            json.dump({sessions[0].id: {"text": "Fixed the rounding", "state": "done"},
+                       sessions[1].id: {"text": "Stale line", "state": "done"}}, fh)
+        rows = {r["name"]: r["detail"] for r in self.api(FakeEngine(sessions)).get("/api/state", "")[1]["groups"][0]["sessions"]}
+        self.assertEqual(rows, {"a": "Fixed the rounding", "b": ""})
+
+
+class RealListing(ApiCase):
+    """Over emx's own registry, so the panel's hiding and `starting` rules are the ones the page gets."""
+
+    def record(self, key, name, cwd):
+        where = engine.session_folder(Path(self.state), key)
+        os.makedirs(where)
+        with open(os.path.join(where, "session.json"), "w", encoding="utf-8") as fh:
+            json.dump({"key": key, "agent": "claude", "name": name, "cwd": cwd, "session_id": key, "started_at": 1.0, "run_at": 0}, fh)
+
+    def real(self, panes=(), screen=""):
+        return engine.Engine(FakeTmux(panes, screen), "claude", Path(self.state))
+
+    def names(self, api):
+        return [r["name"] for g in api.get("/api/state", "")[1]["groups"] for r in g["sessions"]]
+
+    def test_a_test_session_in_a_temp_folder_is_hidden_unless_the_flag_is_set(self):
+        self.record(KEY, "emx-test-a", tempfile.gettempdir())
+        self.record(OTHER, "real", self.path("Workspace"))
+        self.assertEqual(self.names(self.api(self.real())), ["real"])
+        with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
+            self.assertEqual(sorted(self.names(self.api(self.real()))), ["emx-test-a", "real"])
+
+    def test_a_session_waiting_at_claudes_trust_question_says_so(self):
+        self.record(KEY, "new", self.path("Workspace"))
+        pane = Pane("%9", "@9", False, "", KEY, 80, 80, agent="claude", pid=0)
+        for screen, detail in (("Do you trust the files in this folder?\n 1. Yes, I trust this folder", phone.TRUST_DETAIL),
+                               ("Welcome", "")):
+            with self.subTest(screen=screen):
+                row = self.api(self.real([pane], screen)).get("/api/state", "")[1]["groups"][0]["sessions"][0]
+                self.assertEqual((row["word"], row["detail"]), ("Needs input", detail))
+
+
+class Folders(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.engine = FakeEngine([session("1", "a", self.path("Workspace", "emalatxana"), "done")])
+
+    def find(self, text):
+        return [f["path"] for f in self.api(self.engine).get("/api/folders", "q=" + text)[1]["folders"]]
+
+    def test_any_part_of_a_folder_name_finds_it(self):
+        self.assertEqual(self.find("budget")[0], self.path("Workspace", "budget-tracker"))
+        self.assertEqual(self.find("Budget")[0], self.path("Workspace", "budget-tracker"))
+        for text in ("emx", "EMX", "emalatxana"):
+            with self.subTest(text=text):
+                self.assertEqual(self.find(text)[0], self.path("Workspace", "emalatxana"))
+
+    def test_a_folder_row_has_its_path_a_tilde_form_and_its_last_part(self):
+        (row,) = [f for f in self.api(self.engine).get("/api/folders", "q=budget")[1]["folders"]][:1]
+        self.assertEqual((row["shown"], row["base"]), ("~/Workspace/budget-tracker", "budget-tracker"))
+
+    def test_nothing_typed_offers_the_session_folder_first(self):
+        self.assertEqual(self.find("")[0], self.path("Workspace", "emalatxana"))
+
+    def test_a_path_outside_home_and_known_folders_lists_nothing(self):
+        self.assertEqual(self.find("/etc/"), [])
+        self.assertEqual(self.find("/etc/ss"), [])
+        for text in ("/", "~/../", "/" + self.dir.split("/")[1] + "/"):
+            with self.subTest(text=text):
+                self.assertTrue(all(p.startswith(self.home + "/") for p in self.find(text)), self.find(text))
+
+    def test_a_variable_in_the_text_is_never_expanded(self):
+        with mock.patch.dict(os.environ, {"EMX_TEST_SECRET": self.home}):
+            self.assertEqual(self.find("$EMX_TEST_SECRET/"), [])
+            body = self.api(self.engine).post("/api/new", {"folder": "$EMX_TEST_SECRET/Workspace"})[1]
+        self.assertFalse(body["ok"])
+        self.assertNotIn(self.home, body["message"])
+
+    def test_at_most_eight_folders(self):
+        for n in range(12):
+            os.makedirs(self.path("Workspace", f"many-{n}"))
+        self.assertEqual(len(self.find("many")), 8)
+
+    def test_allowed_folder_is_home_known_folders_and_what_is_below_them(self):
+        elsewhere = os.path.join(self.dir, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "sub"))
+        self.assertFalse(phone.allowed_folder("/etc", self.home, []))
+        self.assertFalse(phone.allowed_folder("/", self.home, ["/"]))
+        self.assertTrue(phone.allowed_folder(self.path("Workspace"), self.home, []))
+        self.assertFalse(phone.allowed_folder(elsewhere, self.home, []))
+        self.assertTrue(phone.allowed_folder(elsewhere, self.home, [elsewhere]))
+        self.assertTrue(phone.allowed_folder(os.path.join(elsewhere, "sub"), self.home, [elsewhere]))
+        self.assertFalse(phone.allowed_folder(elsewhere + "-sibling", self.home, [elsewhere]))
+
+    def test_a_link_under_home_that_points_outside_is_not_allowed(self):
+        os.symlink("/etc", self.path("link"))
+        self.assertFalse(phone.allowed_folder(self.path("link"), self.home, []))
+        self.assertFalse(phone.allowed_folder(self.path("link", "ssl"), self.home, []))
+
+    def test_a_recent_folder_outside_home_is_offered_and_allowed(self):
+        elsewhere = os.path.join(self.dir, "elsewhere", "proj-x")
+        os.makedirs(elsewhere)
+        with open(self.prefs, "w") as fh:
+            json.dump({"recent_folders": [elsewhere]}, fh)
+        self.assertEqual(self.find("proj-x"), [elsewhere])
+
+
+class Actions(ApiCase):
+    def setUp(self):
+        super().setUp()
+        self.folder = self.path("Workspace", "emalatxana")
+        self.target = session("1", "alpha", self.folder, "done")
+        self.engine = FakeEngine([self.target])
+
+    def post(self, path, body):
+        return self.api(self.engine).post(path, body)
+
+    def test_new_starts_in_a_folder_the_page_may_use_with_the_name_and_message(self):
+        status, body = self.post("/api/new", {"folder": "~/Workspace/budget-tracker", "name": " Budget ", "message": "hi"})
+        self.assertEqual((status, body["ok"], body["id"]), (200, True, "9" * 8 + "-9999-4999-8999-" + "9" * 12))
+        self.assertEqual(self.engine.started, [(self.path("Workspace", "budget-tracker"), "hi", "Budget")])
+
+    def test_new_refuses_folders_it_may_not_use_and_never_starts_there(self):
+        for folder in ("/etc", "/nonexistent-folder", "", "../../etc", "~/../.."):
+            with self.subTest(folder=folder):
+                body = self.post("/api/new", {"folder": folder, "name": ""})[1]
+                self.assertFalse(body["ok"])
+        self.assertEqual(self.engine.started, [])
+
+    def test_new_refuses_a_bad_name(self):
+        for name in ("a\nb", "a\x1b[0m", "x" * 51):
+            with self.subTest(name=name):
+                self.assertFalse(self.post("/api/new", {"folder": self.folder, "name": name})[1]["ok"])
+        self.assertEqual(self.engine.started, [])
+
+    def test_new_reports_a_session_that_did_not_come_up(self):
+        api = self.api(self.engine, wait_running=lambda eng, sid: (None, "Session never ran"))
+        body = api.post("/api/new", {"folder": self.folder})[1]
+        self.assertEqual((body["ok"], body["message"]), (False, "Session never ran"))
+
+    def test_rename_goes_through_the_renamer_and_keeps_the_test_prefix_under_the_flag(self):
+        made = []
+
+        class Renamer:
+            def __init__(self, eng, tmux, rename, panel):
+                made.append((rename, panel))
+
+            def attempt(self):
+                return True, "Renamed.", True
+
+        with mock.patch.object(phone.sidebar, "Renamer", Renamer):
+            self.assertEqual(self.post("/api/rename", {"id": self.target.id, "name": "beta"})[1], {"ok": True, "message": "Renamed."})
+            with mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": "1"}):
+                self.post("/api/rename", {"id": self.target.id, "name": "x"})
+        self.assertEqual([(r.id, r.new, panel) for r, panel in made], [(self.target.id, "beta", None), (self.target.id, "emx-test-x", None)])
+
+    def test_rename_refuses_what_the_panel_refuses(self):
+        for name in ("", "a\nb", "x" * 51, "ends\\"):
+            with self.subTest(name=name):
+                self.assertFalse(self.post("/api/rename", {"id": self.target.id, "name": name})[1]["ok"])
+        self.assertEqual(self.post("/api/rename", {"id": self.target.id, "name": "alpha"})[1]["message"], "Unchanged.")
+
+    def test_close_and_rename_need_a_session_id_and_close_needs_a_real_running_flag(self):
+        for path, body in (
+            ("/api/close", {"id": "../x", "running": True}), ("/api/close", {"id": self.target.id, "running": "yes"}),
+            ("/api/close", {"id": self.target.id}), ("/api/close", {"id": 5, "running": True}),
+            ("/api/rename", {"id": "../x", "name": "n"}), ("/api/rename", {"id": self.target.id, "name": 7}),
+        ):
+            with self.subTest(path=path, body=body):
+                self.assertEqual(self.post(path, body)[0], 400)
+
+    def test_close_goes_through_the_closer_with_what_the_page_showed(self):
+        made = []
+
+        class Closer:
+            def __init__(self, eng, targets, wait_for=(), panel="", clear_dead_panes=False):
+                made.append((targets, clear_dead_panes))
+
+            def close_one(self, confirm):
+                return True, f"Closed {confirm.name}."
+
+        with mock.patch.object(phone.sidebar, "Closer", Closer):
+            body = self.post("/api/close", {"id": self.target.id, "running": True})[1]
+        self.assertEqual(body, {"ok": True, "message": "Closed alpha."})
+        ((targets, clear),) = made
+        self.assertEqual([(t.id, t.name, t.running) for t in targets], [(self.target.id, "alpha", True)])
+        self.assertTrue(clear)
+
+    def test_close_of_a_session_no_longer_listed_does_nothing(self):
+        body = self.post("/api/close", {"id": OTHER, "running": True})[1]
+        self.assertFalse(body["ok"])
+
+    def test_an_unknown_post_path_is_not_found(self):
+        self.assertIsNone(self.post("/api/nope", {}))
+
+    def test_busy_is_true_only_while_a_post_runs(self):
+        api = self.api(self.engine)
+        seen = []
+        api.rename = lambda body: seen.append(api.busy()) or (200, {})
+        api.post("/api/rename", {})
+        self.assertEqual((seen, api.busy()), ([True], False))
+
+
+class Routines(ApiCase):
+    NOW = 1_800_000_000.0
+
+    def test_routines_carry_their_tag_tone_runs_and_next_time(self):
+        passed = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
+        failed = core.RoutineView("sync", "failed · exit 2", "error", ((self.NOW - 900, core.FAILED, "2"),), None, note="no calendar schedule")
+        api = self.api(FakeEngine([]), read_routines=lambda now: ([passed, failed], None))
+        data = api.get("/api/routines", "")[1]
+        one, two = data["routines"]
+        self.assertEqual((one["name"], one["tag"], one["tone"]), ("backup-nightly", "passed", "done"))
+        self.assertRegex(one["runs"][0], r"^\d\d:\d\d ✓$")
+        self.assertRegex(one["next"], r"^next ")
+        self.assertEqual((two["tone"], two["next"]), ("error", "no calendar schedule"))
+        self.assertRegex(two["runs"][0], r"✗2$")
+        self.assertIsNone(data["error"])
+
+    def test_the_panels_lines_for_the_same_views_are_unchanged(self):
+        view = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
+        rows = core.routine_lines(view, 40, self.NOW, local=time.gmtime)
+        self.assertEqual(rows[1][0], "  " + time.strftime("%H:%M", time.gmtime(self.NOW - 600)) + " ✓")
+
+    def test_an_error_from_the_reader_reaches_the_page(self):
+        api = self.api(FakeEngine([]), read_routines=lambda now: (None, "systemd isn't here"))
+        self.assertEqual(api.get("/api/routines", "")[1], {"routines": [], "error": "systemd isn't here"})
+
+    def test_a_reader_that_raises_is_an_error_not_a_crash(self):
+        def boom(now):
+            raise RuntimeError("no systemctl")
+
+        self.assertEqual(self.api(FakeEngine([]), read_routines=boom).get("/api/routines", "")[1]["error"], "no systemctl")
+
+    def test_the_reader_runs_once_a_minute_not_per_request(self):
+        calls = []
+        api = self.api(FakeEngine([]), read_routines=lambda now: calls.append(now) or ([], None))
+        api.get("/api/routines", "")
+        api.get("/api/routines", "")
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
