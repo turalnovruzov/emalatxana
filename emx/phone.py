@@ -496,7 +496,10 @@ class PhoneApi:
         session, error = self.wait_running(self.engine, started.id)
         if session is None:
             return 200, {"ok": False, "id": started.id, "message": error}
-        self.update_prefs(lambda prefs: (core.remember_folder(prefs, folder), None))
+        try:
+            self.update_prefs(lambda prefs: (core.remember_folder(prefs, folder), None))
+        except OSError:
+            pass
         return 200, {"ok": True, "id": started.id, "message": f"Started {started.name}."}
 
     def rename(self, body: dict) -> tuple:
@@ -659,8 +662,8 @@ class PhoneApi:
         if not self.name_lock.acquire(blocking=False):
             return 200, {"ok": False, "message": NAME_BUSY}
         try:
-            namer = self.namer(self.sources.claude, self.sources.transcript_path(sid), sid, session.name, core.unnamed(session), offered)
             try:
+                namer = self.namer(self.sources.claude, self.sources.transcript_path(sid), sid, session.name, core.unnamed(session), offered)
                 name, error, _ = namer.ask()
             except Exception as exc:
                 name, error = None, f"asking for a name failed: {core.error_line(exc)}"

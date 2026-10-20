@@ -177,7 +177,7 @@ function renderFolder(group) {
   header.addEventListener("click", () => toggleFolder(group.key));
   bar.append(header);
   if (!group.pinned) {
-    const more = el("button", "more", "⋯");
+    const more = el("button", "more", glyphText("⋯"));
     more.type = "button";
     more.setAttribute("aria-label", "More for " + group.label);
     more.addEventListener("click", () => openFolderSheet(group.key));
@@ -210,7 +210,7 @@ function renderRow(session) {
   const text = el("span", "text");
   const names = el("span", "nameline");
   names.append(el("b", "name", session.name));
-  if (session.worktree) names.append(el("span", "branch tone-path", data.look.worktree_mark + session.worktree));
+  if (session.worktree) names.append(el("span", "branch tone-path", glyphText(data.look.worktree_mark.trimEnd()) + " " + session.worktree));
   text.append(names);
   const line = statusLine(session, linked);
   if (line) text.append(line);
@@ -218,7 +218,7 @@ function renderRow(session) {
   const glyph = el("span", "glyph tone-" + session.glyph_tone, glyphText(spinning ? currentFrame() : session.glyph));
   if (spinning) glyph.dataset.spin = "";
   main.append(glyph, text, el("span", "age", session.age));
-  const more = el("button", "more", "⋯");
+  const more = el("button", "more", glyphText("⋯"));
   more.type = "button";
   more.setAttribute("aria-label", "More for " + session.name);
   more.addEventListener("click", () => openSheet(session.id));

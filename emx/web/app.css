@@ -157,8 +157,8 @@ a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 .folder-bar .folder { flex: 1 1 auto; min-width: 0; }
 .folder-bar .more { width: 44px; height: 44px; margin-top: 10px; border: 0; background: transparent; color: var(--muted); font-size: 18px; flex: none; }
 .row .nameline { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.row .nameline .name { flex: 0 1 auto; min-width: 0; }
-.row .nameline .branch { flex: 0 10 auto; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .nameline .name { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+.row .nameline .branch { flex: 1 1 0; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .routines-row + .routines-row { margin-top: 0; }
 .peek-lines { display: flex; flex-direction: column; gap: 4px; padding: 4px 0 8px; font-size: 14px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .peek-line.code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
@@ -178,6 +178,9 @@ a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 input[type="search"] { -webkit-appearance: none; appearance: none; }
 input[type="search"]::-webkit-search-cancel-button { display: none; }
 .tone-accent { color: var(--accent); }
+.tone-path { color: var(--path); }
+.top #routines-back { flex: none; white-space: nowrap; }
+.top #routines-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .folder-bar { padding-right: 4px; }
 #routine-layer, #update-layer { z-index: 30; }
 .notes { max-height: 50vh; max-height: 50dvh; overflow-y: auto; }

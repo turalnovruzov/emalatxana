@@ -396,6 +396,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: `draw_routines` in `emx/sidebar.py`.
 4. **Gotcha**: a view that forgets to record its extent leaves it at `(0, 0)`, so the wheel silently does nothing there.
 
+### Every prefs write from the panel's process is a load-change-save under `sidebar.PREFS_LOCK`
+
+1. **Rule**: every write to the prefs file from the panel's process is a load-change-save under `sidebar.PREFS_LOCK`, through `App.save_prefs` or `PhoneApi.update_prefs`, and `core.save_prefs` writes through a per-call `mkstemp` temp file.
+2. **Why**: the panel's thread and the page's thread share one process, and a write between the other's read and replace would drop its change (#67).
+3. **Minimal example**: ``PhoneApi.update_prefs(lambda p: (core.toggle_pin(p, sid), None))``
+4. **Gotcha**: another view's panel process is not under this lock.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

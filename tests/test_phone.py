@@ -1031,6 +1031,24 @@ class Page(ServerCase):
         for tone in tones:
             self.assertRegex(css, r"\.tone-%s\b" % tone)
 
+    def test_every_tone_class_the_script_can_write_has_a_css_rule(self):
+        css, _ = self.text("/app.css")
+        js, _ = self.text("/app.js")
+        written = set(re.findall(r'"tone-([a-z]+)', js))
+        sent = set(core.CATEGORY_TONE.values()) | {core.glyph_tone(s) for s in every_state("/w")} | {"path", "error", "muted", "accent", "needs", "idle"}
+        for tone in written | sent:
+            self.assertRegex(css, r"\.tone-%s\b[^{]*\{[^}]*color: var\(--%s\)" % (tone, tone), tone)
+
+    def test_the_branch_label_is_written_as_text_and_only_the_branch_truncates(self):
+        css, _ = self.text("/app.css")
+        js, _ = self.text("/app.js")
+        rule = lambda selector: re.search(re.escape(selector) + r" \{([^}]*)\}", css).group(1)
+        self.assertNotIn("flex: 1", rule(".row .nameline .name"))
+        self.assertIn("flex: 1 1 0", rule(".row .nameline .branch"))
+        self.assertIn("text-overflow: ellipsis", rule(".row .nameline .branch"))
+        self.assertRegex(js, r'"branch tone-path", glyphText\(')
+        self.assertEqual(len(re.findall(r'"more", glyphText\("⋯"\)', js)), 2)
+
     def test_the_script_respects_reduced_motion(self):
         js, _ = self.text("/app.js")
         self.assertIn("prefers-reduced-motion", js)
