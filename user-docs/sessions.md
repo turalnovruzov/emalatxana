@@ -11,6 +11,7 @@ To start in another folder, press `Tab` and pick one. Type to filter; `↑` and 
 ## Open and switch
 
 - Move the cursor with `↑` and `↓` (or `j` and `k`).
+- The mouse wheel scrolls the list without moving the selection; `↑` and `↓` bring it back. While there is more than fits, a thin bar at the right edge shows where you are.
 - `→` or `Enter` opens the session and goes to it. A click on a session does the same.
 - `←` in a session, from an empty prompt, comes back to the panel. With text in the prompt, `←` moves the cursor in the prompt as usual.
 - `^\` jumps to the session and back to the panel, from anywhere.

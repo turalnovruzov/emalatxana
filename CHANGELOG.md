@@ -2,7 +2,7 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
-## 2.16.0 — 2026-10-20
+## 2.17.0 — 2026-10-20
 
 - The phone page groups sessions as the panel does: one group per repository, with a `Pinned` group on top. A session in a git worktree sits under its repository and shows `⎇ <branch>` after its name.
 - `⋯` on a session now also has `Peek` (the last part of its conversation, as the panel's Space shows it, refreshed while open) and `Pin to top` or `Unpin`. Pins are the panel's own, so the Pinned group is the same on both.
@@ -13,6 +13,17 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - A `Notifications` row shows the panel's past needs-input and done notices, newest first, unread in colour; tap one to open that session.
 - Tap a routine to see its runs one per line, its error and when it is next due (no run output).
 - After emx updates, the page says `emx updated to X.` with what changed since the version this device last saw, and says when a new major version is waiting; the page reloads itself once to run the new version.
+
+## 2.16.1 — 2026-10-20
+
+- Copying text in a session reaches your computer's clipboard on its own, including on a server through `emx remote`, and keeps working after the server restarts, with no tmux setting to set by hand. Both your computer and the server need emx 2.16.1 for it to work.
+
+## 2.16.0 — 2026-10-20
+
+- The mouse wheel scrolls the panel: the session list, Notifications, Routines and the key help.
+- Scrolling leaves the selection where it is, even when it scrolls out of view; `↑` or `↓` brings it back.
+- Scrolling doesn't close a peek, clear a notice or disarm a close confirm.
+- A thin scroll bar at the panel's right edge shows where you are, only while there is more than fits.
 
 ## 2.15.0 — 2026-10-20
 

@@ -389,6 +389,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: ``"glyph_tone": core.glyph_tone(s)`` in the row, read in the script as ``"glyph tone-" + session.glyph_tone``.
 4. **Gotcha**: the animation's frame index is the clock's, shared by every row, and reduced motion keeps the still frame. Every glyph the page writes ends in U+FE0E, or iOS can draw the Working star as a green emoji. Changing what a laptop path draws needs a golden first, from the previous tag (`tests/fixtures/rows/wide-2.14.0.json`, `RowsAreUnchanged`).
 
+### Every scrolling panel view records its extent and draws its own scroll bar
+
+1. **Rule**: a panel view that can be taller than its room records `self.extent = (total, height)` on every draw, rebuilds its rows one column narrower when `core.scroll_thumb(total, height, 0)` is not None, and ends with `draw_scroll_bar(...)`. The wheel clamps against the last frame's extent with `core.wheel_scroll`; the next draw clamps again.
+2. **Why**: the input handler has no layout of its own, and deciding the bar per frame never leaves a bar glyph under the rows (#82).
+3. **Minimal example**: `draw_routines` in `emx/sidebar.py`.
+4. **Gotcha**: a view that forgets to record its extent leaves it at `(0, 0)`, so the wheel silently does nothing there.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

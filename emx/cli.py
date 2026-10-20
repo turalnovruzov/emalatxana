@@ -552,9 +552,9 @@ COPY_MAX_BYTES = 16 * 1024 * 1024
 def copied(args: list) -> int:
     """What every copy in copy mode runs, with the copied text on stdin: a copy made in a view's viewer goes on to the clipboard of the terminal showing it. Always returns 0 and prints nothing.
 
-    A copy made anywhere else has already gone to the terminal, so with no
-    session key in the environment tmux gave the copy (AGENT_KEY_ENV, which
-    only a viewer's session holds) it does nothing.
+    A copy made anywhere else goes to the terminal through tmux itself
+    (`set-clipboard on`), so with no session key in the environment tmux gave
+    the copy (AGENT_KEY_ENV, which only a viewer's session holds) it does nothing.
     """
     try:
         data = sys.stdin.buffer.read(COPY_MAX_BYTES + 1)

@@ -642,6 +642,9 @@ class ShippedConf(unittest.TestCase):
         self.assertIn("set-hook -g client-focus-out 'set-option @emx_focus 0'", SHELL_CONF)
         self.assertNotIn("allow-passthrough", SHELL_CONF)
 
+    def test_copies_are_passed_to_the_terminal_clipboard(self):
+        self.assertIn("set -g set-clipboard on\n", SHELL_CONF)
+
     def test_the_status_line_is_on_at_the_bottom(self):
         for line in ("set -g status on", "set -g status-position bottom", "set -g status-style 'bg=colour236", "set -g status-format[0] ''"):
             self.assertIn(line, SHELL_CONF)
@@ -696,6 +699,25 @@ class Focus(PrivateServer):
         self.assertIn("tmux*:extkeys:RGB:clipboard:ccolour:cstyle:focus:title", features)
         self.assertNotIn("hyperlinks", features)
         self.assertEqual(self.tmux.run("show-options", "-gv", "window-size").strip(), "latest")
+
+    def test_a_panes_osc_52_copy_reaches_the_clients_terminal(self):
+        self.assertEqual(self.tmux.run("show-options", "-gv", "set-clipboard").strip(), "on")
+        payload = "copied-by-a-session"
+        encoded = base64.b64encode(payload.encode()).decode()
+        self.tmux.run(
+            "respawn-pane", "-k", "-t", self.main,
+            f"printf '\\033]52;c;{encoded}\\007'; sleep 60",
+        )
+        seen = b""
+        deadline = time.monotonic() + 5
+        while encoded.encode() not in seen and time.monotonic() < deadline:
+            if select.select([self.client_fd], [], [], 0.1)[0]:
+                try:
+                    seen += os.read(self.client_fd, 65536)
+                except OSError:
+                    break
+        self.assertIn(b"\x1b]52;", seen)
+        self.assertIn(encoded.encode(), seen)
 
     def test_the_attached_client_is_listed_by_its_tty(self):
         (tty,) = self.tmux.client_ttys()

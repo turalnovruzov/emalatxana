@@ -1,6 +1,6 @@
 # Routines
 
-If your server runs routines as systemd user timers, `R` in the panel opens a view of what they did in the past 24 hours. `R` or `Esc` goes back to the session list. Through `emx remote` you see the server's routines (`emx docs remote`).
+If your server runs routines as systemd user timers, `R` in the panel opens a view of what they did in the past 24 hours. The mouse wheel scrolls it. `R` or `Esc` goes back to the session list. Through `emx remote` you see the server's routines (`emx docs remote`).
 
 The view only reads. It never starts, stops or changes a routine, and it does not open a run or read what a run printed. Pass or fail comes from the exit code alone.
 
