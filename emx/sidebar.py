@@ -151,7 +151,12 @@ REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
 WHEEL_ROWS = 3
 # ncurses 5 mouse ABI (macOS system python) has no BUTTON5; wheel-down arrives as the REPORT_MOUSE_POSITION bit.
+# ALL_MOUSE_EVENTS leaves that bit out, so the mouse mask must add WHEEL_DOWN or ncurses drops the event (see `mouse_mask`).
 WHEEL_DOWN = getattr(curses, "BUTTON5_PRESSED", curses.REPORT_MOUSE_POSITION)
+
+
+def mouse_mask():
+    return curses.ALL_MOUSE_EVENTS | WHEEL_DOWN
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
@@ -4156,7 +4161,7 @@ def setup_curses(scr) -> None:
         pass
     scr.keypad(True)
     scr.timeout(KEY_WAIT_MS)
-    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    curses.mousemask(mouse_mask())
     curses.mouseinterval(0)
 
 

@@ -8558,9 +8558,24 @@ class WheelScroll(WheelCase):
         probe = "import curses; del curses.BUTTON5_PRESSED; from emx import sidebar; print(sidebar.WHEEL_DOWN == curses.REPORT_MOUSE_POSITION)"
         out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent)
         self.assertEqual(out.stdout.strip(), "True", out.stderr)
+        probe = "import curses; del curses.BUTTON5_PRESSED; from emx import sidebar; print(bool(sidebar.mouse_mask() & curses.REPORT_MOUSE_POSITION))"
+        out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=Path(__file__).resolve().parent.parent)
+        self.assertEqual(out.stdout.strip(), "True", out.stderr)
         with mock.patch.object(sidebar, "WHEEL_DOWN", curses.REPORT_MOUSE_POSITION):
             self.wheel()
         self.assertEqual(self.app.scroll, sidebar.WHEEL_ROWS)
+
+    def test_setup_curses_asks_for_the_wheel_down_event(self):
+        with mock.patch.object(sidebar.curses, "mousemask") as mousemask, mock.patch.object(sidebar.curses, "mouseinterval"), \
+                mock.patch.object(sidebar.curses, "curs_set"), mock.patch.object(sidebar.curses, "raw"), mock.patch.object(sidebar.os, "write"):
+            sidebar.setup_curses(mock.MagicMock())
+        asked = mousemask.call_args[0][0]
+        self.assertEqual(asked & sidebar.WHEEL_DOWN, sidebar.WHEEL_DOWN)
+        with mock.patch.object(sidebar, "WHEEL_DOWN", curses.REPORT_MOUSE_POSITION), mock.patch.object(sidebar.curses, "mousemask") as mousemask, \
+                mock.patch.object(sidebar.curses, "mouseinterval"), mock.patch.object(sidebar.curses, "curs_set"), \
+                mock.patch.object(sidebar.curses, "raw"), mock.patch.object(sidebar.os, "write"):
+            sidebar.setup_curses(mock.MagicMock())
+        self.assertTrue(mousemask.call_args[0][0] & curses.REPORT_MOUSE_POSITION)
 
     def test_wheel_down_scrolls_three_rows_and_the_selection_stays(self):
         first = self.app.cursor
