@@ -67,6 +67,7 @@ HELP = (
     ("→ Enter", "open the session and go to it"),
     ("←", "back here, from an empty prompt"),
     ("↑↓ j k", "move"),
+    ("wheel", "scroll; the selection stays, ↑↓ brings it back"),
     ("Enter click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),

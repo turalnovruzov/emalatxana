@@ -37,6 +37,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `→` `Enter` | Open the session and go to it. |
 | `←` | Back here, from an empty prompt. |
 | `↑↓` `j` `k` | Move. |
+| `wheel` | Scrolls the list, Notifications, Routines or the key help; the selection stays and `↑↓` brings it back. A thin bar at the right edge shows where you are while there is more than fits. |
 | `Enter` `click` | Fold a group; a click opens a session. |
 | `space` | Peek at what the session asks or did; `↑↓` next, `space` or `Esc` closes. |
 | `n` | New session where the cursor is; `Tab` there picks another folder. |

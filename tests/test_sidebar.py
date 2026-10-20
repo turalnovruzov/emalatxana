@@ -7994,7 +7994,8 @@ class PhonePanel(AppCase):
         self.assertEqual(self.opened, [])
 
     def test_help_on_a_laptop_still_closes_on_any_key_and_is_2_10_0s(self):
-        self.assertEqual(sidebar.HELP, HELP_2_10_0)
+        wheel = ("wheel", "scroll; the selection stays, ↑↓ brings it back")
+        self.assertEqual(sidebar.HELP, HELP_2_10_0[:3] + (wheel,) + HELP_2_10_0[3:])
         self.app.window_width = 120
         self.app.handle_key("?")
         self.app.handle_key(curses.KEY_DOWN)
@@ -8003,7 +8004,7 @@ class PhonePanel(AppCase):
     def test_every_plain_key_of_the_laptops_help_but_the_wide_only_ones_is_in_the_phones(self):
         laptop = {t for keys, _ in sidebar.HELP if keys for t in keys.split()}
         phone = {t for keys, _ in sidebar.NARROW_HELP for t in keys.split()}
-        self.assertEqual(laptop - phone, {"s", "<", ">"})
+        self.assertEqual(laptop - phone, {"s", "<", ">", "wheel"})
         self.assertTrue(set(sidebar.WIDE_ONLY_KEYS) >= {"s", "<", ">"})
         self.assertEqual(phone - laptop, {"↵", "t", "‹", "a"})
 

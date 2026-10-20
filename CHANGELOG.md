@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.15.0 — 2026-10-20
+
+- The mouse wheel scrolls the panel: the session list, Notifications, Routines and the key help.
+- Scrolling leaves the selection where it is, even when it scrolls out of view; `↑` or `↓` brings it back.
+- Scrolling doesn't close a peek, clear a notice or disarm a close confirm.
+- A thin scroll bar at the panel's right edge shows where you are, only while there is more than fits.
+
 ## 2.14.0 — 2026-10-20
 
 - emx serves a phone page: your sessions on a web page you open in Safari on your iPhone, in emx's own colours (yellow for needs input, green for done, lavender for idle), one compact row per session, grouped by folder. A tap on a row opens it in the Claude app.
