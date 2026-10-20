@@ -4571,6 +4571,10 @@ class Tones(unittest.TestCase):
         self.assertEqual(sidebar.TONES["idle"][0], nearest_256(0x87, 0x87, 0xAF))
         self.assertEqual(sidebar.TONES["idle"][0], 103)
 
+    def test_border_is_238(self):
+        self.assertEqual(sidebar.TONES["border"][0], 238)
+        self.assertEqual(sidebar.TONES["border"][0], core.TONE_INDEX["border"])
+
     def test_the_selection_bar_is_blue_24_focused_236_not(self):
         self.assertEqual(sidebar.BAR_BG, {"focused": 24, "unfocused": 236})
 

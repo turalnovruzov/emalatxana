@@ -884,6 +884,40 @@ class TwoLineRows(unittest.TestCase):
         self.assertEqual(len(core.confirm_lines("^x again to remove", 15, 1)), 2)
 
 
+class WheelAndThumb(unittest.TestCase):
+    def test_wheel_scroll_clamps_to_the_content(self):
+        self.assertEqual(core.wheel_scroll(0, -3, 40, 10), 0)
+        self.assertEqual(core.wheel_scroll(0, 3, 40, 10), 3)
+        self.assertEqual(core.wheel_scroll(29, 3, 40, 10), 30)
+        self.assertEqual(core.wheel_scroll(30, -3, 40, 10), 27)
+        self.assertEqual(core.wheel_scroll(0, 3, 5, 10), 0)
+
+    def test_no_thumb_when_the_content_fits_or_the_view_is_one_row(self):
+        self.assertIsNone(core.scroll_thumb(10, 10, 0))
+        self.assertIsNone(core.scroll_thumb(5, 10, 0))
+        self.assertIsNone(core.scroll_thumb(11, 1, 0))
+
+    def test_thumb_start_and_length(self):
+        self.assertEqual(core.scroll_thumb(40, 10, 0), (0, 2))
+        self.assertEqual(core.scroll_thumb(40, 10, 30), (8, 2))
+        self.assertEqual(core.scroll_thumb(40, 10, 15), (4, 2))
+        self.assertEqual(core.scroll_thumb(1000, 10, 990), (9, 1))
+        self.assertEqual(core.scroll_thumb(11, 10, 1), (1, 9))
+        self.assertEqual(core.scroll_thumb(40, 10, 99), (8, 2))
+
+    def test_thumb_stays_inside_the_track_and_only_moves_down(self):
+        starts = []
+        for scroll in range(31):
+            start, length = core.scroll_thumb(40, 10, scroll)
+            self.assertGreaterEqual(start, 0)
+            self.assertLessEqual(start + length, 10)
+            starts.append(start)
+        self.assertEqual(starts, sorted(starts))
+
+    def test_border_tone_is_xterm_238(self):
+        self.assertEqual(core.TONE_INDEX["border"], 238)
+
+
 class ListWindow(unittest.TestCase):
     """Scrolling and clicks count screen rows, so a wrapped row is kept whole on screen and every line of it is his click."""
 

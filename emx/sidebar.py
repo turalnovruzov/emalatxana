@@ -148,6 +148,7 @@ FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
+WHEEL_ROWS = 3
 
 # (256-colour index, basic colour) for each tone; the basic one is used when the terminal has fewer than 256 colours.
 TONES = {
@@ -161,6 +162,7 @@ TONES = {
     "copper": (core.TONE_INDEX["copper"], curses.COLOR_YELLOW),
     "remote": (core.TONE_INDEX["remote"], curses.COLOR_MAGENTA),
     "idle": (core.TONE_INDEX["idle"], curses.COLOR_BLUE),
+    "border": (core.TONE_INDEX["border"], curses.COLOR_WHITE),
     "plain": (-1, -1),
 }
 BAR_BG = {"focused": 24, "unfocused": 236}
@@ -4126,7 +4128,7 @@ class Palette:
                 self.pairs[tone][bar] = 3 * i + j
 
     def attr(self, tone: str, bar: str | None = None) -> int:
-        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped") else 0
+        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped", "border") else 0
         if bar and not self.rich:
             extra |= curses.A_REVERSE | (curses.A_DIM if bar == "unfocused" else 0)
         if not self.colored:
