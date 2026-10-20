@@ -2,6 +2,12 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.14.1 — 2026-10-20
+
+- The phone page now behaves like an app: pinch and double-tap zoom are off, focusing a field no longer zooms the page, and the page itself no longer shifts or bounces. Only the session list (and the menus and the New screen) scroll, inside a fixed frame that keeps clear of the notch and the home bar.
+- Added to the home screen with "Open as Web App", it opens full screen under the name "emx", with no Safari bars and a dark status bar.
+- Buttons and rows no longer flash or offer a text-selection menu when tapped; fields stay selectable.
+
 ## 2.14.0 — 2026-10-20
 
 - emx serves a phone page: your sessions on a web page you open in Safari on your iPhone, in emx's own colours (yellow for needs input, green for done, lavender for idle), one compact row per session, grouped by folder. A tap on a row opens it in the Claude app.

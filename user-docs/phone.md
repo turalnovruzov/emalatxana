@@ -12,6 +12,8 @@ emx serves a page in your browser that lists your sessions as the panel does, in
 - The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only.
 - A session waiting at Claude's own question about trusting a new folder shows as needs input, "waiting to trust this folder: answer it in a terminal". The page cannot answer that question.
 
+The page acts as an app: no pinch or double-tap zoom, no zoom when you tap a field, and the page does not shift or bounce; only the list and the menus scroll. To use it full screen, open it in Safari, tap Share, then Add to Home Screen, and open it from the new `emx` icon (leave "Open as Web App" on). The icon is Safari's picture of the page; emx has no icon of its own yet.
+
 ### Set it up once
 
 The page is reachable over Tailscale only, so it needs no password and opens nothing to the internet.

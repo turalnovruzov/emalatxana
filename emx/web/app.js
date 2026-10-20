@@ -339,5 +339,9 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && sheet) closeSheet();
 });
 document.addEventListener("visibilitychange", poll);
+// iOS Safari ignores user-scalable=no in a tab, so pinch is stopped here.
+for (const name of ["gesturestart", "gesturechange", "gestureend"]) {
+  document.addEventListener(name, (event) => event.preventDefault());
+}
 
 startPolling();
