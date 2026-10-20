@@ -7,7 +7,7 @@ Two ways to use emx from a phone. The **phone page** is a web page with your ses
 emx serves a page in your browser that lists your sessions as the panel does, in the same colours, grouped by folder, one row each: the state and a short line about what it is doing, and how long ago it started.
 
 - Each row looks as the panel's does: the same mark, colours, state word and line about what it is doing. The Working mark moves through the panel's frames (it stays still when your phone asks for reduced motion). A stopped session is one dim line.
-- Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A row with no link opens the menu instead.
+- Tap a row to open that session in the Claude app (the session needs Claude Code's Remote Control on). A stopped row resumes on tap (below), and a running row with no link yet opens the menu instead.
 - Tap a stopped row to resume it, as Enter does in the panel: it reads `resuming…`, then shows its state. `Resume` is also in the menu of any session that is not running.
 - Tap a folder's name to fold it or unfold it. A folded folder shows how many sessions it holds. Folds are kept in this browser, per device, and do not change the panel.
 - Pull down at the top of the list to refresh it. The page also updates by itself every few seconds.
