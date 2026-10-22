@@ -5,6 +5,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -1374,12 +1375,12 @@ class Views(PrivateServer):
         zsh = shutil.which("zsh")
         if zsh is None:
             self.skipTest("zsh is not installed")
-        self.tmux.run("set-option", "-g", "default-shell", zsh)
         self.tmux.run("set-option", "-g", "remain-on-exit-format", self.emx_exit_format())
         self.tmux.link_agent(self.window, self.key, "cat")
         bare = f"exec env -u TMUX tmux -L {self.tmux.socket} attach-session -t =emx-a-{self.key}:"
         self.tmux.clear_history(self.main)
-        self.die(bare)
+        # Through zsh explicitly: tmux 3.8 no longer hands a pane command to default-shell.
+        self.die(f"{shlex.quote(zsh)} -c {shlex.quote(bare)}")
         self.assertTrue(core.viewer_last_line(*self.tmux.dead_pane_output(self.main)).endswith("not found"))
 
     def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
