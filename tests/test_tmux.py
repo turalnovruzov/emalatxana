@@ -1379,7 +1379,7 @@ class Views(PrivateServer):
         self.tmux.link_agent(self.window, self.key, "cat")
         bare = f"exec env -u TMUX tmux -L {self.tmux.socket} attach-session -t =emx-a-{self.key}:"
         self.tmux.clear_history(self.main)
-        # Through zsh explicitly: tmux 3.8 no longer hands a pane command to default-shell.
+        # Through zsh explicitly: on tmux 3.8 in CI, default-shell zsh did not see this command, so it never failed.
         self.die(f"{shlex.quote(zsh)} -c {shlex.quote(bare)}")
         self.assertTrue(core.viewer_last_line(*self.tmux.dead_pane_output(self.main)).endswith("not found"))
 
