@@ -1138,10 +1138,25 @@ class PaneParse(unittest.TestCase):
 
     def test_an_agent_session_name_needs_a_session_id(self):
         key = str(uuid.uuid4())
-        self.assertEqual(Tmux("emx-test-unused").viewer_command(key), f"exec env -u TMUX tmux -L emx-test-unused attach-session -t =emx-a-{key}:")
+        self.assertEqual(Tmux("emx-test-unused").viewer_command(key), f"exec env -u TMUX tmux -L emx-test-unused attach-session -t '=emx-a-{key}:'")
         for bad in ("s1", "", "x;y", key + " "):
             with self.subTest(bad=bad), self.assertRaises(TmuxError):
                 Tmux("emx-test-unused").viewer_command(bad)
+
+    def test_the_viewer_target_word_reaches_tmux_unexpanded_under_every_shell(self):
+        key = str(uuid.uuid4())
+        word = Tmux("emx-test-unused").viewer_command(key).split(" -t ", 1)[1]
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            path = shutil.which(name)
+            if path is None:
+                continue
+            ran += 1
+            with self.subTest(shell=name):
+                done = subprocess.run([path, "-c", "printf %s " + word], capture_output=True, text=True)
+                self.assertEqual(done.stdout, f"=emx-a-{key}:")
+        if not ran:
+            self.fail("no shell to try")
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -1264,6 +1279,16 @@ class Views(PrivateServer):
         return key, pane
 
     def test_a_right_click_in_a_slot_goes_to_a_session_that_asked_for_the_mouse_and_opens_no_menu(self):
+        self.check_a_right_click_reaches_a_mouse_session()
+
+    def test_a_right_click_reaches_a_mouse_session_with_zsh_as_tmuxs_shell(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+        self.tmux.run("set-option", "-g", "default-shell", zsh)
+        self.check_a_right_click_reaches_a_mouse_session()
+
+    def check_a_right_click_reaches_a_mouse_session(self):
         self.tmux.bind_menu()
         key, pane = self.mouse_agent()
         self.show_in(self.main, key, self.show(pane, "#{window_id}"))
@@ -1289,10 +1314,37 @@ class Views(PrivateServer):
         self.tmux.link_agent(self.show(pane, "#{window_id}"), key, "cat")
         check = self.tmux.global_option(MENU_CHECK_OPT)
 
-        def menu_here(shown):
-            return subprocess.run(["sh", "-c", f"{check} {shown}"], capture_output=True).returncode == 0
+        def menu_here(shell, shown):
+            return subprocess.run([shell, "-c", f"{check} {shown}"], capture_output=True).returncode == 0
 
-        self.assertEqual((menu_here(self.key), menu_here(key), menu_here(str(uuid.uuid4()))), (True, False, False))
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            path = shutil.which(name)
+            if path is None:
+                continue
+            ran += 1
+            with self.subTest(shell=name):
+                got = (menu_here(path, self.key), menu_here(path, key), menu_here(path, str(uuid.uuid4())))
+                self.assertEqual(got, (True, False, False))
+        if not ran:
+            self.fail("no shell to try")
+
+    def test_a_viewer_attaches_under_every_shell_tmux_may_use(self):
+        baseline = len(self.clients())
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            with self.subTest(shell=name):
+                path = shutil.which(name)
+                if path is None:
+                    self.skipTest(f"{name} is not installed")
+                ran += 1
+                self.tmux.run("set-option", "-g", "default-shell", path)
+                self.tmux.respawn(self.main, "cat")
+                self.wait_for(lambda: len(self.clients()) == baseline, "the previous viewer to go")
+                self.show_in(self.main, self.key)
+                self.assertEqual(self.show(self.main, "#{pane_dead}"), "0")
+        if not ran:
+            self.fail("no shell to try")
 
     def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
         self.tmux.bind_menu()

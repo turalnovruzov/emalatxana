@@ -342,8 +342,9 @@ class Tmux:
 
     def viewer_command(self, key: str) -> str:
         """The command a slot runs to show session `key`: a client of this same server attached to `emx-a-<key>`, so the agent's pane never moves."""
-        target = f"={agent_session(key)}:"
-        return f"exec env -u TMUX tmux -L {shlex.quote(self.socket)} attach-session -t {shlex.quote(target)}"
+        # Not shlex.quote: it leaves a leading `=` bare, which zsh expands as a command path.
+        target = f"'={agent_session(key)}:'"
+        return f"exec env -u TMUX tmux -L {shlex.quote(self.socket)} attach-session -t {target}"
 
     def claim_width(self, slot: str, key: str) -> None:
         """Make the viewer running in `slot` the latest client of session `key`, so the session's window takes this view's width again (`window-size latest`) without restarting the viewer.
@@ -563,7 +564,7 @@ class Tmux:
         if not menu or not default or gate in default:
             return
         self.set_global_option(MENU_OPT, default)
-        shown = shlex.quote(f"={AGENT_SESSION_PREFIX}") + '"$1":'
+        shown = "'=" + AGENT_SESSION_PREFIX + "'\"$1\"':'"
         check = (
             f"f() {{ test \"$(tmux -L {shlex.quote(self.socket)} display-message -p -t {shown} "
             f"'#{{mouse_any_flag}}' 2>/dev/null)\" = 0; }}; f"
