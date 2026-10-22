@@ -1258,6 +1258,7 @@ class Views(PrivateServer):
 
     def test_a_right_click_in_a_slot_opens_the_pane_menu_on_the_slot_not_on_the_sessions_window(self):
         self.tmux.bind_menu()
+        self.tmux.run("set-option", "-g", "mouse", "on")
         self.show_in(self.main, self.key)
         self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
         view_window = self.show(self.main, "#{window_id}")
@@ -1386,12 +1387,16 @@ class Views(PrivateServer):
         self.right_click_split(self.main)
         self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the window to split")
 
+    def root_line(self, key):
+        listing = self.tmux.run("list-keys", "-T", "root").splitlines()
+        return "\n".join(line for line in listing if line.split()[3:4] == [key])
+
     def test_the_pane_menu_binding_is_tmuxs_own_menu_gated_on_the_slot_and_binding_again_changes_nothing(self):
-        default = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        default = self.root_line("MouseDown3Pane")
         self.tmux.bind_menu()
-        once = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        once = self.root_line("MouseDown3Pane")
         self.tmux.bind_menu()
-        self.assertEqual(self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane"), once)
+        self.assertEqual(self.root_line("MouseDown3Pane"), once)
         self.assertIn("#{==:#{@emx_role},viewer}", once)
         self.assertEqual(self.tmux.global_option(MENU_OPT), default.split("MouseDown3Pane", 1)[1].strip())
         self.show_in(self.main, self.key)
@@ -1770,6 +1775,27 @@ class ClosingAStoppedSession(PrivateServer):
         self.assertNotIn(self.key, self.tmux.agent_keys())
         self.assertFalse([p for p in self.tmux.panes() if p.session == self.key])
         self.assertFalse(os.path.exists(engine.session_folder(self.state, self.key)))
+
+
+class RootBindingPickTests(unittest.TestCase):
+    LISTING = (
+        "bind-key    -T root  M-MouseDown3Pane  display-menu -t = alt\n"
+        "bind-key    -T root  MouseDown3Pane    if-shell -F -t = x { menu } { default }\n"
+        "bind-key -r -T root  WheelUpPane       copy-mode -e\n"
+    )
+
+    def pick(self, key):
+        from emx.tmux import _root_binding_in
+        return _root_binding_in(self.LISTING, key)
+
+    def test_the_key_token_must_equal_the_key_so_the_m_prefixed_one_never_matches(self):
+        self.assertEqual(self.pick("MouseDown3Pane"), "if-shell -F -t = x { menu } { default }")
+        self.assertEqual(self.pick("M-MouseDown3Pane"), "display-menu -t = alt")
+
+    def test_a_repeatable_binding_is_found_and_a_missing_key_gives_nothing(self):
+        self.assertEqual(self.pick("WheelUpPane"), "copy-mode -e")
+        self.assertEqual(self.pick("MouseDown2Pane"), "")
+        self.assertEqual(self.pick("Pane"), "")
 
 
 if __name__ == "__main__":

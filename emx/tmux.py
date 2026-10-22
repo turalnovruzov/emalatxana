@@ -576,11 +576,10 @@ class Tmux:
     def _root_binding(self, key: str) -> str:
         """The command `key` runs in the root table, as tmux lists it, "" when it has none."""
         try:
-            out = self.run("list-keys", "-T", "root", key)
+            out = self.run("list-keys", "-T", "root")
         except TmuxError:
             return ""
-        found = re.match(r"bind-key\s+(?:-r\s+)?-T\s+root\s+\S+\s+(.*)", out.strip(), re.S)
-        return found.group(1).strip() if found else ""
+        return _root_binding_in(out, key)
 
     def bind_copy(self, command: str) -> None:
         """Have every copy made in copy mode also run `command` with the copied text on its stdin.
@@ -700,3 +699,12 @@ class Tmux:
     def detach(self) -> None:
         """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""
         self.run("detach-client")
+
+
+def _root_binding_in(listing: str, key: str) -> str:
+    """The command of the `key` line in a `list-keys -T root` listing; tmux 3.7c prints nothing for a single-key query."""
+    for line in listing.splitlines():
+        found = re.match(r"bind-key\s+(?:-r\s+)?-T\s+root\s+(\S+)\s+(.*)", line.strip())
+        if found and found.group(1) == key:
+            return found.group(2).strip()
+    return ""
