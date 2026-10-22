@@ -16,6 +16,7 @@ To start in another folder, press `Tab` and pick one. Type to filter; `↑` and 
 - `←` in a session, from an empty prompt, comes back to the panel. With text in the prompt, `←` moves the cursor in the prompt as usual.
 - `^\` jumps to the session and back to the panel, from anywhere.
 - `Enter` or a click on a project header folds or unfolds the group.
+- If a session's view closes by itself, the panel's notice line says why (`The viewer closed: …`); open the session again from the panel.
 
 ## Peek
 

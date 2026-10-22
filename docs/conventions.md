@@ -62,6 +62,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
    ```
 4. **Gotcha**: `-q` also hides a session that does not exist (`=emxx:` returns `''` with exit 0 too), so an empty value never proves the option is unset. Read it only after `has_session()`.
 
+### A `=name:` target inside a shell string is single-quoted by hand
+
+1. **Rule**: when a `=name:` target goes into a shell string (a pane command, or an `if-shell` job tmux runs through `default-shell`), write the single quotes yourself: `-t '={sid}:'`.
+2. **Why**: `shlex.quote` leaves a leading `=` bare, and zsh reads `=word` as the path of command `word`, so the command fails with "not found" and exit 1.
+3. **Minimal example**: `viewer_command` and the `bind_menu` check in `emx/tmux.py`.
+4. **Gotcha**: hand quotes are safe only because `agent_session` accepts only session ids; never put a free-form name in one.
+
 ### Every start of `claude` for an existing session asks `core.attach_allowed` first
 
 1. **Rule**: before emx starts `claude --resume` for a session of its own (in the session's dead pane, or a new hidden window), it passes the session's row and a named trigger (`OPEN`, `NEW`) to `core.attach_allowed`. Only `OPEN`, his explicit Enter, → or click, or his tap on Resume or a stopped row on the phone page (`PhoneApi.resume`, judged on a fresh listing), may resume a session with no live process; `NEW` is judged on the listing the `Starter` took for it (`wait_until_running`), never on one taken on the curses thread, and needs the session running in it. A running session is never started again: its own pane stays in its hidden window, and the view's slot shows it through a viewer.

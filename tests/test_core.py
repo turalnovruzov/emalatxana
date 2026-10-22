@@ -5754,5 +5754,23 @@ class NarrowBars(unittest.TestCase):
                 self.assertEqual(self.width(core.narrow_session_bar(name, "Working", "plain", self.COUNTS, width)), width)
 
 
+class ViewerLastLine(unittest.TestCase):
+    CLOSED = " This viewer has closed. Pick the session on the panel to reopen it."
+
+    def test_the_last_line_before_tmuxs_own_is_the_reason(self):
+        text = f"zsh:1: emx-a-k: not found\n\n\n{self.CLOSED}\n"
+        self.assertEqual(core.viewer_last_line(text, self.CLOSED), "zsh:1: emx-a-k: not found")
+        dead = "Pane is dead (status 1, Thu Oct 22 15:42:45 2026)"
+        self.assertEqual(core.viewer_last_line(f"boom\n{dead}\n", dead), "boom")
+
+    def test_tmuxs_own_line_cut_short_by_a_narrow_pane_is_still_left_out(self):
+        self.assertEqual(core.viewer_last_line("boom\n This viewer has closed. Pick the sessio\n", self.CLOSED), "boom")
+
+    def test_no_output_but_tmuxs_own_gives_nothing(self):
+        for text in (self.CLOSED + "\n", "\n \n\n", ""):
+            with self.subTest(text=text):
+                self.assertEqual(core.viewer_last_line(text, self.CLOSED), "")
+
+
 if __name__ == "__main__":
     unittest.main()

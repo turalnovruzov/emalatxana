@@ -1,7 +1,7 @@
 import os
 import re
 
-__version__ = "2.17.1"
+__version__ = "2.17.2"
 
 
 def _layout(code: str) -> tuple:

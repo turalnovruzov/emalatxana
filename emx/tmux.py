@@ -342,8 +342,9 @@ class Tmux:
 
     def viewer_command(self, key: str) -> str:
         """The command a slot runs to show session `key`: a client of this same server attached to `emx-a-<key>`, so the agent's pane never moves."""
-        target = f"={agent_session(key)}:"
-        return f"exec env -u TMUX tmux -L {shlex.quote(self.socket)} attach-session -t {shlex.quote(target)}"
+        # Not shlex.quote: it leaves a leading `=` bare, which zsh expands as a command path.
+        target = f"'={agent_session(key)}:'"
+        return f"exec env -u TMUX tmux -L {shlex.quote(self.socket)} attach-session -t {target}"
 
     def claim_width(self, slot: str, key: str) -> None:
         """Make the viewer running in `slot` the latest client of session `key`, so the session's window takes this view's width again (`window-size latest`) without restarting the viewer.
@@ -563,7 +564,7 @@ class Tmux:
         if not menu or not default or gate in default:
             return
         self.set_global_option(MENU_OPT, default)
-        shown = shlex.quote(f"={AGENT_SESSION_PREFIX}") + '"$1":'
+        shown = "'=" + AGENT_SESSION_PREFIX + "'\"$1\"':'"
         check = (
             f"f() {{ test \"$(tmux -L {shlex.quote(self.socket)} display-message -p -t {shown} "
             f"'#{{mouse_any_flag}}' 2>/dev/null)\" = 0; }}; f"
@@ -575,11 +576,10 @@ class Tmux:
     def _root_binding(self, key: str) -> str:
         """The command `key` runs in the root table, as tmux lists it, "" when it has none."""
         try:
-            out = self.run("list-keys", "-T", "root", key)
+            out = self.run("list-keys", "-T", "root")
         except TmuxError:
             return ""
-        found = re.match(r"bind-key\s+(?:-r\s+)?-T\s+root\s+\S+\s+(.*)", out.strip(), re.S)
-        return found.group(1).strip() if found else ""
+        return _root_binding_in(out, key)
 
     def bind_copy(self, command: str) -> None:
         """Have every copy made in copy mode also run `command` with the copied text on its stdin.
@@ -636,6 +636,18 @@ class Tmux:
     def capture(self, pane: str) -> str:
         return self.run("capture-pane", "-p", "-t", pane)
 
+    def dead_pane_output(self, pane: str) -> tuple[str, str]:
+        """(everything a dead pane printed, history included, the line tmux itself wrote on it): emx's `remain-on-exit-format` pushes a viewer's last words off the screen into history."""
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        text = self.run("capture-pane", "-p", "-J", "-S", "-", "-t", pane)
+        return text, self.run("display-message", "-p", "-t", pane, "#{E:remain-on-exit-format}").strip()
+
+    def clear_history(self, pane: str) -> None:
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        self.run("clear-history", "-t", pane)
+
     def prompt_probe(self, pane: str) -> tuple:
         """(cursor x, cursor y, cursor shown, pane width, in a mode) for the pane."""
         out = self.run(
@@ -687,3 +699,12 @@ class Tmux:
     def detach(self) -> None:
         """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""
         self.run("detach-client")
+
+
+def _root_binding_in(listing: str, key: str) -> str:
+    """The command of the `key` line in a `list-keys -T root` listing; tmux 3.7c prints nothing for a single-key query."""
+    for line in listing.splitlines():
+        found = re.match(r"bind-key\s+(?:-r\s+)?-T\s+root\s+(\S+)\s+(.*)", line.strip())
+        if found and found.group(1) == key:
+            return found.group(2).strip()
+    return ""

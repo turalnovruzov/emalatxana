@@ -2,6 +2,11 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.17.2 — 2026-10-22
+
+- Opening a session works again when tmux runs zsh as its shell (as on a Mac): the session no longer flashes past and closes. The right-click menu in a session works there too, including on tmux 3.7c.
+- If a session's view ever closes by itself, the panel's notice line now says why: `The viewer closed: …`.
+
 ## 2.17.1 — 2026-10-22
 
 - Nothing changes in how emx works. The repo is now public, so its CI runs on GitHub's free runners again.

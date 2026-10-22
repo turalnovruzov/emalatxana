@@ -5,6 +5,7 @@ import os
 import pty
 import re
 import select
+import shlex
 import shutil
 import struct
 import subprocess
@@ -19,7 +20,7 @@ from unittest import mock
 
 from emx import cli, core, engine
 from emx.tmux import (
-    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
+    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError, _root_binding_in,
 )
 
 try:
@@ -1138,10 +1139,25 @@ class PaneParse(unittest.TestCase):
 
     def test_an_agent_session_name_needs_a_session_id(self):
         key = str(uuid.uuid4())
-        self.assertEqual(Tmux("emx-test-unused").viewer_command(key), f"exec env -u TMUX tmux -L emx-test-unused attach-session -t =emx-a-{key}:")
+        self.assertEqual(Tmux("emx-test-unused").viewer_command(key), f"exec env -u TMUX tmux -L emx-test-unused attach-session -t '=emx-a-{key}:'")
         for bad in ("s1", "", "x;y", key + " "):
             with self.subTest(bad=bad), self.assertRaises(TmuxError):
                 Tmux("emx-test-unused").viewer_command(bad)
+
+    def test_the_viewer_target_word_reaches_tmux_unexpanded_under_every_shell(self):
+        key = str(uuid.uuid4())
+        word = Tmux("emx-test-unused").viewer_command(key).split(" -t ", 1)[1]
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            path = shutil.which(name)
+            if path is None:
+                continue
+            ran += 1
+            with self.subTest(shell=name):
+                done = subprocess.run([path, "-c", "printf %s " + word], capture_output=True, text=True)
+                self.assertEqual(done.stdout, f"=emx-a-{key}:")
+        if not ran:
+            self.fail("no shell to try")
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
@@ -1243,6 +1259,7 @@ class Views(PrivateServer):
 
     def test_a_right_click_in_a_slot_opens_the_pane_menu_on_the_slot_not_on_the_sessions_window(self):
         self.tmux.bind_menu()
+        self.tmux.run("set-option", "-g", "mouse", "on")
         self.show_in(self.main, self.key)
         self.wait_for(lambda: self.show(self.main, "#{mouse_any_flag}") == "1", "the viewer to turn mouse reporting on")
         view_window = self.show(self.main, "#{window_id}")
@@ -1264,6 +1281,16 @@ class Views(PrivateServer):
         return key, pane
 
     def test_a_right_click_in_a_slot_goes_to_a_session_that_asked_for_the_mouse_and_opens_no_menu(self):
+        self.check_a_right_click_reaches_a_mouse_session()
+
+    def test_a_right_click_reaches_a_mouse_session_with_zsh_as_tmuxs_shell(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+        self.tmux.run("set-option", "-g", "default-shell", zsh)
+        self.check_a_right_click_reaches_a_mouse_session()
+
+    def check_a_right_click_reaches_a_mouse_session(self):
         self.tmux.bind_menu()
         key, pane = self.mouse_agent()
         self.show_in(self.main, key, self.show(pane, "#{window_id}"))
@@ -1289,22 +1316,88 @@ class Views(PrivateServer):
         self.tmux.link_agent(self.show(pane, "#{window_id}"), key, "cat")
         check = self.tmux.global_option(MENU_CHECK_OPT)
 
-        def menu_here(shown):
-            return subprocess.run(["sh", "-c", f"{check} {shown}"], capture_output=True).returncode == 0
+        def menu_here(shell, shown):
+            return subprocess.run([shell, "-c", f"{check} {shown}"], capture_output=True).returncode == 0
 
-        self.assertEqual((menu_here(self.key), menu_here(key), menu_here(str(uuid.uuid4()))), (True, False, False))
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            path = shutil.which(name)
+            if path is None:
+                continue
+            ran += 1
+            with self.subTest(shell=name):
+                got = (menu_here(path, self.key), menu_here(path, key), menu_here(path, str(uuid.uuid4())))
+                self.assertEqual(got, (True, False, False))
+        if not ran:
+            self.fail("no shell to try")
+
+    def test_a_viewer_attaches_under_every_shell_tmux_may_use(self):
+        baseline = len(self.clients())
+        ran = 0
+        for name in ("zsh", "bash", "sh"):
+            with self.subTest(shell=name):
+                path = shutil.which(name)
+                if path is None:
+                    self.skipTest(f"{name} is not installed")
+                ran += 1
+                self.tmux.run("set-option", "-g", "default-shell", path)
+                self.tmux.respawn(self.main, "cat")
+                self.wait_for(lambda: len(self.clients()) == baseline, "the previous viewer to go")
+                self.show_in(self.main, self.key)
+                self.assertEqual(self.show(self.main, "#{pane_dead}"), "0")
+        if not ran:
+            self.fail("no shell to try")
+
+    def emx_exit_format(self):
+        conf = Path(core.__file__).with_name("emx.tmux.conf").read_text(encoding="utf-8")
+        return re.search(r"^setw -g remain-on-exit-format '(.*)'$", conf, re.M).group(1)
+
+    def die(self, command):
+        self.tmux.respawn(self.main, command)
+        self.wait_for(lambda: self.show(self.main, "#{pane_dead}") == "1", "the pane to end")
+
+    def test_a_dead_viewer_reports_its_own_last_line_only(self):
+        for name, fmt in (("emx's", self.emx_exit_format()), ("tmux's default", None)):
+            with self.subTest(format=name):
+                if fmt is None:
+                    self.tmux.run("set-option", "-gu", "remain-on-exit-format")
+                else:
+                    self.tmux.run("set-option", "-g", "remain-on-exit-format", fmt)
+                self.tmux.clear_history(self.main)
+                self.die("echo OLD; exit 0")
+                self.tmux.clear_history(self.main)
+                self.die("echo boom; exit 1")
+                text, exit_line = self.tmux.dead_pane_output(self.main)
+                self.assertEqual(core.viewer_last_line(text, exit_line), "boom")
+                self.assertNotIn("OLD", text)
+
+    def test_a_viewer_zsh_could_not_start_says_not_found(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+        self.tmux.run("set-option", "-g", "remain-on-exit-format", self.emx_exit_format())
+        self.tmux.link_agent(self.window, self.key, "cat")
+        bare = f"exec env -u TMUX tmux -L {self.tmux.socket} attach-session -t =emx-a-{self.key}:"
+        self.tmux.clear_history(self.main)
+        # Through zsh explicitly: on tmux 3.8 in CI, default-shell zsh did not see this command, so it never failed.
+        self.die(f"{shlex.quote(zsh)} -c {shlex.quote(bare)}")
+        self.assertTrue(core.viewer_last_line(*self.tmux.dead_pane_output(self.main)).endswith("not found"))
 
     def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
         self.tmux.bind_menu()
         self.right_click_split(self.main)
         self.wait_for(lambda: self.show(self.main, "#{window_panes}") == "3", "the window to split")
 
+    def root_line(self, key):
+        listing = self.tmux.run("list-keys", "-T", "root").splitlines()
+        return "\n".join(line for line in listing if line.split()[3:4] == [key])
+
     def test_the_pane_menu_binding_is_tmuxs_own_menu_gated_on_the_slot_and_binding_again_changes_nothing(self):
-        default = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        default = self.root_line("MouseDown3Pane")
         self.tmux.bind_menu()
-        once = self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane")
+        once = self.root_line("MouseDown3Pane")
         self.tmux.bind_menu()
-        self.assertEqual(self.tmux.run("list-keys", "-T", "root", "MouseDown3Pane"), once)
+        self.assertEqual(self.root_line("MouseDown3Pane"), once)
         self.assertIn("#{==:#{@emx_role},viewer}", once)
         self.assertEqual(self.tmux.global_option(MENU_OPT), default.split("MouseDown3Pane", 1)[1].strip())
         self.show_in(self.main, self.key)
@@ -1683,6 +1776,26 @@ class ClosingAStoppedSession(PrivateServer):
         self.assertNotIn(self.key, self.tmux.agent_keys())
         self.assertFalse([p for p in self.tmux.panes() if p.session == self.key])
         self.assertFalse(os.path.exists(engine.session_folder(self.state, self.key)))
+
+
+class RootBindingPickTests(unittest.TestCase):
+    LISTING = (
+        "bind-key    -T root  M-MouseDown3Pane  display-menu -t = alt\n"
+        "bind-key    -T root  MouseDown3Pane    if-shell -F -t = x { menu } { default }\n"
+        "bind-key -r -T root  WheelUpPane       copy-mode -e\n"
+    )
+
+    def pick(self, key):
+        return _root_binding_in(self.LISTING, key)
+
+    def test_the_key_token_must_equal_the_key_so_the_m_prefixed_one_never_matches(self):
+        self.assertEqual(self.pick("MouseDown3Pane"), "if-shell -F -t = x { menu } { default }")
+        self.assertEqual(self.pick("M-MouseDown3Pane"), "display-menu -t = alt")
+
+    def test_a_repeatable_binding_is_found_and_a_missing_key_gives_nothing(self):
+        self.assertEqual(self.pick("WheelUpPane"), "copy-mode -e")
+        self.assertEqual(self.pick("MouseDown2Pane"), "")
+        self.assertEqual(self.pick("Pane"), "")
 
 
 if __name__ == "__main__":
