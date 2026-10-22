@@ -501,6 +501,9 @@ class SwitchToTmux(ClientTmux):
     def viewer_command(self, key):
         return f"viewer {key}"
 
+    def clear_history(self, pane):
+        pass
+
     def set_pane_option(self, pane, name, value):
         self.calls.append(("set_pane_option", pane, name, value))
 
@@ -6547,6 +6550,9 @@ class SwitchTmux(ClientTmux):
     def viewer_command(self, key):
         return f"viewer {key}"
 
+    def clear_history(self, pane):
+        pass
+
     def respawn(self, pane, command, cwd=None):
         pass
 
@@ -7562,6 +7568,16 @@ class ViewTmux(ClientTmux):
         self.held = Pane("%5", "@5", False, "", KEY_A, 100, 100, agent="claude") if held == "default" else held
         self.options = {}
         self.calls = []
+        self.dead_output = ("", "")
+
+    def clear_history(self, pane):
+        self.calls.append(("clear_history", pane))
+
+    def dead_pane_output(self, pane):
+        self.calls.append(("dead_pane_output", pane))
+        if isinstance(self.dead_output, Exception):
+            raise self.dead_output
+        return self.dead_output
 
     def panes(self, session=SESSION):
         listed = [Pane("%1", "@1", False, "sidebar", "", 40, 141), self.slot_pane]
@@ -7743,7 +7759,7 @@ class SlotTending(AppCase):
         self.app.attached = 0
         calls = self.tend(tmux)
         self.assertEqual(calls, [
-            ("set_view_option", sidebar.REOPEN_OPT, ""), ("link_agent", "@5", KEY_A), ("respawn", "%2", f"viewer {KEY_A}"),
+            ("set_view_option", sidebar.REOPEN_OPT, ""), ("link_agent", "@5", KEY_A), ("clear_history", "%2"), ("respawn", "%2", f"viewer {KEY_A}"),
             ("set_pane_option", "%2", sidebar.ROLE, "viewer"), ("set_pane_option", "%2", sidebar.VIEW_OPT, KEY_A),
         ])
 
@@ -7769,7 +7785,39 @@ class SlotTending(AppCase):
         for tmux in (ViewTmux(slot=self.VIEWER, held=None), ViewTmux(slot=replace(self.VIEWER, dead=True))):
             with self.subTest(held=tmux.held, dead=tmux.slot_pane.dead):
                 self.app.attached = 1
-                self.assertEqual(self.tend(tmux), self.parked())
+                looked = [] if tmux.held is None else [("dead_pane_output", "%2")]
+                self.assertEqual(self.tend(tmux), (looked if tmux.slot_pane.dead else []) + self.parked())
+
+    def dead_viewer(self, output, held="default"):
+        tmux = ViewTmux(slot=replace(self.VIEWER, dead=True), held=held)
+        tmux.dead_output = output
+        self.app.attached = 1
+        return tmux
+
+    def test_a_viewer_that_died_while_its_session_lives_says_its_last_line(self):
+        calls = self.tend(self.dead_viewer(("zsh:1: emx-a-x: not found\n F\n", " F")))
+        self.assertEqual(self.app.notice, "The viewer closed: zsh:1: emx-a-x: not found")
+        self.assertIs(self.app.notice_error, True)
+        self.assertEqual(calls, [("dead_pane_output", "%2")] + self.parked())
+
+    def test_a_viewer_whose_session_has_gone_parks_without_a_notice(self):
+        self.app.notice = "before"
+        calls = self.tend(self.dead_viewer(("boom\n", ""), held=None))
+        self.assertEqual((calls, self.app.notice), (self.parked(), "before"))
+
+    def test_a_dead_viewers_output_that_cannot_be_read_or_is_empty_parks_without_a_notice(self):
+        for output in (TmuxError("gone"), (" F\n", " F")):
+            with self.subTest(output=output):
+                self.app.notice = "before"
+                calls = self.tend(self.dead_viewer(output))
+                self.assertEqual((calls, self.app.notice), ([("dead_pane_output", "%2")] + self.parked(), "before"))
+
+    def test_showing_a_session_clears_the_slots_history_just_before_its_viewer_starts(self):
+        tmux = ViewTmux()
+        self.app.tmux = tmux
+        sidebar.App.show(self.app, tmux.slot_pane, KEY_A, "@5")
+        calls = tmux.calls
+        self.assertEqual(calls[calls.index(("clear_history", "%2")) + 1], ("respawn", "%2", f"viewer {KEY_A}"))
 
     def test_a_viewer_of_a_live_session_with_a_client_is_left_alone(self):
         self.app.attached = 1

@@ -500,6 +500,13 @@ def live_or_dead_agent(panes, sid: str):
     return next((p for p in panes if p.session == sid and p.agent), None)
 
 
+def viewer_last_line(text: str, exit_line: str) -> str:
+    """The last non-blank line a dead viewer printed, leaving out tmux's own `exit_line`, which a narrow pane cuts short; "" when it printed none."""
+    skip = exit_line.strip()
+    lines = (line.strip() for line in reversed(text.splitlines()))
+    return next((line for line in lines if line and not skip.startswith(line)), "")
+
+
 def rename_blocked(list_failing: bool, busy: Rename | None, session: Session | None) -> str | None:
     """Why Ctrl+R can't start a rename of `session` (the row under the cursor), or None.
 

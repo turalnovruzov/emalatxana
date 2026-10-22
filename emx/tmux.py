@@ -637,6 +637,18 @@ class Tmux:
     def capture(self, pane: str) -> str:
         return self.run("capture-pane", "-p", "-t", pane)
 
+    def dead_pane_output(self, pane: str) -> tuple[str, str]:
+        """(everything a dead pane printed, history included, the line tmux itself wrote on it): emx's `remain-on-exit-format` pushes a viewer's last words off the screen into history."""
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        text = self.run("capture-pane", "-p", "-J", "-S", "-", "-t", pane)
+        return text, self.run("display-message", "-p", "-t", pane, "#{E:remain-on-exit-format}").strip()
+
+    def clear_history(self, pane: str) -> None:
+        if not _PANE_ID.fullmatch(pane):
+            raise TmuxError(f"not a pane id: {pane!r}")
+        self.run("clear-history", "-t", pane)
+
     def prompt_probe(self, pane: str) -> tuple:
         """(cursor x, cursor y, cursor shown, pane width, in a mode) for the pane."""
         out = self.run(

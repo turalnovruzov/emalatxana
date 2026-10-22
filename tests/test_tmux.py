@@ -1346,6 +1346,41 @@ class Views(PrivateServer):
         if not ran:
             self.fail("no shell to try")
 
+    def emx_exit_format(self):
+        conf = Path(core.__file__).with_name("emx.tmux.conf").read_text(encoding="utf-8")
+        return re.search(r"^setw -g remain-on-exit-format '(.*)'$", conf, re.M).group(1)
+
+    def die(self, command):
+        self.tmux.respawn(self.main, command)
+        self.wait_for(lambda: self.show(self.main, "#{pane_dead}") == "1", "the pane to end")
+
+    def test_a_dead_viewer_reports_its_own_last_line_only(self):
+        for name, fmt in (("emx's", self.emx_exit_format()), ("tmux's default", None)):
+            with self.subTest(format=name):
+                if fmt is None:
+                    self.tmux.run("set-option", "-gu", "remain-on-exit-format")
+                else:
+                    self.tmux.run("set-option", "-g", "remain-on-exit-format", fmt)
+                self.tmux.clear_history(self.main)
+                self.die("echo OLD; exit 0")
+                self.tmux.clear_history(self.main)
+                self.die("echo boom; exit 1")
+                text, exit_line = self.tmux.dead_pane_output(self.main)
+                self.assertEqual(core.viewer_last_line(text, exit_line), "boom")
+                self.assertNotIn("OLD", text)
+
+    def test_a_viewer_zsh_could_not_start_says_not_found(self):
+        zsh = shutil.which("zsh")
+        if zsh is None:
+            self.skipTest("zsh is not installed")
+        self.tmux.run("set-option", "-g", "default-shell", zsh)
+        self.tmux.run("set-option", "-g", "remain-on-exit-format", self.emx_exit_format())
+        self.tmux.link_agent(self.window, self.key, "cat")
+        bare = f"exec env -u TMUX tmux -L {self.tmux.socket} attach-session -t =emx-a-{self.key}:"
+        self.tmux.clear_history(self.main)
+        self.die(bare)
+        self.assertTrue(core.viewer_last_line(*self.tmux.dead_pane_output(self.main)).endswith("not found"))
+
     def test_a_right_click_anywhere_else_runs_tmuxs_own_binding(self):
         self.tmux.bind_menu()
         self.right_click_split(self.main)

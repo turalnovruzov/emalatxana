@@ -2273,6 +2273,8 @@ class App:
         if slot.role == "viewer" and slot.view:
             held = core.live_or_dead_agent(self.tmux.panes(), slot.view)
             if slot.dead or held is None:
+                if slot.dead and held is not None:
+                    self.say_why_the_viewer_closed(slot)
                 self.park(slot)
                 slot = self.main_pane
         attached = self.tmux.client_state()[0]
@@ -2303,11 +2305,20 @@ class App:
         else:
             self.show(slot, key, held.window)
 
+    def say_why_the_viewer_closed(self, slot: Pane) -> None:
+        try:
+            line = core.viewer_last_line(*self.tmux.dead_pane_output(slot.id))
+        except TmuxError:
+            return
+        if line:
+            self.say(f"The viewer closed: {line}", error=True)
+
     def show(self, slot: Pane, key: str, window: str) -> None:
         """Show session `key`, whose pane is in `window`, in the slot through a viewer; the session's pane itself never moves."""
         if slot.role == "viewer" and slot.view == key and not slot.dead:
             return
         self.tmux.link_agent(window, key, self_command("blank", ""))
+        self.tmux.clear_history(slot.id)
         self.tmux.respawn(slot.id, self.tmux.viewer_command(key))
         self.tmux.set_pane_option(slot.id, ROLE, "viewer")
         self.tmux.set_pane_option(slot.id, VIEW_OPT, key)
