@@ -120,7 +120,7 @@ Report **in-session, in plain language**: when a piece is merged, tell him what 
 
 ### What this project is
 
-*Emalatxana* (Azerbaijani for a workshop; `emx`) is Tural's main workspace for working with Claude Code. **The idea is in [`README.md`](README.md), the only statement of it.** Sole user: Tural. The repo is private. No scheduled runs.
+*Emalatxana* (Azerbaijani for a workshop; `emx`) is Tural's main workspace for working with Claude Code. **The idea is in [`README.md`](README.md), the only statement of it.** Sole user: Tural. The repo is public. No scheduled runs.
 
 **It is a separate tool.** Tural: *"it's a separate tool, it shouldn't be dependent on my other projects"* (2026-10-07). Nothing committed hard-codes or depends on his other repos, project names, folders, accounts or session names; anything specific to him is runtime input or local config that is never committed.
 
@@ -170,11 +170,11 @@ Of an earlier prototype Tural said: *"I don't want to lose sessions in the middl
 
 #### Keep his data out of the repo, project specifics
 
-The repo is private, but it may be made public later and the tool stays separate. So no commit, PR body, issue comment, fixture, log or evidence holds secrets, private data about other people, or real session names, paths, transcripts or screenshots of his. Fixtures and evidence come from throwaway sessions only.
+The repo is public (since 2026-10-20) and the tool stays separate. So no commit, PR body, issue comment, fixture, log or evidence holds secrets, private data about other people, or real session names, paths, transcripts or screenshots of his. Fixtures and evidence come from throwaway sessions only.
 
 #### His gates, in addition to the shared ones
 
-**Making this repo public** is his gate. `permissions.deny` in `.claude/settings.json` holds `pkill` and `killall` by prefix, not `sudo` or `xargs`.
+**The repo is public** (Tural, 2026-10-20: *"Why can't we just make this a public repo?"*, after a history scan found no secrets or private data; private Actions minutes had run out). Repo settings, its visibility included, stay his gate. `permissions.deny` in `.claude/settings.json` holds `pkill` and `killall` by prefix, not `sudo` or `xargs`.
 
 #### Both front ends move together
 
