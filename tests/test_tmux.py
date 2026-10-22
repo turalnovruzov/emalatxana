@@ -19,7 +19,7 @@ from unittest import mock
 
 from emx import cli, core, engine
 from emx.tmux import (
-    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError,
+    AGENT_OPT, BACK_OPT, HUSH_OPT, MENU_OPT, PASTE_OPT, RELAY_PASTE_OPT, ROLE, SESSION, SESSION_OPT, VIEW_OPT, Pane, Tmux, TmuxError, _root_binding_in,
 )
 
 try:
@@ -1785,7 +1785,6 @@ class RootBindingPickTests(unittest.TestCase):
     )
 
     def pick(self, key):
-        from emx.tmux import _root_binding_in
         return _root_binding_in(self.LISTING, key)
 
     def test_the_key_token_must_equal_the_key_so_the_m_prefixed_one_never_matches(self):
