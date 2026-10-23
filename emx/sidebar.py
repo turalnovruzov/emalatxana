@@ -182,7 +182,7 @@ CATEGORY_TONE = core.CATEGORY_TONE
 session_tone = core.session_tone
 
 
-def bar_format(parts: list) -> str:
+def bar_format(parts: list, scheme: str = core.DARK) -> str:
     """The bar's tmux status-format: every `#` and `%` in a part is doubled, so text from a session can never run a command, style the bar or be read as a time.
 
     A part may carry a fourth item, the name of the user range a click on it
@@ -190,7 +190,7 @@ def bar_format(parts: list) -> str:
     """
     out = []
     for text, tone, bold, *where in parts:
-        colour = TONES[tone][0]
+        colour = core.SCHEME_TONES[scheme][tone]
         fg = "default" if colour < 0 else f"colour{colour}"
         drawn = f"#[fg={fg},{'bold' if bold else 'nobold'}]" + text.replace("#", "##").replace("%", "%%")
         out.append(f"#[range=user|{where[0]}]{drawn}#[norange]" if where else drawn)
@@ -1949,7 +1949,8 @@ class App:
         self.shown_link = None
         self.menu = None
         self.started_note = None
-        self.palette = Palette()
+        self.palette = Palette(core.scheme(self.prefs))
+        self.applied_scheme = None
         self.main_pane = None
         self.applied = None
         self.misses = {}
@@ -2062,7 +2063,22 @@ class App:
         self.prefs = core.merge_prefs(self.prefs_base, self.prefs, disk)
         self.prefs_base = copy.deepcopy(disk)
         self.apply_mode()
+        self.apply_scheme()
         self.regroup()
+
+    def apply_scheme(self) -> None:
+        """Draw the chosen scheme: the panel's colours, and tmux's bottom bar and pane borders, which are global options every panel sets alike."""
+        name = core.scheme(self.prefs)
+        if name == self.applied_scheme:
+            return
+        self.applied_scheme = name
+        self.palette.use(name)
+        try:
+            for option, value in core.SCHEME_TMUX[name].items():
+                self.tmux.set_global_option(option, value)
+        except TmuxError as exc:
+            self.say(f"Couldn't set the colours: {exc}", error=True)
+        self.scr.clear()
 
     def my_panes(self) -> list:
         """The panes of this panel's own view window."""
@@ -2153,6 +2169,7 @@ class App:
 
     def housekeep(self, fresh_list: bool) -> None:
         self.reload_prefs()
+        self.apply_scheme()
         try:
             sidebar, main = self.layout_panes(self.my_panes())
             if self.primary and not self.legacy_cleared:
@@ -3552,14 +3569,14 @@ class App:
         if not self.window_width:
             return
         if self.narrow:
-            self.bar.push(bar_format(self.narrow_bar()))
+            self.bar.push(bar_format(self.narrow_bar(), core.scheme(self.prefs)))
             return
         tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         parts = core.bar_parts(
             __version__, core.bar_counts(self.sessions), self.history[0] if self.history else None,
             time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded, self.notice_key_live(),
         )
-        self.bar.push(bar_format(parts))
+        self.bar.push(bar_format(parts, core.scheme(self.prefs)))
 
     def prompt_lines(self, width: int, room: int | None = None) -> list:
         """The prompt's lines; the picker's suggestions get only what `room` leaves after the title, input and hints."""
@@ -4200,33 +4217,42 @@ def setup_curses(scr) -> None:
 
 
 class Palette:
-    """curses attributes for each tone in TONES, plain or on a selection bar ("focused" or "unfocused", see `core.selection_bar`).
+    """curses attributes for each tone, plain or on a selection bar ("focused" or "unfocused", see `core.selection_bar`).
 
-    With 256 colours each bar is a background colour from BAR_BG; with fewer
-    the bar is reverse video, dimmed while the panel lacks focus, and the
-    greys become dim white.
+    What each tone and bar looks like is `core.palette_spec`'s answer for the
+    scheme, and `use` swaps it on a live screen. With no bar background the
+    bar is reverse video, dimmed while the panel lacks focus.
     """
 
-    def __init__(self):
+    def __init__(self, scheme: str = core.DARK):
         self.colored = curses.has_colors()
-        self.rich = False
         self.pairs = {}
+        self.dim = {}
+        self.reverse_bar = True
         if not self.colored:
+            self.dim = dict.fromkeys(core.GREY_TONES, True)
             return
         curses.start_color()
         curses.use_default_colors()
-        self.rich = curses.COLORS >= 256 and curses.COLOR_PAIRS > 3 * len(TONES)
-        for i, (tone, (rich, basic)) in enumerate(TONES.items()):
-            fg = rich if self.rich else basic
+        self.use(scheme)
+
+    def use(self, scheme: str) -> None:
+        if not self.colored:
+            return
+        tones, bar = core.palette_spec(scheme, curses.COLORS, curses.COLOR_PAIRS)
+        self.reverse_bar = bar is None
+        self.dim = {tone: dim for tone, (_, dim) in tones.items()}
+        for i, (tone, (fg, _)) in enumerate(tones.items()):
             self.pairs[tone] = {None: 3 * i + 1}
             curses.init_pair(3 * i + 1, fg, -1)
-            for j, (bar, bg) in enumerate(BAR_BG.items(), start=2):
-                curses.init_pair(3 * i + j, fg, bg if self.rich else -1)
-                self.pairs[tone][bar] = 3 * i + j
+            for j, focus in enumerate(("focused", "unfocused"), start=2):
+                bar_fg = core.bar_foreground(scheme, bar, fg)
+                curses.init_pair(3 * i + j, bar_fg, -1 if bar is None else bar[focus])
+                self.pairs[tone][focus] = 3 * i + j
 
     def attr(self, tone: str, bar: str | None = None) -> int:
-        extra = curses.A_DIM if not self.rich and tone in ("muted", "path", "stopped", "border") else 0
-        if bar and not self.rich:
+        extra = curses.A_DIM if self.dim.get(tone) else 0
+        if bar and self.reverse_bar:
             extra |= curses.A_REVERSE | (curses.A_DIM if bar == "unfocused" else 0)
         if not self.colored:
             return extra | (curses.A_BOLD if tone == "error" else 0)

@@ -32,7 +32,7 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | phone | update [off | on] | uninstall]
+USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | phone | colors [dark | light | terminal] | update [off | on] | uninstall]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
 emx install <url> is internal too: what install.sh runs to install emx from that repo's newest version tag.
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
@@ -51,6 +51,7 @@ docs prints the emx docs index (start there); docs <page> prints one page.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 phone prints the address of the phone page this emx serves over Tailscale, or why it isn't up.
+colors prints the colour scheme; colors dark, light or terminal sets it (Light for a light terminal background); a running emx follows within seconds.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
 update off stops the automatic updates (emx update still updates when you run it); update on starts them again.
 uninstall removes the installed emx and its link; your prefs and emx's state are kept.
@@ -229,6 +230,8 @@ def refresh_workspace(tmux: Tmux) -> None:
         tmux.respawn(pane, self_command("sidebar", tmux.socket))
     if upgrade:
         tmux.source_config()
+        for option, value in core.SCHEME_TMUX[core.scheme(core.load_prefs(core.prefs_path()))].items():
+            tmux.set_global_option(option, value)
         # Stamped last, so an upgrade that fails partway is retried on the next launch.
         tmux.set_session_option(VERSION_OPT, version)
 
@@ -676,6 +679,23 @@ def install_command(url: str) -> int:
     return 0
 
 
+def colors_command(args: list) -> int:
+    path = core.prefs_path()
+    if not args:
+        print(f"Colours: {core.scheme(core.load_prefs(path))}. Choices: {', '.join(core.SCHEMES)}.")
+        return 0
+    if len(args) != 1 or args[0] not in core.SCHEMES:
+        print(USAGE, file=sys.stderr)
+        return 2
+    try:
+        core.save_prefs(path, core.set_scheme(core.load_prefs(path), args[0]))
+    except OSError as exc:
+        print(f"emx: couldn't save prefs: {exc}", file=sys.stderr)
+        return 1
+    print(f"Colours set to {args[0]}.")
+    return 0
+
+
 def update_command(args: list) -> int:
     root = emx.ROOT
     if args == ["--report"]:
@@ -788,6 +808,8 @@ def main(argv: list) -> int:
         return install_command(argv[1])
     if argv[0] == "phone":
         return phone_command(argv[1:])
+    if argv[0] == "colors":
+        return colors_command(argv[1:])
     if argv[0] == "update":
         return update_command(argv[1:])
     if argv[0] == "uninstall" and len(argv) == 1:

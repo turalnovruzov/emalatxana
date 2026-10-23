@@ -5772,5 +5772,114 @@ class ViewerLastLine(unittest.TestCase):
                 self.assertEqual(core.viewer_last_line(text, self.CLOSED), "")
 
 
+class ColourSchemes(unittest.TestCase):
+    def tones(self, name, colors, pairs=256):
+        return core.palette_spec(name, colors, pairs)
+
+    def test_dark_at_256_colours_is_todays_tones_and_bars(self):
+        tones, bar = self.tones("dark", 256)
+        self.assertEqual({t: fg for t, (fg, _) in tones.items()}, {**core.TONE_INDEX, "plain": -1})
+        self.assertFalse(any(dim for _, dim in tones.values()))
+        self.assertEqual(bar, {"focused": 24, "unfocused": 236})
+
+    def test_dark_without_256_colours_or_pairs_falls_back_to_basic_colours(self):
+        for colors, pairs in ((8, 64), (256, 16)):
+            with self.subTest(colors=colors, pairs=pairs):
+                tones, bar = self.tones("dark", colors, pairs)
+                self.assertEqual({t: fg for t, (fg, _) in tones.items()}, core.BASIC_TONES)
+                self.assertEqual({t for t, (_, dim) in tones.items() if dim}, {"muted", "path", "stopped", "border"})
+                self.assertIsNone(bar)
+
+    def test_light_at_256_colours_uses_the_board_values(self):
+        tones, bar = self.tones("light", 256)
+        want = {"needs": 130, "done": 28, "idle": 61, "accent": 25, "error": 160, "copper": 166,
+                "muted": 243, "path": 242, "stopped": 248, "plain": -1}
+        for tone, index in want.items():
+            with self.subTest(tone=tone):
+                self.assertEqual(tones[tone], (index, False))
+        self.assertEqual(bar, {"focused": 153, "unfocused": 254})
+
+    def test_light_at_8_colours_draws_greys_dim_in_the_default_colour(self):
+        tones, bar = self.tones("light", 8, 64)
+        for tone in ("muted", "path", "stopped", "border"):
+            self.assertEqual(tones[tone], (-1, True))
+        self.assertEqual([tones[t] for t in ("needs", "done", "error")], [(3, False), (2, False), (1, False)])
+        self.assertIsNone(bar)
+
+    def test_terminal_scheme_uses_only_the_ansi_colours(self):
+        tones, bar = self.tones("terminal", 256)
+        want = {"needs": 3, "done": 2, "idle": 5, "accent": 4, "error": 1, "copper": 3,
+                "muted": 8, "path": 8, "stopped": 8, "plain": -1}
+        for tone, index in want.items():
+            with self.subTest(tone=tone):
+                self.assertEqual(tones[tone][0], index)
+        self.assertEqual({t for t, (_, dim) in tones.items() if dim}, {"stopped"})
+        self.assertIsNone(bar)
+        self.assertTrue(all(-1 <= fg <= 15 for fg, _ in tones.values()))
+
+    def test_terminal_scheme_at_8_colours_drops_the_bright_black(self):
+        tones, bar = self.tones("terminal", 8, 64)
+        for tone in ("muted", "path", "stopped"):
+            self.assertEqual(tones[tone], (-1, True))
+        self.assertIsNone(bar)
+
+    def test_terminal_bar_text_is_the_default_colour_for_every_tone(self):
+        for colors in (256, 8):
+            tones, bar = self.tones("terminal", colors, 64)
+            for tone, (fg, _) in tones.items():
+                with self.subTest(colors=colors, tone=tone):
+                    self.assertEqual(core.bar_foreground("terminal", bar, fg), -1)
+
+    def test_dark_and_light_fallback_bar_text_keeps_the_tone_colour(self):
+        for name in ("dark", "light"):
+            tones, bar = self.tones(name, 8, 64)
+            self.assertIsNone(bar)
+            for tone, (fg, _) in tones.items():
+                with self.subTest(name=name, tone=tone):
+                    self.assertEqual(core.bar_foreground(name, bar, fg), fg)
+        tones, bar = self.tones("dark", 256)
+        self.assertEqual(core.bar_foreground("dark", bar, 4), 4)
+
+    def test_every_scheme_has_the_same_tones(self):
+        for name in core.SCHEMES:
+            with self.subTest(name=name):
+                self.assertEqual(set(core.SCHEME_TONES[name]), set(core.SCHEME_TONES["dark"]))
+                self.assertEqual(set(self.tones(name, 256)[0]), set(core.SCHEME_TONES["dark"]))
+
+    def test_dark_tmux_options_are_the_ones_in_the_conf(self):
+        conf = Path(core.__file__).with_name("emx.tmux.conf").read_text(encoding="utf-8")
+        for option, value in core.SCHEME_TMUX["dark"].items():
+            with self.subTest(option=option):
+                match = re.search(rf"^set[w]? -g {option} '([^']*)'", conf, re.M)
+                self.assertIsNotNone(match)
+                self.assertEqual(match.group(1), value)
+
+    def test_light_and_terminal_tmux_options(self):
+        self.assertEqual(core.SCHEME_TMUX["light"], {
+            "status-style": "bg=colour254,fg=default",
+            "pane-border-style": "fg=colour250", "pane-active-border-style": "fg=colour25"})
+        self.assertEqual(core.SCHEME_TMUX["terminal"], {
+            "status-style": "bg=default,fg=default",
+            "pane-border-style": "fg=colour8", "pane-active-border-style": "fg=colour4"})
+
+    def test_the_scheme_defaults_to_dark_and_only_a_known_one_is_kept(self):
+        self.assertEqual(core.scheme({}), "dark")
+        self.assertEqual(core.normalize_prefs({"scheme": "light"})["scheme"], "light")
+        for bad in ("pink", 3, None):
+            with self.subTest(bad=bad):
+                self.assertNotIn("scheme", core.normalize_prefs({"scheme": bad}))
+
+    def test_the_scheme_survives_a_save_and_load(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "prefs.json"
+            core.save_prefs(path, core.set_scheme({}, "terminal"))
+            self.assertEqual(core.scheme(core.load_prefs(path)), "terminal")
+
+    def test_set_scheme_leaves_its_input_alone(self):
+        prefs = {"side": "left"}
+        self.assertEqual(core.set_scheme(prefs, "light"), {"side": "left", "scheme": "light"})
+        self.assertEqual(prefs, {"side": "left"})
+
+
 if __name__ == "__main__":
     unittest.main()

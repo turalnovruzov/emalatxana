@@ -1213,6 +1213,9 @@ class RelaunchTmux:
     def source_config(self):
         self.sourced += 1
 
+    def set_global_option(self, name, value):
+        pass
+
 
 class UpdateCommands(unittest.TestCase):
     def setUp(self):
@@ -1661,6 +1664,9 @@ class MigratingTmux:
     def source_config(self):
         self.ops.append(("source",))
 
+    def set_global_option(self, name, value):
+        self.ops.append(("global", name, value))
+
 
 class Migration(unittest.TestCase):
     """`emx` and the auto update's `emx relaunch` move a running 2.9.0 workspace onto views the same way."""
@@ -1714,6 +1720,62 @@ class Migration(unittest.TestCase):
     def test_a_second_wide_terminal_gets_a_view_of_its_own(self):
         _, argv = self.launched(cols=200, attached=1)
         self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
+
+
+class ColorsCommand(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp})
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.prefs = core.prefs_path()
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["colors", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_setting_a_scheme_saves_it_and_keeps_the_other_prefs(self):
+        core.save_prefs(self.prefs, {"side": "left"})
+        self.assertEqual(self.run_main("light"), (0, "Colours set to light.\n", ""))
+        saved = json.loads(self.prefs.read_text(encoding="utf-8"))
+        self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
+
+    def test_with_no_argument_it_prints_the_scheme(self):
+        self.assertEqual(self.run_main(), (0, "Colours: dark. Choices: dark, light, terminal.\n", ""))
+        self.assertFalse(self.prefs.exists())
+        self.run_main("light")
+        self.assertEqual(self.run_main()[1], "Colours: light. Choices: dark, light, terminal.\n")
+
+    def test_anything_else_prints_the_usage_and_changes_nothing(self):
+        self.run_main("light")
+        before = self.prefs.read_text(encoding="utf-8")
+        for args in (("pink",), ("light", "dark")):
+            with self.subTest(args=args):
+                code, out, err = self.run_main(*args)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn("colors [dark | light | terminal]", err)
+                self.assertEqual(self.prefs.read_text(encoding="utf-8"), before)
+
+    def test_a_prefs_file_that_cannot_be_written_is_reported(self):
+        with mock.patch.object(cli.core, "save_prefs", side_effect=OSError("disk full")):
+            code, out, err = self.run_main("terminal")
+        self.assertEqual((code, out, err), (1, "", "emx: couldn't save prefs: disk full\n"))
+
+
+class UpgradeKeepsScheme(unittest.TestCase):
+    def test_an_upgrade_sets_the_saved_schemes_options_after_sourcing_the_conf(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp}):
+            core.save_prefs(core.prefs_path(), core.set_scheme({}, "light"))
+            tmux = MigratingTmux("emx-test-unit")
+            tmux.options[VERSION_OPT] = "old"
+            cli.refresh_workspace(tmux)
+        calls = [op for op in tmux.ops if op[0] in ("source", "global")]
+        self.assertEqual(calls, [("source",), *[("global", k, v) for k, v in core.SCHEME_TMUX["light"].items()]])
 
 
 if __name__ == "__main__":

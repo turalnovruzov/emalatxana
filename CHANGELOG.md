@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.18.0 — 2026-10-23
+
+- Three colour schemes: Dark (as before), Light and Terminal's own. Pick one with `emx colors dark`, `emx colors light` or `emx colors terminal`; `emx colors` shows the one in use.
+- Light is for terminals with a white or cream background. emx doesn't detect your terminal, so run `emx colors light` there.
+- The pane borders and the bottom bar follow the scheme too.
+- A running emx switches within a few seconds, without a restart.
+
 ## 2.17.2 — 2026-10-22
 
 - Opening a session works again when tmux runs zsh as its shell (as on a Mac): the session no longer flashes past and closes. The right-click menu in a session works there too, including on tmux 3.7c.
