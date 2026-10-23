@@ -152,6 +152,9 @@ FRAME_SECONDS = 0.15
 KEY_WAIT_MS = 200
 REPUSH_SECONDS = 10
 MAX_QUEUED_KEYS = 64
+BACKGROUND_ASK_SECONDS = 5
+REPLY_WAIT_MS = 50
+REPLY_WAIT_TOTAL_MS = 200
 WHEEL_ROWS = 3
 # ncurses 5 mouse ABI (macOS system python) has no BUTTON5; wheel-down arrives as the REPORT_MOUSE_POSITION bit.
 # ALL_MOUSE_EVENTS leaves that bit out, so the mouse mask must add WHEEL_DOWN or ncurses drops the event (see `mouse_mask`).
@@ -182,7 +185,7 @@ CATEGORY_TONE = core.CATEGORY_TONE
 session_tone = core.session_tone
 
 
-def bar_format(parts: list, scheme: str = core.DARK) -> str:
+def bar_format(parts: list, scheme: str = core.TERMINAL) -> str:
     """The bar's tmux status-format: every `#` and `%` in a part is doubled, so text from a session can never run a command, style the bar or be read as a time.
 
     A part may carry a fourth item, the name of the user range a click on it
@@ -204,17 +207,31 @@ class StatusBar:
         self.tmux = tmux
         self.last = None
         self.at = 0.0
+        self.line = 0
+
+    def restart(self, line: int) -> None:
+        """Move the bar to another status line; the next frame writes it there."""
+        self.line = line
+        self.last = None
 
     def push(self, text: str) -> None:
         now = time.monotonic()
         if self.tmux is None or (text == self.last and now - self.at < REPUSH_SECONDS):
             return
         try:
-            self.tmux.set_bar(text)
+            self.tmux.set_bar(text, self.line)
         except TmuxError:
             # Runs every frame: reporting each failure would put an error line up every 200 ms.
             return
         self.last, self.at = text, now
+
+
+def write_terminal(data: bytes) -> None:
+    """Write to the terminal tmux gives this pane; a closed one is not an error worth stopping a frame for."""
+    try:
+        os.write(1, data)
+    except OSError:
+        pass
 
 
 def fetch_sessions(engine: Engine) -> tuple:
@@ -1951,6 +1968,11 @@ class App:
         self.started_note = None
         self.palette = Palette(core.scheme(self.prefs))
         self.applied_scheme = None
+        self.applied_shade = None
+        self.shade_set = False
+        self.shade_broken = False
+        self.background = None
+        self.background_asked_at = None
         self.main_pane = None
         self.applied = None
         self.misses = {}
@@ -2069,16 +2091,72 @@ class App:
     def apply_scheme(self) -> None:
         """Draw the chosen scheme: the panel's colours, and tmux's bottom bar and pane borders, which are global options every panel sets alike."""
         name = core.scheme(self.prefs)
-        if name == self.applied_scheme:
+        shade = None
+        if name == core.TERMINAL and self.background and self.me and not self.shade_broken and self.palette.can_shade:
+            shade = core.selection_shade(self.background)
+        if name == self.applied_scheme and shade == self.applied_shade:
             return
+        renamed = name != self.applied_scheme
         self.applied_scheme = name
-        self.palette.use(name)
+        self.applied_shade = shade
+        try:
+            if shade:
+                # Index 16 is black until remapped, so the pane's colours change before the palette draws with them.
+                self.tmux.set_pane_option(self.me, "pane-colours[16]", shade["focused"])
+                self.tmux.set_pane_option(self.me, "pane-colours[17]", shade["unfocused"])
+                self.shade_set = True
+        except TmuxError as exc:
+            self.say(f"Couldn't shade the selected row: {exc}", error=True)
+            self.shade_broken = True
+            shade = self.applied_shade = None
+        try:
+            if not shade and self.shade_set:
+                self.tmux.unset_pane_option(self.me, "pane-colours[16]")
+                self.tmux.unset_pane_option(self.me, "pane-colours[17]")
+                self.shade_set = False
+        except TmuxError as exc:
+            self.say(f"Couldn't clear the row shade: {exc}", error=True)
+        self.palette.use(name, shade=bool(shade))
+        if renamed:
+            self.apply_scheme_to_tmux(name)
+            if name == core.TERMINAL:
+                self.ask_background()
+        self.scr.clear()
+
+    def apply_scheme_to_tmux(self, name: str) -> None:
+        """The global colour options, then this view's status lines, the bar always put on its line before the line shows."""
         try:
             for option, value in core.SCHEME_TMUX[name].items():
                 self.tmux.set_global_option(option, value)
+            if name == core.TERMINAL:
+                self.bar.restart(1)
+                self.update_bar()
+                self.tmux.set_view_option("status", "2")
+                self.tmux.set_view_option("status-format[0]", core.BAR_RULE)
+            else:
+                self.bar.restart(0)
+                self.update_bar()
+                self.tmux.set_view_option("status", "on")
+                self.tmux.unset_view_option("status-format[1]")
         except TmuxError as exc:
             self.say(f"Couldn't set the colours: {exc}", error=True)
-        self.scr.clear()
+
+    def ask_background(self) -> None:
+        """Ask the terminal for its background colour; the reply comes in as keys, see `terminal_report`."""
+        self.background_asked_at = time.monotonic()
+        write_terminal(core.BACKGROUND_QUERY)
+
+    def ask_background_again(self) -> None:
+        """No client may have been attached when the first question went out, so an unanswered one is repeated."""
+        if core.scheme(self.prefs) != core.TERMINAL or self.background is not None:
+            return
+        if self.background_asked_at is None or time.monotonic() - self.background_asked_at >= BACKGROUND_ASK_SECONDS:
+            self.ask_background()
+
+    def on_background(self, rgb) -> None:
+        if rgb is not None:
+            self.background = rgb
+        self.apply_scheme()
 
     def my_panes(self) -> list:
         """The panes of this panel's own view window."""
@@ -2170,6 +2248,7 @@ class App:
     def housekeep(self, fresh_list: bool) -> None:
         self.reload_prefs()
         self.apply_scheme()
+        self.ask_background_again()
         try:
             sidebar, main = self.layout_panes(self.my_panes())
             if self.primary and not self.legacy_cleared:
@@ -4158,8 +4237,15 @@ class App:
                     return
                 self.scr.timeout(0)
                 try:
-                    if self.focus_report(key) is not None:
-                        self.read_focus()
+                    report = self.terminal_report(key)
+                    if report is not None:
+                        kind, value = report
+                        if kind == "focus":
+                            self.read_focus()
+                            if core.scheme(self.prefs) == core.TERMINAL:
+                                self.ask_background()
+                        else:
+                            self.on_background(value)
                         continue
                     if key not in (curses.KEY_RESIZE, curses.KEY_MOUSE):
                         # A key typed here proves focus; he is already moving, so the cursor stays his.
@@ -4175,22 +4261,45 @@ class App:
             return self.pending_keys.pop(0)
         return self.scr.get_wch()
 
-    def focus_report(self, key) -> bool | None:
-        """tmux reports focus as ESC [ I or ESC [ O, which curses hands over one key at a time.
+    def terminal_report(self, key) -> tuple | None:
+        """("focus", None) or ("background", rgb or None) when `key` starts what the terminal reported, else None.
 
-        Keys read past the ESC that turn out not to be a report are put back,
-        so Esc and anything after it still reach `handle_key`.
+        tmux reports focus as ESC [ I or ESC [ O, and answers the background
+        question with ESC ] 11 ; colour ST, which curses hands over one key at
+        a time. Keys read past the ESC that turn out not to be a report are put
+        back, so Esc and anything after it still reach `handle_key`. A reply
+        that began and never ended is dropped, so its letters never act as keys.
         """
         keys = [key]
-        while core.may_be_focus_report(keys):
+        patient = False
+        waited = 0
+        deadline = time.monotonic() + REPLY_WAIT_TOTAL_MS / 1000
+        while core.may_be_focus_report(keys) or core.may_be_background_reply(keys):
             try:
                 keys.append(self.next_key())
             except curses.error:
+                if keys[:2] != ["\x1b", "]"]:
+                    break
+                if patient:
+                    waited += REPLY_WAIT_MS
+                    if waited >= REPLY_WAIT_TOTAL_MS:
+                        break
+                else:
+                    patient = True
+                    self.scr.timeout(REPLY_WAIT_MS)
+            if time.monotonic() > deadline:
                 break
-        focus = core.focus_report(keys)
-        if focus is None:
-            self.pending_keys[:0] = keys[1:]
-        return focus
+        if patient:
+            self.scr.timeout(0)
+        if core.focus_report(keys, focus_key_codes()) is not None:
+            return "focus", None
+        body = core.background_reply(keys)
+        if body is not None:
+            return "background", core.parse_background(body)
+        if core.abandoned_background_reply(keys):
+            return "background", None
+        self.pending_keys[:0] = keys[1:]
+        return None
 
     def run(self) -> None:
         self.poller.start()
@@ -4200,6 +4309,30 @@ class App:
         while True:
             self.refresh()
             self.read_input()
+
+
+_FOCUS_KEY_CODES: tuple | None = None
+
+
+def focus_key_codes() -> tuple:
+    """The key codes curses decodes tmux's focus reports into, (focus-in, focus-out), None where it does not.
+
+    With keypad on, ncurses turns ESC [ I and ESC [ O into one key each
+    (terminfo `kxIN` and `kxOUT`); the codes are assigned at run time, so they
+    are found by name.
+    """
+    global _FOCUS_KEY_CODES
+    if _FOCUS_KEY_CODES is None:
+        found = {}
+        try:
+            for code in range(curses.KEY_MAX + 1, curses.KEY_MAX + 1024):
+                name = curses.keyname(code)
+                if name in (b"kxIN", b"kxOUT"):
+                    found[name] = code
+        except curses.error:
+            return None, None
+        _FOCUS_KEY_CODES = (found.get(b"kxIN"), found.get(b"kxOUT"))
+    return _FOCUS_KEY_CODES
 
 
 def setup_curses(scr) -> None:
@@ -4224,7 +4357,7 @@ class Palette:
     bar is reverse video, dimmed while the panel lacks focus.
     """
 
-    def __init__(self, scheme: str = core.DARK):
+    def __init__(self, scheme: str = core.TERMINAL):
         self.colored = curses.has_colors()
         self.pairs = {}
         self.dim = {}
@@ -4236,10 +4369,14 @@ class Palette:
         curses.use_default_colors()
         self.use(scheme)
 
-    def use(self, scheme: str) -> None:
+    @property
+    def can_shade(self) -> bool:
+        return self.colored and curses.COLORS >= 256
+
+    def use(self, scheme: str, shade: bool = False) -> None:
         if not self.colored:
             return
-        tones, bar = core.palette_spec(scheme, curses.COLORS, curses.COLOR_PAIRS)
+        tones, bar = core.palette_spec(scheme, curses.COLORS, curses.COLOR_PAIRS, shade)
         self.reverse_bar = bar is None
         self.dim = {tone: dim for tone, (_, dim) in tones.items()}
         for i, (tone, (fg, _)) in enumerate(tones.items()):

@@ -5846,15 +5846,18 @@ class ColourSchemes(unittest.TestCase):
                 self.assertEqual(set(core.SCHEME_TONES[name]), set(core.SCHEME_TONES["dark"]))
                 self.assertEqual(set(self.tones(name, 256)[0]), set(core.SCHEME_TONES["dark"]))
 
-    def test_dark_tmux_options_are_the_ones_in_the_conf(self):
+    def test_terminal_tmux_options_are_the_ones_in_the_conf(self):
         conf = Path(core.__file__).with_name("emx.tmux.conf").read_text(encoding="utf-8")
-        for option, value in core.SCHEME_TMUX["dark"].items():
+        for option, value in core.SCHEME_TMUX["terminal"].items():
             with self.subTest(option=option):
                 match = re.search(rf"^set[w]? -g {option} '([^']*)'", conf, re.M)
                 self.assertIsNotNone(match)
                 self.assertEqual(match.group(1), value)
 
-    def test_light_and_terminal_tmux_options(self):
+    def test_every_schemes_tmux_options(self):
+        self.assertEqual(core.SCHEME_TMUX["dark"], {
+            "status-style": "bg=colour236,fg=colour252",
+            "pane-border-style": "fg=colour238", "pane-active-border-style": "fg=colour75"})
         self.assertEqual(core.SCHEME_TMUX["light"], {
             "status-style": "bg=colour254,fg=default",
             "pane-border-style": "fg=colour250", "pane-active-border-style": "fg=colour25"})
@@ -5862,12 +5865,122 @@ class ColourSchemes(unittest.TestCase):
             "status-style": "bg=default,fg=default",
             "pane-border-style": "fg=colour8", "pane-active-border-style": "fg=colour4"})
 
-    def test_the_scheme_defaults_to_dark_and_only_a_known_one_is_kept(self):
-        self.assertEqual(core.scheme({}), "dark")
-        self.assertEqual(core.normalize_prefs({"scheme": "light"})["scheme"], "light")
+    def test_the_scheme_defaults_to_terminal_and_a_saved_one_is_kept(self):
+        self.assertEqual(core.scheme({}), "terminal")
+        for name in ("dark", "light", "terminal"):
+            with self.subTest(name=name):
+                self.assertEqual(core.scheme(core.normalize_prefs({"scheme": name})), name)
         for bad in ("pink", 3, None):
             with self.subTest(bad=bad):
                 self.assertNotIn("scheme", core.normalize_prefs({"scheme": bad}))
+                self.assertEqual(core.scheme(core.normalize_prefs({"scheme": bad})), "terminal")
+
+    def test_parse_background_reads_every_reply_form(self):
+        for body, want in (("rgb:1e1e/1e1e/1e1e", (30, 30, 30)), ("rgb:ff/ff/ff", (255, 255, 255)),
+                           ("rgb:f/0/8", (255, 0, 136)), ("#1e1e1e", (30, 30, 30))):
+            with self.subTest(body=body):
+                self.assertEqual(core.parse_background(body), want)
+        for bad in ("rgba:ff/ff/ff/ff", "", "rgb:zz/00/00", "rgb:1/2"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(core.parse_background(bad))
+
+    def test_the_shade_is_lighter_on_dark_and_darker_on_light(self):
+        def channels(rgb):
+            h = core.selection_shade(rgb)["focused"]
+            return [int(h[i:i + 2], 16) for i in (1, 3, 5)]
+        self.assertTrue(all(c > 30 for c in channels((30, 30, 30))))
+        self.assertTrue(all(c < 255 for c in channels((255, 255, 255))))
+        self.assertNotEqual(core.selection_shade((0, 0, 0))["focused"], "#000000")
+
+    def test_the_shade_matches_the_chosen_board(self):
+        for rgb, board in (((30, 30, 30), "#333333"), ((255, 255, 255), "#e8e8e8")):
+            got = core.selection_shade(rgb)["focused"]
+            with self.subTest(board=board):
+                for i in (1, 3, 5):
+                    self.assertLessEqual(abs(int(got[i:i + 2], 16) - int(board[i:i + 2], 16)), 3)
+
+    def test_the_unfocused_shade_sits_between_the_background_and_the_focused_one(self):
+        for rgb in ((30, 30, 30), (255, 255, 255)):
+            shade = core.selection_shade(rgb)
+            for i, base in zip((1, 3, 5), rgb):
+                low, high = sorted((base, int(shade["focused"][i:i + 2], 16)))
+                with self.subTest(rgb=rgb, i=i):
+                    self.assertLess(low, int(shade["unfocused"][i:i + 2], 16))
+                    self.assertLess(int(shade["unfocused"][i:i + 2], 16), high)
+
+    def test_a_grey_background_gives_a_grey_shade(self):
+        for level in (0, 17, 30, 128, 200, 255):
+            for which in ("focused", "unfocused"):
+                h = core.selection_shade((level,) * 3)[which]
+                with self.subTest(level=level, which=which):
+                    self.assertEqual(h[1:3], h[3:5])
+                    self.assertEqual(h[3:5], h[5:7])
+
+    def test_background_reply_reads_both_terminators(self):
+        for end in ("\x1b\\", "\x07"):
+            keys = list("\x1b]11;rgb:1e1e/1e1e/1e1e" + end)
+            with self.subTest(end=end):
+                self.assertEqual(core.background_reply(keys), "rgb:1e1e/1e1e/1e1e")
+                self.assertFalse(core.may_be_background_reply(keys))
+                for n in range(1, len(keys)):
+                    if core.background_reply(keys[:n]) is None:
+                        self.assertTrue(core.may_be_background_reply(keys[:n]), keys[:n])
+        for keys in (["\x1b", "["], ["\x1b", "]", "1", "0"], ["q"], ["\x1b", 5]):
+            with self.subTest(keys=keys):
+                self.assertFalse(core.may_be_background_reply(keys))
+                self.assertIsNone(core.background_reply(keys))
+
+    def test_a_long_background_reply_is_kept_reading_until_it_ends(self):
+        keys = list("\x1b]11;" + "a" * 200)
+        self.assertTrue(core.may_be_background_reply(keys))
+        self.assertTrue(core.abandoned_background_reply(keys))
+        for end in ("\x07", "\x1b\\"):
+            ended = keys + list(end)
+            self.assertFalse(core.may_be_background_reply(ended))
+            self.assertFalse(core.abandoned_background_reply(ended))
+            self.assertEqual(core.background_reply(ended), "a" * 200)
+            self.assertIsNone(core.parse_background(core.background_reply(ended)))
+
+    def test_a_reply_that_began_and_never_ended_is_abandoned(self):
+        self.assertTrue(core.abandoned_background_reply(list("\x1b]11;rgb:1e")))
+        self.assertTrue(core.abandoned_background_reply(list("\x1b]11;")))
+        for keys in ([], list("\x1b]11"), list("\x1b]11;rgb:1e1e/1e1e/1e1e\x07"), list("\x1b[A"), ["x"], list("\x1b]11;a") + [5]):
+            with self.subTest(keys=keys):
+                self.assertFalse(core.abandoned_background_reply(keys))
+
+    def test_focus_report_knows_the_key_codes_curses_decodes_it_into(self):
+        self.assertTrue(core.focus_report([581], (581, 582)))
+        self.assertFalse(core.focus_report([582], (581, 582)))
+        for keys, codes in (([583], (581, 582)), ([581], (None, None)), ([581, 582], (581, 582)), (["x"], (581, 582))):
+            with self.subTest(keys=keys):
+                self.assertIsNone(core.focus_report(keys, codes))
+
+    def test_terminal_with_a_shade_keeps_its_tones_and_bars_on_16_and_17(self):
+        tones, bar = core.palette_spec("terminal", 256, 256, shade=True)
+        self.assertEqual(tones, core.palette_spec("terminal", 256, 256, shade=False)[0])
+        self.assertEqual(bar, {"focused": 16, "unfocused": 17})
+        self.assertIsNone(core.palette_spec("terminal", 16, 256, shade=True)[1])
+        self.assertIsNone(core.palette_spec("terminal", 256, 256)[1])
+
+    def test_dark_and_light_ignore_the_shade(self):
+        for name in ("dark", "light"):
+            with self.subTest(name=name):
+                self.assertEqual(core.palette_spec(name, 256, 256, shade=True), core.palette_spec(name, 256, 256))
+
+    def test_the_shade_indices_are_drawn_by_no_scheme(self):
+        for index in core.SHADE_INDEX.values():
+            for name, tones in core.SCHEME_TONES.items():
+                self.assertNotIn(index, tones.values(), name)
+            for bar in core.SCHEME_BAR.values():
+                self.assertNotIn(index, (bar or {}).values())
+            self.assertNotIn(index, core.BASIC_TONES.values())
+            self.assertNotIn(index, core.TONE_INDEX.values())
+
+    def test_the_rule_is_bright_black_lower_eighth_blocks(self):
+        self.assertTrue(core.BAR_RULE.startswith("#[fg=colour8]"))
+        self.assertGreaterEqual(core.BAR_RULE.count("\u2581"), 500)
+        rest = core.BAR_RULE.replace("#[fg=colour8]", "").replace("#[default]", "").replace("\u2581", "")
+        self.assertEqual(rest, "")
 
     def test_the_scheme_survives_a_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:

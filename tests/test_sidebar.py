@@ -237,11 +237,15 @@ class FakeScr:
 
 
 class FakePalette:
+    can_shade = True
+
     def __init__(self, scheme=core.DARK):
         self.schemes = [scheme]
+        self.shades = [False]
 
-    def use(self, scheme):
+    def use(self, scheme, shade=False):
         self.schemes.append(scheme)
+        self.shades.append(shade)
 
     def attr(self, tone, selected=False):
         return 0
@@ -294,9 +298,19 @@ class ClientTmux(WindowPanes):
         self.shows = shows
         self.slot = slot
         self.globals_set = []
+        self.calls = []
 
     def set_global_option(self, name, value):
         self.globals_set.append((name, value))
+
+    def set_view_option(self, name, value):
+        return self.set_session_option(name, value)
+
+    def set_session_option(self, name, value):
+        self.calls.append(("set_view_option", name, value))
+
+    def unset_view_option(self, name):
+        self.calls.append(("unset_view_option", name))
 
     def views(self):
         if isinstance(self.state, Exception):
@@ -307,9 +321,6 @@ class ClientTmux(WindowPanes):
 
     def view_option(self, name):
         return self.session_option(name)
-
-    def set_view_option(self, name, value):
-        return self.set_session_option(name, value)
 
     def session_option(self, name):
         if isinstance(self.hush, Exception):
@@ -324,10 +335,20 @@ class ClientTmux(WindowPanes):
 
 class FakeBar:
     def __init__(self, tmux):
+        self.tmux = tmux
         self.pushed = []
+        self.line = 0
+        self.restarts = []
+
+    def restart(self, line):
+        self.line = line
+        self.restarts.append(line)
 
     def push(self, text):
         self.pushed.append(text)
+        calls = getattr(self.tmux, "calls", None)
+        if calls is not None:
+            calls.append(("set_bar", text, self.line))
 
 
 REST_BAR = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
@@ -335,6 +356,15 @@ REST_BAR = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
 
 def plain_bar(text):
     return re.sub(r"#\[[^\]]*\]", "", text).replace("##", "#").replace("%%", "%")
+
+
+TERMINAL_WRITES = []
+
+
+def setUpModule():
+    patch = mock.patch.object(sidebar, "write_terminal", TERMINAL_WRITES.append)
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
 
 
 class AppCase(unittest.TestCase):
@@ -345,6 +375,7 @@ class AppCase(unittest.TestCase):
         return plain_bar(self.app.bar.pushed[-1])
 
     def setUp(self):
+        TERMINAL_WRITES.clear()
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         patches = [
@@ -389,6 +420,27 @@ class AppCase(unittest.TestCase):
 
     def poll(self, *sessions):
         self.app.poller.result = (list(sessions), None)
+
+    def write_scheme(self, name, mtime):
+        core.save_prefs(self.app.prefs_file, core.set_scheme(core.load_prefs(self.app.prefs_file), name))
+        os.utime(self.app.prefs_file, ns=(mtime, mtime))
+
+    def housekeep_once(self):
+        quiet = ("check_relay", "check_open", "time_whats_new", "check_update", "check_phone", "check_hush")
+        with mock.patch.object(sidebar.App, "my_panes", lambda self: []), \
+                mock.patch.object(sidebar.App, "layout_panes", lambda self, panes: (None, None)):
+            patches = [mock.patch.object(sidebar.App, name, lambda self: None) for name in quiet]
+            for p in patches:
+                p.start()
+                self.addCleanup(p.stop)
+            sidebar.App.housekeep(self.app, False)
+
+    def no_scheme(self):
+        """For a test of something else that runs the real housekeep against a tmux fake that only records its own calls."""
+        for name in ("apply_scheme", "ask_background_again"):
+            patch = mock.patch.object(sidebar.App, name, lambda self: None)
+            patch.start()
+            self.addCleanup(patch.stop)
 
 
 class QueuedClicks(AppCase):
@@ -1002,6 +1054,7 @@ class LegacyViewers(AppCase):
 
     def setUp(self):
         super().setUp()
+        self.no_scheme()
         self.app.tmux = LegacyTmux()
         self.app.me = "%1"
         self.app.legacy_cleared = False
@@ -4562,7 +4615,9 @@ class AttrScr(RecordingScr):
 
 
 class TonePalette:
-    def use(self, scheme):
+    can_shade = False
+
+    def use(self, scheme, shade=False):
         pass
 
     def attr(self, tone, selected=False):
@@ -4714,7 +4769,7 @@ class BarFormat(unittest.TestCase):
                 self.assertEqual(sidebar.bar_format([(text, "plain", False)]), f"#[fg=default,nobold]{want}#[default]")
 
     def test_tones_become_their_256_colours_and_bold_is_explicit(self):
-        out = sidebar.bar_format([("✻1", "needs", True), ("✻1", "idle", True), ("⇄ host", "remote", True), ("x", "muted", False)])
+        out = sidebar.bar_format([("✻1", "needs", True), ("✻1", "idle", True), ("⇄ host", "remote", True), ("x", "muted", False)], "dark")
         self.assertIn("#[fg=colour221,bold]✻1", out)
         self.assertIn("#[fg=colour103,bold]✻1", out)
         self.assertIn("#[fg=colour141,bold]⇄ host", out)
@@ -4742,7 +4797,7 @@ class WideBarIsUnchanged(unittest.TestCase):
                     a["width"], a["loaded"], a["notice_key"],
                 )
                 self.assertEqual([list(p) for p in parts], case["parts"])
-                self.assertEqual(sidebar.bar_format(parts), case["format"])
+                self.assertEqual(sidebar.bar_format(parts, "dark"), case["format"])
 
 
 ROWS_GOLDEN = Path(__file__).parent / "fixtures" / "rows" / "wide-2.14.0.json"
@@ -4754,7 +4809,9 @@ class RowStub:
     class Palette:
         CODES = {"plain": 0, "muted": 1, "needs": 2, "done": 3, "stopped": 4, "accent": 5, "path": 6, "error": 7, "copper": 8, "remote": 9, "idle": 10}
 
-        def use(self, scheme):
+        can_shade = False
+
+        def use(self, scheme, shade=False):
             pass
 
         def attr(self, tone, selected=None):
@@ -4801,7 +4858,7 @@ class StatusBarPush(unittest.TestCase):
         bar.push("a")
         bar.push("a")
         bar.push("b")
-        self.assertEqual([c.args for c in tmux.set_bar.call_args_list], [("a",), ("b",)])
+        self.assertEqual([c.args for c in tmux.set_bar.call_args_list], [("a", 0), ("b", 0)])
 
     def test_the_same_text_is_pushed_again_after_the_repush_interval(self):
         tmux = mock.Mock()
@@ -4845,6 +4902,7 @@ class AppBar(AppCase):
         self.assertIn("⚒", plain_bar(self.app.bar.pushed[0]))
 
     def test_the_idle_count_is_lavender(self):
+        self.app.prefs = core.set_scheme(self.app.prefs, "dark")
         self.app.window_width = 100
         self.app.update_bar()
         self.assertIn("#[fg=colour103,bold]✻1", self.app.bar.pushed[-1])
@@ -6729,6 +6787,7 @@ class HistoryWiring(AppCase):
         self.assertEqual(self.app.history, [])
 
     def test_the_bar_dims_a_read_newest_notice(self):
+        self.app.prefs = core.set_scheme(self.app.prefs, "dark")
         self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
         self.app.window_width = 140
         self.app.update_bar()
@@ -8904,8 +8963,8 @@ class SchemeBars(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn("#[fg=default,nobold]y", sidebar.bar_format(self.PARTS, name))
 
-    def test_dark_is_the_default(self):
-        self.assertEqual(sidebar.bar_format(self.PARTS), sidebar.bar_format(self.PARTS, "dark"))
+    def test_terminal_is_the_default(self):
+        self.assertEqual(sidebar.bar_format(self.PARTS), sidebar.bar_format(self.PARTS, "terminal"))
 
 
 class SchemeFollowsPrefs(AppCase):
@@ -8914,10 +8973,6 @@ class SchemeFollowsPrefs(AppCase):
         ("pane-border-style", "fg=colour250"),
         ("pane-active-border-style", "fg=colour25"),
     ]
-
-    def write_scheme(self, name, mtime):
-        core.save_prefs(self.app.prefs_file, core.set_scheme(core.load_prefs(self.app.prefs_file), name))
-        os.utime(self.app.prefs_file, ns=(mtime, mtime))
 
     def test_a_scheme_saved_by_the_command_reaches_tmux_and_the_palette_in_one_pass(self):
         self.write_scheme("light", 1)
@@ -8931,24 +8986,14 @@ class SchemeFollowsPrefs(AppCase):
         self.app.reload_prefs()
         self.assertEqual(len(self.app.tmux.globals_set), 3)
 
-    def housekeep_once(self):
-        quiet = ("check_relay", "check_open", "time_whats_new", "check_update", "check_phone", "check_hush")
-        with mock.patch.object(sidebar.App, "my_panes", lambda self: []), \
-                mock.patch.object(sidebar.App, "layout_panes", lambda self, panes: (None, None)):
-            patches = [mock.patch.object(sidebar.App, name, lambda self: None) for name in quiet]
-            for p in patches:
-                p.start()
-                self.addCleanup(p.stop)
-            sidebar.App.housekeep(self.app, False)
-
     def test_the_first_housekeep_sets_the_saved_scheme(self):
         self.write_scheme("terminal", 1)
         self.housekeep_once()
         self.assertEqual(dict(self.app.tmux.globals_set), core.SCHEME_TMUX["terminal"])
 
-    def test_with_nothing_saved_the_first_housekeep_sets_dark(self):
+    def test_with_nothing_saved_the_first_housekeep_sets_terminal(self):
         self.housekeep_once()
-        self.assertEqual(dict(self.app.tmux.globals_set), core.SCHEME_TMUX["dark"])
+        self.assertEqual(dict(self.app.tmux.globals_set), core.SCHEME_TMUX["terminal"])
 
     def test_a_tmux_error_is_said_once_and_the_scheme_still_counts_as_applied(self):
         self.app.tmux.set_global_option = mock.Mock(side_effect=sidebar.TmuxError("no"))
@@ -8956,6 +9001,222 @@ class SchemeFollowsPrefs(AppCase):
         self.app.reload_prefs()
         self.app.reload_prefs()
         self.assertEqual(self.app.tmux.set_global_option.call_count, 1)
+
+
+class ShadeTmux(ClientTmux):
+    """ClientTmux that also records the pane options the selected row's shade is drawn with; `fail_pane_options` makes setting one raise."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_pane_options = False
+
+    def set_pane_option(self, pane, name, value):
+        if self.fail_pane_options:
+            raise TmuxError("no pane-colours")
+        self.calls.append(("set_pane_option", pane, name, value))
+
+    def unset_pane_option(self, pane, name):
+        self.calls.append(("unset_pane_option", pane, name))
+
+
+class TerminalShade(AppCase):
+    REPLY = list("\x1b]11;rgb:1e1e/1e1e/1e1e\x1b\\")
+    QUERY = core.BACKGROUND_QUERY
+
+    def setUp(self):
+        super().setUp()
+        tmux = ShadeTmux()
+        self.app.tmux = self.app.bar.tmux = tmux
+        self.app.me = "%1"
+        self.keys_seen = mock.Mock()
+        self.app.handle_key = self.keys_seen
+        self.timeouts = []
+        self.scr.timeout = self.timeouts.append
+        use = self.app.palette.use
+
+        def logged(scheme, shade=False):
+            tmux.calls.append(("use", scheme, shade))
+            use(scheme, shade)
+
+        self.app.palette.use = logged
+        self.at = 100.0
+        patch = mock.patch.object(sidebar.time, "monotonic", lambda: self.at)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def feed(self, *keys):
+        self.scr.keys = list(keys)
+        self.app.read_input()
+
+    def calls(self, kind):
+        return [c for c in self.app.tmux.calls if c[0] == kind]
+
+    def shade(self, rgb):
+        return core.selection_shade(rgb)
+
+    def test_terminal_asks_the_background_and_dark_never_does(self):
+        self.housekeep_once()
+        self.assertEqual(TERMINAL_WRITES, [self.QUERY])
+        self.write_scheme("dark", 1)
+        self.at += 10
+        self.housekeep_once()
+        self.assertEqual(TERMINAL_WRITES, [self.QUERY])
+        self.at += 10
+        self.housekeep_once()
+        self.assertEqual(TERMINAL_WRITES, [self.QUERY])
+
+    def test_dark_asked_nothing_from_the_start(self):
+        self.write_scheme("dark", 1)
+        self.housekeep_once()
+        self.at += 10
+        self.housekeep_once()
+        self.assertEqual(TERMINAL_WRITES, [])
+
+    def test_an_unknown_background_is_asked_again_every_5_seconds(self):
+        self.housekeep_once()
+        for later, asked in ((1, 1), (4, 1), (5, 2)):
+            self.at = 100.0 + later
+            self.housekeep_once()
+            self.assertEqual(len(TERMINAL_WRITES), asked, later)
+        self.feed(*self.REPLY)
+        self.at += 10
+        self.housekeep_once()
+        self.assertEqual(len(TERMINAL_WRITES), 2)
+
+    def test_a_focus_report_asks_again(self):
+        self.housekeep_once()
+        self.app.read_focus = mock.Mock()
+        self.feed("\x1b", "[", "I")
+        self.assertEqual(TERMINAL_WRITES, [self.QUERY, self.QUERY])
+        self.app.read_focus.assert_called_once()
+
+    def test_a_decoded_focus_report_asks_again_too(self):
+        self.housekeep_once()
+        self.app.read_focus = mock.Mock()
+        with mock.patch.object(sidebar, "focus_key_codes", return_value=(581, 582)):
+            self.feed(581)
+            self.assertEqual(TERMINAL_WRITES, [self.QUERY, self.QUERY])
+            self.app.read_focus.assert_called_once()
+            self.feed(582)
+        self.assertEqual(len(TERMINAL_WRITES), 3)
+        self.keys_seen.assert_not_called()
+
+    def test_a_reply_longer_than_any_colour_never_leaks_its_tail_as_keys(self):
+        for end in ("\x07", "\x1b\\"):
+            with self.subTest(end=end):
+                self.keys_seen.reset_mock()
+                self.feed(*("\x1b]11;rgb:" + "0" * 80 + "/12" + end), "q")
+                self.assertEqual([c.args[0] for c in self.keys_seen.call_args_list], ["q"])
+        self.keys_seen.reset_mock()
+        self.feed(*("\x1b]11;rgb:" + "0" * 80 + "/12"))
+        self.keys_seen.assert_not_called()
+
+    def test_a_background_reply_is_read_and_never_reaches_the_keys(self):
+        self.feed(*self.REPLY)
+        self.assertEqual(self.app.background, (30, 30, 30))
+        self.keys_seen.assert_not_called()
+
+    def test_a_bell_ended_reply_is_read_too(self):
+        self.feed(*"\x1b]11;rgb:ffff/ffff/ffff\x07")
+        self.assertEqual(self.app.background, (255, 255, 255))
+        self.keys_seen.assert_not_called()
+
+    def test_a_reply_cut_short_is_dropped(self):
+        self.feed(*"\x1b]11;rgb:1e")
+        self.keys_seen.assert_not_called()
+        self.assertIsNone(self.app.background)
+        self.assertEqual(self.timeouts[-1], sidebar.KEY_WAIT_MS)
+
+    def test_a_reply_split_after_esc_bracket_is_still_read(self):
+        def stall():
+            raise curses.error("no input yet")
+
+        for head in (["\x1b", "]"], list("\x1b]11;r")):
+            with self.subTest(head=head):
+                self.app.background = None
+                self.timeouts.clear()
+                rest = list(self.REPLY[len(head):])
+                self.feed(*head, stall, *rest)
+                self.assertEqual(self.app.background, (30, 30, 30))
+                self.keys_seen.assert_not_called()
+                self.assertIn(sidebar.REPLY_WAIT_MS, self.timeouts)
+                self.assertEqual(self.timeouts[-1], sidebar.KEY_WAIT_MS)
+                self.assertEqual(self.app.pending_keys, [])
+
+    def test_esc_alone_still_reaches_the_keys(self):
+        self.feed("\x1b")
+        self.keys_seen.assert_called_once_with("\x1b")
+        self.keys_seen.reset_mock()
+        self.feed("\x1b", "]", "x")
+        self.assertEqual([c.args[0] for c in self.keys_seen.call_args_list], ["\x1b", "]", "x"])
+
+    def test_a_known_background_remaps_16_and_17_before_the_palette_switches(self):
+        self.housekeep_once()
+        self.app.tmux.calls.clear()
+        self.feed(*self.REPLY)
+        shade = self.shade((30, 30, 30))
+        self.assertEqual(self.app.tmux.calls, [
+            ("set_pane_option", "%1", "pane-colours[16]", shade["focused"]),
+            ("set_pane_option", "%1", "pane-colours[17]", shade["unfocused"]),
+            ("use", "terminal", True),
+        ])
+
+    def test_without_a_background_terminal_draws_the_reversed_bar(self):
+        self.housekeep_once()
+        self.assertEqual(self.app.palette.schemes[-1], "terminal")
+        self.assertFalse(self.app.palette.shades[-1])
+        self.assertEqual(self.calls("set_pane_option"), [])
+
+    def test_a_pane_colours_error_keeps_the_reversed_bar(self):
+        self.housekeep_once()
+        self.app.tmux.fail_pane_options = True
+        self.feed(*self.REPLY)
+        self.assertFalse(self.app.palette.shades[-1])
+        self.assertTrue(self.app.notice_error)
+        self.app.notice, self.app.notice_error = "", False
+        self.feed(*"\x1b]11;rgb:ffff/ffff/ffff\x07")
+        self.assertEqual(self.app.notice, "")
+        self.assertFalse(self.app.palette.shades[-1])
+
+    def test_terminal_draws_the_rule_above_the_bar(self):
+        self.app.window_width = 100
+        self.housekeep_once()
+        calls = self.app.tmux.calls
+        options = [c for c in calls if c[0] == "set_view_option"]
+        self.assertEqual(options, [("set_view_option", "status", "2"), ("set_view_option", "status-format[0]", core.BAR_RULE)])
+        first_bar = next(i for i, c in enumerate(calls) if c[0] == "set_bar")
+        self.assertEqual(calls[first_bar][2], 1)
+        self.assertLess(first_bar, calls.index(options[0]))
+
+    def test_switching_to_dark_takes_the_line_and_the_shade_away(self):
+        self.app.window_width = 100
+        self.housekeep_once()
+        self.feed(*self.REPLY)
+        self.app.tmux.calls.clear()
+        self.write_scheme("dark", 1)
+        self.app.reload_prefs()
+        calls = self.app.tmux.calls
+        self.assertEqual(self.calls("unset_pane_option"), [
+            ("unset_pane_option", "%1", "pane-colours[16]"), ("unset_pane_option", "%1", "pane-colours[17]")])
+        self.assertIn(("set_view_option", "status", "on"), calls)
+        self.assertIn(("unset_view_option", "status-format[1]"), calls)
+        self.assertEqual(self.calls("set_bar")[0][2], 0)
+        self.assertEqual(self.calls("use"), [("use", "dark", False)])
+
+    def test_the_same_reply_twice_changes_nothing(self):
+        self.housekeep_once()
+        self.feed(*self.REPLY)
+        self.app.tmux.calls.clear()
+        self.feed(*self.REPLY)
+        self.assertEqual(self.app.tmux.calls, [])
+
+    def test_a_new_background_moves_the_shade(self):
+        self.housekeep_once()
+        self.feed(*self.REPLY)
+        self.feed(*"\x1b]11;rgb:ffff/ffff/ffff\x07")
+        pane = self.calls("set_pane_option")
+        self.assertEqual(pane[-2][2:], ("pane-colours[16]", self.shade((255, 255, 255))["focused"]))
+        self.assertEqual(pane[-1][2:], ("pane-colours[17]", self.shade((255, 255, 255))["unfocused"]))
 
 
 if __name__ == "__main__":

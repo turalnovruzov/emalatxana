@@ -21,13 +21,13 @@ It puts emx in `~/.local/share/emx` and the `emx` command in `~/.local/bin`. If 
 
 Run `emx`. It opens the workspace: the panel on one side, the session you are in on the other.
 
-If your terminal has a light background, run `emx colors light`; emx doesn't detect it.
+emx draws in your terminal's own colours, so a light terminal already looks right. `emx colors dark` or `emx colors light` picks emx's own colours instead.
 
 ## The panel at a glance
 
 The panel lists your sessions, grouped by project. Each shows its name and age, and under the name what it is doing, in full: a long status wraps onto as many lines as it needs. The row under the cursor is the one the keys act on. Press `?` in the panel to see every key.
 
-The colours say the state at a glance (shown here in the default Dark scheme): Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is lavender, and Stopped is dim.
+The colours say the state at a glance (shown here in the default scheme, your terminal's own colours): Needs input is yellow, Working is grey, Done is green, Idle (interrupted, waiting for you) is magenta, and Stopped is dim.
 
 One bar runs across the bottom of the whole window. It shows emx and its version, the latest notification, a count for each state that has sessions, in that state's colour (Stopped sessions are not counted), and the key hints. The hints follow the cursor: they list the keys that act on the session or header it is on, and they change with the session's state. `N all` next to the notification opens all of them, and `?` shows every key. The selected row also repeats its likeliest key, dimmed, at the right end of its last line. The panel itself is just your sessions, on your terminal's own background.
 
