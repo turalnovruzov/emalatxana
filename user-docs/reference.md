@@ -98,7 +98,7 @@ Environment variables, set before running `emx`.
 
 Set with `emx colors`; a running emx switches within seconds, borders and bottom bar included. emx never switches scheme by itself.
 
-- Terminal's own (the default): your terminal's own 16 colours, so it follows its theme. The selected row is a shade of your terminal's background (a little lighter on a dark theme, a little darker on a light one) and keeps its colours; emx asks the terminal for the background, and where the terminal doesn't say, the row is inverted. A thin grey line sits just above the bottom bar.
+- Terminal's own (the default): your terminal's own 16 colours, so it follows its theme. The selected row is a shade of your terminal's background (a little lighter on a dark theme, a little darker on a light one) and keeps its colours; emx asks the terminal for the background, again each time you come back to the panel, so a theme switch shows then; where the terminal doesn't say, the row is inverted. A thin grey line sits just above the bottom bar.
 - Dark: emx's own colours, for dark terminals.
 - Light: emx's own colours, for white or cream terminals.
 
