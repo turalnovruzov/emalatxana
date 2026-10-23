@@ -135,6 +135,72 @@ def xterm256_hex(index: int) -> str:
 
 
 TONE_HEX = {tone: xterm256_hex(index) for tone, index in TONE_INDEX.items()}
+DARK, LIGHT, TERMINAL = SCHEMES = ("dark", "light", "terminal")
+SCHEME_TONES = {
+    DARK: {**TONE_INDEX, "plain": -1},
+    LIGHT: {
+        "muted": 243, "needs": 130, "done": 28, "stopped": 248, "accent": 25, "path": 242,
+        "error": 160, "copper": 166, "remote": 91, "idle": 61, "border": 250, "plain": -1,
+    },
+    TERMINAL: {
+        "muted": 8, "needs": 3, "done": 2, "stopped": 8, "accent": 4, "path": 8,
+        "error": 1, "copper": 3, "remote": 6, "idle": 5, "border": 8, "plain": -1,
+    },
+}
+# The basic-colour fallback for a terminal with fewer than 256 colours.
+BASIC_TONES = {
+    "muted": 7, "needs": 3, "done": 2, "stopped": 7, "accent": 6, "path": 7,
+    "error": 1, "copper": 3, "remote": 5, "idle": 4, "border": 7, "plain": -1,
+}
+GREY_TONES = ("muted", "path", "stopped", "border")
+# Selection-bar background per focus; None is reverse video.
+SCHEME_BAR = {
+    DARK: {"focused": 24, "unfocused": 236},
+    LIGHT: {"focused": 153, "unfocused": 254},
+    TERMINAL: None,
+}
+SCHEME_TMUX = {
+    DARK: {
+        "status-style": "bg=colour236,fg=colour252",
+        "pane-border-style": "fg=colour238",
+        "pane-active-border-style": "fg=colour75",
+    },
+    LIGHT: {
+        "status-style": "bg=colour254,fg=default",
+        "pane-border-style": "fg=colour250",
+        "pane-active-border-style": "fg=colour25",
+    },
+    TERMINAL: {
+        "status-style": "bg=default,fg=default",
+        "pane-border-style": "fg=colour8",
+        "pane-active-border-style": "fg=colour4",
+    },
+}
+
+
+def palette_spec(name: str, colors: int, pairs: int) -> tuple:
+    """What the panel draws for a scheme on a terminal with `colors` colours and `pairs` colour pairs: (tones, bar).
+
+    `tones[tone]` is (foreground, dim); `bar` is the selection-bar background
+    per focus, or None for reverse video.
+    """
+    if name == TERMINAL:
+        tones = {}
+        for tone, fg in SCHEME_TONES[TERMINAL].items():
+            dim = tone == "stopped"
+            if colors < 16 and fg >= 8:
+                fg, dim = -1, True
+            tones[tone] = (fg, dim)
+        return tones, None
+    if colors >= 256 and pairs > 3 * len(SCHEME_TONES[name]):
+        return {tone: (fg, False) for tone, fg in SCHEME_TONES[name].items()}, SCHEME_BAR[name]
+    tones = {}
+    for tone, fg in BASIC_TONES.items():
+        grey = tone in GREY_TONES
+        tones[tone] = (-1 if grey and name == LIGHT else fg, grey)
+    return tones, None
+
+
 CATEGORY_TONE = {NEEDS_INPUT: "needs", WORKING: "plain", DONE: "done", STOPPED: "stopped"}
 
 
@@ -2341,6 +2407,8 @@ def normalize_prefs(raw) -> dict:
             prefs["pinned"] = pinned
     if raw.get("view") in VIEWS:
         prefs["view"] = raw["view"]
+    if raw.get("scheme") in SCHEMES:
+        prefs["scheme"] = raw["scheme"]
     if parse_version(raw.get("last_version")):
         prefs["last_version"] = raw["last_version"]
     # A "voice" setting saved before the two modes counts as his choice: on is voice mode, muted is notification mode.
@@ -2370,6 +2438,14 @@ def current_view(prefs: dict) -> str:
 
 def toggle_view(prefs: dict) -> dict:
     return {**prefs, "view": BY_STATE if current_view(prefs) == PROJECT else PROJECT}
+
+
+def scheme(prefs: dict) -> str:
+    return prefs.get("scheme", DARK)
+
+
+def set_scheme(prefs: dict, name: str) -> dict:
+    return {**prefs, "scheme": name}
 
 
 def notice_mode(prefs: dict) -> str:
