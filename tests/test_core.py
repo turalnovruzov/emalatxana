@@ -5823,6 +5823,23 @@ class ColourSchemes(unittest.TestCase):
             self.assertEqual(tones[tone], (-1, True))
         self.assertIsNone(bar)
 
+    def test_terminal_bar_text_is_the_default_colour_for_every_tone(self):
+        for colors in (256, 8):
+            tones, bar = self.tones("terminal", colors, 64)
+            for tone, (fg, _) in tones.items():
+                with self.subTest(colors=colors, tone=tone):
+                    self.assertEqual(core.bar_foreground("terminal", bar, fg), -1)
+
+    def test_dark_and_light_fallback_bar_text_keeps_the_tone_colour(self):
+        for name in ("dark", "light"):
+            tones, bar = self.tones(name, 8, 64)
+            self.assertIsNone(bar)
+            for tone, (fg, _) in tones.items():
+                with self.subTest(name=name, tone=tone):
+                    self.assertEqual(core.bar_foreground(name, bar, fg), fg)
+        tones, bar = self.tones("dark", 256)
+        self.assertEqual(core.bar_foreground("dark", bar, 4), 4)
+
     def test_every_scheme_has_the_same_tones(self):
         for name in core.SCHEMES:
             with self.subTest(name=name):

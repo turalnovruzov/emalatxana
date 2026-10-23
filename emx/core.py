@@ -201,6 +201,11 @@ def palette_spec(name: str, colors: int, pairs: int) -> tuple:
     return tones, None
 
 
+def bar_foreground(name: str, bar, fg: int) -> int:
+    """The foreground of text on a reverse-video selection bar: Terminal's own colours make one even bar, so every tone goes default; Dark and Light's fallback keeps the tone's colour."""
+    return -1 if name == TERMINAL and bar is None else fg
+
+
 CATEGORY_TONE = {NEEDS_INPUT: "needs", WORKING: "plain", DONE: "done", STOPPED: "stopped"}
 
 

@@ -4246,7 +4246,8 @@ class Palette:
             self.pairs[tone] = {None: 3 * i + 1}
             curses.init_pair(3 * i + 1, fg, -1)
             for j, focus in enumerate(("focused", "unfocused"), start=2):
-                curses.init_pair(3 * i + j, fg, -1 if bar is None else bar[focus])
+                bar_fg = core.bar_foreground(scheme, bar, fg)
+                curses.init_pair(3 * i + j, bar_fg, -1 if bar is None else bar[focus])
                 self.pairs[tone][focus] = 3 * i + j
 
     def attr(self, tone: str, bar: str | None = None) -> int:
