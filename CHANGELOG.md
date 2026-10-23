@@ -7,6 +7,7 @@ What changed in emx, newest version first. The panel shows a version's lines the
 - Terminal's own is now the default colour scheme, for new installs and for anyone who never picked one with `emx colors`. A scheme you picked is kept.
 - In Terminal's own, the selected row is a shade of your terminal's own background (a little lighter on a dark theme, a little darker on a light one) and keeps its colours. emx asks the terminal for its background; where the terminal doesn't say, the row is inverted as before.
 - In Terminal's own, a thin grey line sits just above the bottom bar. Dark and Light look as before.
+- The selected row's shade follows your terminal's theme when you switch it, as soon as you click back into the panel.
 
 ## 2.18.0 — 2026-10-23
 

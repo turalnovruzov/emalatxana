@@ -183,7 +183,6 @@ SHADE_INDEX = {"focused": 16, "unfocused": 17}
 SHADE_STEP = 0.09
 BACKGROUND_QUERY = b"\x1b]11;?\x1b\\"
 BACKGROUND_REPLY_PREFIX = "\x1b]11;"
-BACKGROUND_REPLY_LIMIT = 64
 # A fixed run rather than tmux's #{R:...} repeat, so an older tmux draws it the same; tmux cuts it at the window width.
 BAR_RULE = "#[fg=colour8]" + "▁" * 1000 + "#[default]"
 
@@ -227,8 +226,11 @@ def background_reply(keys: list) -> str | None:
 
 
 def may_be_background_reply(keys: list) -> bool:
-    """Whether `keys` could still grow into a background reply, so the next key is worth reading."""
-    if not keys or len(keys) >= BACKGROUND_REPLY_LIMIT:
+    """Whether `keys` could still grow into a background reply, so the next key is worth reading.
+
+    A reply of any length stays one until it ends: its tail must never act as keys.
+    """
+    if not keys:
         return False
     if not all(isinstance(k, str) and len(k) == 1 for k in keys):
         return False
@@ -236,6 +238,14 @@ def may_be_background_reply(keys: list) -> bool:
     if len(text) <= len(BACKGROUND_REPLY_PREFIX):
         return BACKGROUND_REPLY_PREFIX.startswith(text)
     return text.startswith(BACKGROUND_REPLY_PREFIX) and background_reply(keys) is None
+
+
+def abandoned_background_reply(keys: list) -> bool:
+    """Whether `keys` began a background reply that never ended, so none of it may act as keys."""
+    if not keys or not all(isinstance(k, str) and len(k) == 1 for k in keys):
+        return False
+    text = "".join(keys)
+    return len(text) >= len(BACKGROUND_REPLY_PREFIX) and text.startswith(BACKGROUND_REPLY_PREFIX) and background_reply(keys) is None
 
 
 def palette_spec(name: str, colors: int, pairs: int, shade: bool = False) -> tuple:
@@ -3037,8 +3047,13 @@ def _dim_after(params: str, dim: bool) -> bool:
     return dim
 
 
-def focus_report(keys: list) -> bool | None:
-    """True for a focus-in report (ESC [ I), False for focus-out (ESC [ O), None for any other keys."""
+def focus_report(keys: list, codes: tuple = (None, None)) -> bool | None:
+    """True for a focus-in report (ESC [ I), False for focus-out (ESC [ O), None for any other keys.
+
+    `codes` are the key codes curses decodes those two reports into (focus-in, focus-out), where it does.
+    """
+    if len(keys) == 1 and isinstance(keys[0], int) and keys[0] in codes:
+        return keys[0] == codes[0]
     if len(keys) == 3 and keys[0] == "\x1b" and keys[1] == "[" and keys[2] in ("I", "O"):
         return keys[2] == "I"
     return None

@@ -5930,9 +5930,30 @@ class ColourSchemes(unittest.TestCase):
                 self.assertFalse(core.may_be_background_reply(keys))
                 self.assertIsNone(core.background_reply(keys))
 
-    def test_a_background_reply_stops_growing_at_the_limit(self):
-        keys = list("\x1b]11;" + "a" * 70)
-        self.assertFalse(core.may_be_background_reply(keys))
+    def test_a_long_background_reply_is_kept_reading_until_it_ends(self):
+        keys = list("\x1b]11;" + "a" * 200)
+        self.assertTrue(core.may_be_background_reply(keys))
+        self.assertTrue(core.abandoned_background_reply(keys))
+        for end in ("\x07", "\x1b\\"):
+            ended = keys + list(end)
+            self.assertFalse(core.may_be_background_reply(ended))
+            self.assertFalse(core.abandoned_background_reply(ended))
+            self.assertEqual(core.background_reply(ended), "a" * 200)
+            self.assertIsNone(core.parse_background(core.background_reply(ended)))
+
+    def test_a_reply_that_began_and_never_ended_is_abandoned(self):
+        self.assertTrue(core.abandoned_background_reply(list("\x1b]11;rgb:1e")))
+        self.assertTrue(core.abandoned_background_reply(list("\x1b]11;")))
+        for keys in ([], list("\x1b]11"), list("\x1b]11;rgb:1e1e/1e1e/1e1e\x07"), list("\x1b[A"), ["x"], list("\x1b]11;a") + [5]):
+            with self.subTest(keys=keys):
+                self.assertFalse(core.abandoned_background_reply(keys))
+
+    def test_focus_report_knows_the_key_codes_curses_decodes_it_into(self):
+        self.assertTrue(core.focus_report([581], (581, 582)))
+        self.assertFalse(core.focus_report([582], (581, 582)))
+        for keys, codes in (([583], (581, 582)), ([581], (None, None)), ([581, 582], (581, 582)), (["x"], (581, 582))):
+            with self.subTest(keys=keys):
+                self.assertIsNone(core.focus_report(keys, codes))
 
     def test_terminal_with_a_shade_keeps_its_tones_and_bars_on_16_and_17(self):
         tones, bar = core.palette_spec("terminal", 256, 256, shade=True)

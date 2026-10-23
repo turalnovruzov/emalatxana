@@ -4273,6 +4273,7 @@ class App:
         keys = [key]
         patient = False
         waited = 0
+        deadline = time.monotonic() + REPLY_WAIT_TOTAL_MS / 1000
         while core.may_be_focus_report(keys) or core.may_be_background_reply(keys):
             try:
                 keys.append(self.next_key())
@@ -4286,14 +4287,16 @@ class App:
                 else:
                     patient = True
                     self.scr.timeout(REPLY_WAIT_MS)
+            if time.monotonic() > deadline:
+                break
         if patient:
             self.scr.timeout(0)
-        if core.focus_report(keys) is not None:
+        if core.focus_report(keys, focus_key_codes()) is not None:
             return "focus", None
         body = core.background_reply(keys)
         if body is not None:
             return "background", core.parse_background(body)
-        if "".join(k for k in keys if isinstance(k, str)).startswith(core.BACKGROUND_REPLY_PREFIX) and len(keys) >= len(core.BACKGROUND_REPLY_PREFIX):
+        if core.abandoned_background_reply(keys):
             return "background", None
         self.pending_keys[:0] = keys[1:]
         return None
@@ -4306,6 +4309,30 @@ class App:
         while True:
             self.refresh()
             self.read_input()
+
+
+_FOCUS_KEY_CODES: tuple | None = None
+
+
+def focus_key_codes() -> tuple:
+    """The key codes curses decodes tmux's focus reports into, (focus-in, focus-out), None where it does not.
+
+    With keypad on, ncurses turns ESC [ I and ESC [ O into one key each
+    (terminfo `kxIN` and `kxOUT`); the codes are assigned at run time, so they
+    are found by name.
+    """
+    global _FOCUS_KEY_CODES
+    if _FOCUS_KEY_CODES is None:
+        found = {}
+        try:
+            for code in range(curses.KEY_MAX + 1, curses.KEY_MAX + 1024):
+                name = curses.keyname(code)
+                if name in (b"kxIN", b"kxOUT"):
+                    found[name] = code
+        except curses.error:
+            return None, None
+        _FOCUS_KEY_CODES = (found.get(b"kxIN"), found.get(b"kxOUT"))
+    return _FOCUS_KEY_CODES
 
 
 def setup_curses(scr) -> None:

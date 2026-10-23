@@ -9090,6 +9090,27 @@ class TerminalShade(AppCase):
         self.assertEqual(TERMINAL_WRITES, [self.QUERY, self.QUERY])
         self.app.read_focus.assert_called_once()
 
+    def test_a_decoded_focus_report_asks_again_too(self):
+        self.housekeep_once()
+        self.app.read_focus = mock.Mock()
+        with mock.patch.object(sidebar, "focus_key_codes", return_value=(581, 582)):
+            self.feed(581)
+            self.assertEqual(TERMINAL_WRITES, [self.QUERY, self.QUERY])
+            self.app.read_focus.assert_called_once()
+            self.feed(582)
+        self.assertEqual(len(TERMINAL_WRITES), 3)
+        self.keys_seen.assert_not_called()
+
+    def test_a_reply_longer_than_any_colour_never_leaks_its_tail_as_keys(self):
+        for end in ("\x07", "\x1b\\"):
+            with self.subTest(end=end):
+                self.keys_seen.reset_mock()
+                self.feed(*("\x1b]11;rgb:" + "0" * 80 + "/12" + end), "q")
+                self.assertEqual([c.args[0] for c in self.keys_seen.call_args_list], ["q"])
+        self.keys_seen.reset_mock()
+        self.feed(*("\x1b]11;rgb:" + "0" * 80 + "/12"))
+        self.keys_seen.assert_not_called()
+
     def test_a_background_reply_is_read_and_never_reaches_the_keys(self):
         self.feed(*self.REPLY)
         self.assertEqual(self.app.background, (30, 30, 30))

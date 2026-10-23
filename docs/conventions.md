@@ -410,6 +410,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: ``PhoneApi.update_prefs(lambda p: (core.toggle_pin(p, sid), None))``
 4. **Gotcha**: another view's panel process is not under this lock.
 
+### A colour only the terminal knows is drawn through a palette index no scheme uses
+
+1. **Rule**: when the panel needs a colour only the terminal knows (the selected row's shade, from its background), it draws with a palette index no scheme uses (`core.SHADE_INDEX`, 16 and 17) and remaps it on its own pane only, with `set-option -p pane-colours[N]`. The remap is set before `Palette.use` switches to those indices and unset when leaving.
+2. **Why**: tmux then draws the 24-bit colour, or the nearest of 256, itself, and nothing outside the panel pane changes.
+3. **Minimal example**: ``tmux.set_pane_option(pane, f"pane-colours[{core.SHADE_INDEX['focused']}]", shade["focused"])``
+4. **Gotcha**: index 16 is black until it is remapped, and any tone that uses 16 or 17 breaks the shade (`test_the_shade_indices_are_drawn_by_no_scheme` guards it).
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
