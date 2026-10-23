@@ -217,6 +217,9 @@ class FakeScr:
     def erase(self):
         pass
 
+    def clear(self):
+        pass
+
     def addstr(self, *args):
         pass
 
@@ -234,6 +237,12 @@ class FakeScr:
 
 
 class FakePalette:
+    def __init__(self, scheme=core.DARK):
+        self.schemes = [scheme]
+
+    def use(self, scheme):
+        self.schemes.append(scheme)
+
     def attr(self, tone, selected=False):
         return 0
 
@@ -284,6 +293,10 @@ class ClientTmux(WindowPanes):
         self.hush = ""
         self.shows = shows
         self.slot = slot
+        self.globals_set = []
+
+    def set_global_option(self, name, value):
+        self.globals_set.append((name, value))
 
     def views(self):
         if isinstance(self.state, Exception):
@@ -4549,6 +4562,9 @@ class AttrScr(RecordingScr):
 
 
 class TonePalette:
+    def use(self, scheme):
+        pass
+
     def attr(self, tone, selected=False):
         return 1000 + sum(map(ord, tone))
 
@@ -4737,6 +4753,9 @@ class RowStub:
 
     class Palette:
         CODES = {"plain": 0, "muted": 1, "needs": 2, "done": 3, "stopped": 4, "accent": 5, "path": 6, "error": 7, "copper": 8, "remote": 9, "idle": 10}
+
+        def use(self, scheme):
+            pass
 
         def attr(self, tone, selected=None):
             return self.CODES[tone] * 4 + {None: 0, "focused": 1}.get(selected, 2)
@@ -8867,6 +8886,76 @@ class ScrollBar(WheelCase):
         self.assertNotEqual(self.scr.cells[2][:-1], before[:-1])
         self.app.handle_key("x")
         self.assertFalse(self.app.help)
+
+
+class SchemeBars(unittest.TestCase):
+    PARTS = [("✻1", "needs", True), ("x", "muted", False), ("y", "plain", False)]
+
+    def test_light_and_terminal_colour_the_bar_with_their_own_tones(self):
+        light = sidebar.bar_format(self.PARTS, "light")
+        self.assertIn("#[fg=colour130,bold]✻1", light)
+        self.assertIn("#[fg=colour243,nobold]x", light)
+        terminal = sidebar.bar_format(self.PARTS, "terminal")
+        self.assertIn("#[fg=colour3,bold]", terminal)
+        self.assertIn("#[fg=colour8,nobold]", terminal)
+
+    def test_plain_is_the_default_colour_in_every_scheme(self):
+        for name in core.SCHEMES:
+            with self.subTest(name=name):
+                self.assertIn("#[fg=default,nobold]y", sidebar.bar_format(self.PARTS, name))
+
+    def test_dark_is_the_default(self):
+        self.assertEqual(sidebar.bar_format(self.PARTS), sidebar.bar_format(self.PARTS, "dark"))
+
+
+class SchemeFollowsPrefs(AppCase):
+    LIGHT = [
+        ("status-style", "bg=colour254,fg=default"),
+        ("pane-border-style", "fg=colour250"),
+        ("pane-active-border-style", "fg=colour25"),
+    ]
+
+    def write_scheme(self, name, mtime):
+        core.save_prefs(self.app.prefs_file, core.set_scheme(core.load_prefs(self.app.prefs_file), name))
+        os.utime(self.app.prefs_file, ns=(mtime, mtime))
+
+    def test_a_scheme_saved_by_the_command_reaches_tmux_and_the_palette_in_one_pass(self):
+        self.write_scheme("light", 1)
+        self.app.reload_prefs()
+        self.assertEqual(self.app.tmux.globals_set, self.LIGHT)
+        self.assertEqual(self.app.palette.schemes[-1], "light")
+
+    def test_a_second_reload_with_no_change_sets_nothing_more(self):
+        self.write_scheme("light", 1)
+        self.app.reload_prefs()
+        self.app.reload_prefs()
+        self.assertEqual(len(self.app.tmux.globals_set), 3)
+
+    def housekeep_once(self):
+        quiet = ("check_relay", "check_open", "time_whats_new", "check_update", "check_phone", "check_hush")
+        with mock.patch.object(sidebar.App, "my_panes", lambda self: []), \
+                mock.patch.object(sidebar.App, "layout_panes", lambda self, panes: (None, None)):
+            patches = [mock.patch.object(sidebar.App, name, lambda self: None) for name in quiet]
+            for p in patches:
+                p.start()
+                self.addCleanup(p.stop)
+            sidebar.App.housekeep(self.app, False)
+
+    def test_the_first_housekeep_sets_the_saved_scheme(self):
+        self.write_scheme("terminal", 1)
+        self.housekeep_once()
+        self.assertEqual(dict(self.app.tmux.globals_set), core.SCHEME_TMUX["terminal"])
+
+    def test_with_nothing_saved_the_first_housekeep_sets_dark(self):
+        self.housekeep_once()
+        self.assertEqual(dict(self.app.tmux.globals_set), core.SCHEME_TMUX["dark"])
+
+    def test_a_tmux_error_is_said_once_and_the_scheme_still_counts_as_applied(self):
+        self.app.tmux.set_global_option = mock.Mock(side_effect=sidebar.TmuxError("no"))
+        self.write_scheme("light", 1)
+        self.app.reload_prefs()
+        self.app.reload_prefs()
+        self.assertEqual(self.app.tmux.set_global_option.call_count, 1)
 
 
 if __name__ == "__main__":
