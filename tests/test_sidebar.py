@@ -4696,7 +4696,6 @@ class PanelGround(AppCase):
     """2.6.0 gave the panel its own background; it is the terminal's again, and a workspace upgrading from 2.6.0 loses the option."""
 
     def test_housekeep_resets_the_panel_style_to_the_terminals_once(self):
-        self.no_scheme()
         calls = []
 
         class Housekeeping(ClientTmux):
@@ -7277,7 +7276,6 @@ class OpenRequests(AppCase):
 
     def setUp(self):
         super().setUp()
-        self.no_scheme()
         self.app.tmux = OpenTmux()
         self.app.me = "%1"
 

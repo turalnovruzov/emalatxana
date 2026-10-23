@@ -5854,7 +5854,10 @@ class ColourSchemes(unittest.TestCase):
                 self.assertIsNotNone(match)
                 self.assertEqual(match.group(1), value)
 
-    def test_light_and_terminal_tmux_options(self):
+    def test_every_schemes_tmux_options(self):
+        self.assertEqual(core.SCHEME_TMUX["dark"], {
+            "status-style": "bg=colour236,fg=colour252",
+            "pane-border-style": "fg=colour238", "pane-active-border-style": "fg=colour75"})
         self.assertEqual(core.SCHEME_TMUX["light"], {
             "status-style": "bg=colour254,fg=default",
             "pane-border-style": "fg=colour250", "pane-active-border-style": "fg=colour25"})
