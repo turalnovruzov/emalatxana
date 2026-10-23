@@ -178,11 +178,72 @@ SCHEME_TMUX = {
 }
 
 
-def palette_spec(name: str, colors: int, pairs: int) -> tuple:
+# Palette slots no scheme draws with; the panel remaps them per pane to the selected row's shade.
+SHADE_INDEX = {"focused": 16, "unfocused": 17}
+SHADE_STEP = 0.09
+BACKGROUND_QUERY = b"\x1b]11;?\x1b\\"
+BACKGROUND_REPLY_PREFIX = "\x1b]11;"
+BACKGROUND_REPLY_LIMIT = 64
+# A fixed run rather than tmux's #{R:...} repeat, so an older tmux draws it the same; tmux cuts it at the window width.
+BAR_RULE = "#[fg=colour8]" + "▁" * 1000 + "#[default]"
+
+
+def parse_background(body: str) -> tuple[int, int, int] | None:
+    """The colour in a terminal's answer to the background query (`rgb:R/G/B` with 1 to 4 hex digits a channel, or `#rrggbb`), or None."""
+    body = body.strip()
+    match = re.fullmatch(r"#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})", body)
+    if match:
+        return tuple(int(c, 16) for c in match.groups())
+    match = re.fullmatch(r"rgb:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})", body)
+    if not match:
+        return None
+    return tuple(round(int(c, 16) * 255 / (16 ** len(c) - 1)) for c in match.groups())
+
+
+def selection_shade(rgb: tuple) -> dict:
+    """The selected row's background for a terminal background `rgb`: a step lighter on a dark one, a step darker on a light one; the unfocused panel gets half the step."""
+    dark = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] < 128
+
+    def moved(step: float) -> str:
+        channels = [round(c + (255 - c) * step) if dark else round(c - c * step) for c in rgb]
+        return "#" + "".join(f"{min(255, max(0, c)):02x}" for c in channels)
+
+    return {"focused": moved(SHADE_STEP), "unfocused": moved(SHADE_STEP / 2)}
+
+
+def background_reply(keys: list) -> str | None:
+    """The body of a complete background reply in `keys` (ESC ] 11 ; body, ended by BEL or ESC \\), else None."""
+    if not keys or not all(isinstance(k, str) and len(k) == 1 for k in keys):
+        return None
+    text = "".join(keys)
+    if not text.startswith(BACKGROUND_REPLY_PREFIX):
+        return None
+    rest = text[len(BACKGROUND_REPLY_PREFIX):]
+    if rest.endswith("\x07"):
+        return rest[:-1]
+    if rest.endswith("\x1b\\"):
+        return rest[:-2]
+    return None
+
+
+def may_be_background_reply(keys: list) -> bool:
+    """Whether `keys` could still grow into a background reply, so the next key is worth reading."""
+    if not keys or len(keys) >= BACKGROUND_REPLY_LIMIT:
+        return False
+    if not all(isinstance(k, str) and len(k) == 1 for k in keys):
+        return False
+    text = "".join(keys)
+    if len(text) <= len(BACKGROUND_REPLY_PREFIX):
+        return BACKGROUND_REPLY_PREFIX.startswith(text)
+    return text.startswith(BACKGROUND_REPLY_PREFIX) and background_reply(keys) is None
+
+
+def palette_spec(name: str, colors: int, pairs: int, shade: bool = False) -> tuple:
     """What the panel draws for a scheme on a terminal with `colors` colours and `pairs` colour pairs: (tones, bar).
 
     `tones[tone]` is (foreground, dim); `bar` is the selection-bar background
-    per focus, or None for reverse video.
+    per focus, or None for reverse video. Terminal's own with `shade` on a
+    256-colour terminal bars on the shade slots.
     """
     if name == TERMINAL:
         tones = {}
@@ -191,7 +252,7 @@ def palette_spec(name: str, colors: int, pairs: int) -> tuple:
             if colors < 16 and fg >= 8:
                 fg, dim = -1, True
             tones[tone] = (fg, dim)
-        return tones, None
+        return tones, (dict(SHADE_INDEX) if shade and colors >= 256 else None)
     if colors >= 256 and pairs > 3 * len(SCHEME_TONES[name]):
         return {tone: (fg, False) for tone, fg in SCHEME_TONES[name].items()}, SCHEME_BAR[name]
     tones = {}
@@ -2446,7 +2507,7 @@ def toggle_view(prefs: dict) -> dict:
 
 
 def scheme(prefs: dict) -> str:
-    return prefs.get("scheme", DARK)
+    return prefs.get("scheme", TERMINAL)
 
 
 def set_scheme(prefs: dict, name: str) -> dict:
