@@ -647,9 +647,15 @@ class ShippedConf(unittest.TestCase):
         self.assertIn("set -g set-clipboard on\n", SHELL_CONF)
 
     def test_the_status_line_is_on_at_the_bottom(self):
-        for line in ("set -g status on", "set -g status-position bottom", "set -g status-style 'bg=colour236", "set -g status-format[0] ''"):
+        for line in ("set -g status on", "set -g status-position bottom", "set -g status-style 'bg=default,fg=default'",
+                     "set -g status-format[0] ''", "set -g status-format[1] ''"):
             self.assertIn(line, SHELL_CONF)
         self.assertNotIn("status off", SHELL_CONF)
+
+    def test_the_conf_starts_with_terminals_own_colours(self):
+        for option, value in core.SCHEME_TMUX["terminal"].items():
+            with self.subTest(option=option):
+                self.assertIn(f"{option} '{value}'", SHELL_CONF)
 
     def test_the_status_line_mouse_keys_are_unbound_but_a_click_on_the_back_range(self):
         # 2.12.0: a click on a phone's `‹ sessions` goes back to the panel; every other status key stays unbound.
@@ -735,6 +741,12 @@ class Bar(PrivateServer):
         self.tmux.set_bar("emx-bar-probe")
         self.read_client_until(b"emx-bar-probe")
 
+    def test_unsetting_a_never_set_view_option_is_quiet(self):
+        self.tmux.unset_view_option("status-format[1]")
+        self.tmux.set_bar("second", 1)
+        self.assertEqual(self.tmux.view_option("status-format[1]"), "second")
+        self.tmux.unset_view_option("status-format[1]")
+
     def test_unsetting_the_2_6_0_panel_style_leaves_the_terminals_own(self):
         self.tmux.set_pane_option(self.sidebar, "window-style", "bg=colour235")
         self.tmux.unset_pane_option(self.sidebar, "window-style")
@@ -745,6 +757,18 @@ class Bar(PrivateServer):
         with mock.patch.object(tmux, "run") as run:
             tmux.set_bar("x")
         self.assertEqual(run.call_args.args, ("set-option", "-t", "=emx:", "status-format[0]", "x"))
+
+    def test_set_bar_on_line_1_writes_the_second_format(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            tmux.set_bar("x", 1)
+        self.assertEqual(run.call_args.args[-2:], ("status-format[1]", "x"))
+
+    def test_unset_view_option_unsets_on_the_view(self):
+        tmux = Tmux("emx-test-unused")
+        with mock.patch.object(tmux, "run") as run:
+            tmux.unset_view_option("status-format[1]")
+        self.assertEqual(run.call_args.args, ("set-option", "-u", "-t", "=emx:", "status-format[1]"))
 
     def test_after_sourcing_twice_the_only_status_mouse_key_is_the_back_range_click(self):
         self.tmux.source_config()
