@@ -1744,7 +1744,7 @@ class ColorsCommand(unittest.TestCase):
         self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
 
     def test_with_no_argument_it_prints_the_scheme(self):
-        self.assertEqual(self.run_main(), (0, "Colours: dark. Choices: dark, light, terminal.\n", ""))
+        self.assertEqual(self.run_main(), (0, "Colours: terminal. Choices: dark, light, terminal.\n", ""))
         self.assertFalse(self.prefs.exists())
         self.run_main("light")
         self.assertEqual(self.run_main()[1], "Colours: light. Choices: dark, light, terminal.\n")

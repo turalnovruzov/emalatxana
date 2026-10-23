@@ -5846,9 +5846,9 @@ class ColourSchemes(unittest.TestCase):
                 self.assertEqual(set(core.SCHEME_TONES[name]), set(core.SCHEME_TONES["dark"]))
                 self.assertEqual(set(self.tones(name, 256)[0]), set(core.SCHEME_TONES["dark"]))
 
-    def test_dark_tmux_options_are_the_ones_in_the_conf(self):
+    def test_terminal_tmux_options_are_the_ones_in_the_conf(self):
         conf = Path(core.__file__).with_name("emx.tmux.conf").read_text(encoding="utf-8")
-        for option, value in core.SCHEME_TMUX["dark"].items():
+        for option, value in core.SCHEME_TMUX["terminal"].items():
             with self.subTest(option=option):
                 match = re.search(rf"^set[w]? -g {option} '([^']*)'", conf, re.M)
                 self.assertIsNotNone(match)

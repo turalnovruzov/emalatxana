@@ -51,7 +51,7 @@ docs prints the emx docs index (start there); docs <page> prints one page.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 phone prints the address of the phone page this emx serves over Tailscale, or why it isn't up.
-colors prints the colour scheme; colors dark, light or terminal sets it (Light for a light terminal background); a running emx follows within seconds.
+colors prints the colour scheme; colors dark, light or terminal sets it (terminal is the default and follows your terminal's theme); a running emx follows within seconds.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
 update off stops the automatic updates (emx update still updates when you run it); update on starts them again.
 uninstall removes the installed emx and its link; your prefs and emx's state are kept.
