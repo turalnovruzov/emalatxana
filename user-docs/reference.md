@@ -14,6 +14,10 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `emx hush` | Stops the voice now, without muting later notices. |
 | `emx remote` | `emx remote <host>` opens the emx running on a server over ssh (host from your SSH config); closing it leaves the server's sessions running. |
 | `emx phone` | Prints the address of the phone page, or why it isn't up. |
+| `emx colors` | Prints the colour scheme in use. |
+| `emx colors dark` | Sets the colour scheme to Dark. |
+| `emx colors light` | Sets the colour scheme to Light. |
+| `emx colors terminal` | Sets the colour scheme to Terminal's own. |
 | `emx update` | Installs the newest version now, a new major version included. |
 | `emx update off` | Stops the automatic updates. |
 | `emx update on` | Starts the automatic updates again. |
@@ -90,6 +94,14 @@ Environment variables, set before running `emx`.
 | `EMX_BIN_HOME` | The folder of the `emx` link (default `~/.local/bin`). |
 | `EMX_UPDATE_SECONDS` | How often a running panel checks for updates (default 600). |
 
+## Colour schemes
+
+Set with `emx colors`; a running emx switches within seconds, borders and bottom bar included. emx does not detect your terminal's background.
+
+- Dark (the default): for dark terminals.
+- Light: for white or cream terminals.
+- Terminal's own: your terminal's own 16 colours, so it follows its theme.
+
 ## The prefs file
 
-Your choices are saved in `prefs.json` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`: panel side and width, voice or notification mode, view, pinned sessions, and favourite and recent folders. Whether automatic updates are on is kept in the install folder instead (`emx update off` and `emx update on`). emx's own state is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
+Your choices are saved in `prefs.json` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`: panel side and width, voice or notification mode, colour scheme, view, pinned sessions, and favourite and recent folders. Whether automatic updates are on is kept in the install folder instead (`emx update off` and `emx update on`). emx's own state is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
