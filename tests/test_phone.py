@@ -1068,13 +1068,19 @@ class Page(ServerCase):
         css, _ = self.text("/app.css")
         self.assertIn("prefers-reduced-motion", css)
 
-    def test_the_new_controls_are_at_least_44px_and_stars_are_text_glyphs(self):
+    def test_the_new_controls_are_at_least_44px(self):
         css, _ = self.text("/app.css")
         js, _ = self.text("/app.js")
-        for selector in (r"\.star", r"\.folder-bar \.more", r"\.findbar \.plain-button"):
+        for selector in (r"\.folder-bar \.more", r"\.findbar \.plain-button"):
             rule = re.search(selector + r" \{([^}]*)\}", css).group(1)
             self.assertRegex(rule, r"(?:min-)?(?:width|height): 44px")
-        self.assertRegex(js, r'glyphText\(folder\.favourite \? "★" : "☆"\)')
+
+    def test_the_script_has_no_star(self):
+        css, _ = self.text("/app.css")
+        js, _ = self.text("/app.js")
+        for text in ("/api/favourite", "toggleStar", "☆"):
+            self.assertNotIn(text, js)
+        self.assertNotIn(".star {", css)
 
     def test_the_script_holds_no_grouping_rule(self):
         js, _ = self.text("/app.js")
@@ -1282,16 +1288,14 @@ class Service(ApiCase):
 
 class Port(unittest.TestCase):
     def test_the_port_is_8787_unless_the_setting_is_a_valid_unprivileged_port(self):
-        for value, want in (("", 8787), ("abc", 8787), ("80", 8787), ("1023", 8787), ("70000", 8787), ("-5", 8787),
-                            ("1024", 1024), ("9000", 9000), ("65535", 65535)):
+        for value, want in ((80, 8787), (1023, 8787), (70000, 8787), (1024, 1024), (9000, 9000), (65535, 65535)):
             with self.subTest(value=value):
-                self.assertEqual(phone.phone_port(None, {"EMX_PHONE_PORT": value}), want)
-        self.assertEqual(phone.phone_port(None, {}), 8787)
+                self.assertEqual(phone.phone_port(core.normalize_prefs({"phone_port": value})), want)
+        self.assertEqual(phone.phone_port(None), 8787)
 
-    def test_the_port_comes_from_the_file_unless_env_sets_it(self):
-        self.assertEqual(phone.phone_port({"phone_port": 9000}, {}), 9000)
-        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "9100"}), 9100)
-        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "80"}), 9000)
+    def test_the_port_comes_from_the_file_and_not_the_environment(self):
+        with mock.patch.dict(os.environ, {"EMX_PHONE_PORT": "9100"}):
+            self.assertEqual(phone.phone_port({"phone_port": 9000}), 9000)
 
 
 class Peek(ApiCase):
@@ -1531,60 +1535,25 @@ class Folder(ApiCase):
         self.assertEqual(body["ok"], False)
 
 
-class Favourites(ApiCase):
+class FolderRows(ApiCase):
     def setUp(self):
         super().setUp()
         self.engine = FakeEngine([session("1", "a", self.path("Workspace", "emalatxana"), "done")])
         self.budget = self.path("Workspace", "budget-tracker")
 
-    def post(self, folder):
-        return self.api(self.engine).post("/api/favourite", {"folder": folder})
-
-    def test_favourite_toggles_the_panels_pref(self):
-        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "side": "left"})
-        body = self.post(self.budget)[1]
-        self.assertEqual((body["ok"], body["on"], body["message"]), (True, True, "★ ~/Workspace/budget-tracker is a favourite"))
-        saved = core.load_prefs(self.prefs)
-        self.assertEqual((saved["favourite_folders"], saved["side"]), ([self.budget], "left"))
-        rows = self.api(self.engine).get("/api/folders", "q=budget")[1]["folders"]
-        self.assertEqual([r["favourite"] for r in rows if r["path"] == self.budget], [True])
-        body = self.post("~/Workspace/budget-tracker")[1]
-        self.assertEqual((body["on"], body["message"]), (False, "~/Workspace/budget-tracker is no longer a favourite"))
-        saved = core.load_prefs(self.prefs)
-        self.assertNotIn("favourite_folders", saved)
-        self.assertEqual(saved["side"], "left")
-
-    def test_a_phone_favourite_writes_the_config_line(self):
+    def test_favourite_is_not_an_endpoint(self):
         core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
-        before = self.prefs.config.read_text()
-        self.assertTrue(self.post(self.budget)[1]["ok"])
-        after = self.prefs.config.read_text()
-        self.assertRegex(after, r"(?m)^favourite_folders = .*Workspace/budget-tracker$")
-        self.assertEqual([line for line in after.splitlines() if line.startswith("#")], [line for line in before.splitlines() if line.startswith("#")])
+        before = (self.prefs.config.read_bytes(), self.saved())
+        self.assertIsNone(self.api(self.engine).post("/api/favourite", {"folder": self.budget}))
+        self.assertEqual((self.prefs.config.read_bytes(), self.saved()), before)
 
-    def test_a_folder_with_a_line_break_is_refused_and_the_file_gains_no_line(self):
-        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
-        before = self.saved()
-        for folder in (self.budget + "\nscheme = dark", self.budget + "\rside = left", self.budget + "\x00"):
-            with self.subTest(folder=folder):
-                code, body = self.post(folder)
-                self.assertEqual((code, body["ok"]), (400, False))
-        self.assertEqual(self.saved(), before)
-
-    def test_favourite_refuses_a_folder_the_page_may_not_use(self):
-        outside = os.path.join(self.dir, "outside")
-        os.makedirs(outside)
-        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
-        before = self.saved()
-        for folder in (outside, "/etc", self.path("missing")):
-            with self.subTest(folder=folder):
-                self.assertFalse(self.post(folder)[1]["ok"])
-        self.assertEqual(self.post(1)[0], 400)
-        self.assertEqual(self.post("x" * 4097)[0], 400)
-        self.assertEqual(self.saved(), before)
-        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "favourite_folders": [outside]})
-        body = self.post(outside)[1]
-        self.assertEqual((body["ok"], body["on"]), (True, False))
+    def test_folder_rows_carry_no_favourite_flag(self):
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "favourite_folders": [self.budget]})
+        rows = self.api(self.engine).get("/api/folders", "q=")[1]["folders"]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(set(row), {"path", "shown", "base"})
+        self.assertEqual(rows[0]["path"], self.budget)
 
     def test_new_records_the_folder_as_the_panel_does(self):
         core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "recent_folders": ["/old"]})
@@ -1681,7 +1650,7 @@ class RoutineWords(ApiCase):
 
 class NewRoutesAreGuarded(ServerCase):
     GETS = ("/api/peek?id=" + KEY, "/api/notifications", "/api/whats-new?since=2.0.0")
-    POSTS = ("/api/pin", "/api/favourite", "/api/close-group", "/api/suggest-name")
+    POSTS = ("/api/pin", "/api/close-group", "/api/suggest-name")
 
     def test_another_tailscale_user_is_refused_everywhere_with_no_session_data(self):
         self.tailnet = StubTailnet(user=7777)

@@ -18,7 +18,7 @@ emx serves a page in your browser that lists your sessions as the panel does, in
 - `Rename` has a `Suggest` button that asks Haiku for a name and puts it in the field; only `Save` renames. Tap it again for another.
 - `⋯` on a folder's header has `New session here` and `Close N sessions`. Close asks once more, within two seconds. Pinned has no `⋯`, and is never closed as a folder.
 - The field at the top finds sessions by name or folder, as `^f` does in the panel; every group opens while you find, and the `✕` clears it.
-- `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. The star next to a folder makes it a favourite, shared with the panel's `★`. The name and the first message are optional. The new session is shown selected in the list, and its folder becomes a recent one.
+- `+ New` starts a session. Type any part of a folder's name and the matching folders appear, those your sessions use first; tap one, then `Start`. Favourite folders, set under `c` in the panel, are listed first. The name and the first message are optional. The new session is shown selected in the list, and its folder becomes a recent one.
 - The `Notifications` row at the bottom lists the panel's past needs-input and done notices, newest first, unread ones in colour with their count on the row. Tap one to open that session.
 - The `Routines` row at the bottom lists your server's scheduled routines and what they did, read-only. Tap a routine to see each of its runs, its error and when it is next due.
 - After emx updates, the page says `emx updated to X.` with what changed since the version this device last saw, and `emx X available: run emx update` when a new major version is waiting. The page reloads itself once to run the new version.
@@ -35,7 +35,7 @@ The page is reachable over Tailscale only, so it needs no password and opens not
 3. On the machine, run `emx phone` for the address (for example `http://machine.your-tailnet.ts.net:8787/`) and open it in Safari. Safari says "Not Secure" because the address is plain http; the Tailscale tunnel already encrypts it.
 4. If a firewall such as `ufw` is on, let traffic in on the Tailscale interface: `sudo ufw allow in on tailscale0`.
 
-The page is served by the emx workspace itself, so it is up whenever your emx is, and again after emx updates itself. If Tailscale is missing or not connected, the panel says so once, in one line, and `emx phone` says it again. Set `phone_port` in the config file (`c` in the panel, Port) to use another port than 8787, at the next start; `EMX_PHONE_PORT` overrides it.
+The page is served by the emx workspace itself, so it is up whenever your emx is, and again after emx updates itself. If Tailscale is missing or not connected, the panel says so once, in one line, and `emx phone` says it again. Set `phone_port` in the config file (`c` in the panel, Port) to use another port than 8787, at the next start.
 
 ### Who is let in
 
@@ -57,7 +57,7 @@ The panel fills the screen. The bar at the bottom shows the counts by state and 
 - `↑` and `↓` (or `j` and `k`) move, as on the laptop.
 - `?` shows the keys that work on a phone; `↑` and `↓` scroll it, any other key closes it.
 
-Every panel key from the laptop works, Ctrl keys included, except the panel's side and width (`s`, `<`, `>`), which mean nothing when the panel fills the screen.
+Every panel key from the laptop works, Ctrl keys included. `c` there hides Side and Width, which mean nothing when the panel fills the screen.
 
 ## Open in the Claude app
 

@@ -73,20 +73,16 @@ HELP = (
     ("Enter click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
-    ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
+    ("", "in its folder list favourites (c) and recent folders list first"),
     ("^x", "interrupt a working session; twice closes it"),
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
-    ("^s", "by project / by state"),
     ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
     ("R", "routines: what ran in the past 24 hours; R or Esc back"),
-    ("m", "voice mode or notification mode"),
     ("h", "stop the voice now (voice mode)"),
-    ("s", "panel to the other side"),
-    ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
     ("^q", "hide the panel; ^q again, ^\\ or ← brings it back"),
     ("q", "detach; sessions keep running"),
@@ -107,22 +103,18 @@ NARROW_HELP = (
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session"),
-    ("^s", "by project / by state"),
     ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
     ("R", "routines: what ran in the past 24 hours; R or Esc back"),
-    ("m", "voice mode or notification mode"),
     ("h", "stop the voice now (voice mode)"),
     ("q", "detach; sessions keep running"),
     ("?", "close this help; ↑↓ scroll it"),
 )
 NARROW_HELP_KEY_WIDTH = 11
-WIDE_ONLY_KEYS = ("s", "<", ">", ",", ".")
 HELP_SCROLL_KEYS = (curses.KEY_UP, curses.KEY_DOWN, "k", "j")
 ENTER_KEYS = ("\n", "\r", curses.KEY_ENTER)
 FOCUS_REPORTS_ON, FOCUS_REPORTS_OFF = "\x1b[?1004h", "\x1b[?1004l"
 BACKSPACE_KEYS = ("\x7f", "\b", curses.KEY_BACKSPACE)
-CTRL_S = "\x13"
 CTRL_X = "\x18"
 CTRL_F = "\x06"
 CTRL_T = "\x14"
@@ -2050,7 +2042,7 @@ class App:
 
     def make_updater(self) -> Updater:
         return Updater(
-            interval=lambda: core.update_seconds(self.prefs, os.environ),
+            interval=lambda: core.update_seconds(self.prefs),
             wanted=lambda: core.updates_on(self.prefs),
         )
 
@@ -2360,7 +2352,7 @@ class App:
             major=lambda: max(tuple(self.majors_said), key=core.parse_version, default=None),
             claude=self.claude,
         )
-        self.phone = phone.PhoneService(self.engine, core.phone_port(self.prefs, os.environ), self.state, self.home, self.prefs_files, sources=sources)
+        self.phone = phone.PhoneService(self.engine, core.phone_port(self.prefs), self.state, self.home, self.prefs_files, sources=sources)
         self.phone.start()
 
     def check_phone(self) -> None:
@@ -3123,8 +3115,6 @@ class App:
                 self.open_picker()
             else:
                 self.complete_suggestion()
-        elif p["stage"] == "folder" and key == CTRL_T:
-            self.toggle_favourite()
         elif p["stage"] == "folder" and key in (curses.KEY_UP, curses.KEY_DOWN):
             self.move_pick(-1 if key == curses.KEY_UP else 1)
         elif isinstance(key, str) and key.isprintable():
@@ -3154,23 +3144,6 @@ class App:
             p["text"], folders, core.present_folders(recent, readable), listed, self.home,
             roots=roots, favourites=core.present_folders(favourites, readable),
         )
-
-    def toggle_favourite(self) -> None:
-        """Ctrl+T in the picker: star or unstar the highlighted folder, else the top row (as Tab picks)."""
-        rows = self.suggestions()
-        target = self.prompt.get("picked") or (rows[0].path if rows else None)
-        if target is None:
-            return
-        try:
-            self.prefs, on = core.toggle_favourite(self.prefs, target)
-        except ValueError as exc:
-            self.prompt.update(hint=f"Can't star that folder: {exc}")
-            return
-        self.save_prefs()
-        name = core.tilde_path(target, self.home)
-        hint = core.favourite_hint(name, on)
-        still_listed = target in {r.path for r in self.suggestions()}
-        self.prompt.update(picked=target if still_listed else None, hint=hint)
 
     def move_pick(self, delta: int) -> None:
         """The highlight is kept by path: a listing arriving late can move rows, and the folder he chose must not change under him."""
@@ -3389,8 +3362,6 @@ class App:
             self.open_here()
         elif key == "a" and self.narrow:
             self.open_menu()
-        elif key == CTRL_S:
-            self.toggle_view()
         elif key == CTRL_X:
             self.press_close()
         elif key in (CTRL_F, "/"):
@@ -3407,16 +3378,8 @@ class App:
             self.open_history()
         elif key == "R":
             self.open_routines()
-        elif key == "m":
-            self.toggle_mode()
         elif key == "h":
             self.hush()
-        elif key == "s":
-            self.flip_side()
-        elif key in ("<", ","):
-            self.change_panel_width(-core.WIDTH_STEP)
-        elif key in (">", "."):
-            self.change_panel_width(core.WIDTH_STEP)
         elif key == "q":
             self.detach()
 
@@ -3566,11 +3529,8 @@ class App:
         return [setting for kind, setting in core.settings_rows(self.narrow) if kind == "item"]
 
     def settings_shown_prefs(self) -> dict:
-        """The prefs as the menu shows them: a setting an environment variable overrides at that value, and another view's width as its own."""
+        """The prefs as the menu shows them: another view's width as its own."""
         shown = dict(self.prefs)
-        for setting in core.SETTINGS:
-            if core.env_override(setting, os.environ):
-                shown[setting.key] = core.setting_value(setting, self.prefs, os.environ)
         shown["panel_width"] = self.panel_width()
         return shown
 
@@ -3624,16 +3584,8 @@ class App:
             self.settings_enter(self.settings_items()[item[1]])
         st["at"] = item[1]
 
-    def env_read_only(self, setting) -> bool:
-        name = core.env_override(setting, os.environ)
-        if name:
-            self.say(f"Set by {name}, which wins over the file.", seconds=RESTORED_NOTICE_SECONDS)
-        return bool(name)
-
     def settings_change(self, setting, step: int) -> None:
         """`←` (-1) and `→` (+1) on a row: a choice moves to its neighbour and the width by its step; any other row changes only by typing."""
-        if self.env_read_only(setting):
-            return
         if setting.key == "side":
             self.flip_side()
         elif setting.key == "panel_width":
@@ -3652,8 +3604,6 @@ class App:
         self.apply_prefs(old)
 
     def settings_enter(self, setting) -> None:
-        if self.env_read_only(setting):
-            return
         if setting.kind == "choice":
             self.settings_change(setting, 1)
         elif setting.kind == "folders":
@@ -3917,7 +3867,7 @@ class App:
             hint = "Enter start · Tab folder · Esc cancel"
         else:
             head = [("New session · pick a folder:", curses.A_BOLD)]
-            hint = "↑↓ pick · Tab fill · Enter use · ^t ★ · Esc " + ("back" if p.get("back") else "cancel")
+            hint = "↑↓ pick · Tab fill · Enter use · Esc " + ("back" if p.get("back") else "cancel")
         head += [(t, 0) for t in core.wrap("> " + p["text"] + "▏", width)[-3:]]
         tail = [(t, curses.A_DIM) for t in core.wrap_words(p["hint"], width)[:3]] if p["hint"] else []
         tail += [(t, curses.A_DIM) for t in core.wrap_words(hint, width)[:2]]
@@ -4115,9 +4065,6 @@ class App:
         self.draw_scroll_bar(top + 2, room, len(rows), self.help_scroll, width)
 
     def setting_description(self, setting) -> str:
-        name = core.env_override(setting, os.environ)
-        if name:
-            return f"Set by {name}, which wins over the file."
         for problem in self.config_problems:
             found = re.match(r"line (\d+): (" + re.escape(setting.key) + r" .*)", problem)
             if found:
@@ -4752,7 +4699,7 @@ def own_view(socket: str) -> str:
 def run(socket: str) -> int:
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
-    claude = core.claude_command(core.load_prefs(core.prefs_files()), os.environ)
+    claude = core.claude_command(core.load_prefs(core.prefs_files()))
 
     view = own_view(socket)
 

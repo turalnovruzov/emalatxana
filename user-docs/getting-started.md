@@ -21,7 +21,7 @@ It puts emx in `~/.local/share/emx` and the `emx` command in `~/.local/bin`. If 
 
 Run `emx`. It opens the workspace: the panel on one side, the session you are in on the other.
 
-emx draws in your terminal's own colours, so a light terminal already looks right. `emx colors dark` or `emx colors light`, or Colours under `c` in the panel, picks emx's own colours instead.
+emx draws in your terminal's own colours, so a light terminal already looks right. Colours under `c` in the panel (Look) picks emx's own colours instead.
 
 ## The panel at a glance
 

@@ -319,7 +319,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    host = core.remote_host(arg)
    argv = core.ssh_client_args(ssh, host, control, core.remote_shell(base, "follow"))
    ```
-4. **Gotcha**: `remote_shell` quotes the args but not `base` (`EMX_REMOTE_COMMAND` may carry `env X=Y`), so `base` must only come from the laptop's own environment, never from the server or a relay line.
+4. **Gotcha**: `remote_shell` quotes the args but not `base` (`remote_command` may carry `env X=Y`), so `base` must only come from the laptop's own config file, never from the server or a relay line.
 
 ### A change that would stop an older and a newer emx working together over `emx remote` is a major version
 
@@ -337,7 +337,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    shell = core.follow_shell(base, host_name)
    host = core.relay_host(option_value, time.time())
    ```
-4. **Gotcha**: `env` finds only real files on PATH, so an `emx` that exists only as an alias needs `EMX_REMOTE_COMMAND`. `@emx_relay` stays a bare float, because an older panel parses it as one.
+4. **Gotcha**: `env` finds only real files on PATH, so an `emx` that exists only as an alias needs `remote_command`. `@emx_relay` stays a bare float, because an older panel parses it as one.
 
 ### A transcript path from a hook record goes through `engine.allowed_transcript` first
 
@@ -357,7 +357,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 1. **Rule**: every public command, panel key, root key and public `EMX_` setting is listed in `user-docs/reference.md` as its own backtick code span, and `tests/test_docs.py` fails when one is missing.
 2. **Why**: the docs are what Tural reads, and a drift test is the only thing that notices a key added without a line.
 3. **Minimal example**: ``| `^g` | Go somewhere. |``
-4. **Gotcha**: the test matches the exact backticked form, so `emx update` is not satisfied by `emx update off`. Keys handled only in `handle_key` or `prompt_key` (Tab, Esc, the folder list's `^t`, `,` and `.`) are not drift-tested and are kept by hand.
+4. **Gotcha**: the test matches the exact backticked form, so `emx update` is not satisfied by `emx update --report`. Keys handled only in `handle_key` or `prompt_key` (Tab, Esc) are not drift-tested and are kept by hand.
 
 ### Text that reaches a tmux format goes through `sidebar.bar_format`
 
@@ -414,7 +414,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 1. **Rule**: every settings write goes through `core.change_prefs(files, fn)`, which reads, applies `fn` and saves under the cross-process `core.prefs_lock`; `core.save_prefs` is never called bare outside tests, and it writes only the keys whose value differs from the file.
 2. **Why**: the panel's merge, other views' panels, the phone thread and the CLI become one critical section across processes, and a bad line he never changed is never rewritten.
-3. **Minimal example**: ``core.change_prefs(files, lambda disk: core.set_scheme(disk, "dark"))``
+3. **Minimal example**: ``core.change_prefs(files, lambda disk: {**disk, "scheme": "dark"})``
 4. **Gotcha**: `prefs_lock` (flock) is not reentrant and `ensure_config` takes it itself, so neither is called under it.
 
 ### A colour only the terminal knows is drawn through a palette index no scheme uses
@@ -423,6 +423,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 2. **Why**: tmux then draws the 24-bit colour, or the nearest of 256, itself, and nothing outside the panel pane changes.
 3. **Minimal example**: ``tmux.set_pane_option(pane, f"pane-colours[{core.SHADE_INDEX['focused']}]", shade["focused"])``
 4. **Gotcha**: index 16 is black until it is remapped, and any tone that uses 16 or 17 breaks the shade (`test_the_shade_indices_are_drawn_by_no_scheme` guards it).
+
+### A changed `Setting` comment is refreshed in his config through `core.OLD_TEMPLATE_COMMENTS`
+
+1. **Rule**: when a `Setting`'s comment text changes, the old line goes into `core.OLD_TEMPLATE_COMMENTS` (old to new), and `save_prefs` swaps exact-match lines on a write that happens anyway.
+2. **Why**: his existing config keeps emx's own comments current without emx ever rewriting his own lines or writing just to refresh a comment.
+3. **Minimal example**: ``"# Panel width in columns, 16 to 500 (< and > change it too)": "# Panel width in columns, 16 to 500 (dragging the pane border changes it too)"``
+4. **Gotcha**: the match is the whole line minus its ending, with no strip, so an indented or edited copy is his and stays; the refresh runs only when there are changes, and `test_no_current_comment_is_an_old_one` guards the map.
 
 ## The contract for this file
 

@@ -333,7 +333,7 @@ class PhoneApi:
     def post(self, path: str, body: dict):
         actions = {
             "/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume,
-            "/api/pin": self.pin, "/api/favourite": self.favourite, "/api/close-group": self.close_group,
+            "/api/pin": self.pin, "/api/close-group": self.close_group,
         }
         action = actions.get(path)
         if action is None and path != "/api/suggest-name":
@@ -456,11 +456,9 @@ class PhoneApi:
         rows = core.folder_suggestions(
             text, in_use, recent, listed, self.home, limit=FOLDER_CANDIDATES, roots=roots, favourites=favourites,
         )
-        starred = {os.path.normpath(f) for f in favourites}
         shown = [r for r in rows if allowed_folder(r.path, self.home, known) and os.path.isdir(r.path)]
         return [
-            {"path": r.path, "shown": r.shown, "base": os.path.basename(r.path.rstrip("/")) or r.path,
-             "favourite": os.path.normpath(r.path) in starred}
+            {"path": r.path, "shown": r.shown, "base": os.path.basename(r.path.rstrip("/")) or r.path}
             for r in shown[:FOLDER_ROWS]
         ]
 
@@ -601,31 +599,6 @@ class PhoneApi:
         except OSError as exc:
             return 200, {"ok": False, "message": f"Couldn't save settings: {exc}"}
         return 200, {"ok": True, "pinned": pinned, "message": message}
-
-    def favourite(self, body: dict) -> tuple:
-        text = body.get("folder")
-        if not isinstance(text, str) or not text.strip() or len(text) > 4096:
-            return 400, {"ok": False, "message": "Pick a folder."}
-        folder = self.resolve(text)
-        if core.has_control(folder):
-            return 400, {"ok": False, "message": "Pick a folder."}
-        sessions, _ = self.engine.list_sessions()
-        allowed = lambda: os.path.isdir(folder) and allowed_folder(folder, self.home, self.allowed_roots(sessions))
-
-        def toggle(prefs):
-            starred = folder in {os.path.normpath(f) for f in core.favourite_folders(prefs)}
-            if not starred and not allowed():
-                return prefs, None
-            new, on = core.toggle_favourite(prefs, folder)
-            return new, on
-
-        try:
-            on = self.update_prefs(toggle)
-        except OSError as exc:
-            return 200, {"ok": False, "message": f"Couldn't save settings: {exc}"}
-        if on is None:
-            return 200, {"ok": False, "message": "emx only stars folders in your home folder or folders it already knows."}
-        return 200, {"ok": True, "on": on, "message": core.favourite_hint(core.tilde_path(folder, self.home), on)}
 
     def close_group(self, body: dict) -> tuple:
         key, find, sent = body.get("key"), body.get("find"), body.get("sessions")
@@ -843,8 +816,8 @@ PROBLEM_LINES = {
 }
 
 
-def phone_port(prefs=None, env=None) -> int:
-    return core.phone_port(prefs or {}, os.environ if env is None else env)
+def phone_port(prefs=None) -> int:
+    return core.phone_port(prefs or {})
 
 
 def problem_line(problem: str, port: int) -> str:

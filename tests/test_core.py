@@ -1,3 +1,4 @@
+import dataclasses
 import json
 import os
 import re
@@ -1411,7 +1412,7 @@ BOARD = """\
 ## Panel
 # Which side of the window the panel sits on: left or right
 side = right
-# Panel width in columns, 16 to 500 (< and > change it too)
+# Panel width in columns, 16 to 500 (dragging the pane border changes it too)
 panel_width = 40
 # How sessions are grouped: project or state
 view = project
@@ -1605,23 +1606,64 @@ class ConfigFile(unittest.TestCase):
         core.ensure_config(self.files)
         self.assertEqual(self.config_text(), core.config_template(defaults(), os.path.expanduser("~")))
 
-    def test_env_overrides_the_file(self):
+    def test_readers_take_the_file_and_ignore_the_environment(self):
         prefs = {"phone_port": 9000, "update_check_seconds": 100, "claude_command": "mine", "remote_command": "mine-emx"}
+        env = {"EMX_PHONE_PORT": "9100", "EMX_UPDATE_SECONDS": "30", "EMX_CLAUDE": "fake", "EMX_REMOTE_COMMAND": "other"}
         cases = (
-            (core.phone_port, "EMX_PHONE_PORT", "9100", 9100, "x", 9000),
-            (core.update_seconds, "EMX_UPDATE_SECONDS", "30", 30, "2", 100),
-            (core.claude_command, "EMX_CLAUDE", "fake", "fake", "", "mine"),
-            (core.remote_command, "EMX_REMOTE_COMMAND", "other", "other", "  ", "mine-emx"),
+            (core.phone_port, "phone_port", 9000),
+            (core.update_seconds, "update_check_seconds", 100),
+            (core.claude_command, "claude_command", "mine"),
+            (core.remote_command, "remote_command", "mine-emx"),
         )
-        for fn, var, good, got, bad, fallback in cases:
-            with self.subTest(var=var):
-                self.assertEqual(fn(prefs, {var: good}), got)
-                self.assertEqual(fn(prefs, {var: bad}), fallback)
-                self.assertEqual(fn(prefs, {}), fallback)
-                self.assertEqual(fn({}, {}), next(s.default for s in core.SETTINGS if s.env == var))
-        setting = core.SETTING_BY_KEY["phone_port"]
-        self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "9100"}), "EMX_PHONE_PORT")
-        self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "80"}), "")
+        with mock.patch.dict(os.environ, env):
+            for fn, key, got in cases:
+                with self.subTest(key=key):
+                    self.assertEqual(fn(prefs), got)
+                    self.assertEqual(fn({}), core.SETTING_BY_KEY[key].default)
+
+    def test_no_setting_has_an_env_field(self):
+        self.assertNotIn("env", {f.name for f in dataclasses.fields(core.Setting)})
+
+    def test_the_width_comment_names_no_removed_key(self):
+        setting = core.SETTING_BY_KEY["panel_width"]
+        self.assertNotIn("<", setting.comment)
+        self.assertNotIn("<", setting.describe)
+
+    OLD_WIDTH = "# Panel width in columns, 16 to 500 (< and > change it too)"
+    NEW_WIDTH = "# Panel width in columns, 16 to 500 (dragging the pane border changes it too)"
+
+    def test_an_old_template_comment_is_replaced_on_the_next_write(self):
+        for ending in ("\n", "\r\n"):
+            with self.subTest(ending=ending), tempfile.TemporaryDirectory() as d:
+                files = files_in(d)
+                files.config.parent.mkdir(parents=True)
+                files.state.parent.mkdir(parents=True, exist_ok=True)
+                files.config.write_bytes(f"{self.OLD_WIDTH}{ending}side = right{ending}".encode())
+                core.change_prefs(files, lambda prefs: {**prefs, "side": "left"})
+                self.assertEqual(files.config.read_bytes().decode(),
+                                 f"{self.NEW_WIDTH}{ending}side = left{ending}")
+
+    def test_only_exact_old_template_lines_change(self):
+        for text in (f"  {self.OLD_WIDTH}\n", f"{self.OLD_WIDTH} mine\n", "# my note (< and > change it too)\n",
+                     "## my own\n# another one\n"):
+            with self.subTest(text=text):
+                self.assertEqual(core.refresh_template_comments(text), text)
+
+    def test_an_old_comment_alone_causes_no_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            files = files_in(d)
+            files.config.parent.mkdir(parents=True)
+            files.config.write_text(f"{self.OLD_WIDTH}\nside = right\n")
+            before = (files.config.read_bytes(), files.config.stat().st_mtime_ns)
+            core.change_prefs(files, lambda prefs: prefs)
+            self.assertEqual((files.config.read_bytes(), files.config.stat().st_mtime_ns), before)
+
+    def test_no_current_comment_is_an_old_one(self):
+        for setting in core.SETTINGS:
+            self.assertNotIn("# " + setting.comment, core.OLD_TEMPLATE_COMMENTS)
+        current = {"# " + s.comment for s in core.SETTINGS}
+        for new in core.OLD_TEMPLATE_COMMENTS.values():
+            self.assertIn(new, current)
 
     def test_config_and_state_are_written_private(self):
         core.ensure_config(self.files)
@@ -1781,10 +1823,8 @@ class ConfigFile(unittest.TestCase):
                          "config line 2: a (+2 more; emx config shows the file)")
 
 
-class FavouriteHint(unittest.TestCase):
-    def test_the_hint_is_the_panels_text(self):
-        self.assertEqual(core.favourite_hint("~/x", True), "★ ~/x is a favourite")
-        self.assertEqual(core.favourite_hint("~/x", False), "~/x is no longer a favourite")
+class MajorLine(unittest.TestCase):
+    def test_the_line_names_the_command(self):
         self.assertEqual(core.major_line("3.0.0"), "emx 3.0.0 available: run emx update")
 
 
@@ -6353,13 +6393,8 @@ class ColourSchemes(unittest.TestCase):
     def test_the_scheme_survives_a_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:
             path = files_in(d)
-            core.save_prefs(path, core.set_scheme({}, "terminal"))
+            core.save_prefs(path, {"scheme": "terminal"})
             self.assertEqual(core.scheme(core.load_prefs(path)), "terminal")
-
-    def test_set_scheme_leaves_its_input_alone(self):
-        prefs = {"side": "left"}
-        self.assertEqual(core.set_scheme(prefs, "light"), {"side": "left", "scheme": "light"})
-        self.assertEqual(prefs, {"side": "left"})
 
 
 if __name__ == "__main__":

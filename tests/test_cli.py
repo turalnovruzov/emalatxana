@@ -19,7 +19,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 import emx
-from emx import __version__, cli, core
+from emx import __version__, cli, core, notify
 from emx.tmux import OPEN_OPT, RELAY_PASTE_OPT, SESSION, TERMINAL_OPT, VERSION_OPT, Pane, Tmux, TmuxError, View
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -291,8 +291,9 @@ class PhoneAddress(unittest.TestCase):
 
     def test_the_busy_line_names_the_port_from_the_setting(self):
         self.write({"url": None, "problem": "busy"})
-        with mock.patch.dict(os.environ, {"EMX_PHONE_PORT": "9001"}):
-            self.assertIn("port 9001 is taken", self.run_phone()[1])
+        core.ensure_config(core.prefs_files())
+        core.change_prefs(core.prefs_files(), lambda prefs: {**prefs, "phone_port": 9001})
+        self.assertIn("port 9001 is taken", self.run_phone()[1])
 
     def test_with_no_file_yet_it_asks_to_wait(self):
         code, out, _ = self.run_phone()
@@ -308,9 +309,9 @@ class PhoneAddress(unittest.TestCase):
             self.assertEqual(self.run_phone()[0], 2)
         self.assertEqual(self.run_phone(args=("x",))[0], 2)
 
-    def test_it_is_a_public_command_and_the_port_setting_is_in_the_usage(self):
+    def test_it_is_a_public_command_and_the_port_variable_is_gone_from_the_usage(self):
         self.assertIn("| phone |", cli.USAGE.splitlines()[0])
-        self.assertIn("EMX_PHONE_PORT", cli.USAGE)
+        self.assertNotIn("EMX_PHONE_PORT", cli.USAGE)
 
 
 class OpenSession(unittest.TestCase):
@@ -422,7 +423,7 @@ class OpenSession(unittest.TestCase):
     def test_every_click_rewrites_the_one_launch_file_in_place(self):
         self.run_open(attached=0, terminal="com.googlecode.iterm2")
         first = self.launch_file().read_text(encoding="utf-8")
-        with mock.patch.dict(os.environ, {"EMX_CLAUDE": "/x/other-claude"}):
+        with mock.patch.dict(os.environ, {"EMX_NOTIFY_HOME": "/x/other-home"}):
             self.run_open(attached=0, terminal="com.googlecode.iterm2")
         self.run_open(server=False)
         self.assertEqual(self.command_files(), [self.launch_file()])
@@ -431,6 +432,10 @@ class OpenSession(unittest.TestCase):
         self.assertEqual(self.launch_file().read_text(encoding="utf-8"), first)
         self.assertEqual({tuple(argv) for argv in self.opened()},
                          {("/x/fake-open", "-b", runner, str(self.launch_file())) for runner in ("com.googlecode.iterm2", "com.apple.Terminal")})
+
+    def test_open_env_drops_the_removed_settings(self):
+        self.assertNotIn("EMX_CLAUDE", notify.OPEN_ENV)
+        self.assertNotIn("EMX_REMOTE_COMMAND", notify.OPEN_ENV)
 
     def test_launch_files_of_earlier_builds_are_removed(self):
         folder = Path(self.state, "emx", "open")
@@ -824,7 +829,9 @@ class OpenRemote(unittest.TestCase):
         self.log = os.path.join(tmp.name, "ssh.log")
         fake = str(Path(__file__).resolve().parent / "fake_ssh.py")
         env = {"EMX_REMOTE_HOST": "srv", "EMX_SSH": fake, "EMX_REMOTE_TERMINAL": "com.googlecode.iterm2",
-               "EMX_REMOTE_COMMAND": "true", "FAKE_SSH_LOG": self.log, "EMX_SOCKET": "emx-test-x"}
+               "FAKE_SSH_LOG": self.log, "EMX_SOCKET": "emx-test-x"}
+        core.ensure_config(core.prefs_files())
+        core.change_prefs(core.prefs_files(), lambda prefs: {**prefs, "remote_command": "true"})
         for patch in (
             mock.patch.dict(os.environ, env),
             mock.patch.object(cli, "Tmux", side_effect=AssertionError("a local tmux was touched")),
@@ -935,9 +942,10 @@ class RemoteCommand(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("remote <host>", err.getvalue())
 
-    def test_the_usage_names_the_command_and_its_setting(self):
+    def test_the_usage_names_the_command_and_its_ssh_variable_only(self):
         self.assertIn("remote <host>", cli.USAGE)
-        self.assertIn("EMX_REMOTE_COMMAND", cli.USAGE)
+        self.assertNotIn("EMX_REMOTE_COMMAND", cli.USAGE)
+        self.assertIn("EMX_SSH", cli.USAGE)
 
 
 class RecordingWorkspace:
@@ -1254,6 +1262,11 @@ class UpdateCommands(unittest.TestCase):
     def config_text(self):
         return core.prefs_files().config.read_text(encoding="utf-8")
 
+    def set_updates(self, value):
+        core.ensure_config(core.prefs_files())
+        path = core.prefs_files().config
+        path.write_text(path.read_text().replace("updates = on", f"updates = {value}").replace("updates = off", f"updates = {value}"))
+
     def test_update_from_a_checkout_says_so_and_writes_nothing(self):
         self.assertIsNone(emx.ROOT)
         code, out, err = self.run_main("update")
@@ -1263,24 +1276,15 @@ class UpdateCommands(unittest.TestCase):
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.exists(self.bin))
 
-    def test_update_off_writes_the_config_even_on_a_checkout(self):
-        self.assertIsNone(emx.ROOT)
-        code, out, _ = self.run_main("update", "off")
-        self.assertEqual((code, out), (0, "Automatic updates are off; emx update still updates when you run it.\n"))
-        self.assertIn("\nupdates = off\n", self.config_text())
-        code, out, _ = self.run_main("update", "on")
-        self.assertEqual((code, out), (0, "Automatic updates are on.\n"))
-        self.assertIn("\nupdates = on\n", self.config_text())
-
-    def test_update_off_then_on_writes_the_config_and_leaves_the_marker(self):
-        self.installed()
-        marker = os.path.join(self.root, "updates-off")
-        before = self.run_main("update", "off")
-        self.assertEqual(before[:2], (0, "Automatic updates are off; emx update still updates when you run it.\n"))
-        self.assertIn("\nupdates = off\n", self.config_text())
-        self.assertFalse(os.path.exists(marker))
-        self.assertEqual(self.run_main("update", "on")[:2], (0, "Automatic updates are on.\n"))
-        self.assertIn("\nupdates = on\n", self.config_text())
+    def test_removed_commands_print_the_usage_and_change_nothing(self):
+        path = core.prefs_files().config
+        for argv in (("colors",), ("colors", "dark"), ("update", "off"), ("update", "on")):
+            with self.subTest(argv=argv):
+                before = path.read_bytes() if path.exists() else None
+                code, out, err = self.run_main(*argv)
+                self.assertEqual((code, out), (2, ""))
+                self.assertTrue(err.startswith("usage: emx"))
+                self.assertEqual(path.read_bytes() if path.exists() else None, before)
 
     def test_update_report_reads_the_config(self):
         self.installed()
@@ -1338,11 +1342,11 @@ class UpdateCommands(unittest.TestCase):
         add_version(self.source, "2.3.2")
         got = self.report()
         self.assertEqual((got["status"], got["before"], got["after"]), ("updated", "2.3.1", "2.3.2"))
-        self.run_main("update", "off")
+        self.set_updates("off")
         add_version(self.source, "2.3.3")
         got = self.report()
         self.assertEqual((got["status"], got["after"]), ("off", "2.3.2"))
-        self.run_main("update", "on")
+        self.set_updates("on")
         cli.install.git(self.root, "remote", "set-url", "origin", os.path.join(self.tmp, "missing"))
         got = self.report()
         self.assertEqual((got["status"], got["before"]), ("failed", "2.3.2"))
@@ -1446,10 +1450,13 @@ class UpdateCommands(unittest.TestCase):
         self.assertEqual(done.stdout.strip(), os.path.join(self.root, "current", "bin", "emx"))
 
     def test_usage_names_update_uninstall_and_the_internal_commands(self):
-        for words in ("update [off | on]", "uninstall", "emx install <url> is internal", "emx update --report is internal",
-                      "emx relaunch <socket> is internal", "docs [<page>]", "docs <page> prints one page", "EMX_HOME", "EMX_BIN_HOME", "EMX_UPDATE_SECONDS"):
+        for words in ("| update |", "uninstall", "emx install <url> is internal", "emx update --report is internal",
+                      "emx relaunch <socket> is internal", "docs [<page>]", "docs <page> prints one page", "EMX_HOME", "EMX_BIN_HOME"):
             with self.subTest(words=words):
                 self.assertIn(words, cli.USAGE)
+        for words in ("EMX_UPDATE_SECONDS", "update [off", "colors"):
+            with self.subTest(words=words):
+                self.assertNotIn(words, cli.USAGE)
 
 
 def docs_text(page):
@@ -1756,57 +1763,6 @@ class Migration(unittest.TestCase):
         self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
 
 
-class ColorsCommand(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp})
-        patch.start()
-        self.addCleanup(patch.stop)
-        self.prefs = core.prefs_files()
-
-    def run_main(self, *argv):
-        out, err = io.StringIO(), io.StringIO()
-        with redirect_stdout(out), redirect_stderr(err):
-            code = cli.main(["colors", *argv])
-        return code, out.getvalue(), err.getvalue()
-
-    def test_setting_a_scheme_saves_it_and_keeps_the_other_prefs(self):
-        core.save_prefs(self.prefs, {"side": "left"})
-        self.assertEqual(self.run_main("light"), (0, "Colours set to light.\n", ""))
-        saved = core.load_prefs(self.prefs)
-        self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
-
-    def test_colors_writes_one_line_keeping_comments(self):
-        core.ensure_config(self.prefs)
-        before = self.prefs.config.read_text(encoding="utf-8").splitlines()
-        self.run_main("dark")
-        after = self.prefs.config.read_text(encoding="utf-8").splitlines()
-        self.assertEqual([(a, b) for a, b in zip(before, after) if a != b], [("scheme = terminal", "scheme = dark")])
-        self.assertEqual(len(before), len(after))
-
-    def test_with_no_argument_it_prints_the_scheme(self):
-        self.assertEqual(self.run_main(), (0, "Colours: terminal. Choices: dark, light, terminal.\n", ""))
-        self.assertFalse(self.prefs.config.exists())
-        self.run_main("light")
-        self.assertEqual(self.run_main()[1], "Colours: light. Choices: dark, light, terminal.\n")
-
-    def test_anything_else_prints_the_usage_and_changes_nothing(self):
-        self.run_main("light")
-        before = self.prefs.config.read_text(encoding="utf-8")
-        for args in (("pink",), ("light", "dark")):
-            with self.subTest(args=args):
-                code, out, err = self.run_main(*args)
-                self.assertEqual((code, out), (2, ""))
-                self.assertIn("colors [dark | light | terminal]", err)
-                self.assertEqual(self.prefs.config.read_text(encoding="utf-8"), before)
-
-    def test_a_prefs_file_that_cannot_be_written_is_reported(self):
-        with mock.patch.object(cli.core, "save_prefs", side_effect=OSError("disk full")):
-            code, out, err = self.run_main("terminal")
-        self.assertEqual((code, out, err), (1, "", "emx: couldn't save settings: disk full\n"))
-
-
 class ConfigCommand(unittest.TestCase):
     def setUp(self):
         tmp = os.path.realpath(tempfile.mkdtemp())
@@ -1874,7 +1830,7 @@ class UpgradeKeepsScheme(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
         with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp}):
-            core.save_prefs(core.prefs_files(), core.set_scheme({}, "light"))
+            core.save_prefs(core.prefs_files(), {"scheme": "light"})
             tmux = MigratingTmux("emx-test-unit")
             tmux.options[VERSION_OPT] = "old"
             cli.refresh_workspace(tmux)

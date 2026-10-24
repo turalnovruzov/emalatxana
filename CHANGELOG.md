@@ -2,6 +2,15 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.21.0 — 2026-10-24
+
+- Settings now change in one place only: the config file, through `c` in the panel or `emx config`.
+- Removed, because `c` does the same: the panel keys `s` (side), `<` `>` and `,` `.` (width), `m` (mode) and `^s` (view). Dragging the panel's border still saves the width, and `h` still stops the voice.
+- Removed: `^t` starring a folder in the folder list, and the star on the phone page. Favourites are added and removed under `c` (Favourites). `^t` still pins a session.
+- Removed: `emx colors` and `emx update off` / `on`. Colours and Automatic updates are under `c`. `emx update` still installs the newest version now.
+- Removed: the environment variables `EMX_PHONE_PORT`, `EMX_UPDATE_SECONDS`, `EMX_CLAUDE` and `EMX_REMOTE_COMMAND` no longer have any effect. If you set one, put its value in the config file instead: `phone_port`, `update_check_seconds`, `claude_command` or `remote_command`.
+- The comment above `panel_width` in an existing config file is brought up to date the next time emx saves a setting.
+
 ## 2.20.0 — 2026-10-24
 
 - All of emx's settings now live in one commented file, `~/.config/emx/config`: side, panel width, view, mode, colours, automatic updates and how often to check, the phone port, favourite folders, and the claude and server commands. Each line has a comment saying what it does and what it accepts.

@@ -2529,10 +2529,6 @@ def scheme(prefs: dict) -> str:
     return prefs.get("scheme", TERMINAL)
 
 
-def set_scheme(prefs: dict, name: str) -> dict:
-    return {**prefs, "scheme": name}
-
-
 def notice_mode(prefs: dict) -> str:
     return prefs.get("mode", NOTIFICATION_MODE)
 
@@ -2581,7 +2577,6 @@ class Setting:
     shown: tuple = ()
     low: int = 0
     high: int | None = None
-    env: str = ""
     wide_only: bool = False
     next_start: bool = False
 
@@ -2589,7 +2584,7 @@ class Setting:
 SETTINGS = (
     Setting("side", "Panel", "Side", "choice", "right", "Which side of the window the panel sits on: left or right",
             "Which side of the window the panel sits on.", choices=SIDES, wide_only=True),
-    Setting("panel_width", "Panel", "Width", "number", 40, "Panel width in columns, 16 to 500 (< and > change it too)",
+    Setting("panel_width", "Panel", "Width", "number", 40, "Panel width in columns, 16 to 500 (dragging the pane border changes it too)",
             "How many columns wide the panel is.", low=MIN_PANEL, high=MAX_WIDTH, wide_only=True),
     Setting("view", "Panel", "View", "choice", PROJECT, "How sessions are grouped: project or state",
             "How the panel groups sessions: by project or by state.", choices=VIEWS, shown=("by project", "by state")),
@@ -2601,21 +2596,25 @@ SETTINGS = (
     Setting("updates", "Updates", "Automatic updates", "choice", "on", "Install new versions by itself: on or off",
             "Whether emx installs new versions by itself.", choices=("on", "off")),
     Setting("update_check_seconds", "Updates", "Check every", "number", 600, "How often to check, in seconds",
-            "How often emx looks for a new version, in seconds.", low=UPDATE_MIN_SECONDS, env="EMX_UPDATE_SECONDS"),
+            "How often emx looks for a new version, in seconds.", low=UPDATE_MIN_SECONDS),
     Setting("phone_port", "Phone", "Port", "number", DEFAULT_PHONE_PORT,
             "Port of the phone page, 1024 to 65535 (takes effect at the next start)", "The port of the phone page.",
-            low=1024, high=65535, env="EMX_PHONE_PORT", next_start=True),
+            low=1024, high=65535, next_start=True),
     Setting("favourite_folders", "Folders", "Favourites", "folders", [], "Starred folders for new sessions, one per line",
             "Folders starred for new sessions."),
     Setting("claude_command", "Commands", "Claude command", "text", "claude",
             "The claude command sessions start with (takes effect at the next start)",
-            "The command sessions start claude with.", env="EMX_CLAUDE", next_start=True),
+            "The command sessions start claude with.", next_start=True),
     Setting("remote_command", "Commands", "Server's emx", "text", "emx",
             "emx's command on the server, for emx remote (run through its login shell)",
-            "emx's command on the server, used by emx remote.", env="EMX_REMOTE_COMMAND"),
+            "emx's command on the server, used by emx remote."),
 )
 SETTING_BY_KEY = {s.key: s for s in SETTINGS}
 CONFIG_KEYS = frozenset(SETTING_BY_KEY)
+OLD_TEMPLATE_COMMENTS = {
+    "# Panel width in columns, 16 to 500 (< and > change it too)":
+        "# Panel width in columns, 16 to 500 (dragging the pane border changes it too)",
+}
 CONFIG_HEADER = (
     "# emx settings. Save the file and a running emx follows within seconds.",
     "# A line emx can’t read is skipped, and the bar says which and why.",
@@ -2809,6 +2808,17 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
     return text
 
 
+def refresh_template_comments(text: str) -> str:
+    """`text` with each line that is exactly a comment an older emx wrote replaced by today's; his own comments never change."""
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if body in OLD_TEMPLATE_COMMENTS:
+            line = OLD_TEMPLATE_COMMENTS[body] + line[len(body):]
+        out.append(line)
+    return "".join(out)
+
+
 def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
     """Replaces `path` whole; a symlink is followed, so the file it points to changes and the link stays."""
     path = Path(os.path.realpath(path))
@@ -2929,7 +2939,7 @@ def save_prefs(files: PrefsFiles, prefs: dict) -> None:
     parsed = read_config(text, home)[0]
     changes = {k: v for k, v in wanted.items() if v != parsed[k]}
     if changes:
-        new = write_config_text(text, changes, home)
+        new = refresh_template_comments(write_config_text(text, changes, home))
         if new != text:
             _atomic_write(files.config, new, mode=files.config.stat().st_mode & 0o777)
 
@@ -2964,50 +2974,24 @@ def ensure_config(files: PrefsFiles, updates_off: bool = False) -> bool:
     return True
 
 
-def _env_value(setting: Setting, env: Mapping | None):
-    """The setting's environment variable's value when it is set and good, else None."""
-    env = os.environ if env is None else env
-    text = env.get(setting.env, "").strip() if setting.env else ""
-    if setting.kind == "text":
-        return text or None
-    if setting.kind == "number":
-        return _check(setting, text, "")[0]
-    return None
-
-
-def env_override(setting: Setting, env: Mapping | None = None) -> str:
-    return setting.env if _env_value(setting, env) is not None else ""
-
-
-def _setting_value(key: str, prefs: Mapping, env: Mapping | None):
-    setting = SETTING_BY_KEY[key]
-    value = _env_value(setting, env)
-    return prefs.get(key, setting.default) if value is None else value
-
-
-def setting_value(setting: Setting, prefs: Mapping, env: Mapping | None = None):
-    """What emx uses for the setting now: its environment variable when that is set and good, else the file's value."""
-    return _setting_value(setting.key, prefs, env)
-
-
 def updates_on(prefs: Mapping) -> bool:
     return prefs.get("updates", "on") != "off"
 
 
-def update_seconds(prefs: Mapping, env: Mapping | None = None) -> int:
-    return _setting_value("update_check_seconds", prefs, env)
+def update_seconds(prefs: Mapping) -> int:
+    return prefs.get("update_check_seconds", SETTING_BY_KEY["update_check_seconds"].default)
 
 
-def phone_port(prefs: Mapping, env: Mapping | None = None) -> int:
-    return _setting_value("phone_port", prefs, env)
+def phone_port(prefs: Mapping) -> int:
+    return prefs.get("phone_port", SETTING_BY_KEY["phone_port"].default)
 
 
-def claude_command(prefs: Mapping, env: Mapping | None = None) -> str:
-    return _setting_value("claude_command", prefs, env)
+def claude_command(prefs: Mapping) -> str:
+    return prefs.get("claude_command", SETTING_BY_KEY["claude_command"].default)
 
 
-def remote_command(prefs: Mapping, env: Mapping | None = None) -> str:
-    return _setting_value("remote_command", prefs, env)
+def remote_command(prefs: Mapping) -> str:
+    return prefs.get("remote_command", SETTING_BY_KEY["remote_command"].default)
 
 
 def settings_rows(narrow: bool) -> list:
@@ -3129,10 +3113,6 @@ def toggle_favourite(prefs: dict, folder: str) -> tuple[dict, bool]:
     if updated:
         new["favourite_folders"] = updated
     return new, on
-
-
-def favourite_hint(name: str, on: bool) -> str:
-    return f"★ {name} is a favourite" if on else f"{name} is no longer a favourite"
 
 
 def major_line(major: str) -> str:

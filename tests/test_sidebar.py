@@ -429,7 +429,7 @@ class AppCase(unittest.TestCase):
         self.app.poller.result = (list(sessions), None)
 
     def write_scheme(self, name, mtime):
-        core.save_prefs(self.app.prefs_files, core.set_scheme(core.load_prefs(self.app.prefs_files), name))
+        core.save_prefs(self.app.prefs_files, {**core.load_prefs(self.app.prefs_files), "scheme": name})
         os.utime(self.app.prefs_files.config, ns=(mtime, mtime))
 
     def housekeep_once(self):
@@ -1740,7 +1740,7 @@ class NewSession(AppCase):
             self.type("~/some/path")
             self.app.draw()
             self.keys(curses.KEY_DOWN, "\t", "\n")
-        self.assertEqual(len(saves), 1)
+        self.assertEqual(saves, [])
 
     def test_n_enter_enter_never_reopens_the_stopped_row_under_the_cursor(self):
         self.poll(session("s", "/p/stopped", state="stopped", pid=None), session("b", "/p/beta"))
@@ -1968,34 +1968,18 @@ class NewSession(AppCase):
         self.assertTrue(next(t for t in lines if "/f/star" in t).startswith("★"))
         self.assertTrue(next(t for t in lines if "/f/r1" in t).startswith(" "))
 
-    def test_ctrl_t_stars_the_highlight_saves_it_and_keeps_the_highlight(self):
+    def test_ctrl_t_in_the_picker_changes_nothing(self):
         self.picker_with(recent=["/f/r1", "/f/r2"])
         self.keys(curses.KEY_DOWN, curses.KEY_DOWN, "\x14")
-        self.assertEqual(self.saved()["favourite_folders"], ["/f/r2"])
-        self.assertEqual(self.app.suggestions()[0].path, "/f/r2")
-        self.assertEqual(self.app.prompt["picked"], "/f/r2")
-        self.assertIn("favourite", self.app.prompt["hint"])
-        self.keys("\x14")
         self.assertNotIn("favourite_folders", self.saved())
-
-    def test_ctrl_t_with_nothing_highlighted_stars_the_top_row(self):
-        self.picker_with(recent=["/f/r1"])
-        self.keys("\x14")
-        self.assertEqual(self.saved()["favourite_folders"], ["/f/r1"])
+        self.assertEqual(self.app.prompt["picked"], "/f/r2")
+        self.assertEqual(self.app.prompt["hint"], "")
 
     def test_ctrl_t_in_the_message_stage_does_nothing(self):
         self.app.cursor = ("session", "b")
         self.keys("n", "\x14")
         self.assertEqual((self.app.prompt["stage"], self.app.prompt["text"]), ("message", ""))
         self.assertNotIn("favourite_folders", self.app.prefs)
-
-    def test_unstarring_a_folder_that_leaves_the_list_clears_the_highlight(self):
-        self.picker_with(favourites=["/f/only"])
-        self.keys(curses.KEY_DOWN)
-        self.assertEqual(self.app.prompt["picked"], "/f/only")
-        self.keys("\x14")
-        self.assertNotIn("/f/only", self.paths())
-        self.assertIsNone(self.app.prompt["picked"])
 
     def test_a_remembered_folder_found_missing_is_hidden_and_kept(self):
         self.app.listings.readable_cache.update({"/f/gone": False, "/f/gonefav": False})
@@ -2014,13 +1998,17 @@ class NewSession(AppCase):
         self.assertEqual(rows, [f"/f/r{i}" for i in range(2, 10)])
         self.assertIn("/f/r9", self.app.listings.asked)
 
-    def test_the_picker_hint_names_ctrl_t(self):
+    def test_the_picker_hint_has_no_star_key(self):
         self.picker_with()
         drawn = " ".join(text.strip() for text, _ in self.app.bottom_lines(39, 30))
-        self.assertIn("^t ★", drawn)
+        self.assertNotIn("^t", drawn)
 
-    def test_the_help_names_the_favourite_key(self):
-        self.assertTrue(any("^t" in text and "★" in text for _, text in sidebar.HELP))
+    def test_the_help_names_no_star_key(self):
+        for table in (sidebar.HELP, sidebar.NARROW_HELP):
+            for _, text in table:
+                self.assertNotIn("^t", text)
+                self.assertNotIn("star", text)
+        self.assertIn("pin", dict(sidebar.HELP)["^t"])
         self.assertIn("Tab", dict(sidebar.HELP)["n"])
 
     def test_opening_a_session_makes_its_folder_recent_but_not_last(self):
@@ -4509,10 +4497,10 @@ class UpdaterWorker(unittest.TestCase):
         self.addCleanup(prune.stop)
 
     def test_the_interval_is_an_int_of_at_least_five_seconds(self):
-        for value, seconds in (("", 600), ("60", 60), ("5", 5), ("4", 600), ("x", 600), ("1.5", 600)):
+        for value, seconds in ((60, 60), (5, 5), (4, 600), ("x", 600), (1.5, 600)):
             with self.subTest(value=value):
-                self.assertEqual(core.update_seconds({}, {"EMX_UPDATE_SECONDS": value}), seconds)
-        self.assertEqual(core.update_seconds({}, {}), core.UPDATE_CHECK_SECONDS)
+                self.assertEqual(core.update_seconds(core.normalize_prefs({"update_check_seconds": value})), seconds)
+        self.assertEqual(core.update_seconds({}), core.UPDATE_CHECK_SECONDS)
 
     def test_the_first_check_waits_then_checks_each_interval_with_the_guard_and_no_wait(self):
         with mock.patch.object(sidebar.install, "update", return_value=(("9.0.0", "9.0.0", None), None)) as update:
@@ -4927,7 +4915,7 @@ class AppBar(AppCase):
         self.assertIn("⚒", plain_bar(self.app.bar.pushed[0]))
 
     def test_the_idle_count_is_lavender(self):
-        self.app.prefs = core.set_scheme(self.app.prefs, "dark")
+        self.app.prefs = {**self.app.prefs, "scheme": "dark"}
         self.app.window_width = 100
         self.app.update_bar()
         self.assertIn("#[fg=colour103,bold]✻1", self.app.bar.pushed[-1])
@@ -4937,7 +4925,7 @@ class AppBar(AppCase):
         self.assertIn(f"{sidebar.__version__} ⇄ myserver", self.bar())
 
     def test_voice_mode_shows_the_word(self):
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertIn("voice", self.bar())
 
     def test_the_hints_follow_the_context(self):
@@ -5018,7 +5006,7 @@ class HintsInTheBar(AppCase):
         self.app.handle_key("\n")
         self.assertIn("Enter unfold", self.bar(200))
         self.app.handle_key("\n")
-        self.app.handle_key(sidebar.CTRL_S)
+        self.app.toggle_view()
         self.app.cursor = ("group", core.NEEDS_INPUT)
         text = self.bar(200)
         self.assertIn("Enter fold  n new  ? keys", text)
@@ -6812,7 +6800,7 @@ class HistoryWiring(AppCase):
         self.assertEqual(self.app.history, [])
 
     def test_the_bar_dims_a_read_newest_notice(self):
-        self.app.prefs = core.set_scheme(self.app.prefs, "dark")
+        self.app.prefs = {**self.app.prefs, "scheme": "dark"}
         self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
         self.app.window_width = 140
         self.app.update_bar()
@@ -7027,6 +7015,14 @@ class CollapseWiring(AppCase):
         self.assertNotEqual(self.saved()["panel_width"], 55)
         self.assertNotEqual(self.saved()["panel_width"], 60)
 
+    def test_a_dragged_border_saves_the_width(self):
+        self.app.applied = (200, 40)
+        before = self.app.prefs_files.config.read_text(encoding="utf-8").splitlines()
+        self.tick(window_width=200, panel_width=50)
+        after = self.app.prefs_files.config.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([line for line in after if line not in before], ["panel_width = 50"])
+        self.assertEqual(len(after), len(before))
+
     def test_binds_paste_once_with_the_relay_file(self):
         self.tick()
         self.tick()
@@ -7105,10 +7101,10 @@ class HushWiring(AppCase):
         self.housekeep("100")
         self.assertEqual(self.silenced, [])
 
-    def test_the_help_lists_h_and_m(self):
+    def test_the_help_lists_h_and_not_m(self):
         keys = dict(sidebar.HELP)
         self.assertIn("stop the voice", keys["h"])
-        self.assertIn("voice mode or notification mode", keys["m"])
+        self.assertNotIn("m", keys)
 
     def test_h_in_notification_mode_calls_no_voice_and_shows_no_message(self):
         self.app.prefs = {**self.app.prefs, "mode": core.NOTIFICATION_MODE}
@@ -7151,9 +7147,9 @@ class AppRelay(AppCase):
         self.assertEqual(self.lines(), [])
 
     def test_switching_to_notification_mode_appends_one_hush_line_and_to_voice_none(self):
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.lines(), [])
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual([core.parse_relay(l) for l in self.lines()], [{"kind": "hush"}])
 
     def test_a_connected_laptop_takes_the_unavailable_tag_off_the_bar(self):
@@ -7193,7 +7189,7 @@ class ModeKey(AppCase):
         self.assertTrue(self.app.poller.voice.muted)
 
     def test_m_switches_to_voice_saves_it_and_a_new_panel_keeps_it(self):
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.prefs_on_disk()["mode"], "voice")
         self.assertNotIn("voice", self.prefs_on_disk())
         self.assertEqual(self.app.poller.notices.mode, core.VOICE_MODE)
@@ -7203,8 +7199,8 @@ class ModeKey(AppCase):
         self.assertFalse(again.poller.voice.muted)
 
     def test_m_again_returns_to_notification_mode(self):
-        self.app.handle_key("m")
-        self.app.handle_key("m")
+        self.app.toggle_mode()
+        self.app.toggle_mode()
         self.assertEqual(self.prefs_on_disk()["mode"], "notification")
         self.assertEqual(self.app.poller.notices.mode, core.NOTIFICATION_MODE)
         self.assertEqual(self.app.notice, "Notification mode")
@@ -7212,25 +7208,25 @@ class ModeKey(AppCase):
     def test_m_sets_the_voice_muted_flag_both_ways(self):
         self.app.poller.voice = sidebar.Voice()
         self.app.poller.voice.muted = True
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertFalse(self.app.poller.voice.muted)
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertTrue(self.app.poller.voice.muted)
 
     def test_entering_notification_mode_silences_the_voice_and_leaving_it_does_not(self):
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.silenced, [])
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(len(self.silenced), 1)
 
     def test_entering_notification_mode_asks_the_notifier_for_the_permission(self):
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.app.poller.notifier.asked, 0)
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.app.poller.notifier.asked, 1)
 
-    def test_the_help_has_the_m_line(self):
-        self.assertIn(("m", "voice mode or notification mode"), sidebar.HELP)
+    def test_the_help_has_no_m_line(self):
+        self.assertNotIn("m", dict(sidebar.HELP))
 
     def test_a_saved_old_voice_setting_starts_in_its_mode(self):
         for voice, mode in ((True, core.VOICE_MODE), (False, core.NOTIFICATION_MODE)):
@@ -7251,9 +7247,9 @@ class ModeKey(AppCase):
         self.assertNotIn("voice", plain)
         self.assertNotIn("notifications blocked", plain)
         self.assertNotIn("notifications unavailable", plain)
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertIn("voice", self.bar())
-        self.app.handle_key("m")
+        self.app.toggle_mode()
         self.assertEqual(self.bar(), plain)
 
     def test_the_bar_shows_blocked_or_unavailable_only_in_notification_mode(self):
@@ -7261,10 +7257,10 @@ class ModeKey(AppCase):
             with self.subTest(state=state):
                 self.app.poller.notifier.state = state
                 self.assertIn(label, self.bar())
-                self.app.handle_key("m")
+                self.app.toggle_mode()
                 self.assertNotIn(label, self.bar())
                 self.assertIn("voice", self.bar())
-                self.app.handle_key("m")
+                self.app.toggle_mode()
         self.app.poller.notifier.state = core.HELPER_PENDING
         self.assertNotIn("notifications blocked", self.bar())
         self.assertNotIn("notifications unavailable", self.bar())
@@ -7936,19 +7932,15 @@ HELP_2_10_0 = (
     ("Enter click", "fold a group; a click opens a session"),
     ("space", "peek at what the session asks or did; ↑↓ next, space or Esc close"),
     ("n", "new session where the cursor is; Tab there picks another folder"),
-    ("", "in its folder list ^t stars a favourite; ★ and recent folders list first"),
+    ("", "in its folder list favourites (c) and recent folders list first"),
     ("^x", "interrupt a working session; twice closes it"),
     ("", "on a project header, twice closes the group"),
     ("^f /", "find a session by name or folder"),
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
-    ("^s", "by project / by state"),
     ("N", "notifications: the last 20; Enter opens one"),
     ("R", "routines: what ran in the past 24 hours; R or Esc back"),
-    ("m", "voice mode or notification mode"),
     ("h", "stop the voice now (voice mode)"),
-    ("s", "panel to the other side"),
-    ("< >", "narrower / wider panel"),
     ("^\\", "jump to main and back"),
     ("^q", "hide the panel; ^q again, ^\\ or ← brings it back"),
     ("q", "detach; sessions keep running"),
@@ -8147,13 +8139,21 @@ class PhonePanel(AppCase):
         self.app.draw()
         self.assertTrue(any("Enter fold" in line for line in self.scr.cells.values()), self.scr.cells)
 
-    def test_side_and_width_keys_do_nothing_on_a_phone(self):
-        before = dict(self.app.prefs)
-        self.app.tmux = PhoneTmux()
-        for key in ("s", "<", ">", ",", "."):
-            self.app.handle_key(key)
-        self.assertEqual(self.app.prefs, before)
-        self.assertEqual(self.app.tmux.calls, [])
+    def test_removed_keys_do_nothing_on_the_main_list(self):
+        config = self.app.prefs_files.config
+
+        def state():
+            text = config.read_text(encoding="utf-8") if config.exists() else None
+            return (dict(self.app.prefs), text, self.app.mode(), self.app.view(), self.app.notice, len(self.app.tmux.calls))
+
+        for tmux in (None, PhoneTmux()):
+            if tmux is not None:
+                self.app.tmux = tmux
+            before = state()
+            for key in ("s", "<", ">", ",", ".", "m", "\x13"):
+                with self.subTest(key=key, phone=tmux is not None):
+                    self.app.handle_key(key)
+                    self.assertEqual(state(), before)
 
     def test_t_opens_the_session_here_and_on_a_header_does_nothing(self):
         self.poll(session("a", "/p/alpha", "done"))
@@ -8220,11 +8220,10 @@ class PhonePanel(AppCase):
         self.app.handle_key(curses.KEY_DOWN)
         self.assertFalse(self.app.help)
 
-    def test_every_plain_key_of_the_laptops_help_but_the_wide_only_ones_is_in_the_phones(self):
+    def test_every_plain_key_of_the_laptops_help_but_the_wheel_is_in_the_phones(self):
         laptop = {t for keys, _ in sidebar.HELP if keys for t in keys.split()}
         phone = {t for keys, _ in sidebar.NARROW_HELP for t in keys.split()}
-        self.assertEqual(laptop - phone, {"s", "<", ">", "wheel"})
-        self.assertTrue(set(sidebar.WIDE_ONLY_KEYS) >= {"s", "<", ">"})
+        self.assertEqual(laptop - phone, {"wheel"})
         self.assertEqual(phone - laptop, {"↵", "t", "‹", "a"})
 
     def test_every_key_in_the_phones_help_does_something_on_a_phone(self):
@@ -8240,10 +8239,10 @@ class PhonePanel(AppCase):
             "n": ("n", lambda: self.app.prompt is not None), "^x": (sidebar.CTRL_X, lambda: self.app.confirm is not None),
             "^f": (sidebar.CTRL_F, lambda: self.app.find is not None), "/": ("/", lambda: self.app.find is not None),
             "^t": (sidebar.CTRL_T, lambda: "a" in core.pinned_ids(self.app.prefs)),
-            "^r": (sidebar.CTRL_R, lambda: self.app.rename_edit is not None), "^s": (sidebar.CTRL_S, lambda: self.app.view() == core.BY_STATE),
+            "^r": (sidebar.CTRL_R, lambda: self.app.rename_edit is not None),
             "c": ("c", lambda: self.app.settings is not None),
             "N": ("N", lambda: self.app.history_view is not None), "R": ("R", lambda: self.app.routines_view is not None),
-            "m": ("m", lambda: self.app.mode() != core.NOTIFICATION_MODE), "h": ("h", lambda: self.silenced or self.app.mode() == core.NOTIFICATION_MODE),
+            "h": ("h", lambda: self.silenced or self.app.mode() == core.NOTIFICATION_MODE),
             "q": ("q", lambda: detached), "?": ("?", lambda: self.app.help),
         }
         tokens = {t for keys, _ in sidebar.NARROW_HELP for t in keys.split()}
@@ -9102,16 +9101,6 @@ class ConfigFollowsFile(AppCase):
         self.app.reload_prefs()
         self.assertEqual(self.app.config_problems, [])
 
-    def test_keys_write_the_config_keeping_comments(self):
-        self.placed()
-        for key, expect in (("s", "side = left"), (">", "panel_width = 45"), ("m", "mode = voice"), (sidebar.CTRL_S, "view = state")):
-            with self.subTest(key=key):
-                before = self.config_text().splitlines()
-                self.app.handle_key(key)
-                after = self.config_text().splitlines()
-                self.assertEqual([line for line in after if line not in before], [expect])
-                self.assertEqual(len(after), len(before))
-
     def test_pins_and_folds_land_in_the_state_file_not_the_config(self):
         self.app.prefs = core.toggle_pin(self.app.prefs, KEY_A)
         self.app.save_prefs()
@@ -9133,10 +9122,9 @@ class ConfigFollowsFile(AppCase):
         self.assertEqual(self.app.notice, self.app.whats_new)
         self.assertGreater(self.app.notice_until, time.monotonic())
 
-    def test_the_claude_command_comes_from_the_file_unless_env_sets_it(self):
+    def test_the_claude_command_comes_from_the_file(self):
         self.edit("claude_command = claude", "claude_command = /opt/claude", 1)
-        with mock.patch.dict(os.environ):
-            os.environ.pop("EMX_CLAUDE", None)
+        with mock.patch.dict(os.environ, {"EMX_CLAUDE": "/env/claude"}):
             captured = []
             with mock.patch.object(sidebar, "App", lambda scr, tmux, claude: captured.append(claude) or mock.Mock()), \
                     mock.patch.object(sidebar.curses, "wrapper", lambda body: body(self.scr)), \
@@ -9144,9 +9132,8 @@ class ConfigFollowsFile(AppCase):
                     mock.patch.object(sidebar, "own_view", lambda socket: SESSION), \
                     mock.patch.object(sidebar.os, "write", lambda fd, data: None):
                 sidebar.run("emx-test-sock")
-                os.environ["EMX_CLAUDE"] = "/env/claude"
                 sidebar.run("emx-test-sock")
-        self.assertEqual(captured, ["/opt/claude", "/env/claude"])
+        self.assertEqual(captured, ["/opt/claude", "/opt/claude"])
 
     def test_the_config_is_made_on_a_first_start_and_takes_the_old_marker(self):
         self.app.prefs_files.config.unlink()
@@ -9353,17 +9340,29 @@ class SettingsMenu(AppCase):
         self.press("\n", "\n", *"/no/such/place", "\n")
         self.assertEqual(self.app.settings["edit"]["hint"], "No such folder.")
 
-    def test_an_env_override_makes_the_row_read_only(self):
+    def test_an_environment_variable_no_longer_locks_a_row(self):
         os.environ["EMX_PHONE_PORT"] = "9100"
         self.go_to("Port")
-        before = self.config_lines()
-        self.press(curses.KEY_RIGHT, "\n")
-        self.assertIsNone(self.app.settings["edit"])
-        self.assertEqual(self.config_lines(), before)
+        self.press("\n")
+        self.assertIsNotNone(self.app.settings["edit"])
+        self.app.settings["edit"]["text"] = ""
+        self.press(*"9200", "\n")
+        self.assertIn("phone_port = 9200", self.config_lines())
         self.tall()
         shown = self.screen()
-        self.assertIn("EMX_PHONE_PORT", shown)
-        self.assertIn("9100", shown)
+        self.assertNotIn("EMX_PHONE_PORT", shown)
+        self.assertNotIn("9100", shown)
+
+    def test_menu_changes_side_width_view_and_mode(self):
+        for label, expect in (("Side", "side = left"), ("Width", "panel_width = 45"), ("View", "view = state"), ("Mode", "mode = voice")):
+            with self.subTest(label=label):
+                before = self.config_lines()
+                self.go_to(label)
+                self.press(curses.KEY_RIGHT)
+                after = self.config_lines()
+                self.assertEqual([line for line in after if line not in before], [expect])
+                self.assertEqual(len(after), len(before))
+                self.press("\x1b")
 
     def test_e_opens_a_popup_with_the_editor(self):
         os.environ["EDITOR"] = "vi"
