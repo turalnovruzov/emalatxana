@@ -7,6 +7,8 @@ import curses
 import json
 import locale
 import os
+import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -78,6 +80,7 @@ HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("^s", "by project / by state"),
+    ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
     ("R", "routines: what ran in the past 24 hours; R or Esc back"),
     ("m", "voice mode or notification mode"),
@@ -105,6 +108,7 @@ NARROW_HELP = (
     ("^t", "pin to the top (in emx; doesn't keep it running)"),
     ("^r", "rename, via /rename in the session"),
     ("^s", "by project / by state"),
+    ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
     ("R", "routines: what ran in the past 24 hours; R or Esc back"),
     ("m", "voice mode or notification mode"),
@@ -132,6 +136,11 @@ NAME_ASKING = "Asking Haiku for a name…"
 NAME_STILL_FINISHING = "Still finishing an earlier Haiku call; Tab again in a moment."
 FIND_NONE = "No session matches."
 FIND_HINT = "↑↓ move · Enter open · Esc clear"
+SETTINGS_HINT = "↑↓ move · ←→ change · ↵ edit · Esc back"
+SETTINGS_FOOTER = "←→ change  ↵ edit  e file  ? keys"
+FAVOURITES_HINT = "↑↓ move · x remove · ↵ add · Esc back"
+EDIT_FOOTER = "Enter save · Esc cancel"
+OWN_WIDTH_NOTE = "This terminal's own width; the file's panel_width is your laptop's."
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
 ROUTINES_SECONDS = 60
@@ -1998,6 +2007,7 @@ class App:
         self.history_view = None
         self.history_scroll = 0
         self.routines_view = None
+        self.settings = None
         self.routine_views = None
         self.routines_error = None
         self.routines_reader = None
@@ -2027,6 +2037,7 @@ class App:
         self.peek_wrapped = (None, [])
         self.whats_new = None
         self.whats_new_waits = False
+        self.whats_new_deferred = False
         self.updater = self.make_updater() if emx.ROOT and self.primary else None
         self.phone = None
         self.on_disk = None
@@ -2127,6 +2138,8 @@ class App:
 
     def show_problems(self, problems: list) -> None:
         if problems != self.config_problems and problems:
+            # The one notice slot goes to the problem; the changelog note comes back when it expires.
+            self.whats_new_deferred = self.whats_new is not None and self.notice == self.whats_new
             self.say(core.config_notice(problems), error=True, seconds=15)
         self.config_problems = problems
 
@@ -3243,6 +3256,9 @@ class App:
         item = self.row_map.get(y)
         if self.routines_view is not None:
             return
+        if self.settings is not None:
+            self.settings_tap(item)
+            return
         if self.history_view is not None:
             if item and item[0] == "entry":
                 self.history_view = item[1]
@@ -3282,6 +3298,9 @@ class App:
             self.routines_view = core.wheel_scroll(self.routines_view, delta, total, height)
         elif self.help:
             self.help_scroll = core.wheel_scroll(self.help_scroll, delta, total, height)
+        elif self.settings is not None:
+            self.settings["scroll"] = core.wheel_scroll(self.settings["scroll"], delta, total, height)
+            self.held = ("settings", self.settings["at"])
         else:
             self.scroll = core.wheel_scroll(self.scroll, delta, total, height)
             self.held = ("list", self.cursor)
@@ -3334,6 +3353,8 @@ class App:
             self.history_key(key)
         elif self.routines_view is not None:
             self.routines_key(key)
+        elif self.settings is not None:
+            self.settings_key(key)
         elif self.menu is not None:
             self.menu_key(key)
         elif self.help and self.narrow and key in HELP_SCROLL_KEYS:
@@ -3374,6 +3395,8 @@ class App:
             self.start_rename()
         elif key == "n":
             self.open_prompt()
+        elif key == "c":
+            self.open_settings()
         elif key == "N":
             self.open_history()
         elif key == "R":
@@ -3415,7 +3438,7 @@ class App:
 
     def input_open(self) -> bool:
         """Whether a text input or a view that takes the keys is open, which the actions menu must never come between."""
-        return any(v is not None for v in (self.prompt, self.rename_edit, self.find, self.history_view, self.routines_view))
+        return any(v is not None for v in (self.prompt, self.rename_edit, self.find, self.history_view, self.routines_view, self.settings))
 
     def open_menu(self) -> None:
         """`a` on a phone, or a tap on the selected row: the session's actions in a box under its row, each a plain key or a tap."""
@@ -3528,6 +3551,179 @@ class App:
         elif key in (curses.KEY_DOWN, "j"):
             self.routines_view += 1
 
+    def open_settings(self) -> None:
+        self.settings = {"at": 0, "scroll": 0, "edit": None, "folders": None}
+        self.peeking = False
+        self.say("")
+
+    def settings_items(self) -> list:
+        return [setting for kind, setting in core.settings_rows(self.narrow) if kind == "item"]
+
+    def settings_shown_prefs(self) -> dict:
+        """The prefs as the menu shows them: a setting an environment variable overrides at that value, and another view's width as its own."""
+        shown = dict(self.prefs)
+        for setting in core.SETTINGS:
+            if core.env_override(setting, os.environ):
+                shown[setting.key] = core.setting_value(setting, self.prefs, os.environ)
+        shown["panel_width"] = self.panel_width()
+        return shown
+
+    def settings_key(self, key) -> None:
+        st = self.settings
+        if self.help:
+            if self.narrow and key in HELP_SCROLL_KEYS:
+                self.help_scroll = max(0, self.help_scroll + (-1 if key in (curses.KEY_UP, "k") else 1))
+            else:
+                self.help = False
+            return
+        if st["edit"] is not None:
+            self.settings_edit_key(key)
+            return
+        if key == "?":
+            self.help, self.help_scroll = True, 0
+            return
+        if st["folders"] is not None:
+            self.favourites_key(key)
+            return
+        items = self.settings_items()
+        st["at"] = max(0, min(st["at"], len(items) - 1))
+        setting = items[st["at"]]
+        if key in ("\x1b", "c"):
+            self.settings = None
+        elif key in (curses.KEY_UP, "k"):
+            st["at"] = max(0, st["at"] - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            st["at"] = min(len(items) - 1, st["at"] + 1)
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT):
+            self.settings_change(setting, -1 if key == curses.KEY_LEFT else 1)
+        elif key in ENTER_KEYS:
+            self.settings_enter(setting)
+        elif key == "e":
+            self.edit_config_file()
+
+    def settings_tap(self, item) -> None:
+        """A tap selects a row; a tap on the selected row acts as Enter."""
+        st = self.settings
+        if self.help or st["edit"] is not None or not item:
+            return
+        if st["folders"] is not None:
+            if item[0] == "folder":
+                if item[1] == st["folders"]:
+                    self.favourites_key("\n")
+                st["folders"] = item[1]
+            return
+        if item[0] != "setting":
+            return
+        if item[1] == st["at"]:
+            self.settings_enter(self.settings_items()[item[1]])
+        st["at"] = item[1]
+
+    def env_read_only(self, setting) -> bool:
+        name = core.env_override(setting, os.environ)
+        if name:
+            self.say(f"Set by {name}, which wins over the file.", seconds=RESTORED_NOTICE_SECONDS)
+        return bool(name)
+
+    def settings_change(self, setting, step: int) -> None:
+        """`←` (-1) and `→` (+1) on a row: a choice moves to its neighbour and the width by its step; any other row changes only by typing."""
+        if self.env_read_only(setting):
+            return
+        if setting.key == "side":
+            self.flip_side()
+        elif setting.key == "panel_width":
+            self.change_panel_width(step * core.WIDTH_STEP)
+        elif setting.key == "view":
+            self.toggle_view()
+        elif setting.key == "mode":
+            self.toggle_mode()
+        elif setting.kind == "choice":
+            self.apply_setting(core.cycle(setting, self.prefs, step))
+
+    def apply_setting(self, new: dict) -> None:
+        old = self.prefs
+        self.prefs = new
+        self.save_prefs()
+        self.apply_prefs(old)
+
+    def settings_enter(self, setting) -> None:
+        if self.env_read_only(setting):
+            return
+        if setting.kind == "choice":
+            self.settings_change(setting, 1)
+        elif setting.kind == "folders":
+            self.settings["folders"] = 0
+        else:
+            current = self.panel_width() if setting.key == "panel_width" else self.prefs.get(setting.key, setting.default)
+            self.settings["edit"] = {"setting": setting, "label": setting.label, "text": str(current), "hint": ""}
+
+    def settings_edit_key(self, key) -> None:
+        edit = self.settings["edit"]
+        if key == "\x1b":
+            self.settings["edit"] = None
+        elif key in ENTER_KEYS:
+            self.settings_submit(edit)
+        elif key in BACKSPACE_KEYS:
+            edit["text"], edit["hint"] = edit["text"][:-1], ""
+        elif key == CTRL_U:
+            edit["text"], edit["hint"] = "", ""
+        elif isinstance(key, str) and key.isprintable():
+            edit["text"], edit["hint"] = edit["text"] + key, ""
+
+    def settings_submit(self, edit: dict) -> None:
+        setting = edit["setting"]
+        if edit.get("add"):
+            folder = core.resolve_folder(edit["text"], self.home)
+            if not edit["text"].strip() or not os.path.isdir(folder):
+                edit["hint"] = "No such folder."
+                return
+            if folder not in core.favourite_folders(self.prefs):
+                self.apply_setting(core.toggle_favourite(self.prefs, folder)[0])
+            self.settings["edit"] = None
+            return
+        value, error = core.parse_value(setting, edit["text"], self.home)
+        if error:
+            edit["hint"] = error
+            return
+        if setting.key == "panel_width" and not self.primary:
+            self.own_width = value
+            self.applied = None
+            self.housekeep(fresh_list=False)
+        else:
+            self.apply_setting({**self.prefs, setting.key: value})
+        self.settings["edit"] = None
+
+    def favourites_key(self, key) -> None:
+        st = self.settings
+        folders = core.favourite_folders(self.prefs)
+        st["folders"] = at = max(0, min(st["folders"], len(folders)))
+        if key == "c":
+            self.settings = None
+        elif key in ("\x1b", curses.KEY_LEFT):
+            st["folders"] = None
+        elif key in (curses.KEY_UP, "k"):
+            st["folders"] = max(0, at - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            st["folders"] = min(len(folders), at + 1)
+        elif key == "x" and at < len(folders):
+            self.apply_setting(core.toggle_favourite(self.prefs, folders[at])[0])
+            st["folders"] = min(at, len(core.favourite_folders(self.prefs)))
+        elif key in ENTER_KEYS and at == len(folders):
+            st["edit"] = {"setting": core.SETTING_BY_KEY["favourite_folders"], "label": "Add a folder", "text": "", "hint": "", "add": True}
+
+    def edit_config_file(self) -> None:
+        """`e`: the file in a popup running `$EDITOR`; the file's own change is then read like any other edit."""
+        path = self.prefs_files.config
+        where = f"The config file is {core.tilde_path(str(path), self.home)}"
+        editor = os.environ.get("EDITOR", "").strip()
+        if not editor:
+            self.say(where)
+            return
+        try:
+            core.ensure_config(self.prefs_files, updates_off=install.updates_off_marker())
+            self.tmux.popup(f"exec {editor} {shlex.quote(str(path))}", " emx config ")
+        except (TmuxError, OSError):
+            self.say(where)
+
     def finish_routines(self) -> None:
         reader = self.routines_reader
         if reader is not None and not reader.is_alive():
@@ -3608,6 +3804,13 @@ class App:
             lines += [("Find a session:", curses.A_BOLD)]
             lines += [(t, 0) for t in core.wrap("> " + self.find + "▏", width)[-3:]]
             return lines + [(t, curses.A_DIM) for t in core.wrap_words(FIND_HINT, width)[:2]]
+        if self.settings is not None and self.settings["edit"] is not None:
+            edit = self.settings["edit"]
+            lines += [(f"{edit['label']}:", curses.A_BOLD)]
+            lines += [(t, 0) for t in core.wrap("> " + edit["text"] + "▏", width)[-3:]]
+            if edit["hint"]:
+                lines += [(t, curses.A_DIM) for t in core.wrap_words(edit["hint"], width)[:3]]
+            return lines + [(EDIT_FOOTER, curses.A_DIM)]
         return lines
 
     def bar_hints(self) -> tuple:
@@ -3622,6 +3825,8 @@ class App:
             return (ROUTINES_HINT, "Esc back")
         if self.help:
             return ("? close",)
+        if self.settings is not None:
+            return () if self.settings["edit"] is not None else (SETTINGS_HINT, "Esc back")
         if self.prompt is not None or self.find is not None or self.rename_edit is not None:
             return ()
         if not self.loaded:
@@ -3643,7 +3848,7 @@ class App:
     def notice_key_live(self) -> bool:
         """Whether `N` opens the notifications now: not while a prompt, find, rename, help, the history or the routines view has the keys."""
         return (
-            self.history_view is None and self.routines_view is None and not self.help
+            self.history_view is None and self.routines_view is None and self.settings is None and not self.help
             and self.prompt is None and self.find is None and self.rename_edit is None
         )
 
@@ -3655,7 +3860,7 @@ class App:
             sid, name = self.started_note
             started = self.session(sid)
             return (f"Started {name}.  " + ("↵ open in app" if started is not None and self.link_for(started) else "↵ open"),)
-        held = (self.confirm, self.history_view, self.routines_view, self.prompt, self.find, self.rename_edit)
+        held = (self.confirm, self.history_view, self.routines_view, self.settings, self.prompt, self.find, self.rename_edit)
         if any(v is not None for v in held) or self.peeking or self.help or not self.loaded or not self.sessions:
             return self.bar_hints()
         if self.focused is False or self.cursor not in self.items():
@@ -3750,6 +3955,8 @@ class App:
             self.draw_routines(list_top, list_bottom, w)
         elif self.help:
             self.draw_help(list_top, list_bottom, w)
+        elif self.settings is not None:
+            self.draw_settings(list_top, list_bottom, w)
         elif not self.loaded:
             if not self.list_error:
                 self.put(list_top, 1, "Loading sessions…", curses.A_DIM)
@@ -3896,6 +4103,93 @@ class App:
                 self.put(y, 1, key, self.palette.attr("accent"))
             self.put(y, x, line)
         self.draw_scroll_bar(top + 2, room, len(rows), self.help_scroll, width)
+
+    def setting_description(self, setting) -> str:
+        name = core.env_override(setting, os.environ)
+        if name:
+            return f"Set by {name}, which wins over the file."
+        for problem in self.config_problems:
+            found = re.match(r"line (\d+): (" + re.escape(setting.key) + r" .*)", problem)
+            if found:
+                return f"line {found.group(1)} is skipped: {found.group(2)}"
+        if setting.key == "panel_width" and not self.primary:
+            return OWN_WIDTH_NOTE
+        return setting.describe + (" (takes effect at the next start)" if setting.next_start else "")
+
+    def draw_settings(self, top: int, bottom: int, width: int) -> None:
+        """Board A: the settings in sections, the selected one's description and the file under them."""
+        st = self.settings
+        folders = st["folders"] is not None
+        title, back = ("Favourites", "Esc back") if folders else ("Settings", "c or Esc back")
+        self.put(top, 1, title, curses.A_BOLD)
+        self.put(top, max(len(title) + 3, width - 1 - len(back)), back, curses.A_DIM)
+        items = self.settings_items()
+        st["at"] = at = max(0, min(st["at"], len(items) - 1))
+        if folders:
+            lines, footer = [], [FAVOURITES_HINT]
+        else:
+            saved = "saved to " + core.tilde_path(str(self.prefs_files.config), self.home)
+            footer = core.wrap_words(self.setting_description(items[at]), max(1, width - 2))[:3] + [saved]
+        list_top = top + 2
+        if not folders and bottom - list_top - len(footer) - 2 >= 3:
+            footer += ["", SETTINGS_FOOTER]
+        list_height = max(1, bottom - list_top - len(footer))
+        if folders:
+            lines = self.favourite_lines()
+        else:
+            lines = self.setting_lines(items)
+        wide = width
+        if core.scroll_thumb(len(lines), list_height, 0) is not None:
+            wide = width - 1
+        selected_line = next((i for i, line in enumerate(lines) if line[0] == ("folder" if folders else "setting") and line[1] == (st["folders"] if folders else at)), -1)
+        key = ("settings", st["folders"] if folders else at)
+        want = -1 if self.held == key else selected_line
+        if want >= 0:
+            self.held = None
+        st["scroll"] = core.list_window([1] * len(lines), want, st["scroll"], list_height)
+        self.extent = (len(lines), list_height)
+        self.row_map = core.row_hits([line if line[0] in ("setting", "folder") else None for line in lines], [1] * len(lines), st["scroll"], list_top, list_height)
+        shown = self.settings_shown_prefs()
+        pal = self.palette
+        for y, line in enumerate(lines[st["scroll"]:st["scroll"] + list_height], start=list_top):
+            kind = line[0]
+            if kind == "head":
+                self.put(y, 1, line[1], pal.attr("muted"))
+            elif kind in ("setting", "folder"):
+                chosen = line[1] == (st["folders"] if folders else at)
+                bar = core.selection_bar(chosen, self.focused is not False)
+                if bar:
+                    self.put(y, 0, " " * wide, pal.attr("plain", bar))
+                bold = curses.A_BOLD if chosen else 0
+                if chosen:
+                    self.put(y, 0, "▎", pal.attr("accent", bar) | curses.A_BOLD)
+                if kind == "folder":
+                    self.put(y, 2, core.fit(line[2], max(1, wide - 3)), pal.attr("plain" if line[1] < len(core.favourite_folders(self.prefs)) else "muted", bar) | bold)
+                    continue
+                setting = items[line[1]]
+                value = core.shown_value(setting, shown, chosen)
+                x = max(2 + len(setting.label) + 1, wide - 1 - core.display_width(value))
+                self.put(y, 2, setting.label, pal.attr("plain", bar) | bold)
+                self.put(y, x, core.fit(value, max(1, wide - 1 - x)), pal.attr("plain" if chosen else "muted", bar) | bold)
+        self.draw_scroll_bar(list_top, list_height, len(lines), st["scroll"], width - 1)
+        for i, text in enumerate(footer):
+            tone = "muted" if text == SETTINGS_FOOTER else None
+            self.put(bottom - len(footer) + i, 1, text, pal.attr(tone) if tone else curses.A_DIM)
+
+    def setting_lines(self, items: list) -> list:
+        """The menu's lines: a heading with a blank line before each but the first, and a row per setting."""
+        lines, number = [], 0
+        for kind, payload in core.settings_rows(self.narrow):
+            if kind == "head":
+                lines += ([("blank",)] if lines else []) + [("head", payload)]
+            else:
+                lines.append(("setting", number))
+                number += 1
+        return lines
+
+    def favourite_lines(self) -> list:
+        folders = core.favourite_folders(self.prefs)
+        return [("folder", i, core.tilde_path(f, self.home)) for i, f in enumerate(folders)] + [("folder", len(folders), "+ add a folder")]
 
     def draw_scroll_bar(self, top: int, height: int, total: int, scroll: int, x: int) -> None:
         thumb = core.scroll_thumb(total, height, scroll)
@@ -4245,6 +4539,9 @@ class App:
                 self.confirm = None
             if core.notice_expired(self.notice_until, now):
                 self.say("")
+                if self.whats_new_deferred and self.whats_new is not None:
+                    self.whats_new_deferred = False
+                    self.say(self.whats_new, seconds=WHATS_NEW_SECONDS)
             if self.menu is not None and (not self.narrow or self.cursor != ("session", self.menu) or self.session(self.menu) is None):
                 self.close_menu()
             if fresh_list or now - self.last_housekeep >= HOUSEKEEP_SECONDS:

@@ -575,6 +575,33 @@ class KeyIfTarget(unittest.TestCase):
         run.assert_not_called()
 
 
+class Popup(unittest.TestCase):
+    def test_popup_runs_display_popup(self):
+        tmux = Tmux("sock")
+        proc = mock.Mock(returncode=0)
+        with mock.patch.object(subprocess, "Popen", return_value=proc) as popen:
+            tmux.popup("exec vi file", " emx config ")
+        self.assertEqual(
+            popen.call_args.args[0],
+            ["tmux", "-L", "sock", "display-popup", "-E", "-w", "90%", "-h", "90%", "-T", " emx config ", "exec vi file"],
+        )
+
+    def test_a_popup_still_open_is_left_running(self):
+        tmux = Tmux("sock")
+        proc = mock.Mock()
+        proc.wait.side_effect = [subprocess.TimeoutExpired("tmux", 1), None]
+        with mock.patch.object(subprocess, "Popen", return_value=proc):
+            tmux.popup("exec vi file", "t")
+
+    def test_a_popup_tmux_refuses_is_an_error(self):
+        tmux = Tmux("sock")
+        proc = mock.Mock(returncode=1)
+        proc.stderr.read.return_value = "no current client\n"
+        with mock.patch.object(subprocess, "Popen", return_value=proc):
+            with self.assertRaisesRegex(TmuxError, "no current client"):
+                tmux.popup("exec vi file", "t")
+
+
 class TypeIfTarget(unittest.TestCase):
     def test_a_target_that_is_not_a_pane_id_runs_no_tmux_command(self):
         tmux = Tmux("emx-test-unused")

@@ -50,6 +50,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `^t` | Pin to the top. In the folder list it stars a favourite instead. |
 | `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
 | `^s` | Switch between by project and by state. |
+| `c` | Settings: side, width, mode, colours, updates and more, in a list; `c` or `Esc` closes it. |
 | `N` | Notifications: the last 20; `Enter` opens one. |
 | `R` | Routines: what ran in the past 24 hours; `R` or `Esc` goes back. |
 | `m` | Switch between voice mode and notification mode. |

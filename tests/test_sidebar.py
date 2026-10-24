@@ -8211,7 +8211,10 @@ class PhonePanel(AppCase):
 
     def test_help_on_a_laptop_still_closes_on_any_key_and_is_2_10_0s(self):
         wheel = ("wheel", "scroll; the selection stays, ↑↓ brings it back")
-        self.assertEqual(sidebar.HELP, HELP_2_10_0[:3] + (wheel,) + HELP_2_10_0[3:])
+        settings = ("c", "settings: side, width, mode, colours, updates and more; c or Esc back")
+        expected = HELP_2_10_0[:3] + (wheel,) + HELP_2_10_0[3:]
+        at = [key for key, _ in expected].index("N")
+        self.assertEqual(sidebar.HELP, expected[:at] + (settings,) + expected[at:])
         self.app.window_width = 120
         self.app.handle_key("?")
         self.app.handle_key(curses.KEY_DOWN)
@@ -8238,6 +8241,7 @@ class PhonePanel(AppCase):
             "^f": (sidebar.CTRL_F, lambda: self.app.find is not None), "/": ("/", lambda: self.app.find is not None),
             "^t": (sidebar.CTRL_T, lambda: "a" in core.pinned_ids(self.app.prefs)),
             "^r": (sidebar.CTRL_R, lambda: self.app.rename_edit is not None), "^s": (sidebar.CTRL_S, lambda: self.app.view() == core.BY_STATE),
+            "c": ("c", lambda: self.app.settings is not None),
             "N": ("N", lambda: self.app.history_view is not None), "R": ("R", lambda: self.app.routines_view is not None),
             "m": ("m", lambda: self.app.mode() != core.NOTIFICATION_MODE), "h": ("h", lambda: self.silenced or self.app.mode() == core.NOTIFICATION_MODE),
             "q": ("q", lambda: detached), "?": ("?", lambda: self.app.help),
@@ -9114,6 +9118,21 @@ class ConfigFollowsFile(AppCase):
         self.assertNotIn("pinned", self.config_text())
         self.assertIn(KEY_A, self.app.prefs_files.state.read_text(encoding="utf-8"))
 
+    def test_folds_land_in_the_state_file_not_the_config(self):
+        self.app.prefs = core.toggle_collapsed(self.app.prefs, core.PROJECT, "/p/alpha")
+        self.app.save_prefs()
+        self.assertNotIn("collapsed", self.config_text())
+        self.assertEqual(json.loads(self.app.prefs_files.state.read_text(encoding="utf-8"))["collapsed"], {"project": ["/p/alpha"]})
+
+    def test_the_changelog_note_comes_back_when_the_problem_notice_expires(self):
+        self.app.whats_new = self.app.notice = "Updated to 2.20.0\n- a note"
+        self.app.show_problems(['line 6: side is left or right, not "middle"; using right'])
+        self.assertTrue(self.app.notice.startswith("config line 6"))
+        self.app.notice_until = time.monotonic() - 1
+        self.app.refresh()
+        self.assertEqual(self.app.notice, self.app.whats_new)
+        self.assertGreater(self.app.notice_until, time.monotonic())
+
     def test_the_claude_command_comes_from_the_file_unless_env_sets_it(self):
         self.edit("claude_command = claude", "claude_command = /opt/claude", 1)
         with mock.patch.dict(os.environ):
@@ -9135,6 +9154,246 @@ class ConfigFollowsFile(AppCase):
             again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
         self.assertIn("updates = off", again.prefs_files.config.read_text(encoding="utf-8"))
         self.assertFalse(core.updates_on(again.prefs))
+
+
+class SettingsMenu(AppCase):
+    """`c`: board A's settings list in the panel."""
+
+    def setUp(self):
+        super().setUp()
+        self.scr = RecordingScr(height=30, width=40)
+        self.app.scr = self.scr
+        self.app.window_width = 200
+        self.app.tmux.swap = mock.Mock()
+        self.app.tmux.popup = mock.Mock()
+        self.app.me = "%1"
+        sidebar_pane = Pane("%1", "@1", False, "sidebar", "", 40, 200)
+        main_pane = Pane("%2", "@1", False, "viewer", "", 160, 200)
+        self.app.my_panes = lambda: [sidebar_pane, main_pane]
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        for name in ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND", "EDITOR"):
+            os.environ.pop(name, None)
+
+    def screen(self):
+        self.app.draw()
+        return "\n".join(self.scr.cells.get(y, "").rstrip() for y in range(self.scr.size[0]))
+
+    def tall(self):
+        self.app.scr = self.scr = RecordingScr(height=60, width=80)
+
+    def config_lines(self):
+        return self.app.prefs_files.config.read_text(encoding="utf-8").splitlines()
+
+    def press(self, *keys):
+        for key in keys:
+            self.app.handle_key(key)
+
+    def go_to(self, label):
+        self.press("c")
+        for _ in range(20):
+            if self.app.settings_items()[self.app.settings["at"]].label == label:
+                return
+            self.press("j")
+        self.fail(f"no row {label}")
+
+    def changed(self, before):
+        after = self.config_lines()
+        self.assertEqual(len(after), len(before))
+        return [line for line in after if line not in before]
+
+    def test_c_opens_and_closes_the_menu(self):
+        self.press("c")
+        self.assertIsNotNone(self.app.settings)
+        self.press("c")
+        self.assertIsNone(self.app.settings)
+
+    def test_esc_closes_it(self):
+        self.press("c", "\x1b")
+        self.assertIsNone(self.app.settings)
+
+    def test_question_mark_opens_help_and_any_key_returns_to_settings(self):
+        self.press("c", "?")
+        self.assertTrue(self.app.help)
+        self.assertIn("Keys", self.screen())
+        self.press("x")
+        self.assertFalse(self.app.help)
+        self.assertIsNotNone(self.app.settings)
+
+    def test_the_rows_follow_the_table(self):
+        self.tall()
+        self.press("c")
+        shown = self.screen()
+        order = [shown.index(word) for word in ("Settings", "Panel", "Notices", "Look", "Updates", "Phone", "Folders", "Commands")]
+        self.assertEqual(order, sorted(order))
+        for setting in core.SETTINGS:
+            self.assertIn(setting.label, shown)
+        self.assertIn("c or Esc back", shown)
+        self.assertIn("←→ change  ↵ edit  e file  ? keys", shown)
+
+    def test_the_selected_row_shows_its_description_and_the_file(self):
+        self.tall()
+        self.press("c")
+        shown = self.screen()
+        self.assertIn("Which side of the window the panel sits on.", shown)
+        self.assertIn("saved to " + core.tilde_path(str(self.app.prefs_files.config), self.app.home), shown)
+        self.assertIn("‹ right ›", shown)
+
+    def test_right_on_colours_saves_the_next_scheme_keeping_comments(self):
+        self.go_to("Colours")
+        before = self.config_lines()
+        self.press(curses.KEY_RIGHT)
+        self.assertEqual(self.changed(before), ["scheme = dark"])
+        self.assertEqual(core.scheme(self.app.prefs), "dark")
+
+    def test_left_on_colours_wraps_to_the_last_scheme(self):
+        self.go_to("Colours")
+        self.press(curses.KEY_LEFT)
+        self.assertEqual(core.scheme(self.app.prefs), "light")
+
+    def test_right_on_side_moves_the_panel_and_writes_the_line(self):
+        before = self.config_lines()
+        self.press("c", curses.KEY_RIGHT)
+        self.app.tmux.swap.assert_called_once_with("%1", "%2")
+        self.assertEqual(self.changed(before), ["side = left"])
+
+    def test_right_on_width_steps_it(self):
+        self.press("c", "j", curses.KEY_RIGHT)
+        self.assertEqual(self.app.prefs["panel_width"], 45)
+        self.assertIn("panel_width = 45", self.config_lines())
+
+    def test_enter_on_a_choice_acts_as_right(self):
+        self.go_to("Mode")
+        self.press("\n")
+        self.assertEqual(core.notice_mode(self.app.prefs), "voice")
+
+    def test_enter_on_port_edits_and_saves(self):
+        self.go_to("Port")
+        self.press("\n")
+        self.assertIn("Port:", [text for text, _ in self.app.bottom_lines(39)])
+        self.press(sidebar.CTRL_U, *"9100", "\n")
+        self.assertIsNone(self.app.settings["edit"])
+        self.assertIn("phone_port = 9100", self.config_lines())
+        self.assertEqual(self.app.prefs["phone_port"], 9100)
+
+    def test_a_bad_typed_value_keeps_the_edit_open_with_the_reason(self):
+        self.go_to("Port")
+        before = self.config_lines()
+        self.press("\n", sidebar.CTRL_U, "8", "0", "\n")
+        self.assertIn("1024 to 65535", self.app.settings["edit"]["hint"])
+        self.assertEqual(self.config_lines(), before)
+        self.press("\x1b")
+        self.assertIsNone(self.app.settings["edit"])
+
+    def test_check_every_is_typed_in_seconds_and_shown_in_minutes(self):
+        self.tall()
+        self.go_to("Check every")
+        self.assertIn("10m", self.screen())
+        self.press("\n")
+        self.assertEqual(self.app.settings["edit"]["text"], "600")
+
+    def test_the_commands_are_typed(self):
+        self.go_to("Claude command")
+        self.press("\n", sidebar.CTRL_U, *"/opt/claude", "\n")
+        self.assertIn("claude_command = /opt/claude", self.config_lines())
+        self.assertIn("takes effect at the next start", self.app.setting_description(core.SETTING_BY_KEY["claude_command"]))
+
+    def test_narrow_hides_side_and_width(self):
+        self.app.window_width = 30
+        self.tall()
+        self.press("c")
+        shown = self.screen()
+        self.assertNotIn("Side", shown)
+        self.assertNotIn("Width", shown)
+        self.assertIn("View", shown)
+
+    def test_favourites_add_and_remove(self):
+        folder = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.go_to("Favourites")
+        self.press("\n")
+        self.assertEqual(self.app.settings["folders"], 0)
+        self.press("\n", *folder, "\n")
+        self.assertTrue(any(line.startswith("favourite_folders = ") for line in self.config_lines()))
+        self.assertEqual(core.favourite_folders(self.app.prefs), [folder])
+        self.press("k", "x")
+        self.assertFalse(any(line.startswith("favourite_folders = ") for line in self.config_lines()))
+        self.assertEqual(core.favourite_folders(self.app.prefs), [])
+
+    def test_a_folder_that_does_not_exist_is_refused(self):
+        self.go_to("Favourites")
+        self.press("\n", "\n", *"/no/such/place", "\n")
+        self.assertEqual(self.app.settings["edit"]["hint"], "No such folder.")
+
+    def test_an_env_override_makes_the_row_read_only(self):
+        os.environ["EMX_PHONE_PORT"] = "9100"
+        self.go_to("Port")
+        before = self.config_lines()
+        self.press(curses.KEY_RIGHT, "\n")
+        self.assertIsNone(self.app.settings["edit"])
+        self.assertEqual(self.config_lines(), before)
+        self.tall()
+        shown = self.screen()
+        self.assertIn("EMX_PHONE_PORT", shown)
+        self.assertIn("9100", shown)
+
+    def test_e_opens_a_popup_with_the_editor(self):
+        os.environ["EDITOR"] = "vi"
+        self.press("c", "e")
+        self.app.tmux.popup.assert_called_once_with(f"exec vi {shlex.quote(str(self.app.prefs_files.config))}", " emx config ")
+
+    def test_e_without_an_editor_says_where_the_file_is(self):
+        self.press("c", "e")
+        self.app.tmux.popup.assert_not_called()
+        self.assertEqual(self.app.notice, "The config file is " + core.tilde_path(str(self.app.prefs_files.config), self.app.home))
+
+    def test_e_when_tmux_refuses_says_where_the_file_is(self):
+        os.environ["EDITOR"] = "vi"
+        self.app.tmux.popup.side_effect = sidebar.TmuxError("no client")
+        self.press("c", "e")
+        self.assertTrue(self.app.notice.startswith("The config file is "))
+
+    def test_the_menu_counts_as_an_open_input(self):
+        self.press("c")
+        self.assertTrue(self.app.input_open())
+        self.press("N")
+        self.assertIsNone(self.app.history_view)
+        self.press("n")
+        self.assertIsNone(self.app.prompt)
+        self.assertFalse(self.app.notice_key_live())
+
+    def test_a_tap_selects_a_row_and_a_tap_on_the_selected_row_acts(self):
+        self.press("c")
+        self.screen()
+        y = next(y for y, item in self.app.row_map.items() if item == ("setting", 4))
+        self.assertEqual(self.app.settings_items()[4].label, "Colours")
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 0, y, 0, sidebar.curses.BUTTON1_CLICKED)):
+            self.app.handle_key(sidebar.curses.KEY_MOUSE)
+            self.assertEqual(self.app.settings["at"], 4)
+            self.app.handle_key(sidebar.curses.KEY_MOUSE)
+        self.assertEqual(core.scheme(self.app.prefs), "dark")
+
+    def test_a_long_list_scrolls_to_the_selected_row(self):
+        self.app.scr = self.scr = RecordingScr(height=12, width=40)
+        self.go_to("Server's emx")
+        shown = self.screen()
+        self.assertIn("Server's emx", shown)
+        self.assertNotIn("Side", shown)
+
+    def test_a_bad_line_names_itself_under_its_row(self):
+        path = self.app.prefs_files.config
+        path.write_text(path.read_text(encoding="utf-8").replace("side = right", "side = middle"), encoding="utf-8")
+        os.utime(path, ns=(5, 5))
+        self.app.reload_prefs()
+        self.press("c")
+        self.assertIn("line 6 is skipped: side is left or", self.screen())
+
+    def test_the_bar_hint_and_help_name_the_menu(self):
+        self.press("c")
+        self.assertEqual(self.app.bar_hints(), (sidebar.SETTINGS_HINT, "Esc back"))
+        self.assertTrue(any(key == "c" for key, _ in sidebar.HELP))
+        self.assertTrue(any(key == "c" for key, _ in sidebar.NARROW_HELP))
 
 
 class ShadeTmux(ClientTmux):

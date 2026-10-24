@@ -2969,6 +2969,11 @@ def _setting_value(key: str, prefs: Mapping, env: Mapping | None):
     return prefs.get(key, setting.default) if value is None else value
 
 
+def setting_value(setting: Setting, prefs: Mapping, env: Mapping | None = None):
+    """What emx uses for the setting now: its environment variable when that is set and good, else the file's value."""
+    return _setting_value(setting.key, prefs, env)
+
+
 def updates_on(prefs: Mapping) -> bool:
     return prefs.get("updates", "on") != "off"
 
