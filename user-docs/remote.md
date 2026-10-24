@@ -39,7 +39,7 @@ In the same way, anything running on the server as you can set your laptop's cli
 
 ## Notifications while connected
 
-The server's notifications reach your laptop, spoken or as emx's notification, in the mode set with `m` on the server's panel. Clicking one opens that session on the server's panel. While you are not connected nothing arrives; the Notifications list (`N`) keeps them. `h` on the server's panel also stops the laptop speaking.
+The server's notifications reach your laptop, spoken or as emx's notification, in the mode set under `c` (Notices) on the server's panel. Clicking one opens that session on the server's panel. While you are not connected nothing arrives; the Notifications list (`N`) keeps them. `h` on the server's panel also stops the laptop speaking.
 
 ## Versions
 
@@ -47,7 +47,7 @@ If the server's emx is a different version, `emx remote` says so before it conne
 
 ## If the server cannot find emx
 
-Set `remote_command` in the config file (`emx config`) to emx's full path on the server; `EMX_REMOTE_COMMAND` overrides it. `EMX_SSH` replaces the `ssh` command.
+Set `remote_command` in the config file (`emx config`) to emx's full path on the server. `EMX_SSH` replaces the `ssh` command.
 
 ## Docs of the server's version
 

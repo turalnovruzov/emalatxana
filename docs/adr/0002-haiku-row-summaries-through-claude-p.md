@@ -48,3 +48,5 @@ Measured on Claude Code 2.1.295, 2026-10-08, through emx's own `summarise` wrapp
 | Anthropic API over `urllib` | No subprocess | Needs an API key: a new secret | Lost |
 | The `anthropic` SDK | Convenient | A new library, and an API key | Lost |
 | Keep only the transcript line | Free, instant | Says what the last tool was, not what the session is doing | Lost: the point of #20 |
+
+*Amended 2026-10-24 (#97, 2.21.0):* `EMX_CLAUDE` no longer has any effect; the measurement's shim would now be `claude_command` in the config file.

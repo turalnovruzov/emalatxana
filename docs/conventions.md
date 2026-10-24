@@ -319,7 +319,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    host = core.remote_host(arg)
    argv = core.ssh_client_args(ssh, host, control, core.remote_shell(base, "follow"))
    ```
-4. **Gotcha**: `remote_shell` quotes the args but not `base` (`EMX_REMOTE_COMMAND` may carry `env X=Y`), so `base` must only come from the laptop's own environment, never from the server or a relay line.
+4. **Gotcha**: `remote_shell` quotes the args but not `base` (`remote_command` may carry `env X=Y`), so `base` must only come from the laptop's own config file, never from the server or a relay line.
 
 ### A change that would stop an older and a newer emx working together over `emx remote` is a major version
 
@@ -337,7 +337,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
    shell = core.follow_shell(base, host_name)
    host = core.relay_host(option_value, time.time())
    ```
-4. **Gotcha**: `env` finds only real files on PATH, so an `emx` that exists only as an alias needs `EMX_REMOTE_COMMAND`. `@emx_relay` stays a bare float, because an older panel parses it as one.
+4. **Gotcha**: `env` finds only real files on PATH, so an `emx` that exists only as an alias needs `remote_command`. `@emx_relay` stays a bare float, because an older panel parses it as one.
 
 ### A transcript path from a hook record goes through `engine.allowed_transcript` first
 
@@ -357,7 +357,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 1. **Rule**: every public command, panel key, root key and public `EMX_` setting is listed in `user-docs/reference.md` as its own backtick code span, and `tests/test_docs.py` fails when one is missing.
 2. **Why**: the docs are what Tural reads, and a drift test is the only thing that notices a key added without a line.
 3. **Minimal example**: ``| `^g` | Go somewhere. |``
-4. **Gotcha**: the test matches the exact backticked form, so `emx update` is not satisfied by `emx update off`. Keys handled only in `handle_key` or `prompt_key` (Tab, Esc, the folder list's `^t`, `,` and `.`) are not drift-tested and are kept by hand.
+4. **Gotcha**: the test matches the exact backticked form, so `emx update` is not satisfied by `emx update --report`. Keys handled only in `handle_key` or `prompt_key` (Tab, Esc) are not drift-tested and are kept by hand.
 
 ### Text that reaches a tmux format goes through `sidebar.bar_format`
 

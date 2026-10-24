@@ -6,7 +6,7 @@ Everything here happens in the panel unless it says otherwise. Press `?` there t
 
 Press `n`. With no sessions yet, emx opens the folder list first: pick a folder and press `Enter`, then type the message. After that, the session starts in the folder of the session or project the cursor is on, or in the last folder you used when the cursor is on a header with no folder. If there is no last folder either, `n` opens the folder list first, the same as for the first session. Type a message for Claude and press `Enter`, or leave the message empty to start an empty session.
 
-To start in another folder, press `Tab` and pick one. Type to filter; `↑` and `↓` move through the list. `Tab` completes the path you typed and `Enter` picks the folder. Folders you used recently are listed, and starred ones come first. Press `^t` on a folder to star it as a favourite (or unstar it). `Esc` in a list opened with `Tab` goes back to the message and keeps what you typed; when the list opened on its own (the first session), `Esc` cancels.
+To start in another folder, press `Tab` and pick one. Type to filter; `↑` and `↓` move through the list. `Tab` completes the path you typed and `Enter` picks the folder. Folders you used recently are listed, and favourites (added under `c`, Favourites) come first, marked with ★. `Esc` in a list opened with `Tab` goes back to the message and keeps what you typed; when the list opened on its own (the first session), `Esc` cancels.
 
 ## Open and switch
 
@@ -40,7 +40,7 @@ Press `^x` on a working session to interrupt it. Press `^x` twice to close it. O
 
 ## Views
 
-`^s` switches between listing by project and listing by state.
+Listing by project or by state is View under `c` (Panel).
 
 ## Hide the panel
 
@@ -48,7 +48,7 @@ Press `^x` on a working session to interrupt it. Press `^x` twice to close it. O
 
 ## Panel side and width
 
-`s` moves the panel to the other side. `<` makes it narrower and `>` wider. Both are remembered.
+Side and Width under `c` (Panel) move the panel to the other side and make it narrower or wider. Dragging the panel's border also sets the width. Both are remembered.
 
 ## On a phone
 

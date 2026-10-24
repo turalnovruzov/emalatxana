@@ -57,3 +57,5 @@ git and tar are system tools, like tmux and ssh: no library, no new service.
 | PyPI and pipx | A standard Python install | Publishing a package, which is outward-facing and makes emx public | Rejected in #60 |
 | GitHub Release tarball | No git needed | A release per version, which the versioning rule doesn't make | Rejected in #60 |
 | `git pull` in a checkout | No new code | Runs whatever `main` holds and mixes with the folder agents work in | Rejected in #60 Decided 5 and 9 |
+
+*Amended 2026-10-24 (#97, 2.21.0):* `update_check_seconds` in the config file replaces `EMX_UPDATE_SECONDS`, and `emx update off` / `on` are removed: `updates` in the config file (Automatic updates under `c`) is the only place. `emx update` and `emx update --report` are unchanged.

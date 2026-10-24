@@ -61,7 +61,7 @@ class DocsMatchEmx(unittest.TestCase):
     def test_every_public_command_is_in_the_reference(self):
         commands = public_commands()
         self.assertIn("emx docs", commands)
-        self.assertIn("emx update off", commands)
+        self.assertIn("emx update", commands)
         for command in sorted(commands):
             with self.subTest(command=command):
                 self.assert_in_reference(command, "emx --help")
@@ -122,3 +122,49 @@ class DocsMatchEmx(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+REMOVED_COMMANDS = ("emx colors", "emx update off", "emx update on")
+REMOVED_KEYS = ("s", "<", ">", ",", ".", "m", "^s")
+REMOVED_ENV = ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND")
+
+
+def doc_pages():
+    return {path.name: path.read_text(encoding="utf-8") for path in sorted(DOCS.glob("*.md"))}
+
+
+class RemovedStayRemoved(unittest.TestCase):
+    def test_no_removed_command_is_public_or_documented(self):
+        self.assertEqual(public_commands() & set(REMOVED_COMMANDS), set())
+        self.assertNotIn("colors", cli.USAGE)
+        for name, text in doc_pages().items():
+            for command in REMOVED_COMMANDS:
+                with self.subTest(page=name, command=command):
+                    self.assertNotIn(f"`{command} ", text)
+                    self.assertNotIn(f"`{command}`", text)
+
+    def test_no_removed_key_is_in_the_help_or_the_docs(self):
+        self.assertEqual(panel_key_tokens() & set(REMOVED_KEYS), set())
+        for name, text in doc_pages().items():
+            for key in REMOVED_KEYS:
+                with self.subTest(page=name, key=key):
+                    self.assertNotIn(f"`{key}`", text)
+        for keys, what in sidebar.HELP + sidebar.NARROW_HELP:
+            self.assertNotIn("^t ★", keys + what)
+            self.assertNotIn("stars", what)
+
+    def test_no_removed_env_var_is_anywhere(self):
+        self.assertFalse([name for name in REMOVED_ENV if name in cli.USAGE])
+        for name, text in doc_pages().items():
+            for var in REMOVED_ENV:
+                with self.subTest(page=name, var=var):
+                    self.assertNotIn(var, text)
+        for setting in core.SETTINGS:
+            for var in REMOVED_ENV:
+                self.assertNotIn(var, setting.comment + setting.describe)
+
+    def test_no_doc_says_an_env_var_overrides_the_file(self):
+        for name, text in doc_pages().items():
+            for phrase in ("environment variable overrides", "overrides that key", "wins over its key"):
+                with self.subTest(page=name, phrase=phrase):
+                    self.assertNotIn(phrase, text)

@@ -14,14 +14,8 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `emx hush` | Stops the voice now, without muting later notices. |
 | `emx remote` | `emx remote <host>` opens the emx running on a server over ssh (host from your SSH config); closing it leaves the server's sessions running. |
 | `emx phone` | Prints the address of the phone page, or why it isn't up. |
-| `emx colors` | Prints the colour scheme in use. |
-| `emx colors dark` | Sets the colour scheme to Dark. |
-| `emx colors light` | Sets the colour scheme to Light. |
-| `emx colors terminal` | Sets the colour scheme to Terminal's own. |
 | `emx config` | Opens the settings file in `$EDITOR`, or prints its path when `EDITOR` isn't set. |
 | `emx update` | Installs the newest version now, a new major version included. |
-| `emx update off` | Stops the automatic updates. |
-| `emx update on` | Starts the automatic updates again. |
 | `emx uninstall` | Removes the installed emx and its link; settings and state are kept. |
 
 ## Keys
@@ -48,16 +42,12 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `n` | New session where the cursor is; `Tab` there picks another folder. |
 | `^x` | Interrupt a working session; twice closes it. On a project header, twice closes the group. |
 | `^f` `/` | Find a session by name or folder. |
-| `^t` | Pin to the top. In the folder list it stars a favourite instead. |
+| `^t` | Pin to the top. |
 | `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
-| `^s` | Switch between by project and by state. |
-| `c` | Settings: side, width, mode, colours, updates and more, in a list that edits the config file; `c` or `Esc` closes it. |
+| `c` | Settings: side, width, view, mode, colours, updates and more, in a list that edits the config file; `c` or `Esc` closes it. |
 | `N` | Notifications: the last 20; `Enter` opens one. |
 | `R` | Routines: what ran in the past 24 hours; `R` or `Esc` goes back. |
-| `m` | Switch between voice mode and notification mode. |
 | `h` | Stop the voice now (voice mode). |
-| `s` | Move the panel to the other side. |
-| `<` `>` | Narrower / wider panel (`,` and `.` do the same). |
 | `^\` | Jump to the session and back. |
 | `^q` | Hide the panel. |
 | `q` | Detach; sessions keep running. |
@@ -65,7 +55,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 
 ### On a phone
 
-On a screen narrower than 70 columns (`emx docs phone`) the panel and the session each fill the screen, and these keys work besides the panel's own (all but `s`, `<` and `>`).
+On a screen narrower than 70 columns (`emx docs phone`) the panel and the session each fill the screen, and these keys work besides the panel's own.
 
 | Key | What it does |
 | --- | --- |
@@ -87,31 +77,27 @@ On a screen narrower than 70 columns (`emx docs phone`) the panel and the sessio
 | `x` | In Favourites, remove the selected folder; `+ add a folder` takes a typed folder. |
 | `Esc` `c` | Close the menu (`Esc` in Favourites goes back to the list). |
 
-Every change is saved into the config file. A setting that an environment variable overrides is read-only here.
+Every change is saved into the config file.
 
 ## Settings
 
-Environment variables, set before running `emx`. Each of these that has a key in the config file overrides that key.
+Environment variables, set before running `emx`. The settings that change how emx works are in the config file instead (see below).
 
 | Setting | What it does |
 | --- | --- |
 | `EMX_SOCKET` | The tmux socket name (default `emx`). Not empty and not `default`. |
-| `EMX_CLAUDE` | The claude command (default `claude`). Overrides `claude_command` in the config file. |
 | `EMX_SAY` | Replaces the `say` command that speaks. |
 | `EMX_NOTIFY` | Replaces the notification helper's command. |
 | `EMX_NOTIFY_HOME` | The folder the notification helper is built in. |
 | `EMX_OPEN` | Replaces the `open` command. |
-| `EMX_PHONE_PORT` | The port of the phone page (default 8787; a number from 1024 to 65535). Overrides `phone_port` in the config file. |
-| `EMX_REMOTE_COMMAND` | emx's command on the server for `emx remote` (default `emx`, run through its login shell). Overrides `remote_command` in the config file. |
 | `EMX_CLIPBOARD_IMAGE` | The command `emx remote` reads the laptop clipboard's image with (default `osascript`); it is given a file path to write a PNG to. |
 | `EMX_SSH` | Replaces `ssh` for `emx remote`. |
 | `EMX_HOME` | The folder emx installs into (default `$XDG_DATA_HOME/emx`, else `~/.local/share/emx`). |
 | `EMX_BIN_HOME` | The folder of the `emx` link (default `~/.local/bin`). |
-| `EMX_UPDATE_SECONDS` | How often a running panel checks for updates (default 600). Overrides `update_check_seconds` in the config file. |
 
 ## Colour schemes
 
-Set with `c` (Colours) or `emx colors`; a running emx switches within seconds, borders and bottom bar included. emx never switches scheme by itself.
+Set with Colours under `c` (Look); a running emx switches within seconds, borders and bottom bar included. emx never switches scheme by itself.
 
 - Terminal's own (the default): your terminal's own 16 colours, so it follows its theme. The selected row is a shade of your terminal's background (a little lighter on a dark theme, a little darker on a light one) and keeps its colours; emx asks the terminal for the background, again each time you come back to the panel, so a theme switch shows then; where the terminal doesn't say, the row is inverted. A thin grey line sits just above the bottom bar.
 - Dark: emx's own colours, for dark terminals.
@@ -121,7 +107,7 @@ Set with `c` (Colours) or `emx colors`; a running emx switches within seconds, b
 
 Your settings are in one commented file, `config` under `emx` in `$XDG_CONFIG_HOME`, else `~/.config/emx`. `emx config` opens it, and `c` in the panel is the same settings as a menu (`e` there opens the file). emx writes it the first time it runs, carrying over what an older `prefs.json` held.
 
-A line is `key = value`; a line starting with `#` is a comment, and `## Name` lines group the settings. There are no comments after a value: a `#` there is part of the value. Favourite folders are one `favourite_folders` line per folder. A running emx follows an edit within seconds. A line emx can't read is skipped, the default is used instead, and the panel's notice line names the line and why; emx never rewrites a line you wrote unless you change that setting from the menu or a key.
+A line is `key = value`; a line starting with `#` is a comment, and `## Name` lines group the settings. There are no comments after a value: a `#` there is part of the value. Favourite folders are one `favourite_folders` line per folder. A running emx follows an edit within seconds. A line emx can't read is skipped, the default is used instead, and the panel's notice line names the line and why; emx never rewrites a line you wrote unless you change that setting from the menu.
 
 | Key | Values | Default | What it does |
 | --- | --- | --- | --- |
@@ -137,6 +123,6 @@ A line is `key = value`; a line starting with `#` is a comment, and `## Name` li
 | `claude_command` | a command | `claude` | The command sessions start claude with. Applies at the next start. |
 | `remote_command` | a command | `emx` | emx's command on the server, for `emx remote`. |
 
-A path or command with a line break or other control character is refused. An environment variable from Settings above wins over its key.
+A path or command with a line break or other control character is refused.
 
 Pinned sessions, recent folders, the last folder, folded groups, the hidden panel and the last version seen are not settings; emx keeps them in its own state, `remembered.json` in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`. `prefs.json` is read only when the config file doesn't exist (the first run, or after you delete the config), carrying its values over again, and is never changed or removed.

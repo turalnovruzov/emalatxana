@@ -48,3 +48,5 @@ ssh is a system tool like tmux and `say`: no library, no new service.
 | Tailscale or mosh | Reaching the server; a link that survives roaming | They are server setup, not emx's | Left to the Chief of Staff |
 | A separate follower connection that does not share the master | Simpler | A second authentication, and only possible with a key (`BatchMode`) | Lost |
 | `tail -F` of a guessed path on the server | No `emx follow` | The laptop can't know the server's state folder | Lost |
+
+*Amended 2026-10-24 (#97, 2.21.0):* `remote_command` in the config file replaces `EMX_REMOTE_COMMAND`, which no longer has any effect; the `systemd-run --user --scope --quiet emx` example above now goes in `remote_command`.
