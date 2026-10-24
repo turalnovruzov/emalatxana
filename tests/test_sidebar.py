@@ -429,8 +429,8 @@ class AppCase(unittest.TestCase):
         self.app.poller.result = (list(sessions), None)
 
     def write_scheme(self, name, mtime):
-        core.save_prefs(self.app.prefs_file, core.set_scheme(core.load_prefs(self.app.prefs_file), name))
-        os.utime(self.app.prefs_file.config, ns=(mtime, mtime))
+        core.save_prefs(self.app.prefs_files, core.set_scheme(core.load_prefs(self.app.prefs_files), name))
+        os.utime(self.app.prefs_files.config, ns=(mtime, mtime))
 
     def housekeep_once(self):
         quiet = ("check_relay", "check_open", "time_whats_new", "check_update", "check_phone", "check_hush")
@@ -1940,7 +1940,7 @@ class NewSession(AppCase):
         self.app.starter.is_alive.return_value = False
         self.app.finish_start()
         self.assertEqual(self.app.prefs["recent_folders"][0], "/p/gamma")
-        self.assertEqual(core.load_prefs(self.app.prefs_file)["last_folder"], "/p/gamma")
+        self.assertEqual(core.load_prefs(self.app.prefs_files)["last_folder"], "/p/gamma")
 
     def test_the_help_says_where_n_starts(self):
         self.assertIn("Tab", dict(sidebar.HELP)["n"])
@@ -1957,7 +1957,7 @@ class NewSession(AppCase):
         return [r.path for r in self.app.suggestions()]
 
     def saved(self):
-        return core.load_prefs(self.app.prefs_file)
+        return core.load_prefs(self.app.prefs_files)
 
     def test_the_picker_opens_with_favourites_then_recents_before_any_typing(self):
         self.picker_with(["/f/star"], ["/f/r1", "/f/r2"])
@@ -2137,11 +2137,11 @@ class FindSessions(AppCase):
 
     def test_a_click_on_a_header_while_finding_does_nothing(self):
         self.keys(sidebar.CTRL_F, *"alpha")
-        saved = core.load_prefs(self.app.prefs_file)
+        saved = core.load_prefs(self.app.prefs_files)
         self.click(("group", "/p/alpha"))
         self.assertEqual(self.app.find, "alpha")
         self.assertNotIn("/p/alpha", core.collapsed_keys(self.app.prefs, self.app.view()))
-        self.assertEqual(core.load_prefs(self.app.prefs_file), saved)
+        self.assertEqual(core.load_prefs(self.app.prefs_files), saved)
         self.assertEqual(self.opened, [])
 
     def test_a_click_on_a_session_while_finding_ends_the_find_and_opens_it(self):
@@ -2193,10 +2193,10 @@ class PinSessions(AppCase):
         self.app.handle_key(sidebar.CTRL_T)
         self.poll(session("b", "/p/beta"))
         self.app.refresh()
-        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), {"a"})
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_files)), {"a"})
         self.poll(session("b", "/p/beta"))
         self.app.refresh()
-        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), set())
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_files)), set())
 
     def test_an_empty_listing_prunes_nothing(self):
         self.app.cursor = ("session", "a")
@@ -2204,7 +2204,7 @@ class PinSessions(AppCase):
         for _ in range(3):
             self.poll()
             self.app.refresh()
-        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_file)), {"a"})
+        self.assertEqual(core.pinned_ids(core.load_prefs(self.app.prefs_files)), {"a"})
 
     def test_a_failed_listing_prunes_nothing(self):
         self.app.cursor = ("session", "a")
@@ -4511,8 +4511,8 @@ class UpdaterWorker(unittest.TestCase):
     def test_the_interval_is_an_int_of_at_least_five_seconds(self):
         for value, seconds in (("", 600), ("60", 60), ("5", 5), ("4", 600), ("x", 600), ("1.5", 600)):
             with self.subTest(value=value):
-                self.assertEqual(sidebar.update_interval({"EMX_UPDATE_SECONDS": value}), seconds)
-        self.assertEqual(sidebar.update_interval({}), core.UPDATE_CHECK_SECONDS)
+                self.assertEqual(core.update_seconds({}, {"EMX_UPDATE_SECONDS": value}), seconds)
+        self.assertEqual(core.update_seconds({}, {}), core.UPDATE_CHECK_SECONDS)
 
     def test_the_first_check_waits_then_checks_each_interval_with_the_guard_and_no_wait(self):
         with mock.patch.object(sidebar.install, "update", return_value=(("9.0.0", "9.0.0", None), None)) as update:
@@ -4533,11 +4533,28 @@ class UpdaterWorker(unittest.TestCase):
         self.prune.assert_called_once_with("/tmp/emx-test-root", "9.0.0")
 
     def test_updates_off_checks_nothing(self):
-        with mock.patch.object(sidebar.install, "updates_on", return_value=False), \
-                mock.patch.object(sidebar.install, "update") as update:
-            worker = sidebar.Updater(interval=10)
+        with mock.patch.object(sidebar.install, "update") as update:
+            worker = sidebar.Updater(interval=10, wanted=lambda: False)
             worker.step(time.monotonic() + 3600)
         update.assert_not_called()
+
+    def test_the_updater_follows_the_file(self):
+        wanted, interval = [False], [10]
+        with mock.patch.object(sidebar.install, "update", return_value=(("9.0.0", "9.0.0", None), None)) as update:
+            worker = sidebar.Updater(interval=lambda: interval[0], wanted=lambda: wanted[0])
+            start = time.monotonic()
+            worker.step(start + sidebar.UPDATE_FIRST_SECONDS + 1)
+            update.assert_not_called()
+            wanted[0] = True
+            first = start + sidebar.UPDATE_FIRST_SECONDS + 2
+            worker.step(first)
+            self.assertEqual(update.call_count, 1)
+            interval[0] = 20
+            worker.step(first + 10)
+            worker.step(first + 19)
+            self.assertEqual(update.call_count, 1)
+            worker.step(first + 20)
+        self.assertEqual(update.call_count, 2)
 
     def test_a_held_lock_skips_the_cycle_and_is_not_an_error(self):
         with mock.patch.object(sidebar.install, "update", return_value=(None, sidebar.install.BUSY)):
@@ -6983,7 +7000,7 @@ class CollapseWiring(AppCase):
         sidebar.App.housekeep(self.app, False)
 
     def saved(self):
-        return core.load_prefs(self.app.prefs_file)
+        return core.load_prefs(self.app.prefs_files)
 
     def test_binds_the_key_once_and_a_new_slot_needs_no_rebinding(self):
         self.tick()
@@ -7167,7 +7184,7 @@ class AppRelay(AppCase):
 
 class ModeKey(AppCase):
     def prefs_on_disk(self):
-        return core.read_config(self.app.prefs_file.config.read_text(encoding="utf-8"), os.path.expanduser("~"))[0]
+        return core.read_config(self.app.prefs_files.config.read_text(encoding="utf-8"), os.path.expanduser("~"))[0]
 
     def test_a_new_panel_starts_in_notification_mode(self):
         self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
@@ -7218,9 +7235,9 @@ class ModeKey(AppCase):
     def test_a_saved_old_voice_setting_starts_in_its_mode(self):
         for voice, mode in ((True, core.VOICE_MODE), (False, core.NOTIFICATION_MODE)):
             with self.subTest(voice=voice):
-                self.app.prefs_file.config.unlink(missing_ok=True)
-                self.app.prefs_file.legacy.parent.mkdir(parents=True, exist_ok=True)
-                self.app.prefs_file.legacy.write_text(json.dumps({"voice": voice}), encoding="utf-8")
+                self.app.prefs_files.config.unlink(missing_ok=True)
+                self.app.prefs_files.legacy.parent.mkdir(parents=True, exist_ok=True)
+                self.app.prefs_files.legacy.write_text(json.dumps({"voice": voice}), encoding="utf-8")
                 again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
                 self.assertEqual(again.poller.notices.mode, mode)
 
@@ -8678,14 +8695,14 @@ class PrefsAcrossViews(AppCase):
         self.app.save_prefs()
         other.prefs = core.flip_side(other.prefs)
         other.save_prefs()
-        saved = core.load_prefs(self.app.prefs_file)
+        saved = core.load_prefs(self.app.prefs_files)
         self.assertEqual((core.pinned_ids(saved), saved["side"]), ({KEY_A}, "left"))
 
     def test_a_panel_takes_in_what_another_saved_and_keeps_its_own_unsaved_change(self):
         other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")
         other.prefs = core.toggle_pin(other.prefs, KEY_A)
         other.save_prefs()
-        os.utime(self.app.prefs_file.config, ns=(1, 1))
+        os.utime(self.app.prefs_files.config, ns=(1, 1))
         self.app.prefs = {**self.app.prefs, "side": "left"}
         self.app.reload_prefs()
         self.assertEqual((core.pinned_ids(self.app.prefs), self.app.prefs["side"]), ({KEY_A}, "left"))
@@ -9010,6 +9027,114 @@ class SchemeFollowsPrefs(AppCase):
         self.app.reload_prefs()
         self.app.reload_prefs()
         self.assertEqual(self.app.tmux.set_global_option.call_count, 1)
+
+
+class ConfigFollowsFile(AppCase):
+    """A hand edit of the config file reaches a running panel; the keys write only their own line."""
+
+    def config_text(self):
+        return self.app.prefs_files.config.read_text(encoding="utf-8")
+
+    def edit(self, old, new, stamp):
+        path = self.app.prefs_files.config
+        text = path.read_text(encoding="utf-8")
+        self.assertIn(old, text)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        os.utime(path, ns=(stamp, stamp))
+
+    def placed(self, width=200):
+        self.app.window_width = width
+        sidebar_pane = Pane("%1", "@1", False, "sidebar", "", 40, width)
+        main_pane = Pane("%2", "@1", False, "viewer", "", width - 40, width)
+        self.app.my_panes = lambda: [sidebar_pane, main_pane]
+        self.app.tmux.swap = mock.Mock()
+        self.app.me = "%1"
+
+    def test_a_file_edit_changes_the_scheme_live(self):
+        self.edit("scheme = terminal", "scheme = dark", 1)
+        self.app.reload_prefs()
+        self.assertEqual(core.scheme(self.app.prefs), "dark")
+        self.assertEqual(self.app.palette.schemes[-1], "dark")
+
+    def test_a_file_side_change_swaps_the_panel(self):
+        self.placed()
+        self.edit("side = right", "side = left", 1)
+        self.app.reload_prefs()
+        self.app.tmux.swap.assert_called_once_with("%1", "%2")
+        self.assertEqual(self.app.placed_side, "left")
+        self.edit("panel_width = 40", "panel_width = 41", 2)
+        self.app.reload_prefs()
+        self.app.tmux.swap.assert_called_once()
+
+    def test_a_file_side_change_does_not_swap_a_narrow_view(self):
+        self.placed(width=40)
+        self.edit("side = right", "side = left", 1)
+        self.app.reload_prefs()
+        self.app.tmux.swap.assert_not_called()
+
+    def test_a_file_width_change_reapplies_the_layout(self):
+        self.app.applied = (200, 40)
+        self.edit("panel_width = 40", "panel_width = 60", 1)
+        self.app.reload_prefs()
+        self.assertEqual(self.app.prefs["panel_width"], 60)
+        self.assertIsNone(self.app.applied)
+
+    def test_a_bad_line_shows_in_the_notice_once(self):
+        line = self.config_text().splitlines().index("side = right") + 1
+        self.edit("side = right", "side = middle", 1)
+        self.app.reload_prefs()
+        self.assertTrue(self.app.notice.startswith(f"config line {line}: side is left or right"))
+        self.assertTrue(self.app.notice_error)
+        self.app.say("")
+        self.edit("panel_width = 40", "panel_width = 41", 2)
+        self.app.reload_prefs()
+        self.assertEqual(self.app.notice, "")
+
+    def test_a_good_file_clears_the_remembered_problem(self):
+        self.placed()
+        self.edit("side = right", "side = middle", 1)
+        self.app.reload_prefs()
+        self.edit("side = middle", "side = left", 2)
+        self.app.reload_prefs()
+        self.assertEqual(self.app.config_problems, [])
+
+    def test_keys_write_the_config_keeping_comments(self):
+        self.placed()
+        for key, expect in (("s", "side = left"), (">", "panel_width = 45"), ("m", "mode = voice"), (sidebar.CTRL_S, "view = state")):
+            with self.subTest(key=key):
+                before = self.config_text().splitlines()
+                self.app.handle_key(key)
+                after = self.config_text().splitlines()
+                self.assertEqual([line for line in after if line not in before], [expect])
+                self.assertEqual(len(after), len(before))
+
+    def test_pins_and_folds_land_in_the_state_file_not_the_config(self):
+        self.app.prefs = core.toggle_pin(self.app.prefs, KEY_A)
+        self.app.save_prefs()
+        self.assertNotIn("pinned", self.config_text())
+        self.assertIn(KEY_A, self.app.prefs_files.state.read_text(encoding="utf-8"))
+
+    def test_the_claude_command_comes_from_the_file_unless_env_sets_it(self):
+        self.edit("claude_command = claude", "claude_command = /opt/claude", 1)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("EMX_CLAUDE", None)
+            captured = []
+            with mock.patch.object(sidebar, "App", lambda scr, tmux, claude: captured.append(claude) or mock.Mock()), \
+                    mock.patch.object(sidebar.curses, "wrapper", lambda body: body(self.scr)), \
+                    mock.patch.object(sidebar, "setup_curses", lambda scr: None), \
+                    mock.patch.object(sidebar, "own_view", lambda socket: SESSION), \
+                    mock.patch.object(sidebar.os, "write", lambda fd, data: None):
+                sidebar.run("emx-test-sock")
+                os.environ["EMX_CLAUDE"] = "/env/claude"
+                sidebar.run("emx-test-sock")
+        self.assertEqual(captured, ["/opt/claude", "/env/claude"])
+
+    def test_the_config_is_made_on_a_first_start_and_takes_the_old_marker(self):
+        self.app.prefs_files.config.unlink()
+        with mock.patch.object(sidebar.install, "updates_off_marker", return_value=True):
+            again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
+        self.assertIn("updates = off", again.prefs_files.config.read_text(encoding="utf-8"))
+        self.assertFalse(core.updates_on(again.prefs))
 
 
 class ShadeTmux(ClientTmux):

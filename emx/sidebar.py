@@ -1831,14 +1831,6 @@ class Poller(threading.Thread):
         return result
 
 
-def update_interval(env) -> float:
-    try:
-        seconds = int(env.get("EMX_UPDATE_SECONDS", ""))
-    except ValueError:
-        return core.UPDATE_CHECK_SECONDS
-    return seconds if seconds >= UPDATE_MIN_SECONDS else core.UPDATE_CHECK_SECONDS
-
-
 class Updater(threading.Thread):
     """Checks the installed emx for a newer version off the curses thread and unpacks it; the panel decides when to switch to it.
 
@@ -1846,11 +1838,13 @@ class Updater(threading.Thread):
     error) whenever one of them changed, else None.
     """
 
-    def __init__(self, interval: float | None = None):
+    def __init__(self, interval: float | Callable | None = None, wanted: Callable | None = None):
         super().__init__(daemon=True)
         self.lock = threading.Lock()
-        self.interval = update_interval(os.environ) if interval is None else interval
-        self.next_check = time.monotonic() + UPDATE_FIRST_SECONDS
+        self.interval = interval if callable(interval) else (lambda: core.UPDATE_CHECK_SECONDS if interval is None else interval)
+        self.wanted = wanted or (lambda: True)
+        self.started_at = time.monotonic()
+        self.last_check = None
         self.pruned = False
         self.major = None
         self.error = None
@@ -1865,8 +1859,9 @@ class Updater(threading.Thread):
         if self.on_disk == running and not self.pruned:
             self.pruned = True
             install.prune(root, running)
-        if now >= self.next_check and install.updates_on(root):
-            self.next_check = now + self.interval
+        due = self.started_at + UPDATE_FIRST_SECONDS if self.last_check is None else self.last_check + self.interval()
+        if now >= due and self.wanted():
+            self.last_check = now
             result, error = install.update(root, running, allow_major=False, apply_only_if_running_current=True, wait=False)
             if error != install.BUSY:
                 self.error = error
@@ -1940,9 +1935,16 @@ class App:
         self.me = os.environ.get("TMUX_PANE", "")
         # The panel of `emx` itself, the laptop's first view, runs what is done once per workspace; any other view's is a follower.
         self.primary = getattr(tmux, "view", SESSION) == SESSION
-        self.prefs_file = core.prefs_files()
+        self.prefs_files = core.prefs_files()
+        write_error = ""
+        try:
+            core.ensure_config(self.prefs_files, updates_off=install.updates_off_marker())
+        except OSError as exc:
+            write_error = f"Couldn't write the config file: {exc}"
         self.prefs_mtime = self.prefs_stamp()
-        self.prefs = core.load_prefs(self.prefs_file)
+        self.prefs, problems = core.load_settings(self.prefs_files)
+        self.placed_side = self.prefs["side"]
+        self.config_problems = []
         self.prefs_base = copy.deepcopy(self.prefs)
         self.summaries_file = self.state / SUMMARIES_FILE
         self.summaries_mtime = None
@@ -2025,12 +2027,21 @@ class App:
         self.peek_wrapped = (None, [])
         self.whats_new = None
         self.whats_new_waits = False
-        self.updater = Updater() if emx.ROOT and self.primary else None
+        self.updater = self.make_updater() if emx.ROOT and self.primary else None
         self.phone = None
         self.on_disk = None
         self.majors_said = set()
         self.relaunched = {}
         self.note_new_version()
+        self.show_problems(problems)
+        if write_error:
+            self.say(write_error, error=True)
+
+    def make_updater(self) -> Updater:
+        return Updater(
+            interval=lambda: core.update_seconds(self.prefs, os.environ),
+            wanted=lambda: core.updates_on(self.prefs),
+        )
 
     @property
     def engine(self) -> Engine:
@@ -2064,13 +2075,13 @@ class App:
             return None
 
     def prefs_stamp(self) -> tuple:
-        return self.file_mtime(self.prefs_file.config), self.file_mtime(self.prefs_file.state)
+        return self.file_mtime(self.prefs_files.config), self.file_mtime(self.prefs_files.state)
 
     def save_prefs(self) -> None:
         """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept."""
         try:
             with PREFS_LOCK:
-                merged = core.change_prefs(self.prefs_file, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
+                merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
         except OSError as exc:
             self.say(f"Couldn't save settings: {exc}", error=True)
             return
@@ -2078,17 +2089,46 @@ class App:
         self.prefs_mtime = self.prefs_stamp()
 
     def reload_prefs(self) -> None:
-        """Take in what another view's panel saved, keeping any change of this panel's own not saved yet."""
+        """Take in what another view's panel or his editor saved, keeping any change of this panel's own not saved yet."""
         mtime = self.prefs_stamp()
         if mtime == self.prefs_mtime:
             return
         self.prefs_mtime = mtime
-        disk = core.load_prefs(self.prefs_file)
+        old = self.prefs
+        disk, problems = core.load_settings(self.prefs_files)
         self.prefs = core.merge_prefs(self.prefs_base, self.prefs, disk)
         self.prefs_base = copy.deepcopy(disk)
+        self.apply_prefs(old)
+        self.show_problems(problems)
+
+    def apply_prefs(self, old: dict) -> None:
+        """Make the panel and the window follow the settings that differ from `old`."""
         self.apply_mode()
         self.apply_scheme()
         self.regroup()
+        if self.prefs["panel_width"] != old["panel_width"]:
+            self.applied = None
+        if self.prefs["side"] not in (old["side"], self.placed_side) and not self.narrow:
+            self.move_panel()
+
+    def move_panel(self) -> bool:
+        """Swap the panel and its slot; whether it did."""
+        try:
+            sidebar, main = self.layout_panes(self.my_panes())
+            if sidebar is None or main is None:
+                return False
+            self.tmux.swap(sidebar.id, main.id)
+        except TmuxError as exc:
+            self.say(f"tmux: {exc}", error=True)
+            return False
+        self.placed_side = self.prefs["side"]
+        self.applied = None
+        return True
+
+    def show_problems(self, problems: list) -> None:
+        if problems != self.config_problems and problems:
+            self.say(core.config_notice(problems), error=True, seconds=15)
+        self.config_problems = problems
 
     def apply_scheme(self) -> None:
         """Draw the chosen scheme: the panel's colours, and tmux's bottom bar and pane borders, which are global options every panel sets alike."""
@@ -2306,7 +2346,7 @@ class App:
             major=lambda: max(tuple(self.majors_said), key=core.parse_version, default=None),
             claude=self.claude,
         )
-        self.phone = phone.PhoneService(self.engine, phone.phone_port(), self.state, self.home, self.prefs_file, sources=sources)
+        self.phone = phone.PhoneService(self.engine, core.phone_port(self.prefs, os.environ), self.state, self.home, self.prefs_files, sources=sources)
         self.phone.start()
 
     def check_phone(self) -> None:
@@ -3006,17 +3046,11 @@ class App:
     def flip_side(self) -> None:
         if self.narrow:
             return
-        try:
-            sidebar, main = self.layout_panes(self.my_panes())
-            if sidebar is None or main is None:
-                return
-            self.tmux.swap(sidebar.id, main.id)
-        except TmuxError as exc:
-            self.say(f"tmux: {exc}", error=True)
-            return
         self.prefs = core.flip_side(self.prefs)
+        if not self.move_panel():
+            self.prefs = core.flip_side(self.prefs)
+            return
         self.save_prefs()
-        self.applied = None
         self.housekeep(fresh_list=False)
 
     def change_panel_width(self, delta: int) -> None:
@@ -4411,7 +4445,7 @@ def own_view(socket: str) -> str:
 def run(socket: str) -> int:
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
-    claude = os.environ.get("EMX_CLAUDE") or "claude"
+    claude = core.claude_command(core.load_prefs(core.prefs_files()), os.environ)
 
     view = own_view(socket)
 
