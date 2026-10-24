@@ -538,20 +538,9 @@ function renderSuggestions(folders) {
       box.hidden = true;
       clear(box);
     });
-    const star = el("button", "star " + (folder.favourite ? "tone-accent" : "tone-muted"), glyphText(folder.favourite ? "★" : "☆"));
-    star.type = "button";
-    star.setAttribute("aria-label", (folder.favourite ? "Unstar " : "Star ") + folder.shown);
-    star.setAttribute("aria-pressed", String(folder.favourite));
-    star.addEventListener("click", () => toggleStar(folder.path));
-    row.append(button, star);
+    row.append(button);
     box.append(row);
   }
-}
-
-async function toggleStar(path) {
-  const answer = await api("/api/favourite", { folder: path });
-  toast(answer ? answer.message : "emx didn't answer.");
-  suggest();
 }
 
 async function suggest() {

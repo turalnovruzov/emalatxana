@@ -167,7 +167,6 @@ a.item.accent, .item.accent { color: var(--accent); font-weight: 600; }
 .suggestion-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--selected); }
 .suggestion-row:last-child { border-bottom: 0; }
 .suggestion-row .suggestion { flex: 1 1 auto; min-width: 0; border-bottom: 0; }
-.star { flex: none; width: 44px; min-height: 44px; border: 0; background: transparent; font-size: 20px; }
 .notice { display: block; width: 100%; padding: 10px 16px; border: 0; border-bottom: 1px solid var(--selected); background: transparent; text-align: left; color: var(--plain); text-decoration: none; }
 .notice-head { display: flex; justify-content: space-between; gap: 12px; }
 .notice-head .age { flex: none; font-size: 13px; }
