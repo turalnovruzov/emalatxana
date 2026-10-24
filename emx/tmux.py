@@ -5,11 +5,13 @@ from __future__ import annotations
 import re
 import shlex
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 
 from emx import core
 
+POPUP_SETTLE_SECONDS = 0.5
 SESSION = "emx"
 ROLE = "@emx_role"
 SESSION_OPT = "@emx_session"
@@ -698,6 +700,25 @@ class Tmux:
             raise TmuxError(f"not a pane id: {pane!r}")
         send = f"send-keys -t {pane} {key} ; display-message -p {typed}"
         return self.run("if-shell", "-F", "-t", pane, gate, send, f'display-message -p -t {pane} "{report}"').strip()
+
+    def popup(self, command: str, title: str) -> None:
+        """Open `command` in a popup over the client that used this view last (tmux 3.2+) and return while it is open; it closes with the command.
+
+        `display-popup` itself returns only when the popup closes, so it is
+        given a moment to fail (no client, tmux too old) before it is left running.
+        """
+        argv = self.argv("display-popup", "-E", "-w", "90%", "-h", "90%", "-T", title, command)
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise TmuxError(f"tmux failed: {exc}") from None
+        try:
+            proc.wait(timeout=POPUP_SETTLE_SECONDS)
+        except subprocess.TimeoutExpired:
+            threading.Thread(target=proc.wait, daemon=True).start()
+            return
+        if proc.returncode != 0:
+            raise TmuxError(proc.stderr.read().strip() or f"tmux display-popup exited {proc.returncode}")
 
     def detach(self) -> None:
         """Detach the client that sent the last key. Run from a pane, tmux picks the most recently active client on its session."""

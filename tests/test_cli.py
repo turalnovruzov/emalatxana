@@ -26,6 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
 
 
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
+
 class Attached(Exception):
     pass
 
@@ -996,7 +1005,8 @@ class CreateWorkspace(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = tmp.name
-        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "XDG_CONFIG_HOME": os.path.join(self.dir, "config")})
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "XDG_CONFIG_HOME": os.path.join(self.dir, "config"),
+                                         "XDG_STATE_HOME": os.path.join(self.dir, "state")})
         env.start()
         self.addCleanup(env.stop)
         # A harmless command, so no real panel starts, polls claude agents or speaks.
@@ -1016,7 +1026,7 @@ class CreateWorkspace(unittest.TestCase):
         return self.tmux.run("display-message", "-p", "-t", f"={SESSION}:", fmt).strip()
 
     def test_starts_hidden_when_left_hidden(self):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_collapsed": True})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "panel_collapsed": True})
         cli.create_workspace(self.tmux)
         self.assertEqual(self.show("#{window_zoomed_flag}"), "1")
         self.assertEqual(self.show("#{@emx_role}"), "placeholder")
@@ -1069,8 +1079,8 @@ class CreateWorkspace(unittest.TestCase):
     def test_a_narrow_terminal_starting_emx_gets_a_view_of_its_own_and_leaves_the_laptops_alone(self):
         from emx import sidebar
 
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
-        saved = core.prefs_path().read_bytes()
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
+        saved = core.prefs_files().config.read_bytes()
         argv = self.launched(48)
         self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
         self.assertEqual(sorted(self.tmux.view_names()), [SESSION, "emx-view-1"])
@@ -1088,7 +1098,7 @@ class CreateWorkspace(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual((self.zoomed("emx-view-1"), self.zoomed(SESSION)), ("1", "0"))
         self.assertEqual(self.tmux.run("display-message", "-p", "-t", panel, "#{pane_active}").strip(), "1")
-        self.assertEqual(core.prefs_path().read_bytes(), saved)
+        self.assertEqual(core.prefs_files().config.read_bytes(), saved)
 
     def test_a_wide_terminal_starting_emx_gets_emx_itself(self):
         argv = self.launched(200)
@@ -1241,26 +1251,50 @@ class UpdateCommands(unittest.TestCase):
         self.assertEqual((code, err, len(out.splitlines())), (0, "", 1))
         return core.parse_update_report(out)
 
+    def config_text(self):
+        return core.prefs_files().config.read_text(encoding="utf-8")
+
     def test_update_from_a_checkout_says_so_and_writes_nothing(self):
         self.assertIsNone(emx.ROOT)
-        for args in ([], ["off"], ["on"]):
-            with self.subTest(args=args):
-                code, out, err = self.run_main("update", *args)
-                self.assertEqual((code, out), (1, ""))
-                self.assertIn("runs from a checkout", err)
-                self.assertIn("never updates itself", err)
+        code, out, err = self.run_main("update")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("runs from a checkout", err)
+        self.assertIn("never updates itself", err)
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.exists(self.bin))
 
-    def test_update_off_then_on_writes_and_removes_the_marker(self):
-        self.installed()
-        marker = os.path.join(self.root, "updates-off")
+    def test_update_off_writes_the_config_even_on_a_checkout(self):
+        self.assertIsNone(emx.ROOT)
         code, out, _ = self.run_main("update", "off")
         self.assertEqual((code, out), (0, "Automatic updates are off; emx update still updates when you run it.\n"))
-        self.assertTrue(os.path.exists(marker))
+        self.assertIn("\nupdates = off\n", self.config_text())
         code, out, _ = self.run_main("update", "on")
         self.assertEqual((code, out), (0, "Automatic updates are on.\n"))
+        self.assertIn("\nupdates = on\n", self.config_text())
+
+    def test_update_off_then_on_writes_the_config_and_leaves_the_marker(self):
+        self.installed()
+        marker = os.path.join(self.root, "updates-off")
+        before = self.run_main("update", "off")
+        self.assertEqual(before[:2], (0, "Automatic updates are off; emx update still updates when you run it.\n"))
+        self.assertIn("\nupdates = off\n", self.config_text())
         self.assertFalse(os.path.exists(marker))
+        self.assertEqual(self.run_main("update", "on")[:2], (0, "Automatic updates are on.\n"))
+        self.assertIn("\nupdates = on\n", self.config_text())
+
+    def test_update_report_reads_the_config(self):
+        self.installed()
+        self.assertEqual(self.report()["status"], "current")
+        core.ensure_config(core.prefs_files())
+        path = core.prefs_files().config
+        path.write_text(path.read_text().replace("updates = on", "updates = off"))
+        self.assertEqual(self.report()["status"], "off")
+
+    def test_update_report_migrates_the_marker(self):
+        self.installed()
+        open(os.path.join(self.root, "updates-off"), "w").close()
+        self.assertEqual(self.report()["status"], "off")
+        self.assertIn("\nupdates = off\n", self.config_text())
 
     def test_update_says_up_to_date_or_updated(self):
         self.installed()
@@ -1304,11 +1338,11 @@ class UpdateCommands(unittest.TestCase):
         add_version(self.source, "2.3.2")
         got = self.report()
         self.assertEqual((got["status"], got["before"], got["after"]), ("updated", "2.3.1", "2.3.2"))
-        cli.install.set_updates(self.root, False)
+        self.run_main("update", "off")
         add_version(self.source, "2.3.3")
         got = self.report()
         self.assertEqual((got["status"], got["after"]), ("off", "2.3.2"))
-        cli.install.set_updates(self.root, True)
+        self.run_main("update", "on")
         cli.install.git(self.root, "remote", "set-url", "origin", os.path.join(self.tmp, "missing"))
         got = self.report()
         self.assertEqual((got["status"], got["before"]), ("failed", "2.3.2"))
@@ -1343,7 +1377,7 @@ class UpdateCommands(unittest.TestCase):
         self.installed()
         code, out, _ = self.run_main("uninstall")
         self.assertEqual(code, 0)
-        self.assertTrue(out.endswith("Your prefs and emx's state are kept.\n"))
+        self.assertTrue(out.endswith("Your settings and emx's state are kept.\n"))
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.lexists(os.path.join(self.bin, "emx")))
 
@@ -1726,10 +1760,10 @@ class ColorsCommand(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp})
+        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp})
         patch.start()
         self.addCleanup(patch.stop)
-        self.prefs = core.prefs_path()
+        self.prefs = core.prefs_files()
 
     def run_main(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -1740,37 +1774,107 @@ class ColorsCommand(unittest.TestCase):
     def test_setting_a_scheme_saves_it_and_keeps_the_other_prefs(self):
         core.save_prefs(self.prefs, {"side": "left"})
         self.assertEqual(self.run_main("light"), (0, "Colours set to light.\n", ""))
-        saved = json.loads(self.prefs.read_text(encoding="utf-8"))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
+
+    def test_colors_writes_one_line_keeping_comments(self):
+        core.ensure_config(self.prefs)
+        before = self.prefs.config.read_text(encoding="utf-8").splitlines()
+        self.run_main("dark")
+        after = self.prefs.config.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([(a, b) for a, b in zip(before, after) if a != b], [("scheme = terminal", "scheme = dark")])
+        self.assertEqual(len(before), len(after))
 
     def test_with_no_argument_it_prints_the_scheme(self):
         self.assertEqual(self.run_main(), (0, "Colours: terminal. Choices: dark, light, terminal.\n", ""))
-        self.assertFalse(self.prefs.exists())
+        self.assertFalse(self.prefs.config.exists())
         self.run_main("light")
         self.assertEqual(self.run_main()[1], "Colours: light. Choices: dark, light, terminal.\n")
 
     def test_anything_else_prints_the_usage_and_changes_nothing(self):
         self.run_main("light")
-        before = self.prefs.read_text(encoding="utf-8")
+        before = self.prefs.config.read_text(encoding="utf-8")
         for args in (("pink",), ("light", "dark")):
             with self.subTest(args=args):
                 code, out, err = self.run_main(*args)
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("colors [dark | light | terminal]", err)
-                self.assertEqual(self.prefs.read_text(encoding="utf-8"), before)
+                self.assertEqual(self.prefs.config.read_text(encoding="utf-8"), before)
 
     def test_a_prefs_file_that_cannot_be_written_is_reported(self):
         with mock.patch.object(cli.core, "save_prefs", side_effect=OSError("disk full")):
             code, out, err = self.run_main("terminal")
-        self.assertEqual((code, out, err), (1, "", "emx: couldn't save prefs: disk full\n"))
+        self.assertEqual((code, out, err), (1, "", "emx: couldn't save settings: disk full\n"))
+
+
+class ConfigCommand(unittest.TestCase):
+    def setUp(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.tmp = tmp
+        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": os.path.join(tmp, "c"), "XDG_STATE_HOME": os.path.join(tmp, "s")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("EDITOR", None)
+        self.files = core.prefs_files()
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["config", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def editor(self, body, status=0):
+        path = os.path.join(self.tmp, "editor.sh")
+        with open(path, "w") as fh:
+            fh.write(f'#!/bin/sh\n{body}\nexit {status}\n')
+        os.chmod(path, 0o755)
+        os.environ["EDITOR"] = path
+
+    def test_config_prints_the_path_without_editor(self):
+        self.assertEqual(self.run_main(), (0, f"{self.files.config}\n", ""))
+        self.assertTrue(self.files.config.exists())
+
+    def test_config_runs_the_editor_on_the_file(self):
+        self.editor('echo "side = left" >> "$1"', status=3)
+        code, out, _ = self.run_main()
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("\nside = left\n", self.files.config.read_text(encoding="utf-8"))
+
+    def test_config_reports_bad_lines_after_editing(self):
+        self.editor('echo "colour = blue" >> "$1"')
+        code, _, err = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertRegex(err, r'emx: config line \d+: emx has no setting "colour"\n')
+
+    def test_config_takes_no_arguments(self):
+        code, out, err = self.run_main("x")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("config", err)
+
+
+class NewViewSide(unittest.TestCase):
+    def test_new_view_takes_the_side_from_the_config(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": os.path.join(tmp, "c"), "XDG_STATE_HOME": os.path.join(tmp, "s")}):
+            files = core.prefs_files()
+            core.ensure_config(files)
+            files.config.write_text(files.config.read_text().replace("side = right", "side = left"), encoding="utf-8")
+            tmux = mock.Mock()
+            tmux.run.return_value = "%1\n"
+            tmux.socket = "emx-test-unit"
+            cli.new_view(tmux, "v", 200, 50)
+        split = [c.args for c in tmux.run.call_args_list if c.args[0] == "split-window"][0]
+        self.assertIn("-b", split)
 
 
 class UpgradeKeepsScheme(unittest.TestCase):
     def test_an_upgrade_sets_the_saved_schemes_options_after_sourcing_the_conf(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp}):
-            core.save_prefs(core.prefs_path(), core.set_scheme({}, "light"))
+        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp}):
+            core.save_prefs(core.prefs_files(), core.set_scheme({}, "light"))
             tmux = MigratingTmux("emx-test-unit")
             tmux.options[VERSION_OPT] = "old"
             cli.refresh_workspace(tmux)

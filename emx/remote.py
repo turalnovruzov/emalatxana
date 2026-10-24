@@ -462,7 +462,7 @@ def connect(host_arg: str, env=os.environ) -> int:
         print("emx: remote needs a host name from your SSH config.", file=sys.stderr)
         return 2
     ssh = env.get("EMX_SSH") or "ssh"
-    base = env.get("EMX_REMOTE_COMMAND") or "emx"
+    base = core.remote_command(core.load_prefs(core.prefs_files()), env)
     control = control_dir()
     master, follower, paster, note, code, titled = False, None, None, None, 1, False
     try:
@@ -480,7 +480,7 @@ def connect(host_arg: str, env=os.environ) -> int:
         if remote is None:
             print(
                 f"emx: couldn't run emx on {host}: {why}. If it is installed somewhere the login shell doesn't find, "
-                "set EMX_REMOTE_COMMAND to it.",
+                "set remote_command with emx config (or EMX_REMOTE_COMMAND) to it.",
                 file=sys.stderr,
             )
             return 1
@@ -553,7 +553,7 @@ def open_remote(sid: str, env=os.environ) -> int:
     if bundle:
         print(bundle, flush=True)
     ssh = env.get("EMX_SSH") or "ssh"
-    base = env.get("EMX_REMOTE_COMMAND") or "emx"
+    base = core.remote_command(core.load_prefs(core.prefs_files()), env)
     argv = core.ssh_client_args(
         ssh, host, env.get("EMX_REMOTE_CONTROL") or None, core.remote_shell(base, "open", "--no-window", sid), batch=True
     )

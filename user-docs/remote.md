@@ -47,7 +47,7 @@ If the server's emx is a different version, `emx remote` says so before it conne
 
 ## If the server cannot find emx
 
-Set `EMX_REMOTE_COMMAND` to emx's full path on the server. `EMX_SSH` replaces the `ssh` command.
+Set `remote_command` in the config file (`emx config`) to emx's full path on the server; `EMX_REMOTE_COMMAND` overrides it. `EMX_SSH` replaces the `ssh` command.
 
 ## Docs of the server's version
 

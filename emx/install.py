@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 
+import emx
 from emx import core
 
 SOURCE = "source.git"
@@ -229,18 +230,9 @@ def updates_on(root) -> bool:
     return not os.path.lexists(os.path.join(root, UPDATES_OFF))
 
 
-def set_updates(root, on: bool) -> tuple:
-    marker = os.path.join(root, UPDATES_OFF)
-    try:
-        if on:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(marker)
-        else:
-            with open(marker, "w", encoding="utf-8"):
-                pass
-        return on, None
-    except OSError as exc:
-        return None, f"couldn't turn automatic updates {'on' if on else 'off'}: {exc}"
+def updates_off_marker() -> bool:
+    """Whether the old `updates-off` marker sits in the install folder: what carries into the config file."""
+    return emx.ROOT is not None and not updates_on(emx.ROOT)
 
 
 def _foreign(root: str) -> bool:

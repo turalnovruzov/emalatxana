@@ -4,6 +4,7 @@ import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -20,6 +21,15 @@ from emx.tmux import Pane, TmuxError
 FIXTURES = Path(__file__).parent / "fixtures" / "tailscale"
 OWNER = 4242
 NODE = phone.Node("127.0.0.1", OWNER, "devbox.example-tailnet.ts.net", "devbox")
+
+
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
 
 
 def fixture(name: str) -> str:
@@ -485,13 +495,16 @@ class ApiCase(unittest.TestCase):
         self.dir = os.path.realpath(tmp.name)
         self.home = os.path.join(self.dir, "home")
         self.state = os.path.join(self.dir, "state")
-        self.prefs = os.path.join(self.dir, "prefs.json")
+        self.prefs = core.PrefsFiles(Path(self.dir) / "config", Path(self.dir) / "remembered.json", Path(self.dir) / "prefs.json")
         for folder in ("Workspace/budget-tracker", "Workspace/emalatxana", "other/place"):
             os.makedirs(os.path.join(self.home, folder))
         os.makedirs(self.state)
         env = mock.patch.dict(os.environ, {"EMX_SHOW_TEST_SESSIONS": ""})
         env.start()
         self.addCleanup(env.stop)
+
+    def saved(self):
+        return tuple(f.read_bytes() if f.exists() else None for f in (self.prefs.config, self.prefs.state))
 
     def api(self, engine_, **kwargs):
         kwargs.setdefault("wait_running", lambda eng, sid: (object(), None))
@@ -614,7 +627,7 @@ class Grouping(ApiCase):
         return self.api().get("/api/state", query)[1]
 
     def test_groups_are_the_panels_with_pinned_first(self):
-        with open(self.prefs, "w") as fh:
+        with open(self.prefs.legacy, "w") as fh:
             json.dump({"pinned": [self.sessions[2].id]}, fh)
         panel = core.group_sessions(self.sessions, self.placements, core.PROJECT, frozenset({self.sessions[2].id}))
         groups = self.snapshot()["groups"]
@@ -645,7 +658,7 @@ class Grouping(ApiCase):
         self.assertEqual(self.snapshot("find=zzz")["groups"], [])
 
     def test_a_header_new_folder_is_default_folder(self):
-        with open(self.prefs, "w") as fh:
+        with open(self.prefs.legacy, "w") as fh:
             json.dump({"pinned": [self.sessions[2].id], "last_folder": self.tree}, fh)
         by_key = {g["key"]: g for g in self.snapshot()["groups"]}
         self.assertEqual(by_key[self.repo]["new_folder"], "~/Workspace/emalatxana")
@@ -653,7 +666,7 @@ class Grouping(ApiCase):
         self.assertEqual({k: g["closable"] for k, g in by_key.items()}, {self.repo: True, core.PINNED: False})
 
     def test_pinned_without_a_last_folder_has_no_new_folder(self):
-        with open(self.prefs, "w") as fh:
+        with open(self.prefs.legacy, "w") as fh:
             json.dump({"pinned": [self.sessions[2].id]}, fh)
         pinned = self.snapshot()["groups"][0]
         self.assertIsNone(pinned["new_folder"])
@@ -771,7 +784,7 @@ class Folders(ApiCase):
     def test_a_recent_folder_outside_home_is_offered_and_allowed(self):
         elsewhere = os.path.join(self.dir, "elsewhere", "proj-x")
         os.makedirs(elsewhere)
-        with open(self.prefs, "w") as fh:
+        with open(self.prefs.legacy, "w") as fh:
             json.dump({"recent_folders": [elsewhere]}, fh)
         self.assertEqual(self.find("proj-x"), [elsewhere])
 
@@ -1213,7 +1226,13 @@ class Service(ApiCase):
             service = self.service((NODE, None), port=port)
             service.tick()
         self.assertEqual(phone.read_phone_file(self.state), {"url": None, "problem": "busy"})
-        self.assertEqual(self.said(service), [f"Phone page off: port {port} is taken. Set EMX_PHONE_PORT to another."])
+        self.assertEqual(self.said(service), [f"Phone page off: port {port} is taken. Set another with c in the panel (Port), or in emx config."])
+
+    def test_the_busy_line_points_to_the_menu(self):
+        line = phone.problem_line(phone.BUSY, 8787)
+        self.assertIn("c in the panel (Port)", line)
+        self.assertIn("emx config", line)
+        self.assertNotIn("EMX_PHONE_PORT", line)
 
     def test_a_relaunched_panel_does_not_say_again_what_the_file_already_says(self):
         port = free_port()
@@ -1266,8 +1285,13 @@ class Port(unittest.TestCase):
         for value, want in (("", 8787), ("abc", 8787), ("80", 8787), ("1023", 8787), ("70000", 8787), ("-5", 8787),
                             ("1024", 1024), ("9000", 9000), ("65535", 65535)):
             with self.subTest(value=value):
-                self.assertEqual(phone.phone_port({"EMX_PHONE_PORT": value}), want)
-        self.assertEqual(phone.phone_port({}), 8787)
+                self.assertEqual(phone.phone_port(None, {"EMX_PHONE_PORT": value}), want)
+        self.assertEqual(phone.phone_port(None, {}), 8787)
+
+    def test_the_port_comes_from_the_file_unless_env_sets_it(self):
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {}), 9000)
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "9100"}), 9100)
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "80"}), 9000)
 
 
 class Peek(ApiCase):
@@ -1320,24 +1344,31 @@ class Pins(ApiCase):
         return self.api(self.engine).post("/api/pin", body)
 
     def test_pin_toggles_the_panels_pref_and_keeps_other_prefs(self):
-        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left", "favourite_folders": ["/a"]})
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "side": "left", "favourite_folders": ["/a"]})
         status, body = self.post({"id": self.target.id})
-        saved = core.load_prefs(Path(self.prefs))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((status, body["ok"], body["pinned"], body["message"]), (200, True, True, "Pinned alpha."))
         self.assertEqual((saved["pinned"], saved["side"], saved["favourite_folders"]), ([self.target.id], "left", ["/a"]))
         body = self.post({"id": self.target.id})[1]
-        saved = core.load_prefs(Path(self.prefs))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((body["pinned"], body["message"], saved.get("pinned", [])), (False, "Unpinned alpha.", []))
         self.assertEqual((saved["side"], saved["favourite_folders"]), ("left", ["/a"]))
 
+    def test_a_phone_pin_writes_state_not_config(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.prefs.config.read_text()
+        self.post({"id": self.target.id})
+        self.assertEqual(self.prefs.config.read_text(), before)
+        self.assertIn(self.target.id, self.prefs.state.read_text())
+
     def test_pin_of_an_unlisted_session_writes_nothing(self):
-        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left"})
-        before = Path(self.prefs).read_bytes()
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "side": "left"})
+        before = self.saved()
         body = self.post({"id": "b" * 8 + "-bbbb-4bbb-8bbb-" + "b" * 12})[1]
         self.assertEqual((body["ok"], body["message"]), (False, sidebar.OPEN_GONE))
-        self.assertEqual(Path(self.prefs).read_bytes(), before)
+        self.assertEqual(self.saved(), before)
         self.assertEqual(self.post({"id": "nope"})[0], 400)
-        self.assertEqual(Path(self.prefs).read_bytes(), before)
+        self.assertEqual(self.saved(), before)
 
 
 class Names(ApiCase):
@@ -1510,44 +1541,61 @@ class Favourites(ApiCase):
         return self.api(self.engine).post("/api/favourite", {"folder": folder})
 
     def test_favourite_toggles_the_panels_pref(self):
-        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "side": "left"})
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "side": "left"})
         body = self.post(self.budget)[1]
         self.assertEqual((body["ok"], body["on"], body["message"]), (True, True, "★ ~/Workspace/budget-tracker is a favourite"))
-        saved = core.load_prefs(Path(self.prefs))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((saved["favourite_folders"], saved["side"]), ([self.budget], "left"))
         rows = self.api(self.engine).get("/api/folders", "q=budget")[1]["folders"]
         self.assertEqual([r["favourite"] for r in rows if r["path"] == self.budget], [True])
         body = self.post("~/Workspace/budget-tracker")[1]
         self.assertEqual((body["on"], body["message"]), (False, "~/Workspace/budget-tracker is no longer a favourite"))
-        saved = core.load_prefs(Path(self.prefs))
+        saved = core.load_prefs(self.prefs)
         self.assertNotIn("favourite_folders", saved)
         self.assertEqual(saved["side"], "left")
+
+    def test_a_phone_favourite_writes_the_config_line(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.prefs.config.read_text()
+        self.assertTrue(self.post(self.budget)[1]["ok"])
+        after = self.prefs.config.read_text()
+        self.assertRegex(after, r"(?m)^favourite_folders = .*Workspace/budget-tracker$")
+        self.assertEqual([line for line in after.splitlines() if line.startswith("#")], [line for line in before.splitlines() if line.startswith("#")])
+
+    def test_a_folder_with_a_line_break_is_refused_and_the_file_gains_no_line(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.saved()
+        for folder in (self.budget + "\nscheme = dark", self.budget + "\rside = left", self.budget + "\x00"):
+            with self.subTest(folder=folder):
+                code, body = self.post(folder)
+                self.assertEqual((code, body["ok"]), (400, False))
+        self.assertEqual(self.saved(), before)
 
     def test_favourite_refuses_a_folder_the_page_may_not_use(self):
         outside = os.path.join(self.dir, "outside")
         os.makedirs(outside)
-        core.save_prefs(Path(self.prefs), dict(core.DEFAULT_PREFS))
-        before = Path(self.prefs).read_bytes()
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.saved()
         for folder in (outside, "/etc", self.path("missing")):
             with self.subTest(folder=folder):
                 self.assertFalse(self.post(folder)[1]["ok"])
         self.assertEqual(self.post(1)[0], 400)
         self.assertEqual(self.post("x" * 4097)[0], 400)
-        self.assertEqual(Path(self.prefs).read_bytes(), before)
-        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "favourite_folders": [outside]})
+        self.assertEqual(self.saved(), before)
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "favourite_folders": [outside]})
         body = self.post(outside)[1]
         self.assertEqual((body["ok"], body["on"]), (True, False))
 
     def test_new_records_the_folder_as_the_panel_does(self):
-        core.save_prefs(Path(self.prefs), {**core.DEFAULT_PREFS, "recent_folders": ["/old"]})
+        core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "recent_folders": ["/old"]})
         self.assertTrue(self.api(self.engine).post("/api/new", {"folder": self.budget})[1]["ok"])
-        saved = core.load_prefs(Path(self.prefs))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((saved["last_folder"], saved["recent_folders"][:2]), (self.budget, [self.budget, "/old"]))
 
     def test_a_start_that_failed_records_nothing(self):
         api = self.api(self.engine, wait_running=lambda eng, sid: (None, "never ran"))
         api.post("/api/new", {"folder": self.budget})
-        self.assertFalse(os.path.exists(self.prefs))
+        self.assertFalse(self.prefs.config.exists())
 
 
 class Notifications(ApiCase):

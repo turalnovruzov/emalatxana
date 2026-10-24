@@ -5,5 +5,5 @@
 - **Shared between devices:** the side, pins, favourite folders, recent folders, the list view and folded groups, and voice or notification mode. The saved panel width and hidden panel are your laptop's first terminal's.
 - **Sessions outlive the panel.** Detaching with `q`, closing the terminal, or the panel restarting for an update leaves your Claude sessions running.
 - **Hooks report state.** Each session runs with hooks that tell emx when it starts working, stops, or asks you something. That is how the panel knows what each one is doing.
-- **Where things live.** Your choices (side, width, mode, pins, favourite folders) are in a prefs file, `prefs.json` in `emx` under `$XDG_CONFIG_HOME`, else `~/.config/emx`. emx's own state (session records and hook reports) is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
+- **Where things live.** Your settings (side, width, mode, colours, favourite folders and more) are in one commented file, `config` in `emx` under `$XDG_CONFIG_HOME`, else `~/.config/emx`; `c` in the panel and `emx config` edit it. emx's own state (pins, recent folders, folded groups, session records and hook reports) is in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`.
 - **Installed copy.** An installed emx lives in `~/.local/share/emx`, with one previous version kept; see `emx docs update-and-uninstall`.

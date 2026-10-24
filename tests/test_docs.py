@@ -3,7 +3,7 @@ import re
 import unittest
 from pathlib import Path
 
-from emx import cli, sidebar
+from emx import cli, core, sidebar
 
 DOCS = Path(__file__).resolve().parent.parent / "user-docs"
 TEST_ONLY_SETTINGS = {"EMX_SHOW_TEST_SESSIONS", "EMX_CONFIG_HOME"}
@@ -65,6 +65,15 @@ class DocsMatchEmx(unittest.TestCase):
         for command in sorted(commands):
             with self.subTest(command=command):
                 self.assert_in_reference(command, "emx --help")
+
+    def test_every_config_key_is_in_the_reference(self):
+        for setting in core.SETTINGS:
+            with self.subTest(key=setting.key):
+                self.assert_in_reference(setting.key, "the config file")
+
+    def test_the_config_command_and_key_are_public(self):
+        self.assertIn("emx config", public_commands())
+        self.assertIn("c", panel_key_tokens())
 
     def test_no_internal_command_is_parsed_as_public(self):
         internal = {f"emx {w}" for w in ("hook", "install", "relaunch", "follow", "open", "sidebar", "left", "blank", "paste", "paste-image")}
