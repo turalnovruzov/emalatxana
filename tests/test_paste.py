@@ -16,7 +16,7 @@ from emx import BIN, cli, core, remote
 from emx.tmux import RELAY_PASTE_OPT, SESSION_OPT
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_remote import FAKE_SSH, StubNotifier, StubVoice  # noqa: E402
+from test_remote import FAKE_SSH, StubNotifier, StubVoice, use_remote_command  # noqa: E402
 from test_tmux import BRACKETED_RECORDER, PrivateServer  # noqa: E402
 
 FIXTURE_PNG = core.PNG_SIGNATURE + b"\x00throwaway picture\xff"
@@ -66,10 +66,11 @@ class CtrlVEndToEnd(PrivateServer):
         )
         wrapper.chmod(0o755)
         env = {
-            "EMX_SSH": FAKE_SSH, "EMX_REMOTE_COMMAND": str(wrapper), "EMX_SOCKET": self.tmux.socket,
+            "EMX_SSH": FAKE_SSH, "EMX_SOCKET": self.tmux.socket,
             "XDG_STATE_HOME": str(self.state), "EMX_SHOW_TEST_SESSIONS": "1", "EMX_SAY": "true",
             "EMX_CLIPBOARD_IMAGE": f"cp {shlex.quote(str(self.picture))}",
         }
+        use_remote_command(wrapper)
         for patch in (
             mock.patch.dict(os.environ, env),
             mock.patch.object(remote, "control_dir", lambda: "/tmp/emx-test-ctl/1"),

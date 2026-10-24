@@ -843,8 +843,8 @@ PROBLEM_LINES = {
 }
 
 
-def phone_port(prefs=None, env=None) -> int:
-    return core.phone_port(prefs or {}, os.environ if env is None else env)
+def phone_port(prefs=None) -> int:
+    return core.phone_port(prefs or {})
 
 
 def problem_line(problem: str, port: int) -> str:

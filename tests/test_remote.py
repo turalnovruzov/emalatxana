@@ -30,6 +30,13 @@ SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 FAKE_SSH = str(Path(__file__).resolve().parent / "fake_ssh.py")
 
 
+def use_remote_command(path):
+    """Writes `remote_command` into the module's throwaway config, the laptop side's, so no test reaches the emx on PATH."""
+    files = core.prefs_files()
+    core.ensure_config(files)
+    core.change_prefs(files, lambda prefs: {**prefs, "remote_command": str(path)})
+
+
 def notice(text="Done.", sid=SID):
     return core.relay_notice("t · p", text, text, sid, core.VOICE_MODE, 1.0)
 
@@ -337,6 +344,7 @@ class ConnectCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.log = self.tmp / "ssh.log"
+        use_remote_command("/nonexistent/emx-not-set")
         self.delivery = Recorded()
         self.followers = []
         outer = self
@@ -375,7 +383,7 @@ class ConnectCase(unittest.TestCase):
             encoding="utf-8",
         )
         path.chmod(0o755)
-        os.environ["EMX_REMOTE_COMMAND"] = str(path)
+        use_remote_command(path)
         return path
 
     def run_connect(self, host="emx-test-host"):
@@ -407,7 +415,7 @@ class Connect(ConnectCase):
         attach = [c for c in middle if "-t" in c]
         self.assertEqual((len(follower), len(attach)), (1, 1))
         self.assertIn("BatchMode=yes", follower[0])
-        self.assertTrue(attach[0][-1].endswith(" -lc " + os.environ["EMX_REMOTE_COMMAND"]))
+        self.assertTrue(attach[0][-1].endswith(" -lc " + str(self.tmp / "fake-emx")))
         self.assertEqual(exit_call[exit_call.index("-O"):exit_call.index("-O") + 2], ["-O", "exit"])
         self.assertNotIn("lost the connection", err)
 
@@ -479,7 +487,7 @@ class Connect(ConnectCase):
         code, err = self.run_connect()
         self.assertEqual(code, 1)
         self.assertIn("remote_command", err)
-        self.assertIn("EMX_REMOTE_COMMAND", err)
+        self.assertNotIn("EMX_REMOTE_COMMAND", err)
         calls = self.argvs()
         self.assertFalse([c for c in calls if "-t" in c])
         self.assertFalse([c for c in calls if c[-1].endswith("follow'")])
@@ -536,20 +544,12 @@ class Connect(ConnectCase):
 
 
 class RemoteCommandSetting(ConnectCase):
-    def test_remote_command_from_the_config_unless_env_sets_it(self):
+    def test_remote_command_comes_from_the_config_and_not_the_environment(self):
         path = self.server()
-        del os.environ["EMX_REMOTE_COMMAND"]
-        files = core.prefs_files()
-        core.ensure_config(files)
-        files.config.write_text(files.config.read_text().replace("remote_command = emx", f"remote_command = {path}"), encoding="utf-8")
-        self.assertEqual(self.run_connect()[0], 0)
+        with mock.patch.dict(os.environ, {"EMX_REMOTE_COMMAND": "/nonexistent/emx-env"}):
+            self.assertEqual(self.run_connect()[0], 0)
         self.assertTrue(any(str(path) in c[-1] for c in self.argvs()))
-        self.log.unlink()
-        self.server(version="9.9.9")
-        os.environ["EMX_REMOTE_COMMAND"] = "/nonexistent/emx-env"
-        self.run_connect()
-        self.assertTrue(any("/nonexistent/emx-env" in c[-1] for c in self.argvs()))
-        self.assertFalse(any(str(path) in c[-1] for c in self.argvs()))
+        self.assertFalse(any("/nonexistent/emx-env" in c[-1] for c in self.argvs()))
 
 
 class Tty(io.StringIO):
@@ -805,7 +805,7 @@ class ConnectPaste(ConnectCase):
             encoding="utf-8",
         )
         path.chmod(0o755)
-        os.environ["EMX_REMOTE_COMMAND"] = str(path)
+        use_remote_command(path)
 
     def connect_with(self, reader):
         self.paste_server()
