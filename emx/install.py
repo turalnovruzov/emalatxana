@@ -235,20 +235,6 @@ def updates_off_marker() -> bool:
     return emx.ROOT is not None and not updates_on(emx.ROOT)
 
 
-def set_updates(root, on: bool) -> tuple:
-    marker = os.path.join(root, UPDATES_OFF)
-    try:
-        if on:
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(marker)
-        else:
-            with open(marker, "w", encoding="utf-8"):
-                pass
-        return on, None
-    except OSError as exc:
-        return None, f"couldn't turn automatic updates {'on' if on else 'off'}: {exc}"
-
-
 def _foreign(root: str) -> bool:
     """Whether `root` holds something emx did not make, so installing there would mix into a folder of his."""
     if not os.path.isdir(root) or os.path.isdir(os.path.join(root, SOURCE)):

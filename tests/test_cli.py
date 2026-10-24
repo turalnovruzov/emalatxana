@@ -1251,26 +1251,50 @@ class UpdateCommands(unittest.TestCase):
         self.assertEqual((code, err, len(out.splitlines())), (0, "", 1))
         return core.parse_update_report(out)
 
+    def config_text(self):
+        return core.prefs_files().config.read_text(encoding="utf-8")
+
     def test_update_from_a_checkout_says_so_and_writes_nothing(self):
         self.assertIsNone(emx.ROOT)
-        for args in ([], ["off"], ["on"]):
-            with self.subTest(args=args):
-                code, out, err = self.run_main("update", *args)
-                self.assertEqual((code, out), (1, ""))
-                self.assertIn("runs from a checkout", err)
-                self.assertIn("never updates itself", err)
+        code, out, err = self.run_main("update")
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("runs from a checkout", err)
+        self.assertIn("never updates itself", err)
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.exists(self.bin))
 
-    def test_update_off_then_on_writes_and_removes_the_marker(self):
-        self.installed()
-        marker = os.path.join(self.root, "updates-off")
+    def test_update_off_writes_the_config_even_on_a_checkout(self):
+        self.assertIsNone(emx.ROOT)
         code, out, _ = self.run_main("update", "off")
         self.assertEqual((code, out), (0, "Automatic updates are off; emx update still updates when you run it.\n"))
-        self.assertTrue(os.path.exists(marker))
+        self.assertIn("\nupdates = off\n", self.config_text())
         code, out, _ = self.run_main("update", "on")
         self.assertEqual((code, out), (0, "Automatic updates are on.\n"))
+        self.assertIn("\nupdates = on\n", self.config_text())
+
+    def test_update_off_then_on_writes_the_config_and_leaves_the_marker(self):
+        self.installed()
+        marker = os.path.join(self.root, "updates-off")
+        before = self.run_main("update", "off")
+        self.assertEqual(before[:2], (0, "Automatic updates are off; emx update still updates when you run it.\n"))
+        self.assertIn("\nupdates = off\n", self.config_text())
         self.assertFalse(os.path.exists(marker))
+        self.assertEqual(self.run_main("update", "on")[:2], (0, "Automatic updates are on.\n"))
+        self.assertIn("\nupdates = on\n", self.config_text())
+
+    def test_update_report_reads_the_config(self):
+        self.installed()
+        self.assertEqual(self.report()["status"], "current")
+        core.ensure_config(core.prefs_files())
+        path = core.prefs_files().config
+        path.write_text(path.read_text().replace("updates = on", "updates = off"))
+        self.assertEqual(self.report()["status"], "off")
+
+    def test_update_report_migrates_the_marker(self):
+        self.installed()
+        open(os.path.join(self.root, "updates-off"), "w").close()
+        self.assertEqual(self.report()["status"], "off")
+        self.assertIn("\nupdates = off\n", self.config_text())
 
     def test_update_says_up_to_date_or_updated(self):
         self.installed()
@@ -1314,11 +1338,11 @@ class UpdateCommands(unittest.TestCase):
         add_version(self.source, "2.3.2")
         got = self.report()
         self.assertEqual((got["status"], got["before"], got["after"]), ("updated", "2.3.1", "2.3.2"))
-        cli.install.set_updates(self.root, False)
+        self.run_main("update", "off")
         add_version(self.source, "2.3.3")
         got = self.report()
         self.assertEqual((got["status"], got["after"]), ("off", "2.3.2"))
-        cli.install.set_updates(self.root, True)
+        self.run_main("update", "on")
         cli.install.git(self.root, "remote", "set-url", "origin", os.path.join(self.tmp, "missing"))
         got = self.report()
         self.assertEqual((got["status"], got["before"]), ("failed", "2.3.2"))
@@ -1353,7 +1377,7 @@ class UpdateCommands(unittest.TestCase):
         self.installed()
         code, out, _ = self.run_main("uninstall")
         self.assertEqual(code, 0)
-        self.assertTrue(out.endswith("Your prefs and emx's state are kept.\n"))
+        self.assertTrue(out.endswith("Your settings and emx's state are kept.\n"))
         self.assertFalse(os.path.exists(self.root))
         self.assertFalse(os.path.lexists(os.path.join(self.bin, "emx")))
 
@@ -1753,6 +1777,14 @@ class ColorsCommand(unittest.TestCase):
         saved = core.load_prefs(self.prefs)
         self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
 
+    def test_colors_writes_one_line_keeping_comments(self):
+        core.ensure_config(self.prefs)
+        before = self.prefs.config.read_text(encoding="utf-8").splitlines()
+        self.run_main("dark")
+        after = self.prefs.config.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([(a, b) for a, b in zip(before, after) if a != b], [("scheme = terminal", "scheme = dark")])
+        self.assertEqual(len(before), len(after))
+
     def test_with_no_argument_it_prints_the_scheme(self):
         self.assertEqual(self.run_main(), (0, "Colours: terminal. Choices: dark, light, terminal.\n", ""))
         self.assertFalse(self.prefs.config.exists())
@@ -1773,6 +1805,68 @@ class ColorsCommand(unittest.TestCase):
         with mock.patch.object(cli.core, "save_prefs", side_effect=OSError("disk full")):
             code, out, err = self.run_main("terminal")
         self.assertEqual((code, out, err), (1, "", "emx: couldn't save settings: disk full\n"))
+
+
+class ConfigCommand(unittest.TestCase):
+    def setUp(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        self.tmp = tmp
+        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": os.path.join(tmp, "c"), "XDG_STATE_HOME": os.path.join(tmp, "s")})
+        patch.start()
+        self.addCleanup(patch.stop)
+        os.environ.pop("EDITOR", None)
+        self.files = core.prefs_files()
+
+    def run_main(self, *argv):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["config", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def editor(self, body, status=0):
+        path = os.path.join(self.tmp, "editor.sh")
+        with open(path, "w") as fh:
+            fh.write(f'#!/bin/sh\n{body}\nexit {status}\n')
+        os.chmod(path, 0o755)
+        os.environ["EDITOR"] = path
+
+    def test_config_prints_the_path_without_editor(self):
+        self.assertEqual(self.run_main(), (0, f"{self.files.config}\n", ""))
+        self.assertTrue(self.files.config.exists())
+
+    def test_config_runs_the_editor_on_the_file(self):
+        self.editor('echo "side = left" >> "$1"', status=3)
+        code, out, _ = self.run_main()
+        self.assertEqual((code, out), (3, ""))
+        self.assertIn("\nside = left\n", self.files.config.read_text(encoding="utf-8"))
+
+    def test_config_reports_bad_lines_after_editing(self):
+        self.editor('echo "colour = blue" >> "$1"')
+        code, _, err = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertRegex(err, r'emx: config line \d+: emx has no setting "colour"\n')
+
+    def test_config_takes_no_arguments(self):
+        code, out, err = self.run_main("x")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("config", err)
+
+
+class NewViewSide(unittest.TestCase):
+    def test_new_view_takes_the_side_from_the_config(self):
+        tmp = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": os.path.join(tmp, "c"), "XDG_STATE_HOME": os.path.join(tmp, "s")}):
+            files = core.prefs_files()
+            core.ensure_config(files)
+            files.config.write_text(files.config.read_text().replace("side = right", "side = left"), encoding="utf-8")
+            tmux = mock.Mock()
+            tmux.run.return_value = "%1\n"
+            tmux.socket = "emx-test-unit"
+            cli.new_view(tmux, "v", 200, 50)
+        split = [c.args for c in tmux.run.call_args_list if c.args[0] == "split-window"][0]
+        self.assertIn("-b", split)
 
 
 class UpgradeKeepsScheme(unittest.TestCase):

@@ -16,6 +16,16 @@ import emx
 from emx import core, remote
 from emx.tmux import RELAY_HOST_OPT, RELAY_OPT, RELAY_PASTE_OPT
 
+
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
+
 SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 FAKE_SSH = str(Path(__file__).resolve().parent / "fake_ssh.py")
 
@@ -468,6 +478,7 @@ class Connect(ConnectCase):
         self.server(version=None)
         code, err = self.run_connect()
         self.assertEqual(code, 1)
+        self.assertIn("remote_command", err)
         self.assertIn("EMX_REMOTE_COMMAND", err)
         calls = self.argvs()
         self.assertFalse([c for c in calls if "-t" in c])
@@ -522,6 +533,23 @@ class Connect(ConnectCase):
             code, _ = self.run_connect()
         self.assertEqual(code, 130)
         self.assertTrue(out.getvalue().endswith("\x1b]0;\x07\x1b[23;0t"))
+
+
+class RemoteCommandSetting(ConnectCase):
+    def test_remote_command_from_the_config_unless_env_sets_it(self):
+        path = self.server()
+        del os.environ["EMX_REMOTE_COMMAND"]
+        files = core.prefs_files()
+        core.ensure_config(files)
+        files.config.write_text(files.config.read_text().replace("remote_command = emx", f"remote_command = {path}"), encoding="utf-8")
+        self.assertEqual(self.run_connect()[0], 0)
+        self.assertTrue(any(str(path) in c[-1] for c in self.argvs()))
+        self.log.unlink()
+        self.server(version="9.9.9")
+        os.environ["EMX_REMOTE_COMMAND"] = "/nonexistent/emx-env"
+        self.run_connect()
+        self.assertTrue(any("/nonexistent/emx-env" in c[-1] for c in self.argvs()))
+        self.assertFalse(any(str(path) in c[-1] for c in self.argvs()))
 
 
 class Tty(io.StringIO):

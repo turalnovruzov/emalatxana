@@ -32,7 +32,7 @@ LAUNCH_FILE = "emx.command"
 PENDING_FILE = "pending"
 PENDING_MAX_AGE = 60
 
-USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | phone | colors [dark | light | terminal] | update [off | on] | uninstall]
+USAGE = """usage: emx [--version | docs [<page>] | hush | remote <host> | phone | colors [dark | light | terminal] | config | update [off | on] | uninstall]
 (emx hook <state folder> <session key> is internal: the command a session's hooks run.
 emx install <url> is internal too: what install.sh runs to install emx from that repo's newest version tag.
 emx update --report is internal too: what `emx remote` runs on a server to update it within its major and read one result line.
@@ -52,18 +52,19 @@ hush stops the voice now (the sentence being spoken and any waiting behind it) w
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 phone prints the address of the phone page this emx serves over Tailscale, or why it isn't up.
 colors prints the colour scheme; colors dark, light or terminal sets it (terminal is the default and follows your terminal's theme); a running emx follows within seconds.
+config opens emx's settings file in $EDITOR, or prints its path when EDITOR isn't set; c in the panel opens the same settings as a menu.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
 update off stops the automatic updates (emx update still updates when you run it); update on starts them again.
-uninstall removes the installed emx and its link; your prefs and emx's state are kept.
-Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude").
+uninstall removes the installed emx and its link; your settings and emx's state are kept.
+Environment: EMX_SOCKET names the tmux socket (default "emx"); EMX_CLAUDE is the claude command (default "claude"; overrides claude_command in the config file).
 EMX_SHOW_TEST_SESSIONS=1 shows the emx-test- throwaway sessions that are hidden otherwise, and keeps this emx silent; EMX_SAY replaces the `say` command.
-EMX_CONFIG_HOME, for live checks, holds emx's prefs in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
-EMX_PHONE_PORT is the port of the phone page (default 8787).
-EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell), EMX_SSH replaces ssh.
+EMX_CONFIG_HOME, for live checks, holds emx's settings in place of XDG_CONFIG_HOME, which the sessions' claude reads too.
+EMX_PHONE_PORT is the port of the phone page (default 8787; overrides phone_port in the config file).
+EMX_REMOTE_COMMAND is emx's command on the server (default emx, run through its login shell; overrides remote_command in the config file), EMX_SSH replaces ssh.
 EMX_CLIPBOARD_IMAGE is the command emx remote reads the laptop clipboard's image with (default osascript); it is given a file path to write a PNG to.
 EMX_NOTIFY replaces the notification helper's command, EMX_NOTIFY_HOME the folder it is built in, EMX_OPEN the `open` command.
 EMX_HOME is the folder emx installs into (default $XDG_DATA_HOME/emx, else ~/.local/share/emx), EMX_BIN_HOME the folder of the emx link
-(default ~/.local/bin); EMX_UPDATE_SECONDS is how often a running panel checks for updates (default 600)."""
+(default ~/.local/bin); EMX_UPDATE_SECONDS is how often a running panel checks for updates (default 600; overrides update_check_seconds in the config file)."""
 
 
 SOCKET_REFUSAL = "emx: the tmux socket must be a private name, not empty or \"default\"."
@@ -139,7 +140,7 @@ def phone_command(args: list) -> int:
         print(said["url"])
         return 0
     if said.get("problem") in phone.PROBLEM_LINES:
-        print(phone.problem_line(said["problem"], phone.phone_port()))
+        print(phone.problem_line(said["problem"], phone.phone_port(core.load_prefs(core.prefs_files()), os.environ)))
     else:
         print("The phone page isn't up yet; try again in a moment.")
     return 1
@@ -244,6 +245,11 @@ def launch() -> int:
     if socket is None:
         print(SOCKET_REFUSAL, file=sys.stderr)
         return 2
+    try:
+        core.ensure_config(core.prefs_files(), updates_off=install.updates_off_marker())
+    except OSError as exc:
+        print(f"emx: couldn't write the config file: {exc}", file=sys.stderr)
+        return 1
     tmux = Tmux(socket, CONFIG)
     view = SESSION
     try:
@@ -697,6 +703,30 @@ def colors_command(args: list) -> int:
     return 0
 
 
+def config_command(args: list) -> int:
+    if args:
+        print(USAGE, file=sys.stderr)
+        return 2
+    files = core.prefs_files()
+    try:
+        core.ensure_config(files, updates_off=install.updates_off_marker())
+    except OSError as exc:
+        print(f"emx: couldn't write the config file: {exc}", file=sys.stderr)
+        return 1
+    editor = os.environ.get("EDITOR", "").strip()
+    if not editor:
+        print(files.config)
+        return 0
+    try:
+        code = subprocess.call(shlex.split(editor) + [str(files.config)])
+    except (OSError, ValueError) as exc:
+        print(f"emx: couldn't run the editor: {exc}", file=sys.stderr)
+        return 1
+    for problem in core.load_settings(files)[1]:
+        print(f"emx: config {problem}", file=sys.stderr)
+    return code
+
+
 def update_command(args: list) -> int:
     root = emx.ROOT
     if args == ["--report"]:
@@ -705,16 +735,20 @@ def update_command(args: list) -> int:
     if args not in ([], ["off"], ["on"]):
         print(USAGE, file=sys.stderr)
         return 2
-    if root is None:
-        print(CHECKOUT_UPDATE.format(emx.CODE), file=sys.stderr)
-        return 1
     if args:
-        on, error = install.set_updates(root, args == ["on"])
-        if error:
-            print(f"emx: {error}", file=sys.stderr)
+        on = args == ["on"]
+        try:
+            files = core.prefs_files()
+            core.ensure_config(files, updates_off=install.updates_off_marker())
+            core.change_prefs(files, lambda disk: {**disk, "updates": "on" if on else "off"})
+        except OSError as exc:
+            print(f"emx: couldn't turn automatic updates {'on' if on else 'off'}: {exc}", file=sys.stderr)
             return 1
         print("Automatic updates are on." if on else "Automatic updates are off; emx update still updates when you run it.")
         return 0
+    if root is None:
+        print(CHECKOUT_UPDATE.format(emx.CODE), file=sys.stderr)
+        return 1
     result, error = install.update(root, emx.RUNNING, allow_major=True)
     if error:
         print(f"emx: couldn't update: {error}", file=sys.stderr)
@@ -737,7 +771,13 @@ def update_report(root) -> str:
     now = install.current(root)
     if now is None:
         return core.update_report("failed", __version__, "its install names no current version", None)
-    if not install.updates_on(root):
+    try:
+        files = core.prefs_files()
+        core.ensure_config(files, updates_off=install.updates_off_marker())
+        wanted = core.updates_on(core.load_prefs(files))
+    except OSError:
+        wanted = install.updates_on(root)
+    if not wanted:
         return core.update_report("off", now, now, None)
     result, error = install.update(root, emx.RUNNING, allow_major=False)
     if error:
@@ -756,7 +796,7 @@ def uninstall_command() -> int:
         return 1
     for path in removed:
         print(f"Removed {path}")
-    print("Your prefs and emx's state are kept.")
+    print("Your settings and emx's state are kept.")
     return 0
 
 
@@ -811,6 +851,8 @@ def main(argv: list) -> int:
         return phone_command(argv[1:])
     if argv[0] == "colors":
         return colors_command(argv[1:])
+    if argv[0] == "config":
+        return config_command(argv[1:])
     if argv[0] == "update":
         return update_command(argv[1:])
     if argv[0] == "uninstall" and len(argv) == 1:

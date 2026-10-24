@@ -54,11 +54,17 @@ def make_source(tmp, versions, name="source"):
     return repo
 
 
+def write_marker(root):
+    """The `updates-off` file an older emx wrote into the install folder."""
+    open(os.path.join(root, "updates-off"), "w").close()
+
+
 def temp_homes(case):
     """Puts EMX_HOME, EMX_BIN_HOME and git's config in temp folders for the whole test, so nothing reaches his real install or his git config."""
     tmp = os.path.realpath(tempfile.mkdtemp())
     case.addCleanup(shutil.rmtree, tmp, True)
-    homes = {"EMX_HOME": os.path.join(tmp, "root"), "EMX_BIN_HOME": os.path.join(tmp, "bin"), **GIT_ENV}
+    homes = {"EMX_HOME": os.path.join(tmp, "root"), "EMX_BIN_HOME": os.path.join(tmp, "bin"),
+             "XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state"), **GIT_ENV}
     patcher = mock.patch.dict(os.environ, homes)
     patcher.start()
     case.addCleanup(patcher.stop)
@@ -387,22 +393,19 @@ class Clone(unittest.TestCase):
 
 
 class UpdatesSwitch(unittest.TestCase):
-    def test_off_writes_the_marker_and_on_removes_it(self):
+    def test_updates_on_reads_an_old_marker(self):
         _, root, _ = temp_homes(self)
         os.makedirs(root)
         self.assertTrue(install.updates_on(root))
-        self.assertEqual(install.set_updates(root, False), (False, None))
+        write_marker(root)
         self.assertFalse(install.updates_on(root))
-        self.assertEqual(install.set_updates(root, True), (True, None))
-        self.assertTrue(install.updates_on(root))
-        self.assertEqual(install.set_updates(root, True), (True, None))
 
     def test_updates_off_marker_reads_the_old_marker(self):
         _, root, _ = temp_homes(self)
         os.makedirs(root)
         with mock.patch("emx.ROOT", root):
             self.assertFalse(install.updates_off_marker())
-            install.set_updates(root, False)
+            write_marker(root)
             self.assertTrue(install.updates_off_marker())
         with mock.patch("emx.ROOT", None):
             self.assertFalse(install.updates_off_marker())
@@ -419,7 +422,7 @@ class Uninstall(InstallCase):
         write(self.state, "")
 
     def test_uninstall_removes_root_and_our_link_but_not_a_foreign_link_or_prefs(self):
-        install.set_updates(self.root, False)
+        write_marker(self.root)
         removed, error = install.uninstall(dict(os.environ), self.root)
         self.assertIsNone(error)
         self.assertIn(os.path.join(self.bin, "emx"), removed)
