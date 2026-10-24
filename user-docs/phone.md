@@ -35,7 +35,7 @@ The page is reachable over Tailscale only, so it needs no password and opens not
 3. On the machine, run `emx phone` for the address (for example `http://machine.your-tailnet.ts.net:8787/`) and open it in Safari. Safari says "Not Secure" because the address is plain http; the Tailscale tunnel already encrypts it.
 4. If a firewall such as `ufw` is on, let traffic in on the Tailscale interface: `sudo ufw allow in on tailscale0`.
 
-The page is served by the emx workspace itself, so it is up whenever your emx is, and again after emx updates itself. If Tailscale is missing or not connected, the panel says so once, in one line, and `emx phone` says it again. Set `EMX_PHONE_PORT` to use another port than 8787.
+The page is served by the emx workspace itself, so it is up whenever your emx is, and again after emx updates itself. If Tailscale is missing or not connected, the panel says so once, in one line, and `emx phone` says it again. Set `phone_port` in the config file (`c` in the panel, Port) to use another port than 8787, at the next start; `EMX_PHONE_PORT` overrides it.
 
 ### Who is let in
 

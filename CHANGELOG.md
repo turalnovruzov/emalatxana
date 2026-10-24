@@ -2,6 +2,17 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.20.0 — 2026-10-24
+
+- All of emx's settings now live in one commented file, `~/.config/emx/config`: side, panel width, view, mode, colours, automatic updates and how often to check, the phone port, favourite folders, and the claude and server commands. Each line has a comment saying what it does and what it accepts.
+- `c` in the panel opens Settings, a list you change with `←→` and `Enter`; every change is saved into the file. `e` there opens the file in your `$EDITOR`.
+- `emx config` opens the file in `$EDITOR`, or prints its path when there isn't one.
+- A running emx follows an edit of the file within seconds. A line it can't read is skipped, the default is used, and the panel's notice names the line and why; emx never rewrites a line of yours.
+- The keys (`s`, `<` `>`, `m`, `^s`, `^t`), `emx colors` and `emx update on/off` write the same file and keep your comments. Whether automatic updates are on moved into the file too.
+- Your `prefs.json` carries over by itself the first time. Pins, recent folders, folded groups and the hidden panel are kept apart from the settings, in emx's state.
+- The phone port and the claude command apply at the next start; the file says so.
+- A folder or command with a line break in it is refused, so it can't add a line to the file.
+
 ## 2.19.0 — 2026-10-23
 
 - Terminal's own is now the default colour scheme, for new installs and for anyone who never picked one with `emx colors`. A scheme you picked is kept.

@@ -12,11 +12,11 @@ A new major version (say 2.x to 3.0) is fetched but waits for you: the panel say
 
 ## Turn automatic updates off or on
 
-`emx update off` stops the automatic updates; `emx update` still updates when you run it. `emx update on` starts them again.
+`emx update off` stops the automatic updates; `emx update` still updates when you run it. `emx update on` starts them again. Both write `updates` in the config file, as does Automatic updates under `c` (Updates).
 
 ## Uninstall
 
-`emx uninstall` removes the installed emx and its link. Your prefs and emx's state are kept.
+`emx uninstall` removes the installed emx and its link. Your settings and emx's state are kept.
 
 ## A checkout never updates itself
 
