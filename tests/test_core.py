@@ -1623,6 +1623,33 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "9100"}), "EMX_PHONE_PORT")
         self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "80"}), "")
 
+    def test_config_and_state_are_written_private(self):
+        core.ensure_config(self.files)
+        self.assertEqual(self.files.config.stat().st_mode & 0o777, 0o600)
+        core.save_prefs(self.files, {**core.DEFAULT_PREFS, "pinned": ["x"]})
+        self.assertEqual(self.files.state.stat().st_mode & 0o777, 0o600)
+
+    def test_a_leading_bom_is_ignored_and_kept_on_write(self):
+        self.write_config("\ufeffside = left\nscheme = dark\n")
+        values, _, problems = core.read_config(self.config_text(), CFG_HOME)
+        self.assertEqual((values["side"], values["scheme"], problems), ("left", "dark", []))
+        core.save_prefs(self.files, {**core.load_prefs(self.files), "side": "right"})
+        self.assertEqual(self.config_text(), "\ufeffside = right\nscheme = dark\n")
+
+    def test_only_ascii_digits_make_a_number(self):
+        values, _, problems = core.read_config("panel_width = \u0663\u0660\n", CFG_HOME)
+        self.assertEqual(values["panel_width"], core.SETTING_BY_KEY["panel_width"].default)
+        self.assertEqual(len(problems), 1)
+
+    def test_saving_through_a_symlinked_config_changes_the_target(self):
+        core.ensure_config(self.files)
+        target = Path(self.tmp.name) / "elsewhere"
+        self.files.config.rename(target)
+        self.files.config.symlink_to(target)
+        core.save_prefs(self.files, {**core.load_prefs(self.files), "side": "left"})
+        self.assertTrue(self.files.config.is_symlink())
+        self.assertIn("side = left", target.read_text(encoding="utf-8"))
+
     def test_non_utf8_config_uses_defaults_and_is_not_written(self):
         self.files.config.parent.mkdir(parents=True)
         self.files.config.write_bytes(b"side = left\n\xff\xfe\n")

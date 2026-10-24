@@ -2088,16 +2088,17 @@ class App:
     def prefs_stamp(self) -> tuple:
         return self.file_mtime(self.prefs_files.config), self.file_mtime(self.prefs_files.state)
 
-    def save_prefs(self) -> None:
-        """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept."""
+    def save_prefs(self) -> bool:
+        """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept; whether it wrote."""
         try:
             with PREFS_LOCK:
                 merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
         except OSError as exc:
             self.say(f"Couldn't save settings: {exc}", error=True)
-            return
+            return False
         self.prefs, self.prefs_base = merged, copy.deepcopy(merged)
         self.prefs_mtime = self.prefs_stamp()
+        return True
 
     def reload_prefs(self) -> None:
         """Take in what another view's panel or his editor saved, keeping any change of this panel's own not saved yet."""
@@ -2911,9 +2912,10 @@ class App:
         if session is None:
             return
         self.prefs = core.toggle_pin(self.prefs, session.id)
-        self.save_prefs()
+        saved = self.save_prefs()
         self.regroup()
-        self.say(core.pin_notice(self.prefs, session), seconds=RESTORED_NOTICE_SECONDS)
+        if saved:
+            self.say(core.pin_notice(self.prefs, session), seconds=RESTORED_NOTICE_SECONDS)
 
     def open_find(self) -> None:
         self.find = ""
@@ -3768,13 +3770,14 @@ class App:
 
     def toggle_mode(self) -> None:
         self.prefs = core.toggle_mode(self.prefs)
-        self.save_prefs()
+        saved = self.save_prefs()
         self.apply_mode()
         if self.mode() == core.NOTIFICATION_MODE:
             self.poller.voice.silence()
             remote.append_relay(self.relay_file, core.relay_hush(time.time()))
             self.poller.notifier.authorize()
-        self.say(MODE_MESSAGES[self.mode()], seconds=RESTORED_NOTICE_SECONDS)
+        if saved:
+            self.say(MODE_MESSAGES[self.mode()], seconds=RESTORED_NOTICE_SECONDS)
 
     def put(self, y: int, x: int, text: str, attr: int = 0) -> None:
         h, w = self.scr.getmaxyx()
@@ -4121,7 +4124,7 @@ class App:
                 return f"line {found.group(1)} is skipped: {found.group(2)}"
         if setting.key == "panel_width" and not self.primary:
             return OWN_WIDTH_NOTE
-        return setting.describe + (" (takes effect at the next start)" if setting.next_start else "")
+        return setting.describe.rstrip(".") + "; takes effect at the next start." if setting.next_start else setting.describe
 
     def draw_settings(self, top: int, bottom: int, width: int) -> None:
         """Board A: the settings in sections, the selected one's description and the file under them."""

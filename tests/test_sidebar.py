@@ -9237,8 +9237,22 @@ class SettingsMenu(AppCase):
         self.press("c")
         shown = self.screen()
         self.assertIn("Which side of the window the panel sits on.", shown)
-        self.assertIn("saved to " + core.tilde_path(str(self.app.prefs_files.config), self.app.home), shown)
+        saved = "saved to " + core.tilde_path(str(self.app.prefs_files.config), self.app.home)
+        line = next(row.strip() for row in shown.splitlines() if row.strip().startswith("saved to"))
+        self.assertEqual(line, core.fit(saved, core.display_width(line)))
         self.assertIn("‹ right ›", shown)
+
+    def test_a_failed_save_keeps_its_error_and_says_nothing_of_success(self):
+        self.app.prefs_files.config.write_bytes(b"side = left\n\xff\xfe\n")
+        self.app.toggle_mode()
+        self.assertTrue(self.app.notice_error)
+        self.assertIn("Couldn't save settings", self.app.notice)
+        self.app.cursor = ("session", "b")
+        self.app.session = lambda sid: session("b", "/p/beta")
+        self.app.say("")
+        self.app.toggle_pin()
+        self.assertTrue(self.app.notice_error)
+        self.assertIn("Couldn't save settings", self.app.notice)
 
     def test_right_on_colours_saves_the_next_scheme_keeping_comments(self):
         self.go_to("Colours")

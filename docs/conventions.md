@@ -408,7 +408,14 @@ The house style for writing code in this repo: how *this* codebase does things, 
 1. **Rule**: every write to the prefs file from the panel's process is a load-change-save under `sidebar.PREFS_LOCK`, through `App.save_prefs` or `PhoneApi.update_prefs`, and `core.save_prefs` writes through a per-call `mkstemp` temp file.
 2. **Why**: the panel's thread and the page's thread share one process, and a write between the other's read and replace would drop its change (#67).
 3. **Minimal example**: ``PhoneApi.update_prefs(lambda p: (core.toggle_pin(p, sid), None))``
-4. **Gotcha**: another view's panel process is not under this lock.
+4. **Gotcha**: `PREFS_LOCK` covers one process only; across processes the lock is `core.prefs_lock` (see the next entry), which `core.change_prefs` takes.
+
+### Every settings write goes through `core.change_prefs`
+
+1. **Rule**: every settings write goes through `core.change_prefs(files, fn)`, which reads, applies `fn` and saves under the cross-process `core.prefs_lock`; `core.save_prefs` is never called bare outside tests, and it writes only the keys whose value differs from the file.
+2. **Why**: the panel's merge, other views' panels, the phone thread and the CLI become one critical section across processes, and a bad line he never changed is never rewritten.
+3. **Minimal example**: ``core.change_prefs(files, lambda disk: core.set_scheme(disk, "dark"))``
+4. **Gotcha**: `prefs_lock` (flock) is not reentrant and `ensure_config` takes it itself, so neither is called under it.
 
 ### A colour only the terminal knows is drawn through a palette index no scheme uses
 

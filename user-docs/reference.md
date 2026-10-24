@@ -139,4 +139,4 @@ A line is `key = value`; a line starting with `#` is a comment, and `## Name` li
 
 A path or command with a line break or other control character is refused. An environment variable from Settings above wins over its key.
 
-Pinned sessions, recent folders, the last folder, folded groups, the hidden panel and the last version seen are not settings; emx keeps them in its own state, `remembered.json` in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`. `prefs.json` is read once, when the config file doesn't exist yet, and is left where it is.
+Pinned sessions, recent folders, the last folder, folded groups, the hidden panel and the last version seen are not settings; emx keeps them in its own state, `remembered.json` in `emx` under `$XDG_STATE_HOME`, else `~/.local/state`. `prefs.json` is read only when the config file doesn't exist (the first run, or after you delete the config), carrying its values over again, and is never changed or removed.

@@ -2652,7 +2652,7 @@ def _lines(text: str) -> list:
 
 def _split_line(raw: str):
     """None for a blank or comment line, `(None, None)` for a line that is no `key = value`, else `(key, value)`."""
-    line = raw.strip()
+    line = raw.removeprefix("\ufeff").strip()
     if not line or line.startswith("#"):
         return None
     if "=" not in line:
@@ -2679,7 +2679,7 @@ def _check(setting: Setting, text: str, home: str) -> tuple:
             return text, ""
         return None, f'{key} is {_words(setting.choices)}, not "{text}"'
     if setting.kind == "number":
-        if re.fullmatch(r"-?\d+", text) and setting.low <= int(text) and (setting.high is None or int(text) <= setting.high):
+        if re.fullmatch(r"-?[0-9]+", text) and setting.low <= int(text) and (setting.high is None or int(text) <= setting.high):
             return int(text), ""
         if setting.high is None:
             return None, f'{key} is a number of {setting.low} or more, not "{text}"'
@@ -2769,7 +2769,8 @@ def _write_scalar(lines: list, setting: Setting, value) -> list:
         parts = _split_line(raw)
         if parts and parts[0] == setting.key:
             ending = raw[len(raw.rstrip("\r\n")):]
-            return [*lines[:i], f"{setting.key} = {value}{ending}", *lines[i + 1:]]
+            bom = "\ufeff" if raw.startswith("\ufeff") else ""
+            return [*lines[:i], f"{bom}{setting.key} = {value}{ending}", *lines[i + 1:]]
     return _insert_under_section(lines, setting, _setting_lines(setting, value, ""))
 
 
@@ -2808,7 +2809,9 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
     return text
 
 
-def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
+    """Replaces `path` whole; a symlink is followed, so the file it points to changes and the link stays."""
+    path = Path(os.path.realpath(path))
     path.parent.mkdir(parents=True, exist_ok=True)
     # Per call: the panel's thread and the phone page's thread of one process save too, and no two may share a temporary file.
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
