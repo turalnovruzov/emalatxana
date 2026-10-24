@@ -1226,7 +1226,13 @@ class Service(ApiCase):
             service = self.service((NODE, None), port=port)
             service.tick()
         self.assertEqual(phone.read_phone_file(self.state), {"url": None, "problem": "busy"})
-        self.assertEqual(self.said(service), [f"Phone page off: port {port} is taken. Set EMX_PHONE_PORT to another."])
+        self.assertEqual(self.said(service), [f"Phone page off: port {port} is taken. Set another with c in the panel (Port), or in emx config."])
+
+    def test_the_busy_line_points_to_the_menu(self):
+        line = phone.problem_line(phone.BUSY, 8787)
+        self.assertIn("c in the panel (Port)", line)
+        self.assertIn("emx config", line)
+        self.assertNotIn("EMX_PHONE_PORT", line)
 
     def test_a_relaunched_panel_does_not_say_again_what_the_file_already_says(self):
         port = free_port()
@@ -1279,8 +1285,13 @@ class Port(unittest.TestCase):
         for value, want in (("", 8787), ("abc", 8787), ("80", 8787), ("1023", 8787), ("70000", 8787), ("-5", 8787),
                             ("1024", 1024), ("9000", 9000), ("65535", 65535)):
             with self.subTest(value=value):
-                self.assertEqual(phone.phone_port({"EMX_PHONE_PORT": value}), want)
-        self.assertEqual(phone.phone_port({}), 8787)
+                self.assertEqual(phone.phone_port(None, {"EMX_PHONE_PORT": value}), want)
+        self.assertEqual(phone.phone_port(None, {}), 8787)
+
+    def test_the_port_comes_from_the_file_unless_env_sets_it(self):
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {}), 9000)
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "9100"}), 9100)
+        self.assertEqual(phone.phone_port({"phone_port": 9000}, {"EMX_PHONE_PORT": "80"}), 9000)
 
 
 class Peek(ApiCase):
@@ -1342,6 +1353,13 @@ class Pins(ApiCase):
         saved = core.load_prefs(self.prefs)
         self.assertEqual((body["pinned"], body["message"], saved.get("pinned", [])), (False, "Unpinned alpha.", []))
         self.assertEqual((saved["side"], saved["favourite_folders"]), ("left", ["/a"]))
+
+    def test_a_phone_pin_writes_state_not_config(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.prefs.config.read_text()
+        self.post({"id": self.target.id})
+        self.assertEqual(self.prefs.config.read_text(), before)
+        self.assertIn(self.target.id, self.prefs.state.read_text())
 
     def test_pin_of_an_unlisted_session_writes_nothing(self):
         core.save_prefs(self.prefs, {**core.DEFAULT_PREFS, "side": "left"})
@@ -1535,6 +1553,23 @@ class Favourites(ApiCase):
         saved = core.load_prefs(self.prefs)
         self.assertNotIn("favourite_folders", saved)
         self.assertEqual(saved["side"], "left")
+
+    def test_a_phone_favourite_writes_the_config_line(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.prefs.config.read_text()
+        self.assertTrue(self.post(self.budget)[1]["ok"])
+        after = self.prefs.config.read_text()
+        self.assertRegex(after, r"(?m)^favourite_folders = .*Workspace/budget-tracker$")
+        self.assertEqual([line for line in after.splitlines() if line.startswith("#")], [line for line in before.splitlines() if line.startswith("#")])
+
+    def test_a_folder_with_a_line_break_is_refused_and_the_file_gains_no_line(self):
+        core.save_prefs(self.prefs, dict(core.DEFAULT_PREFS))
+        before = self.saved()
+        for folder in (self.budget + "\nscheme = dark", self.budget + "\rside = left", self.budget + "\x00"):
+            with self.subTest(folder=folder):
+                code, body = self.post(folder)
+                self.assertEqual((code, body["ok"]), (400, False))
+        self.assertEqual(self.saved(), before)
 
     def test_favourite_refuses_a_folder_the_page_may_not_use(self):
         outside = os.path.join(self.dir, "outside")

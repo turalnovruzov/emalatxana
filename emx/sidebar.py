@@ -3159,7 +3159,11 @@ class App:
         target = self.prompt.get("picked") or (rows[0].path if rows else None)
         if target is None:
             return
-        self.prefs, on = core.toggle_favourite(self.prefs, target)
+        try:
+            self.prefs, on = core.toggle_favourite(self.prefs, target)
+        except ValueError as exc:
+            self.prompt.update(hint=f"Can't star that folder: {exc}")
+            return
         self.save_prefs()
         name = core.tilde_path(target, self.home)
         hint = core.favourite_hint(name, on)
@@ -3675,6 +3679,9 @@ class App:
             folder = core.resolve_folder(edit["text"], self.home)
             if not edit["text"].strip() or not os.path.isdir(folder):
                 edit["hint"] = "No such folder."
+                return
+            if core.has_control(folder):
+                edit["hint"] = f"Can't star that folder: {core.UNSAFE_TEXT}."
                 return
             if folder not in core.favourite_folders(self.prefs):
                 self.apply_setting(core.toggle_favourite(self.prefs, folder)[0])

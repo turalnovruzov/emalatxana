@@ -2442,6 +2442,14 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     return [(fit(text, width), tone) for text, tone in rows]
 
 
+def has_control(text: str) -> bool:
+    """Whether `text` holds a control character or a line break; one written to the config file would start a line of its own."""
+    return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in text)
+
+
+UNSAFE_TEXT = "a control character or line break can't go in the config file"
+
+
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, value))
 
@@ -2464,7 +2472,7 @@ def normalize_prefs(raw) -> dict:
             prefs["recent_folders"] = recent
     favourites = raw.get("favourite_folders")
     if isinstance(favourites, list):
-        favourites = list(dict.fromkeys(os.path.normpath(f) for f in favourites if isinstance(f, str) and f))
+        favourites = list(dict.fromkeys(os.path.normpath(f) for f in favourites if isinstance(f, str) and f and not has_control(f)))
         if favourites:
             prefs["favourite_folders"] = favourites
     pinned = raw.get("pinned")
@@ -2491,7 +2499,7 @@ def normalize_prefs(raw) -> dict:
             prefs[key] = value
     for key in ("claude_command", "remote_command"):
         text = raw.get(key)
-        if isinstance(text, str) and text.strip() and "\n" not in text and "\r" not in text:
+        if isinstance(text, str) and text.strip() and not has_control(text):
             prefs[key] = text.strip()
     if isinstance(raw.get("panel_collapsed"), bool):
         prefs["panel_collapsed"] = raw["panel_collapsed"]
@@ -2678,6 +2686,8 @@ def _check(setting: Setting, text: str, home: str) -> tuple:
         return None, f'{key} is a number from {setting.low} to {setting.high}, not "{text}"'
     if not text:
         return None, f"{key} can't be empty"
+    if has_control(text):
+        return None, f"{key} can't hold a control character"
     return (_expand_home(text, home) if setting.kind == "folders" else text), ""
 
 
@@ -2782,7 +2792,10 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
 
 
 def write_config_text(text: str, changes: Mapping, home: str) -> str:
-    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays."""
+    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. Raises OSError for a value that would break a line."""
+    for key, value in changes.items():
+        if any(has_control(v) for v in (value if isinstance(value, list) else [value]) if isinstance(v, str)):
+            raise OSError(f"{key}: {UNSAFE_TEXT}")
     for setting in SETTINGS:
         if setting.key not in changes:
             continue
@@ -3102,10 +3115,12 @@ def favourite_folders(prefs: dict) -> list:
 
 
 def toggle_favourite(prefs: dict, folder: str) -> tuple[dict, bool]:
-    """(`prefs` with `folder` starred or unstarred, whether it is a favourite now); `prefs` itself is not changed."""
+    """(`prefs` with `folder` starred or unstarred, whether it is a favourite now); `prefs` itself is not changed. Raises ValueError when starring a path with a control character."""
     folder = os.path.normpath(folder)
     current = favourite_folders(prefs)
     on = folder not in current
+    if on and has_control(folder):
+        raise ValueError(UNSAFE_TEXT)
     updated = [*current, folder] if on else [f for f in current if f != folder]
     new = {k: v for k, v in prefs.items() if k != "favourite_folders"}
     if updated:

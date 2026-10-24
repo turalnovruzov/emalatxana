@@ -1457,6 +1457,25 @@ class ConfigFile(unittest.TestCase):
     def config_text(self):
         return self.files.config.read_text(encoding="utf-8")
 
+    def test_a_line_break_in_a_path_or_command_is_refused_and_adds_no_line(self):
+        self.write_config(core.config_template(defaults(), CFG_HOME))
+        before = self.config_text()
+        for bad in ("/a\nscheme = dark", "/a\rside = left", "/a\x00", "/a\u2028b"):
+            with self.subTest(bad=repr(bad)):
+                with self.assertRaises(ValueError):
+                    core.toggle_favourite(defaults(), bad)
+                core.save_prefs(self.files, {**defaults(), "favourite_folders": [bad]})
+                for key in ("claude_command", "remote_command"):
+                    core.save_prefs(self.files, {**defaults(), key: "x" + bad})
+                    with self.assertRaises(OSError):
+                        core.write_config_text(before, {key: "x" + bad}, CFG_HOME)
+                self.assertEqual(core.normalize_prefs({"favourite_folders": [bad], "claude_command": bad}).get("favourite_folders"), None)
+                self.assertEqual(core.normalize_prefs({"claude_command": bad}).get("claude_command", "claude"), "claude")
+                self.assertEqual(core.parse_value(core.SETTING_BY_KEY["claude_command"], "x" + bad, CFG_HOME)[0], None)
+                self.assertEqual(self.config_text(), before)
+        with self.assertRaises(OSError):
+            core.write_config_text(before, {"favourite_folders": ["/a\nscheme = dark"]}, CFG_HOME)
+
     def test_the_template_reads_back_as_the_defaults(self):
         values, _, problems = core.read_config(core.config_template(defaults(), CFG_HOME), CFG_HOME)
         self.assertEqual(values, defaults())

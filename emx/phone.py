@@ -287,10 +287,10 @@ class PanelSources(NamedTuple):
 class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
-    def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
+    def __init__(self, engine, home: str, state, prefs_files, read_routines: Callable = routines.read,
                  wait_running: Callable = sidebar.wait_until_running, sources: PanelSources = PanelSources(),
                  namer: Callable = sidebar.Namer, closer: Callable = sidebar.Closer, changelog: Callable = read_changelog):
-        self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), prefs_path
+        self.engine, self.home, self.state, self.prefs_files = engine, home, Path(state), prefs_files
         self.sources, self.namer, self.closer, self.changelog = sources, namer, closer, changelog
         self.name_lock = threading.Lock()
         self.routines = RoutinesCache(read_routines)
@@ -396,7 +396,7 @@ class PhoneApi:
             panes = self.engine.tmux.panes()
         except TmuxError:
             panes = []
-        prefs = core.load_prefs(self.prefs_path)
+        prefs = core.load_prefs(self.prefs_files)
         placements = self.sources.placements()
         pinned = core.pinned_ids(prefs)
         summaries, transcripts, now_ms = self.summaries(), self.sources.transcripts(), time.time() * 1000
@@ -424,7 +424,7 @@ class PhoneApi:
 
     def known_folders(self, sessions) -> tuple:
         """(folders with sessions, recent, favourites) as the panel's picker takes them; sessions newest first."""
-        prefs = core.load_prefs(self.prefs_path)
+        prefs = core.load_prefs(self.prefs_files)
         newest = sorted(sessions or [], key=lambda s: -(s.started_at or 0.0))
         return (
             core.session_folders(newest, [], core.PROJECT),
@@ -566,7 +566,7 @@ class PhoneApi:
             return new
 
         with sidebar.PREFS_LOCK:
-            core.change_prefs(self.prefs_path, apply)
+            core.change_prefs(self.prefs_files, apply)
         return result[0]
 
     def peek(self, sid: str) -> tuple:
@@ -599,7 +599,7 @@ class PhoneApi:
         try:
             message, pinned = self.update_prefs(toggle)
         except OSError as exc:
-            return 200, {"ok": False, "message": f"Couldn't save prefs: {exc}"}
+            return 200, {"ok": False, "message": f"Couldn't save settings: {exc}"}
         return 200, {"ok": True, "pinned": pinned, "message": message}
 
     def favourite(self, body: dict) -> tuple:
@@ -607,6 +607,8 @@ class PhoneApi:
         if not isinstance(text, str) or not text.strip() or len(text) > 4096:
             return 400, {"ok": False, "message": "Pick a folder."}
         folder = self.resolve(text)
+        if core.has_control(folder):
+            return 400, {"ok": False, "message": "Pick a folder."}
         sessions, _ = self.engine.list_sessions()
         allowed = lambda: os.path.isdir(folder) and allowed_folder(folder, self.home, self.allowed_roots(sessions))
 
@@ -620,7 +622,7 @@ class PhoneApi:
         try:
             on = self.update_prefs(toggle)
         except OSError as exc:
-            return 200, {"ok": False, "message": f"Couldn't save prefs: {exc}"}
+            return 200, {"ok": False, "message": f"Couldn't save settings: {exc}"}
         if on is None:
             return 200, {"ok": False, "message": "emx only stars folders in your home folder or folders it already knows."}
         return 200, {"ok": True, "on": on, "message": core.favourite_hint(core.tilde_path(folder, self.home), on)}
@@ -639,7 +641,7 @@ class PhoneApi:
         sessions, error = self.engine.list_sessions()
         if sessions is None:
             return 200, {"ok": False, "message": error or "Couldn't list sessions."}
-        group = next((g for g in self.grouped(sessions, find, core.load_prefs(self.prefs_path)) if g.key == key), None)
+        group = next((g for g in self.grouped(sessions, find, core.load_prefs(self.prefs_files)) if g.key == key), None)
         if group is None:
             return 200, {"ok": False, "message": FOLDER_GONE}
         if {s.id for s in group.sessions} != {e["id"] for e in sent}:
@@ -837,17 +839,12 @@ PROBLEM_LINES = {
     MISSING: "Phone page off: Tailscale isn't installed here. emx docs phone says how to set it up.",
     DOWN: "Phone page off: Tailscale isn't connected. Run: sudo tailscale up",
     TAGGED: "Phone page off: this machine is a tagged Tailscale node, so emx can't tell it is yours.",
-    BUSY: "Phone page off: port {port} is taken. Set EMX_PHONE_PORT to another.",
+    BUSY: "Phone page off: port {port} is taken. Set another with c in the panel (Port), or in emx config.",
 }
 
 
-def phone_port(env=None) -> int:
-    env = os.environ if env is None else env
-    try:
-        port = int(env.get("EMX_PHONE_PORT", ""))
-    except ValueError:
-        return DEFAULT_PORT
-    return port if 1024 <= port <= 65535 else DEFAULT_PORT
+def phone_port(prefs=None, env=None) -> int:
+    return core.phone_port(prefs or {}, os.environ if env is None else env)
 
 
 def problem_line(problem: str, port: int) -> str:
@@ -871,12 +868,12 @@ class PhoneService(threading.Thread):
     already said the same (a relaunched panel does not announce it again).
     """
 
-    def __init__(self, engine, port: int, state, home: str, prefs_path, tailnet=None, interval: float = CHECK_SECONDS,
+    def __init__(self, engine, port: int, state, home: str, prefs_files, tailnet=None, interval: float = CHECK_SECONDS,
                  sleep: Callable = time.sleep, sources: PanelSources | None = None):
         super().__init__(daemon=True)
         self.port, self.state, self.interval, self.sleep = port, Path(state), interval, sleep
         self.tailnet = tailnet or Tailnet()
-        self.api = PhoneApi(engine, home, state, prefs_path, sources=sources or PanelSources())
+        self.api = PhoneApi(engine, home, state, prefs_files, sources=sources or PanelSources())
         self.notices, self.lock = [], threading.Lock()
         self.stopping = threading.Event()
         self.server, self.node, self.recorded = None, None, None
