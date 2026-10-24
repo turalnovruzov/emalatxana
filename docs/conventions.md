@@ -414,7 +414,7 @@ The house style for writing code in this repo: how *this* codebase does things, 
 
 1. **Rule**: every settings write goes through `core.change_prefs(files, fn)`, which reads, applies `fn` and saves under the cross-process `core.prefs_lock`; `core.save_prefs` is never called bare outside tests, and it writes only the keys whose value differs from the file.
 2. **Why**: the panel's merge, other views' panels, the phone thread and the CLI become one critical section across processes, and a bad line he never changed is never rewritten.
-3. **Minimal example**: ``core.change_prefs(files, lambda disk: core.set_scheme(disk, "dark"))``
+3. **Minimal example**: ``core.change_prefs(files, lambda disk: {**disk, "scheme": "dark"})``
 4. **Gotcha**: `prefs_lock` (flock) is not reentrant and `ensure_config` takes it itself, so neither is called under it.
 
 ### A colour only the terminal knows is drawn through a palette index no scheme uses
@@ -423,6 +423,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 2. **Why**: tmux then draws the 24-bit colour, or the nearest of 256, itself, and nothing outside the panel pane changes.
 3. **Minimal example**: ``tmux.set_pane_option(pane, f"pane-colours[{core.SHADE_INDEX['focused']}]", shade["focused"])``
 4. **Gotcha**: index 16 is black until it is remapped, and any tone that uses 16 or 17 breaks the shade (`test_the_shade_indices_are_drawn_by_no_scheme` guards it).
+
+### A changed `Setting` comment is refreshed in his config through `core.OLD_TEMPLATE_COMMENTS`
+
+1. **Rule**: when a `Setting`'s comment text changes, the old line goes into `core.OLD_TEMPLATE_COMMENTS` (old to new), and `save_prefs` swaps exact-match lines on a write that happens anyway.
+2. **Why**: his existing config keeps emx's own comments current without emx ever rewriting his own lines or writing just to refresh a comment.
+3. **Minimal example**: ``"# Panel width in columns, 16 to 500 (< and > change it too)": "# Panel width in columns, 16 to 500 (dragging the pane border changes it too)"``
+4. **Gotcha**: the match is the whole line minus its ending, with no strip, so an indented or edited copy is his and stays; the refresh runs only when there are changes, and `test_no_current_comment_is_an_old_one` guards the map.
 
 ## The contract for this file
 

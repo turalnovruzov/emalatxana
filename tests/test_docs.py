@@ -120,10 +120,6 @@ class DocsMatchEmx(unittest.TestCase):
                 self.assertIn(f"## {heading}", index)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 REMOVED_COMMANDS = ("emx colors", "emx update off", "emx update on")
 REMOVED_KEYS = ("s", "<", ">", ",", ".", "m", "^s")
 REMOVED_ENV = ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND")
@@ -168,3 +164,7 @@ class RemovedStayRemoved(unittest.TestCase):
             for phrase in ("environment variable overrides", "overrides that key", "wins over its key"):
                 with self.subTest(page=name, phrase=phrase):
                     self.assertNotIn(phrase, text)
+
+
+if __name__ == "__main__":
+    unittest.main()
