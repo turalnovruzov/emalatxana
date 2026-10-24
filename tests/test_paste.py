@@ -4,6 +4,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -23,6 +24,15 @@ SID = "0b6f4f0c-6b0a-4c4e-9a53-2f0e3c1d7a11"
 
 
 @unittest.skipIf(shutil.which("tmux") is None, "tmux is not installed")
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
+
 class CtrlVEndToEnd(PrivateServer):
     """Ctrl+V on a private server whose `emx follow` is read by `remote.connect` over a fake ssh, with the real `emx paste` and `emx paste-image`."""
 

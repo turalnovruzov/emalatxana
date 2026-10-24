@@ -9,6 +9,15 @@ from unittest import mock
 
 from emx import core, install
 
+
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
 GIT_ENV = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
 GIT_IDENTITY = ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
                 "-c", "tag.gpgsign=false", "-c", "init.defaultBranch=main"]
@@ -387,6 +396,16 @@ class UpdatesSwitch(unittest.TestCase):
         self.assertEqual(install.set_updates(root, True), (True, None))
         self.assertTrue(install.updates_on(root))
         self.assertEqual(install.set_updates(root, True), (True, None))
+
+    def test_updates_off_marker_reads_the_old_marker(self):
+        _, root, _ = temp_homes(self)
+        os.makedirs(root)
+        with mock.patch("emx.ROOT", root):
+            self.assertFalse(install.updates_off_marker())
+            install.set_updates(root, False)
+            self.assertTrue(install.updates_off_marker())
+        with mock.patch("emx.ROOT", None):
+            self.assertFalse(install.updates_off_marker())
 
 
 class Uninstall(InstallCase):

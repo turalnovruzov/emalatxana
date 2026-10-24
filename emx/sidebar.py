@@ -57,7 +57,7 @@ MODE_MESSAGES = {core.VOICE_MODE: "Voice mode", core.NOTIFICATION_MODE: "Notific
 WHATS_NEW_SECONDS = 60
 UPDATER_TICK_SECONDS = 5
 UPDATE_FIRST_SECONDS = 30
-UPDATE_MIN_SECONDS = 5
+UPDATE_MIN_SECONDS = core.UPDATE_MIN_SECONDS
 # A relaunch that did not take (the new tree failed to start) is tried again for the same version only after this long.
 RELAUNCH_RETRY_SECONDS = 300
 ITERM_BUNDLE = core.TERM_PROGRAM_BUNDLES["iTerm.app"]
@@ -1940,8 +1940,8 @@ class App:
         self.me = os.environ.get("TMUX_PANE", "")
         # The panel of `emx` itself, the laptop's first view, runs what is done once per workspace; any other view's is a follower.
         self.primary = getattr(tmux, "view", SESSION) == SESSION
-        self.prefs_file = core.prefs_path()
-        self.prefs_mtime = self.file_mtime(self.prefs_file)
+        self.prefs_file = core.prefs_files()
+        self.prefs_mtime = self.prefs_stamp()
         self.prefs = core.load_prefs(self.prefs_file)
         self.prefs_base = copy.deepcopy(self.prefs)
         self.summaries_file = self.state / SUMMARIES_FILE
@@ -2063,21 +2063,23 @@ class App:
         except OSError:
             return None
 
+    def prefs_stamp(self) -> tuple:
+        return self.file_mtime(self.prefs_file.config), self.file_mtime(self.prefs_file.state)
+
     def save_prefs(self) -> None:
         """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept."""
         try:
             with PREFS_LOCK:
-                merged = core.merge_prefs(self.prefs_base, self.prefs, core.load_prefs(self.prefs_file))
-                core.save_prefs(self.prefs_file, merged)
+                merged = core.change_prefs(self.prefs_file, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
         except OSError as exc:
-            self.say(f"Couldn't save prefs: {exc}", error=True)
+            self.say(f"Couldn't save settings: {exc}", error=True)
             return
         self.prefs, self.prefs_base = merged, copy.deepcopy(merged)
-        self.prefs_mtime = self.file_mtime(self.prefs_file)
+        self.prefs_mtime = self.prefs_stamp()
 
     def reload_prefs(self) -> None:
         """Take in what another view's panel saved, keeping any change of this panel's own not saved yet."""
-        mtime = self.file_mtime(self.prefs_file)
+        mtime = self.prefs_stamp()
         if mtime == self.prefs_mtime:
             return
         self.prefs_mtime = mtime

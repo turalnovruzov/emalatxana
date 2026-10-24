@@ -290,7 +290,7 @@ class PhoneApi:
     def __init__(self, engine, home: str, state, prefs_path, read_routines: Callable = routines.read,
                  wait_running: Callable = sidebar.wait_until_running, sources: PanelSources = PanelSources(),
                  namer: Callable = sidebar.Namer, closer: Callable = sidebar.Closer, changelog: Callable = read_changelog):
-        self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), Path(prefs_path)
+        self.engine, self.home, self.state, self.prefs_path = engine, home, Path(state), prefs_path
         self.sources, self.namer, self.closer, self.changelog = sources, namer, closer, changelog
         self.name_lock = threading.Lock()
         self.routines = RoutinesCache(read_routines)
@@ -558,12 +558,16 @@ class PhoneApi:
 
     def update_prefs(self, change: Callable):
         """`change(prefs)` returns (new prefs, answer); it is read, changed and written under the lock the panel's own saves hold, so neither drops the other's change."""
-        with sidebar.PREFS_LOCK:
-            prefs = core.load_prefs(self.prefs_path)
+        result = []
+
+        def apply(prefs):
             new, answer = change(prefs)
-            if new is not prefs:
-                core.save_prefs(self.prefs_path, new)
-        return answer
+            result.append(answer)
+            return new
+
+        with sidebar.PREFS_LOCK:
+            core.change_prefs(self.prefs_path, apply)
+        return result[0]
 
     def peek(self, sid: str) -> tuple:
         if not core.is_session_id(sid):
@@ -823,7 +827,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 BUSY = "busy"
-DEFAULT_PORT = 8787
+DEFAULT_PORT = core.DEFAULT_PHONE_PORT
 PHONE_FILE = "phone.json"
 CHECK_SECONDS = 30
 BIND_TRIES = 3

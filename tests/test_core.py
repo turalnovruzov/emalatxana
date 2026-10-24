@@ -12,6 +12,20 @@ from unittest import mock
 from emx import __version__, core
 from emx.tmux import Pane, View
 
+
+def files_in(root):
+    root = Path(root)
+    return core.PrefsFiles(root / "emx" / "config", root / "state" / "remembered.json", root / "emx" / "prefs.json")
+
+
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
 class TestSessionsHidden(unittest.TestCase):
     def setUp(self):
         saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
@@ -1099,37 +1113,38 @@ class Prefs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.path = Path(self.tmp.name) / "emx" / "prefs.json"
+        self.files = files_in(self.tmp.name)
+        self.path = self.files.legacy
 
     def test_missing_file_gives_defaults(self):
-        self.assertEqual(core.load_prefs(self.path), core.DEFAULT_PREFS)
+        self.assertEqual(core.load_prefs(self.files), core.DEFAULT_PREFS)
 
     def test_corrupt_and_wrong_shape_give_defaults(self):
         self.path.parent.mkdir(parents=True)
         for content in ["{not json", "", "[1,2]", "null"]:
             with self.subTest(content=content):
                 self.path.write_text(content, encoding="utf-8")
-                self.assertEqual(core.load_prefs(self.path), core.DEFAULT_PREFS)
+                self.assertEqual(core.load_prefs(self.files), core.DEFAULT_PREFS)
 
     def test_non_utf8_bytes_give_defaults(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_bytes(b"\xff\xfe\x00bad")
-        self.assertEqual(core.load_prefs(self.path), core.DEFAULT_PREFS)
+        self.assertEqual(core.load_prefs(self.files), core.DEFAULT_PREFS)
 
     def test_roundtrip_creates_parent_dirs(self):
         prefs = {"side": "left", "panel_width": 30, "last_folder": "/x"}
-        core.save_prefs(self.path, prefs)
-        self.assertEqual(core.load_prefs(self.path), prefs)
+        core.save_prefs(self.files, prefs)
+        self.assertEqual(core.load_prefs(self.files), prefs)
         self.assertFalse(self.path.with_name("prefs.json.tmp").exists())
 
     def test_old_file_with_main_width_loads_and_drops_it(self):
         self.path.parent.mkdir(parents=True)
         old = {"side": "left", "main_width": 80, "panel_width": 30, "last_folder": "/x"}
         self.path.write_text(json.dumps(old), encoding="utf-8")
-        got = core.load_prefs(self.path)
+        got = core.load_prefs(self.files)
         self.assertEqual(got, {"side": "left", "panel_width": 30, "last_folder": "/x"})
-        core.save_prefs(self.path, got)
-        self.assertNotIn("main_width", json.loads(self.path.read_text(encoding="utf-8")))
+        core.save_prefs(self.files, got)
+        self.assertNotIn("main_width", self.files.config.read_text(encoding="utf-8"))
 
     def test_normalize_rejects_bad_values(self):
         got = core.normalize_prefs({"side": "up", "panel_width": True, "last_folder": ""})
@@ -1166,8 +1181,8 @@ class Prefs(unittest.TestCase):
 
     def test_last_version_survives_a_save(self):
         prefs = {**core.DEFAULT_PREFS, "last_version": "1.2.3"}
-        core.save_prefs(self.path, prefs)
-        self.assertEqual(core.load_prefs(self.path), prefs)
+        core.save_prefs(self.files, prefs)
+        self.assertEqual(core.load_prefs(self.files), prefs)
 
     def test_normalize_drops_a_last_version_that_is_not_semver(self):
         for bad in ("", "1.2", "v1.2.3", 123, None):
@@ -1182,25 +1197,26 @@ class Prefs(unittest.TestCase):
         core.normalize_prefs({"side": "left", "last_folder": "/q"})
         self.assertEqual(core.DEFAULT_PREFS, {"side": "right", "panel_width": 40})
 
-    def test_prefs_path_xdg(self):
-        self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "/cfg"}), Path("/cfg/emx/prefs.json"))
+    def test_prefs_files_xdg(self):
+        files = core.prefs_files({"XDG_CONFIG_HOME": "/cfg"})
+        self.assertEqual((files.config, files.legacy), (Path("/cfg/emx/config"), Path("/cfg/emx/prefs.json")))
 
-    def test_prefs_path_ignores_empty_or_relative_xdg(self):
+    def test_prefs_files_ignores_empty_or_relative_xdg(self):
         home = os.path.expanduser("~")
-        want = Path(home) / ".config" / "emx" / "prefs.json"
-        self.assertEqual(core.prefs_path({}), want)
-        self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": ""}), want)
-        self.assertEqual(core.prefs_path({"XDG_CONFIG_HOME": "rel/dir"}), want)
+        want = Path(home) / ".config" / "emx" / "config"
+        self.assertEqual(core.prefs_files({}).config, want)
+        self.assertEqual(core.prefs_files({"XDG_CONFIG_HOME": ""}).config, want)
+        self.assertEqual(core.prefs_files({"XDG_CONFIG_HOME": "rel/dir"}).config, want)
 
     def test_emx_config_home_moves_the_prefs_without_xdg_config_home(self):
-        self.assertEqual(core.prefs_path({"EMX_CONFIG_HOME": "/check"}), Path("/check/emx/prefs.json"))
+        self.assertEqual(core.prefs_files({"EMX_CONFIG_HOME": "/check"}).config, Path("/check/emx/config"))
         self.assertEqual(
-            core.prefs_path({"EMX_CONFIG_HOME": "/check", "XDG_CONFIG_HOME": "/cfg"}), Path("/check/emx/prefs.json"),
+            core.prefs_files({"EMX_CONFIG_HOME": "/check", "XDG_CONFIG_HOME": "/cfg"}).config, Path("/check/emx/config"),
         )
         for unusable in ("", "rel/dir"):
             with self.subTest(value=unusable):
                 self.assertEqual(
-                    core.prefs_path({"EMX_CONFIG_HOME": unusable, "XDG_CONFIG_HOME": "/cfg"}), Path("/cfg/emx/prefs.json"),
+                    core.prefs_files({"EMX_CONFIG_HOME": unusable, "XDG_CONFIG_HOME": "/cfg"}).config, Path("/cfg/emx/config"),
                 )
 
     def test_adjust_panel_width_clamped(self):
@@ -1221,8 +1237,8 @@ class Prefs(unittest.TestCase):
         prefs = core.toggle_view(dict(core.DEFAULT_PREFS))
         prefs = core.toggle_collapsed(prefs, core.BY_STATE, core.DONE)
         prefs = core.toggle_collapsed(prefs, core.PROJECT, "/r/app")
-        core.save_prefs(self.path, prefs)
-        got = core.load_prefs(self.path)
+        core.save_prefs(self.files, prefs)
+        got = core.load_prefs(self.files)
         self.assertEqual(core.current_view(got), core.BY_STATE)
         self.assertEqual(core.collapsed_keys(got, core.BY_STATE), {core.DONE})
         self.assertEqual(core.collapsed_keys(got, core.PROJECT), {"/r/app"})
@@ -1246,7 +1262,7 @@ class Prefs(unittest.TestCase):
 
     def test_no_saved_mode_means_notification_mode(self):
         self.assertNotIn("mode", core.DEFAULT_PREFS)
-        self.assertEqual(core.notice_mode(core.load_prefs(self.path)), "notification")
+        self.assertEqual(core.notice_mode(core.load_prefs(self.files)), "notification")
 
     def test_old_voice_true_means_voice_mode(self):
         self.assertEqual(core.normalize_prefs({"voice": True})["mode"], core.VOICE_MODE)
@@ -1269,10 +1285,10 @@ class Prefs(unittest.TestCase):
                 self.assertNotIn("mode", core.normalize_prefs({"voice": bad}))
 
     def test_save_drops_the_old_voice_key(self):
-        core.save_prefs(self.path, {**core.DEFAULT_PREFS, "voice": True})
-        saved = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(saved["mode"], "voice")
-        self.assertNotIn("voice", saved)
+        core.save_prefs(self.files, {**core.DEFAULT_PREFS, "voice": True})
+        saved = self.files.config.read_text(encoding="utf-8").splitlines()
+        self.assertIn("mode = voice", saved)
+        self.assertFalse([line for line in saved if line.startswith("voice")])
 
     def test_toggle_mode_flips_both_ways(self):
         voice = core.toggle_mode(core.DEFAULT_PREFS)
@@ -1347,7 +1363,7 @@ class RecentFolders(unittest.TestCase):
 
     def test_they_survive_a_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "prefs.json"
+            path = files_in(d)
             core.save_prefs(path, core.remember_folder(dict(core.DEFAULT_PREFS), "/f/a"))
             self.assertEqual(core.load_prefs(path)["recent_folders"], ["/f/a"])
 
@@ -1388,29 +1404,335 @@ class RecentFolders(unittest.TestCase):
         self.assertEqual(core.present_folders(["/a", "/b", "/c"], {"/a": False, "/b": True}), ["/b", "/c"])
 
 
-class SavePrefs(unittest.TestCase):
-    def test_two_threads_saving_at_once_leave_valid_prefs(self):
+BOARD = """\
+# emx settings. Save the file and a running emx follows within seconds.
+# A line emx can’t read is skipped, and the bar says which and why.
+
+## Panel
+# Which side of the window the panel sits on: left or right
+side = right
+# Panel width in columns, 16 to 500 (< and > change it too)
+panel_width = 40
+# How sessions are grouped: project or state
+view = project
+
+## Notices
+# voice (spoken) or notification (macOS notifications)
+mode = notification
+
+## Look
+# Colour scheme: terminal, dark or light
+scheme = terminal
+
+## Updates
+# Install new versions by itself: on or off
+updates = on
+# How often to check, in seconds
+update_check_seconds = 600
+
+## Phone
+# Port of the phone page, 1024 to 65535 (takes effect at the next start)
+phone_port = 8787
+
+## Folders
+# Starred folders for new sessions, one per line
+"""
+CFG_HOME = "/home/x"
+
+
+def defaults():
+    return {s.key: s.default for s in core.SETTINGS}
+
+
+class ConfigFile(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.files = files_in(self.tmp.name)
+
+    def write_config(self, text):
+        self.files.config.parent.mkdir(parents=True, exist_ok=True)
+        self.files.config.write_text(text, encoding="utf-8")
+
+    def config_text(self):
+        return self.files.config.read_text(encoding="utf-8")
+
+    def test_the_template_reads_back_as_the_defaults(self):
+        values, _, problems = core.read_config(core.config_template(defaults(), CFG_HOME), CFG_HOME)
+        self.assertEqual(values, defaults())
+        self.assertEqual(problems, [])
+
+    def test_the_template_matches_the_board(self):
+        lines = core.config_template(defaults(), CFG_HOME).splitlines()
+        want = BOARD.splitlines()
+        self.assertEqual(lines[:len(want)], want)
+        for setting in core.SETTINGS:
+            above = lines.index(f"# {setting.comment}")
+            if setting.kind != "folders":
+                self.assertTrue(lines[above + 1].startswith(setting.key + " = "))
+
+    def test_comments_and_sections_are_skipped(self):
+        values, lines, problems = core.read_config("# a note\n## Look\n\n   \n# scheme = dark\n", CFG_HOME)
+        self.assertEqual((values, lines, problems), (defaults(), {}, []))
+
+    def test_a_bad_value_keeps_the_default_and_names_the_line(self):
+        values, _, problems = core.read_config("\n\n\n\nside = middle\n", CFG_HOME)
+        self.assertEqual(values["side"], "right")
+        self.assertEqual(problems, ['line 5: side is left or right, not "middle"; using right'])
+
+    def test_unknown_key_and_non_key_lines_are_problems(self):
+        _, _, problems = core.read_config("foo = 1\nhello\n", CFG_HOME)
+        self.assertEqual(problems, ['line 1: emx has no setting "foo"', 'line 2: not a "key = value" line'])
+
+    def test_the_first_line_of_a_key_counts(self):
+        values, _, problems = core.read_config("\nside = left\n\nside = right\n", CFG_HOME)
+        self.assertEqual(values["side"], "left")
+        self.assertEqual(problems, ["line 4: side is already set on line 2"])
+
+    def test_numbers_out_of_range_are_bad(self):
+        for line, key in (("panel_width = 9", "panel_width"), ("phone_port = 80", "phone_port"),
+                          ("update_check_seconds = 4", "update_check_seconds"), ("panel_width = ten", "panel_width")):
+            with self.subTest(line=line):
+                values, _, problems = core.read_config(line + "\n", CFG_HOME)
+                self.assertEqual(values[key], core.SETTING_BY_KEY[key].default)
+                self.assertEqual(len(problems), 1)
+        self.assertEqual(core.read_config("panel_width = 9\n", CFG_HOME)[2],
+                         ['line 1: panel_width is a number from 16 to 500, not "9"; using 40'])
+        self.assertEqual(core.read_config("panel_width = 60\n", CFG_HOME)[0]["panel_width"], 60)
+
+    def test_favourites_repeat_and_expand_tilde(self):
+        text = "favourite_folders = ~/a\nfavourite_folders = ~/b\nfavourite_folders = ~/a\nfavourite_folders =\n"
+        values, lines, problems = core.read_config(text, CFG_HOME)
+        self.assertEqual(values["favourite_folders"], [CFG_HOME + "/a", CFG_HOME + "/b"])
+        self.assertEqual((lines["favourite_folders"], problems), (1, []))
+
+    def test_a_write_changes_only_that_line(self):
+        import difflib
+
+        new = core.write_config_text(BOARD, {"side": "left"}, CFG_HOME)
+        diff = [d for d in difflib.ndiff(BOARD.splitlines(), new.splitlines()) if d[0] in "+-"]
+        self.assertEqual(diff, ["- side = right", "+ side = left"])
+        self.assertTrue(new.endswith("\n"))
+
+    def test_a_missing_key_goes_under_its_section(self):
+        text = BOARD.replace("# Colour scheme: terminal, dark or light\nscheme = terminal\n", "")
+        new = core.write_config_text(text, {"scheme": "dark"}, CFG_HOME).splitlines()
+        at = new.index("## Look")
+        self.assertEqual(new[at:at + 4], ["## Look", "# Colour scheme: terminal, dark or light", "scheme = dark", ""])
+        bare = core.write_config_text("side = left\n", {"scheme": "dark"}, CFG_HOME).splitlines()
+        self.assertEqual(bare, ["side = left", "", "## Look", "# Colour scheme: terminal, dark or light", "scheme = dark"])
+
+    def test_favourites_write_keeps_kept_lines_and_appends(self):
+        text = BOARD + "favourite_folders = ~/a\nfavourite_folders = ~/b\n"
+        gone = core.write_config_text(text, {"favourite_folders": [CFG_HOME + "/b"]}, CFG_HOME)
+        self.assertEqual(gone, BOARD + "favourite_folders = ~/b\n")
+        added = core.write_config_text(text, {"favourite_folders": [CFG_HOME + "/a", CFG_HOME + "/b", CFG_HOME + "/c"]}, CFG_HOME)
+        self.assertEqual(added, text + "favourite_folders = ~/c\n")
+        empty = core.write_config_text(text, {"favourite_folders": []}, CFG_HOME)
+        self.assertEqual(empty, BOARD)
+        again = core.write_config_text(empty, {"favourite_folders": [CFG_HOME + "/a"]}, CFG_HOME)
+        self.assertEqual(again, BOARD + "favourite_folders = ~/a\n")
+
+    def test_a_bad_line_is_never_rewritten_unless_its_key_changes(self):
+        text = BOARD.replace("side = right", "side = middle")
+        self.write_config(text)
+        prefs = core.load_prefs(self.files)
+        core.save_prefs(self.files, {**prefs, "pinned": ["a"]})
+        self.assertEqual(self.config_text(), text)
+        core.save_prefs(self.files, {**prefs, "side": "left"})
+        self.assertEqual(self.config_text(), text.replace("side = middle", "side = left"))
+
+    def test_state_keys_never_go_in_the_config(self):
+        prefs = {**core.DEFAULT_PREFS, "pinned": ["a"], "recent_folders": ["/r"], "last_folder": "/r", "last_version": "1.2.3",
+                 "collapsed": {"project": ["/p"]}, "panel_collapsed": True}
+        core.save_prefs(self.files, prefs)
+        text = self.config_text()
+        for key in core.STATE_KEYS:
+            self.assertNotIn(key, text)
+        saved = json.loads(self.files.state.read_text(encoding="utf-8"))
+        self.assertEqual(saved, {k: prefs[k] for k in core.STATE_KEYS})
+
+    def test_ensure_config_migrates_prefs_json(self):
+        folder = os.path.expanduser("~") + "/code/a"
+        legacy = {"side": "left", "panel_width": 60, "scheme": "dark", "voice": True, "favourite_folders": [folder],
+                  "pinned": ["p1"], "recent_folders": ["/r"]}
+        self.files.legacy.parent.mkdir(parents=True)
+        raw = json.dumps(legacy)
+        self.files.legacy.write_text(raw, encoding="utf-8")
+        self.assertTrue(core.ensure_config(self.files))
+        text = self.config_text()
+        for line in ("side = left", "panel_width = 60", "scheme = dark", "mode = voice", "favourite_folders = ~/code/a"):
+            self.assertIn(line, text.splitlines())
+        state = json.loads(self.files.state.read_text(encoding="utf-8"))
+        self.assertEqual((state["pinned"], state["recent_folders"]), (["p1"], ["/r"]))
+        self.assertEqual(self.files.legacy.read_text(encoding="utf-8"), raw)
+        before = self.config_text()
+        self.assertFalse(core.ensure_config(self.files))
+        self.assertEqual(self.config_text(), before)
+
+    def test_a_read_before_the_migration_sees_the_old_prefs(self):
+        self.files.legacy.parent.mkdir(parents=True)
+        self.files.legacy.write_text(json.dumps({"side": "left", "pinned": ["p1"]}), encoding="utf-8")
+        prefs = core.load_prefs(self.files)
+        self.assertEqual((prefs["side"], prefs["pinned"]), ("left", ["p1"]))
+        self.assertFalse(self.files.config.exists())
+
+    def test_ensure_config_takes_updates_off(self):
+        core.ensure_config(self.files, updates_off=True)
+        self.assertIn("updates = off", self.config_text().splitlines())
+        self.assertFalse(core.updates_on(core.load_prefs(self.files)))
+
+    def test_no_legacy_file_writes_the_plain_template(self):
+        core.ensure_config(self.files)
+        self.assertEqual(self.config_text(), core.config_template(defaults(), os.path.expanduser("~")))
+
+    def test_env_overrides_the_file(self):
+        prefs = {"phone_port": 9000, "update_check_seconds": 100, "claude_command": "mine", "remote_command": "mine-emx"}
+        cases = (
+            (core.phone_port, "EMX_PHONE_PORT", "9100", 9100, "x", 9000),
+            (core.update_seconds, "EMX_UPDATE_SECONDS", "30", 30, "2", 100),
+            (core.claude_command, "EMX_CLAUDE", "fake", "fake", "", "mine"),
+            (core.remote_command, "EMX_REMOTE_COMMAND", "other", "other", "  ", "mine-emx"),
+        )
+        for fn, var, good, got, bad, fallback in cases:
+            with self.subTest(var=var):
+                self.assertEqual(fn(prefs, {var: good}), got)
+                self.assertEqual(fn(prefs, {var: bad}), fallback)
+                self.assertEqual(fn(prefs, {}), fallback)
+                self.assertEqual(fn({}, {}), next(s.default for s in core.SETTINGS if s.env == var))
+        setting = core.SETTING_BY_KEY["phone_port"]
+        self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "9100"}), "EMX_PHONE_PORT")
+        self.assertEqual(core.env_override(setting, {"EMX_PHONE_PORT": "80"}), "")
+
+    def test_non_utf8_config_uses_defaults_and_is_not_written(self):
+        self.files.config.parent.mkdir(parents=True)
+        self.files.config.write_bytes(b"side = left\n\xff\xfe\n")
+        prefs, problems = core.load_settings(self.files)
+        self.assertEqual(prefs, core.DEFAULT_PREFS)
+        self.assertEqual(problems, ["the file isn't UTF-8 text; using the defaults"])
+        with self.assertRaises(OSError):
+            core.save_prefs(self.files, {**core.DEFAULT_PREFS, "side": "left"})
+        self.assertEqual(self.files.config.read_bytes(), b"side = left\n\xff\xfe\n")
+
+    def test_two_threads_saving_keep_both_changes(self):
         import threading
 
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "prefs.json"
-            errors = []
+        core.ensure_config(self.files)
+        errors = []
 
-            def save(tag):
-                try:
-                    for i in range(50):
-                        core.save_prefs(path, {**core.DEFAULT_PREFS, "pinned": [f"{tag}{i}"]})
-                except Exception as exc:
-                    errors.append(exc)
+        def work(change):
+            try:
+                for _ in range(20):
+                    core.change_prefs(self.files, lambda disk: {**disk, **change})
+            except Exception as exc:
+                errors.append(exc)
 
-            threads = [threading.Thread(target=save, args=(tag,)) for tag in "ab"]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            self.assertEqual(errors, [])
-            self.assertEqual(len(json.loads(path.read_text(encoding="utf-8"))["pinned"]), 1)
-            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["prefs.json"])
+        threads = [threading.Thread(target=work, args=(c,)) for c in ({"scheme": "dark"}, {"pinned": ["a"]})]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        got = core.load_prefs(self.files)
+        self.assertEqual((got["scheme"], got["pinned"]), ("dark", ["a"]))
+        self.assertEqual(sorted(p.name for p in self.files.config.parent.iterdir()), [".config.lock", "config"])
+
+    def test_change_prefs_reads_under_the_lock(self):
+        import threading
+
+        core.ensure_config(self.files)
+        seen, done = [], threading.Event()
+        holding, release = threading.Event(), threading.Event()
+
+        def holder():
+            with core.prefs_lock(self.files):
+                holding.set()
+                release.wait(5)
+                core.save_prefs(self.files, {**core.load_prefs(self.files), "scheme": "dark"})
+
+        def waiter():
+            def fn(disk):
+                seen.append(disk.get("scheme"))
+                return {**disk, "side": "left"}
+
+            core.change_prefs(self.files, fn)
+            done.set()
+
+        first = threading.Thread(target=holder)
+        first.start()
+        self.assertTrue(holding.wait(5))
+        second = threading.Thread(target=waiter)
+        second.start()
+        self.assertFalse(done.wait(0.2))
+        release.set()
+        first.join()
+        second.join()
+        self.assertTrue(done.is_set())
+        self.assertEqual(seen, ["dark"])
+        got = core.load_prefs(self.files)
+        self.assertEqual((got["scheme"], got["side"]), ("dark", "left"))
+
+    def test_ensure_config_writes_nothing_when_prefs_json_is_unreadable(self):
+        self.files.legacy.mkdir(parents=True)
+        with self.assertRaises(OSError):
+            core.ensure_config(self.files)
+        self.assertFalse(self.files.config.exists())
+        self.assertFalse(self.files.state.exists())
+
+    def test_an_absent_config_is_written_whole(self):
+        core.save_prefs(self.files, {**core.DEFAULT_PREFS, "scheme": "dark"})
+        text = self.config_text()
+        self.assertTrue(text.startswith("# emx settings."))
+        self.assertIn("scheme = dark", text.splitlines())
+
+    def test_prefs_files_prefers_emx_config_home(self):
+        env = {"EMX_CONFIG_HOME": "/check", "XDG_CONFIG_HOME": "/cfg", "XDG_STATE_HOME": "/st"}
+        files = core.prefs_files(env)
+        self.assertEqual((files.config, files.legacy, files.state),
+                         (Path("/check/emx/config"), Path("/check/emx/prefs.json"), Path("/st/emx/remembered.json")))
+        self.assertEqual(core.prefs_files({**env, "EMX_CONFIG_HOME": "rel"}).config, Path("/cfg/emx/config"))
+
+    def test_settings_rows_hide_side_and_width_when_narrow(self):
+        wide = [r[1].key for r in core.settings_rows(False) if r[0] == "item"]
+        narrow = [r[1].key for r in core.settings_rows(True) if r[0] == "item"]
+        self.assertEqual(wide, [s.key for s in core.SETTINGS])
+        self.assertEqual([k for k in wide if k not in narrow], ["side", "panel_width"])
+        heads = [r[1] for r in core.settings_rows(True) if r[0] == "head"]
+        self.assertEqual(heads, ["Panel", "Notices", "Look", "Updates", "Phone", "Folders", "Commands"])
+        self.assertEqual(core.settings_rows(False)[0], ("head", "Panel"))
+
+    def test_cycle_wraps_choices_and_steps_width(self):
+        by = core.SETTING_BY_KEY
+        self.assertEqual(core.cycle(by["scheme"], {}, 1)["scheme"], "dark")
+        self.assertEqual(core.cycle(by["scheme"], {"scheme": "light"}, 1)["scheme"], "terminal")
+        self.assertEqual(core.cycle(by["scheme"], {}, -1)["scheme"], "light")
+        self.assertEqual(core.cycle(by["side"], {"side": "right"}, 1)["side"], "left")
+        self.assertEqual(core.cycle(by["panel_width"], {"panel_width": 40}, 1)["panel_width"], 40 + core.WIDTH_STEP)
+        self.assertEqual(core.cycle(by["panel_width"], {"panel_width": 17}, -1)["panel_width"], core.MIN_PANEL)
+        prefs = {"phone_port": 9000}
+        self.assertEqual(core.cycle(by["phone_port"], prefs, 1), prefs)
+
+    def test_shown_value_formats(self):
+        by = core.SETTING_BY_KEY
+        self.assertEqual(core.shown_value(by["side"], {"side": "right"}, True), "‹ right ›")
+        self.assertEqual(core.shown_value(by["side"], {"side": "right"}, False), "right")
+        self.assertEqual(core.shown_value(by["view"], {}, False), "by project")
+        self.assertEqual(core.shown_value(by["panel_width"], {"panel_width": 40}, True), "‹ 40 ›")
+        self.assertEqual(core.shown_value(by["update_check_seconds"], {"update_check_seconds": 600}, False), "10m")
+        self.assertEqual(core.shown_value(by["update_check_seconds"], {"update_check_seconds": 45}, False), "45s")
+        self.assertEqual(core.shown_value(by["favourite_folders"], {"favourite_folders": ["/a", "/b"]}, False), "2 ›")
+
+    def test_parse_value_uses_the_files_rule(self):
+        by = core.SETTING_BY_KEY
+        self.assertEqual(core.parse_value(by["phone_port"], " 9000 ", CFG_HOME), (9000, ""))
+        self.assertEqual(core.parse_value(by["phone_port"], "80", CFG_HOME),
+                         (None, 'phone_port is a number from 1024 to 65535, not "80"'))
+        self.assertIsNone(core.parse_value(by["claude_command"], "", CFG_HOME)[0])
+
+    def test_config_notice_counts_the_rest(self):
+        self.assertEqual(core.config_notice(["line 2: a"]), "config line 2: a")
+        self.assertEqual(core.config_notice(["line 2: a", "line 3: b", "line 4: c"]),
+                         "config line 2: a (+2 more; emx config shows the file)")
 
 
 class FavouriteHint(unittest.TestCase):
@@ -1439,7 +1761,7 @@ class FavouriteFolders(unittest.TestCase):
 
     def test_they_survive_a_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "prefs.json"
+            path = files_in(d)
             prefs, _ = core.toggle_favourite(dict(core.DEFAULT_PREFS), "/f/a")
             core.save_prefs(path, prefs)
             self.assertEqual(core.load_prefs(path)["favourite_folders"], ["/f/a"])
@@ -2413,7 +2735,7 @@ class Pins(unittest.TestCase):
 
     def test_pins_survive_saving_and_loading(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "emx" / "prefs.json"
+            path = files_in(tmp)
             core.save_prefs(path, core.toggle_pin(dict(core.DEFAULT_PREFS), "a"))
             self.assertEqual(core.pinned_ids(core.load_prefs(path)), {"a"})
 
@@ -5984,7 +6306,7 @@ class ColourSchemes(unittest.TestCase):
 
     def test_the_scheme_survives_a_save_and_load(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "prefs.json"
+            path = files_in(d)
             core.save_prefs(path, core.set_scheme({}, "terminal"))
             self.assertEqual(core.scheme(core.load_prefs(path)), "terminal")
 

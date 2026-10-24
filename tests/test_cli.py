@@ -26,6 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_install import GIT_ENV, add_version, make_source, make_versions, run_git, temp_homes  # noqa: E402
 
 
+def setUpModule():
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    patch = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
+
+
 class Attached(Exception):
     pass
 
@@ -996,7 +1005,8 @@ class CreateWorkspace(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.dir = tmp.name
-        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "XDG_CONFIG_HOME": os.path.join(self.dir, "config")})
+        env = mock.patch.dict(os.environ, {"TMUX_TMPDIR": self.dir, "XDG_CONFIG_HOME": os.path.join(self.dir, "config"),
+                                         "XDG_STATE_HOME": os.path.join(self.dir, "state")})
         env.start()
         self.addCleanup(env.stop)
         # A harmless command, so no real panel starts, polls claude agents or speaks.
@@ -1016,7 +1026,7 @@ class CreateWorkspace(unittest.TestCase):
         return self.tmux.run("display-message", "-p", "-t", f"={SESSION}:", fmt).strip()
 
     def test_starts_hidden_when_left_hidden(self):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_collapsed": True})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "panel_collapsed": True})
         cli.create_workspace(self.tmux)
         self.assertEqual(self.show("#{window_zoomed_flag}"), "1")
         self.assertEqual(self.show("#{@emx_role}"), "placeholder")
@@ -1069,8 +1079,8 @@ class CreateWorkspace(unittest.TestCase):
     def test_a_narrow_terminal_starting_emx_gets_a_view_of_its_own_and_leaves_the_laptops_alone(self):
         from emx import sidebar
 
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
-        saved = core.prefs_path().read_bytes()
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "panel_width": 37, "panel_collapsed": False})
+        saved = core.prefs_files().config.read_bytes()
         argv = self.launched(48)
         self.assertEqual(argv[-2:], ["-t", "=emx-view-1:"])
         self.assertEqual(sorted(self.tmux.view_names()), [SESSION, "emx-view-1"])
@@ -1088,7 +1098,7 @@ class CreateWorkspace(unittest.TestCase):
             time.sleep(0.02)
         self.assertEqual((self.zoomed("emx-view-1"), self.zoomed(SESSION)), ("1", "0"))
         self.assertEqual(self.tmux.run("display-message", "-p", "-t", panel, "#{pane_active}").strip(), "1")
-        self.assertEqual(core.prefs_path().read_bytes(), saved)
+        self.assertEqual(core.prefs_files().config.read_bytes(), saved)
 
     def test_a_wide_terminal_starting_emx_gets_emx_itself(self):
         argv = self.launched(200)
@@ -1726,10 +1736,10 @@ class ColorsCommand(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp})
+        patch = mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp})
         patch.start()
         self.addCleanup(patch.stop)
-        self.prefs = core.prefs_path()
+        self.prefs = core.prefs_files()
 
     def run_main(self, *argv):
         out, err = io.StringIO(), io.StringIO()
@@ -1740,37 +1750,37 @@ class ColorsCommand(unittest.TestCase):
     def test_setting_a_scheme_saves_it_and_keeps_the_other_prefs(self):
         core.save_prefs(self.prefs, {"side": "left"})
         self.assertEqual(self.run_main("light"), (0, "Colours set to light.\n", ""))
-        saved = json.loads(self.prefs.read_text(encoding="utf-8"))
+        saved = core.load_prefs(self.prefs)
         self.assertEqual((saved["scheme"], saved["side"]), ("light", "left"))
 
     def test_with_no_argument_it_prints_the_scheme(self):
         self.assertEqual(self.run_main(), (0, "Colours: terminal. Choices: dark, light, terminal.\n", ""))
-        self.assertFalse(self.prefs.exists())
+        self.assertFalse(self.prefs.config.exists())
         self.run_main("light")
         self.assertEqual(self.run_main()[1], "Colours: light. Choices: dark, light, terminal.\n")
 
     def test_anything_else_prints_the_usage_and_changes_nothing(self):
         self.run_main("light")
-        before = self.prefs.read_text(encoding="utf-8")
+        before = self.prefs.config.read_text(encoding="utf-8")
         for args in (("pink",), ("light", "dark")):
             with self.subTest(args=args):
                 code, out, err = self.run_main(*args)
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn("colors [dark | light | terminal]", err)
-                self.assertEqual(self.prefs.read_text(encoding="utf-8"), before)
+                self.assertEqual(self.prefs.config.read_text(encoding="utf-8"), before)
 
     def test_a_prefs_file_that_cannot_be_written_is_reported(self):
         with mock.patch.object(cli.core, "save_prefs", side_effect=OSError("disk full")):
             code, out, err = self.run_main("terminal")
-        self.assertEqual((code, out, err), (1, "", "emx: couldn't save prefs: disk full\n"))
+        self.assertEqual((code, out, err), (1, "", "emx: couldn't save settings: disk full\n"))
 
 
 class UpgradeKeepsScheme(unittest.TestCase):
     def test_an_upgrade_sets_the_saved_schemes_options_after_sourcing_the_conf(self):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, True)
-        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp}):
-            core.save_prefs(core.prefs_path(), core.set_scheme({}, "light"))
+        with mock.patch.dict(os.environ, {"EMX_CONFIG_HOME": tmp, "XDG_STATE_HOME": tmp}):
+            core.save_prefs(core.prefs_files(), core.set_scheme({}, "light"))
             tmux = MigratingTmux("emx-test-unit")
             tmux.options[VERSION_OPT] = "old"
             cli.refresh_workspace(tmux)

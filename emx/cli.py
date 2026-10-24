@@ -155,7 +155,7 @@ def self_command(*args: str) -> str:
 
 def new_view(tmux: Tmux, name: str, cols: int, lines: int) -> str:
     """Make view session `name`: the placeholder in its slot and a panel beside it, on the side prefs say. Returns the slot's pane."""
-    prefs = core.load_prefs(core.prefs_path())
+    prefs = core.load_prefs(core.prefs_files())
     main = tmux.run(
         "new-session", "-d", "-s", name, "-n", SESSION, "-x", str(cols), "-y", str(lines),
         "-P", "-F", "#{pane_id}", self_command("blank", PLACEHOLDER_TEXT),
@@ -174,7 +174,7 @@ def create_workspace(tmux: Tmux) -> None:
     cols, lines = shutil.get_terminal_size((200, 50))
     main = new_view(tmux, SESSION, cols, lines)
     # The hidden panel saved in prefs is the laptop's, and `emx` itself is the laptop's view.
-    if core.panel_collapsed(core.load_prefs(core.prefs_path())):
+    if core.panel_collapsed(core.load_prefs(core.prefs_files())):
         tmux.toggle_zoom(main)
     tmux.set_session_option(VERSION_OPT, code_version())
     wanted = take_pending_open()
@@ -230,7 +230,7 @@ def refresh_workspace(tmux: Tmux) -> None:
         tmux.respawn(pane, self_command("sidebar", tmux.socket))
     if upgrade:
         tmux.source_config()
-        for option, value in core.SCHEME_TMUX[core.scheme(core.load_prefs(core.prefs_path()))].items():
+        for option, value in core.SCHEME_TMUX[core.scheme(core.load_prefs(core.prefs_files()))].items():
             tmux.set_global_option(option, value)
         # Stamped last, so an upgrade that fails partway is retried on the next launch.
         tmux.set_session_option(VERSION_OPT, version)
@@ -680,7 +680,7 @@ def install_command(url: str) -> int:
 
 
 def colors_command(args: list) -> int:
-    path = core.prefs_path()
+    path = core.prefs_files()
     if not args:
         print(f"Colours: {core.scheme(core.load_prefs(path))}. Choices: {', '.join(core.SCHEMES)}.")
         return 0
@@ -688,9 +688,10 @@ def colors_command(args: list) -> int:
         print(USAGE, file=sys.stderr)
         return 2
     try:
-        core.save_prefs(path, core.set_scheme(core.load_prefs(path), args[0]))
+        core.ensure_config(path, updates_off=install.updates_off_marker())
+        core.change_prefs(path, lambda disk: core.set_scheme(disk, args[0]))
     except OSError as exc:
-        print(f"emx: couldn't save prefs: {exc}", file=sys.stderr)
+        print(f"emx: couldn't save settings: {exc}", file=sys.stderr)
         return 1
     print(f"Colours set to {args[0]}.")
     return 0

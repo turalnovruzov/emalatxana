@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 
+import emx
 from emx import core
 
 SOURCE = "source.git"
@@ -227,6 +228,11 @@ def prune(root, running, keep_lagging: bool = False) -> tuple:
 
 def updates_on(root) -> bool:
     return not os.path.lexists(os.path.join(root, UPDATES_OFF))
+
+
+def updates_off_marker() -> bool:
+    """Whether the old `updates-off` marker sits in the install folder: what carries into the config file."""
+    return emx.ROOT is not None and not updates_on(emx.ROOT)
 
 
 def set_updates(root, on: bool) -> tuple:

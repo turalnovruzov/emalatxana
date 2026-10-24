@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -2176,17 +2178,6 @@ def updated_heading(version: str) -> str:
     return f"emx updated to {version}."
 
 
-def prefs_path(env: Mapping | None = None) -> Path:
-    """`EMX_CONFIG_HOME` moves the prefs for a live check without setting `XDG_CONFIG_HOME`, which the claude in every session pane inherits from emx's tmux server and reads too (it then reports "Not logged in")."""
-    env = os.environ if env is None else env
-    base = env.get("EMX_CONFIG_HOME", "")
-    if not base or not os.path.isabs(base):
-        base = env.get("XDG_CONFIG_HOME", "")
-    if not base or not os.path.isabs(base):
-        base = os.path.join(os.path.expanduser("~"), ".config")
-    return Path(base) / "emx" / "prefs.json"
-
-
 ROUTINES_WINDOW = 86400
 MISSED_SLACK = 300
 CALENDAR_CAP = 1500
@@ -2492,6 +2483,16 @@ def normalize_prefs(raw) -> dict:
         prefs["mode"] = raw["mode"]
     elif isinstance(raw.get("voice"), bool):
         prefs["mode"] = VOICE_MODE if raw["voice"] else NOTIFICATION_MODE
+    if raw.get("updates") in ("on", "off"):
+        prefs["updates"] = raw["updates"]
+    for key in ("update_check_seconds", "phone_port"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and not _check(SETTING_BY_KEY[key], str(value), "")[1]:
+            prefs[key] = value
+    for key in ("claude_command", "remote_command"):
+        text = raw.get(key)
+        if isinstance(text, str) and text.strip() and "\n" not in text and "\r" not in text:
+            prefs[key] = text.strip()
     if isinstance(raw.get("panel_collapsed"), bool):
         prefs["panel_collapsed"] = raw["panel_collapsed"]
     collapsed = raw.get("collapsed")
@@ -2554,12 +2555,321 @@ def toggle_collapsed(prefs: dict, view: str, key: str) -> dict:
     return {**prefs, "collapsed": {v: ks for v, ks in collapsed.items() if ks}}
 
 
-def load_prefs(path: Path) -> dict:
+UPDATE_MIN_SECONDS = 5
+DEFAULT_PHONE_PORT = 8787
+STATE_KEYS = ("pinned", "last_folder", "recent_folders", "collapsed", "last_version", "panel_collapsed")
+
+
+@dataclass(frozen=True)
+class Setting:
+    key: str
+    section: str
+    label: str
+    kind: str
+    default: object
+    comment: str
+    describe: str
+    choices: tuple = ()
+    shown: tuple = ()
+    low: int = 0
+    high: int | None = None
+    env: str = ""
+    wide_only: bool = False
+    next_start: bool = False
+
+
+SETTINGS = (
+    Setting("side", "Panel", "Side", "choice", "right", "Which side of the window the panel sits on: left or right",
+            "Which side of the window the panel sits on.", choices=SIDES, wide_only=True),
+    Setting("panel_width", "Panel", "Width", "number", 40, "Panel width in columns, 16 to 500 (< and > change it too)",
+            "How many columns wide the panel is.", low=MIN_PANEL, high=MAX_WIDTH, wide_only=True),
+    Setting("view", "Panel", "View", "choice", PROJECT, "How sessions are grouped: project or state",
+            "How the panel groups sessions: by project or by state.", choices=VIEWS, shown=("by project", "by state")),
+    Setting("mode", "Notices", "Mode", "choice", NOTIFICATION_MODE, "voice (spoken) or notification (macOS notifications)",
+            "How emx tells you a session needs you: spoken, or a macOS notification.",
+            choices=(VOICE_MODE, NOTIFICATION_MODE)),
+    Setting("scheme", "Look", "Colours", "choice", TERMINAL, "Colour scheme: terminal, dark or light",
+            "The colours of the panel and the bar: your terminal's own, dark or light.", choices=(TERMINAL, DARK, LIGHT)),
+    Setting("updates", "Updates", "Automatic updates", "choice", "on", "Install new versions by itself: on or off",
+            "Whether emx installs new versions by itself.", choices=("on", "off")),
+    Setting("update_check_seconds", "Updates", "Check every", "number", 600, "How often to check, in seconds",
+            "How often emx looks for a new version, in seconds.", low=UPDATE_MIN_SECONDS, env="EMX_UPDATE_SECONDS"),
+    Setting("phone_port", "Phone", "Port", "number", DEFAULT_PHONE_PORT,
+            "Port of the phone page, 1024 to 65535 (takes effect at the next start)", "The port of the phone page.",
+            low=1024, high=65535, env="EMX_PHONE_PORT", next_start=True),
+    Setting("favourite_folders", "Folders", "Favourites", "folders", [], "Starred folders for new sessions, one per line",
+            "Folders starred for new sessions."),
+    Setting("claude_command", "Commands", "Claude command", "text", "claude",
+            "The claude command sessions start with (takes effect at the next start)",
+            "The command sessions start claude with.", env="EMX_CLAUDE", next_start=True),
+    Setting("remote_command", "Commands", "Server's emx", "text", "emx",
+            "emx's command on the server, for emx remote (run through its login shell)",
+            "emx's command on the server, used by emx remote.", env="EMX_REMOTE_COMMAND"),
+)
+SETTING_BY_KEY = {s.key: s for s in SETTINGS}
+CONFIG_KEYS = frozenset(SETTING_BY_KEY)
+CONFIG_HEADER = (
+    "# emx settings. Save the file and a running emx follows within seconds.",
+    "# A line emx can’t read is skipped, and the bar says which and why.",
+)
+
+
+@dataclass(frozen=True)
+class PrefsFiles:
+    config: Path
+    state: Path
+    legacy: Path
+
+
+def prefs_files(env: Mapping | None = None) -> PrefsFiles:
+    """`EMX_CONFIG_HOME` moves the config for a live check without setting `XDG_CONFIG_HOME`, which the claude in every session pane inherits from emx's tmux server and reads too (it then reports "Not logged in")."""
+    env = os.environ if env is None else env
+    base = env.get("EMX_CONFIG_HOME", "")
+    if not base or not os.path.isabs(base):
+        base = env.get("XDG_CONFIG_HOME", "")
+    if not base or not os.path.isabs(base):
+        base = os.path.join(os.path.expanduser("~"), ".config")
+    folder = Path(base) / "emx"
+    return PrefsFiles(folder / "config", state_path(env) / "remembered.json", folder / "prefs.json")
+
+
+def _home() -> str:
+    return os.path.expanduser("~")
+
+
+def _lines(text: str) -> list:
+    """Lines with their `\\n` kept; only `\\n` ends a line, so numbers match an editor's."""
+    return re.findall(r"[^\n]*\n|[^\n]+", text)
+
+
+def _split_line(raw: str):
+    """None for a blank or comment line, `(None, None)` for a line that is no `key = value`, else `(key, value)`."""
+    line = raw.strip()
+    if not line or line.startswith("#"):
+        return None
+    if "=" not in line:
+        return None, None
+    key, value = line.split("=", 1)
+    return key.strip(), value.strip()
+
+
+def _expand_home(text: str, home: str) -> str:
+    if text == "~" or text.startswith("~/"):
+        text = home.rstrip("/") + text[1:]
+    return os.path.normpath(text)
+
+
+def _words(choices) -> str:
+    return choices[0] if len(choices) == 1 else ", ".join(choices[:-1]) + " or " + choices[-1]
+
+
+def _check(setting: Setting, text: str, home: str) -> tuple:
+    """`(value, "")` for a good value, `(None, why)` for a bad one."""
+    key = setting.key
+    if setting.kind == "choice":
+        if text in setting.choices:
+            return text, ""
+        return None, f'{key} is {_words(setting.choices)}, not "{text}"'
+    if setting.kind == "number":
+        if re.fullmatch(r"-?\d+", text) and setting.low <= int(text) and (setting.high is None or int(text) <= setting.high):
+            return int(text), ""
+        if setting.high is None:
+            return None, f'{key} is a number of {setting.low} or more, not "{text}"'
+        return None, f'{key} is a number from {setting.low} to {setting.high}, not "{text}"'
+    if not text:
+        return None, f"{key} can't be empty"
+    return (_expand_home(text, home) if setting.kind == "folders" else text), ""
+
+
+def read_config(text: str, home: str) -> tuple:
+    """`(values, lines, problems)`: every key's value (the default where its line is bad or missing), the first line of each key that has one, and a message per line emx can't use."""
+    values = {s.key: (list(s.default) if s.kind == "folders" else s.default) for s in SETTINGS}
+    lines, problems = {}, []
+    for number, raw in enumerate(_lines(text), 1):
+        parts = _split_line(raw)
+        if parts is None:
+            continue
+        key, value = parts
+        if key is None:
+            problems.append(f'line {number}: not a "key = value" line')
+            continue
+        setting = SETTING_BY_KEY.get(key)
+        if setting is None:
+            problems.append(f'line {number}: emx has no setting "{key}"')
+            continue
+        if setting.kind == "folders":
+            lines.setdefault(key, number)
+            if value:
+                folder = _expand_home(value, home)
+                if folder not in values[key]:
+                    values[key].append(folder)
+            continue
+        if key in lines:
+            problems.append(f"line {number}: {key} is already set on line {lines[key]}")
+            continue
+        lines[key] = number
+        got, why = _check(setting, value, home)
+        if why:
+            problems.append(f"line {number}: {why}; using {setting.default}")
+        else:
+            values[key] = got
+    return values, lines, problems
+
+
+def _setting_lines(setting: Setting, value, home: str) -> list:
+    if setting.kind == "folders":
+        return [f"{setting.key} = {tilde_path(folder, home)}" for folder in value]
+    return [f"{setting.key} = {value}"]
+
+
+def config_template(values: Mapping, home: str) -> str:
+    out = [*CONFIG_HEADER]
+    section = None
+    for setting in SETTINGS:
+        if setting.section != section:
+            section = setting.section
+            out += ["", f"## {section}"]
+        out.append(f"# {setting.comment}")
+        out += _setting_lines(setting, values.get(setting.key, setting.default), home)
+    return "\n".join(out) + "\n"
+
+
+def _insert_under_section(lines: list, setting: Setting, new: list, after: int | None = None) -> list:
+    """`lines` with `new` placed after the last non-blank line of the setting's section (or after line `after`), its comment line first unless the section has it; a missing section is appended."""
+    heading, comment = f"## {setting.section}", f"# {setting.comment}"
+    lines = list(lines)
+    start = next((i for i, line in enumerate(lines) if line.strip() == heading), None)
+    if start is None:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        return lines + (["\n"] if lines else []) + [heading + "\n", comment + "\n", *[n + "\n" for n in new]]
+    end = start + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("## "):
+        end += 1
+    at = after if after is not None else max(i for i in range(start, end) if lines[i].strip())
+    if not lines[at].endswith("\n"):
+        lines[at] += "\n"
+    has_comment = any(line.strip() == comment for line in lines[start:end])
+    lines[at + 1:at + 1] = [n + "\n" for n in ([] if has_comment else [comment]) + new]
+    return lines
+
+
+def _write_scalar(lines: list, setting: Setting, value) -> list:
+    for i, raw in enumerate(lines):
+        parts = _split_line(raw)
+        if parts and parts[0] == setting.key:
+            ending = raw[len(raw.rstrip("\r\n")):]
+            return [*lines[:i], f"{setting.key} = {value}{ending}", *lines[i + 1:]]
+    return _insert_under_section(lines, setting, _setting_lines(setting, value, ""))
+
+
+def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -> list:
+    wanted = set(folders)
+    out, present, last = [], set(), None
+    for raw in lines:
+        parts = _split_line(raw)
+        if parts and parts[0] == setting.key and parts[1]:
+            folder = _expand_home(parts[1], home)
+            if folder not in wanted:
+                continue
+            present.add(folder)
+            out.append(raw)
+            last = len(out) - 1
+        else:
+            out.append(raw)
+    new = [f"{setting.key} = {tilde_path(f, home)}" for f in folders if f not in present]
+    return _insert_under_section(out, setting, new, last) if new else out
+
+
+def write_config_text(text: str, changes: Mapping, home: str) -> str:
+    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays."""
+    for setting in SETTINGS:
+        if setting.key not in changes:
+            continue
+        lines = _lines(text)
+        if setting.kind == "folders":
+            lines = _write_favourites(lines, setting, changes[setting.key], home)
+        else:
+            lines = _write_scalar(lines, setting, changes[setting.key])
+        text = "".join(lines)
+    return text
+
+
+def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Per call: the panel's thread and the phone page's thread of one process save too, and no two may share a temporary file.
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@contextlib.contextmanager
+def prefs_lock(files: PrefsFiles):
+    """Serialises every process that writes the settings. Not reentrant: nothing called under it takes it again."""
+    files.config.parent.mkdir(parents=True, exist_ok=True)
+    with open(files.config.parent / ".config.lock", "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+
+
+def _read_legacy(path: Path):
+    """The parsed `prefs.json`, None when it is missing or not JSON; any other read error raises, so a passing one never counts as an empty file."""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def _state_part(prefs) -> dict:
+    return {k: v for k, v in normalize_prefs(prefs).items() if k in STATE_KEYS}
+
+
+def load_settings(files: PrefsFiles) -> tuple:
+    """`(prefs, problems)` from the config file and the state file; an old `prefs.json` stands in for whichever is not there yet."""
+    problems = []
+    try:
+        legacy = normalize_prefs(_read_legacy(files.legacy))
+    except OSError:
+        legacy = normalize_prefs(None)
+    raw = {}
+    try:
+        data = files.config.read_bytes()
+    except OSError:
+        data = None
+    if data is None:
+        raw.update({k: v for k, v in legacy.items() if k in CONFIG_KEYS})
+    else:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            problems = ["the file isn't UTF-8 text; using the defaults"]
+        else:
+            values, _, problems = read_config(text, _home())
+            raw.update(values)
+    try:
+        raw.update(_state_part(json.loads(files.state.read_text(encoding="utf-8"))))
+    except FileNotFoundError:
+        raw.update({k: v for k, v in legacy.items() if k in STATE_KEYS})
     except (OSError, ValueError):
-        raw = None
-    return normalize_prefs(raw)
+        pass
+    prefs = normalize_prefs(raw)
+    for setting in SETTINGS:
+        if setting.key not in DEFAULT_PREFS and prefs.get(setting.key) == setting.default:
+            del prefs[setting.key]
+    return prefs, problems
+
+
+def load_prefs(files: PrefsFiles) -> dict:
+    return load_settings(files)[0]
 
 
 def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
@@ -2579,20 +2889,153 @@ def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
     return merged
 
 
-def save_prefs(path: Path, prefs: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Per call: the panel's thread and the phone page's thread of one process save too, and no two may share a temporary file.
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".prefs.", suffix=".tmp")
+def save_prefs(files: PrefsFiles, prefs: dict) -> None:
+    """Writes the changed settings into the config text and the state keys into the state file. Callers hold `prefs_lock` (see `change_prefs`)."""
+    prefs = normalize_prefs(prefs)
+    home = _home()
+    state = _state_part(prefs)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(normalize_prefs(prefs), indent=2) + "\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        on_disk = _state_part(json.loads(files.state.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        on_disk = None
+    if on_disk != state:
+        _atomic_write(files.state, json.dumps(state, indent=2) + "\n")
+    wanted = {s.key: prefs.get(s.key, s.default) for s in SETTINGS}
+    try:
+        data = files.config.read_bytes()
+    except FileNotFoundError:
+        _atomic_write(files.config, config_template(wanted, home))
+        return
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise OSError("the config file isn't UTF-8 text") from None
+    parsed = read_config(text, home)[0]
+    changes = {k: v for k, v in wanted.items() if v != parsed[k]}
+    if changes:
+        new = write_config_text(text, changes, home)
+        if new != text:
+            _atomic_write(files.config, new, mode=files.config.stat().st_mode & 0o777)
+
+
+def change_prefs(files: PrefsFiles, fn: Callable) -> dict:
+    """Reads the settings, applies `fn` and writes the result, all under the cross-process lock; returns what `fn` gave."""
+    with prefs_lock(files):
+        disk = load_prefs(files)
+        new = fn(disk)
+        if new != disk:
+            save_prefs(files, new)
+        return new
+
+
+def ensure_config(files: PrefsFiles, updates_off: bool = False) -> bool:
+    """Writes the config file (and the state file) from an old `prefs.json` when there is no config yet; whether it wrote.
+
+    The config is written last, so its existence marks the carry-over done.
+    """
+    if files.config.exists():
+        return False
+    with prefs_lock(files):
+        if files.config.exists():
+            return False
+        legacy = normalize_prefs(_read_legacy(files.legacy))
+        if not files.state.exists():
+            _atomic_write(files.state, json.dumps(_state_part(legacy), indent=2) + "\n")
+        values = {s.key: legacy.get(s.key, s.default) for s in SETTINGS}
+        if updates_off:
+            values["updates"] = "off"
+        _atomic_write(files.config, config_template(values, _home()))
+    return True
+
+
+def _env_value(setting: Setting, env: Mapping | None):
+    """The setting's environment variable's value when it is set and good, else None."""
+    env = os.environ if env is None else env
+    text = env.get(setting.env, "").strip() if setting.env else ""
+    if setting.kind == "text":
+        return text or None
+    if setting.kind == "number":
+        return _check(setting, text, "")[0]
+    return None
+
+
+def env_override(setting: Setting, env: Mapping | None = None) -> str:
+    return setting.env if _env_value(setting, env) is not None else ""
+
+
+def _setting_value(key: str, prefs: Mapping, env: Mapping | None):
+    setting = SETTING_BY_KEY[key]
+    value = _env_value(setting, env)
+    return prefs.get(key, setting.default) if value is None else value
+
+
+def updates_on(prefs: Mapping) -> bool:
+    return prefs.get("updates", "on") != "off"
+
+
+def update_seconds(prefs: Mapping, env: Mapping | None = None) -> int:
+    return _setting_value("update_check_seconds", prefs, env)
+
+
+def phone_port(prefs: Mapping, env: Mapping | None = None) -> int:
+    return _setting_value("phone_port", prefs, env)
+
+
+def claude_command(prefs: Mapping, env: Mapping | None = None) -> str:
+    return _setting_value("claude_command", prefs, env)
+
+
+def remote_command(prefs: Mapping, env: Mapping | None = None) -> str:
+    return _setting_value("remote_command", prefs, env)
+
+
+def settings_rows(narrow: bool) -> list:
+    """The menu's rows in table order: `("head", section)` before the first `("item", setting)` of each section."""
+    rows, section = [], None
+    for setting in SETTINGS:
+        if narrow and setting.wide_only:
+            continue
+        if setting.section != section:
+            section = setting.section
+            rows.append(("head", section))
+        rows.append(("item", setting))
+    return rows
+
+
+def shown_value(setting: Setting, prefs: Mapping, selected: bool) -> str:
+    value = prefs.get(setting.key, setting.default)
+    if setting.kind == "choice":
+        text = setting.shown[setting.choices.index(value)] if setting.shown and value in setting.choices else str(value)
+        return f"‹ {text} ›" if selected else text
+    if setting.key == "panel_width":
+        return f"‹ {value} ›" if selected else str(value)
+    if setting.key == "update_check_seconds":
+        return f"{value // 60}m" if value % 60 == 0 else f"{value}s"
+    if setting.kind == "folders":
+        return f"{len(value)} ›"
+    return str(value)
+
+
+def cycle(setting: Setting, prefs: dict, step: int) -> dict:
+    """`prefs` with a choice moved to its next (+1) or previous (-1) word, wrapping, or the width stepped; other kinds come back unchanged."""
+    if setting.kind == "choice":
+        current = prefs.get(setting.key, setting.default)
+        at = setting.choices.index(current) if current in setting.choices else 0
+        return {**prefs, setting.key: setting.choices[(at + step) % len(setting.choices)]}
+    if setting.key == "panel_width":
+        return {**prefs, "panel_width": _clamp(prefs.get("panel_width", setting.default) + step * WIDTH_STEP, MIN_PANEL, MAX_WIDTH)}
+    return dict(prefs)
+
+
+def parse_value(setting: Setting, text: str, home: str) -> tuple:
+    """`(value, error)` for text typed into the menu, by the same rule as a line of the file."""
+    value, why = _check(setting, text.strip(), home)
+    return (None, why) if why else (value, "")
+
+
+def config_notice(problems: list) -> str:
+    more = len(problems) - 1
+    return "config " + problems[0] + (f" (+{more} more; emx config shows the file)" if more else "")
 
 
 def adjust_panel_width(prefs: dict, delta: int) -> dict:

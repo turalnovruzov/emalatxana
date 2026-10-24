@@ -1,4 +1,5 @@
 import curses
+import dataclasses
 import json
 import os
 import re
@@ -365,6 +366,12 @@ def setUpModule():
     patch = mock.patch.object(sidebar, "write_terminal", TERMINAL_WRITES.append)
     patch.start()
     unittest.addModuleCleanup(patch.stop)
+    tmp = os.path.realpath(tempfile.mkdtemp())
+    unittest.addModuleCleanup(shutil.rmtree, tmp, True)
+    env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": os.path.join(tmp, "config"), "XDG_STATE_HOME": os.path.join(tmp, "state")})
+    env.start()
+    unittest.addModuleCleanup(env.stop)
+    os.environ.pop("EMX_CONFIG_HOME", None)
 
 
 class AppCase(unittest.TestCase):
@@ -423,7 +430,7 @@ class AppCase(unittest.TestCase):
 
     def write_scheme(self, name, mtime):
         core.save_prefs(self.app.prefs_file, core.set_scheme(core.load_prefs(self.app.prefs_file), name))
-        os.utime(self.app.prefs_file, ns=(mtime, mtime))
+        os.utime(self.app.prefs_file.config, ns=(mtime, mtime))
 
     def housekeep_once(self):
         quiet = ("check_relay", "check_open", "time_whats_new", "check_update", "check_phone", "check_hush")
@@ -4237,14 +4244,14 @@ class WhatsNew(AppCase):
 
     def start(self, recorded=None, version="1.1.0", log=LOG, tmux=None):
         if recorded is not None:
-            core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": recorded})
+            core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "last_version": recorded})
         with mock.patch.object(sidebar, "__version__", version), mock.patch.object(sidebar, "read_changelog", return_value=log):
             app = sidebar.App(FakeScr(), tmux=tmux, claude="claude")
         app.housekeep = lambda fresh_list: None
         return app
 
     def recorded(self):
-        return core.load_prefs(core.prefs_path()).get("last_version")
+        return core.load_prefs(core.prefs_files()).get("last_version")
 
     def test_a_newer_version_shows_its_lines_once_and_records_itself(self):
         app = self.start("1.0.0")
@@ -4253,7 +4260,8 @@ class WhatsNew(AppCase):
         self.assertEqual(self.start().notice, "")
 
     def test_the_first_run_records_quietly(self):
-        core.prefs_path().unlink(missing_ok=True)
+        for path in dataclasses.astuple(core.prefs_files()):
+            path.unlink(missing_ok=True)
         app = self.start()
         self.assertEqual(app.notice, "")
         self.assertEqual(self.recorded(), "1.1.0")
@@ -4271,10 +4279,10 @@ class WhatsNew(AppCase):
         self.assertEqual(self.recorded(), "1.1.0")
 
     def test_other_prefs_are_kept(self):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "side": "left", "pinned": ["a"], "last_version": "1.0.0"})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "side": "left", "pinned": ["a"], "last_version": "1.0.0"})
         self.start()
         self.assertEqual(
-            core.load_prefs(core.prefs_path()),
+            core.load_prefs(core.prefs_files()),
             {**core.DEFAULT_PREFS, "side": "left", "pinned": ["a"], "last_version": "1.1.0"},
         )
 
@@ -4308,7 +4316,7 @@ class WhatsNew(AppCase):
         self.assertEqual([t for t, _ in app.bottom_lines(38)][:3], ["emx updated to 1.1.0.", "New in emx 1.1.0:", "· Shiny thing."])
 
     def test_prefs_without_a_record_stay_quiet_and_record(self):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "side": "left"})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "side": "left"})
         app = self.start()
         self.assertEqual(app.notice, "")
         self.assertEqual(self.recorded(), "1.1.0")
@@ -4341,7 +4349,7 @@ class WhatsNew(AppCase):
         self.assertEqual(len(notes), 6)
 
     def test_a_failed_save_shows_the_error_instead(self):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": "1.0.0"})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "last_version": "1.0.0"})
         with mock.patch.object(core, "save_prefs", side_effect=OSError("read-only")):
             app = self.start()
         self.assertTrue(app.notice_error)
@@ -4460,7 +4468,7 @@ class PanelUpdates(AppCase):
         self.popen.assert_not_called()
 
     def start_on(self, version, recorded):
-        core.save_prefs(core.prefs_path(), {**core.DEFAULT_PREFS, "last_version": recorded})
+        core.save_prefs(core.prefs_files(), {**core.DEFAULT_PREFS, "last_version": recorded})
         log = f"# Changelog\n\n## {version}\n\n- Shiny thing.\n"
         with mock.patch.object(sidebar, "__version__", version), mock.patch.object(sidebar, "read_changelog", return_value=log):
             return sidebar.App(FakeScr(), tmux=self.tmux, claude="claude")
@@ -7159,7 +7167,7 @@ class AppRelay(AppCase):
 
 class ModeKey(AppCase):
     def prefs_on_disk(self):
-        return json.loads(self.app.prefs_file.read_text(encoding="utf-8"))
+        return core.read_config(self.app.prefs_file.config.read_text(encoding="utf-8"), os.path.expanduser("~"))[0]
 
     def test_a_new_panel_starts_in_notification_mode(self):
         self.assertEqual(core.notice_mode(self.app.prefs), core.NOTIFICATION_MODE)
@@ -7210,8 +7218,9 @@ class ModeKey(AppCase):
     def test_a_saved_old_voice_setting_starts_in_its_mode(self):
         for voice, mode in ((True, core.VOICE_MODE), (False, core.NOTIFICATION_MODE)):
             with self.subTest(voice=voice):
-                self.app.prefs_file.parent.mkdir(parents=True, exist_ok=True)
-                self.app.prefs_file.write_text(json.dumps({"voice": voice}), encoding="utf-8")
+                self.app.prefs_file.config.unlink(missing_ok=True)
+                self.app.prefs_file.legacy.parent.mkdir(parents=True, exist_ok=True)
+                self.app.prefs_file.legacy.write_text(json.dumps({"voice": voice}), encoding="utf-8")
                 again = sidebar.App(FakeScr(), tmux=ClientTmux(), claude="claude")
                 self.assertEqual(again.poller.notices.mode, mode)
 
@@ -8389,7 +8398,7 @@ class ActionsMenu(AppCase):
         self.app.handle_key("a")
         self.app.handle_key("p")
         self.assertIn("a", core.pinned_ids(self.app.prefs))
-        self.assertIn("a", core.pinned_ids(core.load_prefs(core.prefs_path())))
+        self.assertIn("a", core.pinned_ids(core.load_prefs(core.prefs_files())))
         self.assertIsNone(self.app.menu)
         self.app.handle_key("a")
         self.assertIn(("p", "unpin", ""), self.app.menu_lines(self.app.session("a")))
@@ -8676,7 +8685,7 @@ class PrefsAcrossViews(AppCase):
         other = sidebar.App(self.scr, tmux=ViewTmux(view="emx-view-1"), claude="claude")
         other.prefs = core.toggle_pin(other.prefs, KEY_A)
         other.save_prefs()
-        os.utime(self.app.prefs_file, ns=(1, 1))
+        os.utime(self.app.prefs_file.config, ns=(1, 1))
         self.app.prefs = {**self.app.prefs, "side": "left"}
         self.app.reload_prefs()
         self.assertEqual((core.pinned_ids(self.app.prefs), self.app.prefs["side"]), ({KEY_A}, "left"))
