@@ -1209,6 +1209,22 @@ class Page(ServerCase):
         self.assertRegex(js, r'"branch tone-path", glyphText\(')
         self.assertEqual(len(re.findall(r'"more", glyphText\("⋯"\)', js)), 2)
 
+    def test_the_script_draws_the_unread_section_and_dot_from_data(self):
+        js, _ = self.text("/app.js")
+        for text in ("data.unread_list", "data.look.dot", '"/api/read"', '"unread-entry"'):
+            self.assertIn(text, js)
+        # The routines chip's own " ●" is the only dot literal; the unread dot comes from data.look.dot.
+        self.assertEqual(js.count(core.UNREAD_DOT), 1)
+        self.assertIn('el("span", "tone-error", " ●")', js)
+
+    def test_the_unread_box_matches_the_design(self):
+        css, _ = self.text("/app.css")
+        rule = lambda selector: re.search(re.escape(selector) + r" \{([^}]*)\}", css).group(1)
+        self.assertIn("border-radius: 10px", rule(".unread"))
+        self.assertIn("border: 1px solid var(--border)", rule(".unread"))
+        self.assertIn("text-overflow: ellipsis", rule(".unread-entry .unread-text"))
+        self.assertIn("display: flex", rule(".unread-entry"))
+
     def test_the_script_respects_reduced_motion(self):
         js, _ = self.text("/app.js")
         self.assertIn("prefers-reduced-motion", js)

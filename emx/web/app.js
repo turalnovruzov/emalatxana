@@ -210,6 +210,7 @@ function renderRow(session) {
     main.type = "button";
     main.addEventListener("click", () => (session.running ? openSheet(session.id) : resume(session.id)));
   }
+  main.addEventListener("click", () => markRead(session.id));
   const text = el("span", "text");
   const names = el("span", "nameline");
   names.append(el("b", "name", session.name));
@@ -220,7 +221,9 @@ function renderRow(session) {
   const spinning = session.spin && data.look && !reducedMotion();
   const glyph = el("span", "glyph tone-" + session.glyph_tone, glyphText(spinning ? currentFrame() : session.glyph));
   if (spinning) glyph.dataset.spin = "";
-  main.append(glyph, text, el("span", "age", session.age));
+  main.append(glyph, text);
+  if (session.unread) main.append(el("span", "dot tone-" + session.unread, glyphText(data.look.dot)));
+  main.append(el("span", "age", session.age));
   const more = el("button", "more", glyphText("⋯"));
   more.type = "button";
   more.setAttribute("aria-label", "More for " + session.name);
@@ -246,6 +249,54 @@ function statusLine(session, linked) {
   return line;
 }
 
+// A session opened from the page is read: the server clears its notice, and the row and the Unread entry go at once.
+function markRead(id) {
+  const found = findSession(id);
+  if (!found || !found.session.unread) return;
+  found.session.unread = null;
+  data.unread_list = data.unread_list.filter((item) => item.id !== id);
+  data.unread = Math.max(0, data.unread - 1);
+  api("/api/read", { id });
+  // After the tap's own default action: a link being followed must not be pulled out of the page first.
+  setTimeout(render, 0);
+}
+
+function unreadEntry(item) {
+  const found = findSession(item.id);
+  const linked = found && found.session.link && APP_LINK.test(found.session.link);
+  let entry;
+  if (linked) {
+    entry = el("a", "unread-entry");
+    entry.href = found.session.link;
+    entry.target = "_blank";
+    entry.rel = "noopener";
+  } else {
+    entry = el("button", "unread-entry");
+    entry.type = "button";
+    entry.addEventListener("click", () => {
+      if (!found) clearFind();
+      else if (found.session.running) openSheet(item.id);
+      else resume(item.id);
+    });
+  }
+  entry.addEventListener("click", () => markRead(item.id));
+  entry.append(
+    el("span", "unread-mark tone-" + item.tone, glyphText(item.mark)),
+    el("b", "unread-name", item.name),
+    el("span", "unread-text tone-" + item.tone, item.text),
+  );
+  return entry;
+}
+
+function renderUnread() {
+  const box = el("section", "unread");
+  const title = el("div", "unread-title");
+  title.append(el("b", "", "Unread"));
+  box.append(title);
+  for (const item of data.unread_list) box.append(unreadEntry(item));
+  return box;
+}
+
 function bottomRow(label, count, open) {
   const row = el("button", "routines-row");
   row.type = "button";
@@ -266,6 +317,7 @@ function renderList() {
   if (!data.groups.length) {
     list.append(el("p", "empty", data.finding ? data.look.find_none : "No sessions yet. Tap + New."));
   }
+  if (data.unread_list && data.unread_list.length) list.append(renderUnread());
   for (const group of data.groups) {
     list.append(renderFolder(group));
     if (folded.has(group.key) && !data.finding) continue;
@@ -515,7 +567,10 @@ async function resume(id) {
   const answer = await api("/api/resume", { id });
   resuming.delete(id);
   toast(answer ? answer.message : "emx didn't answer.");
-  if (answer && answer.ok) selectedId = id;
+  if (answer && answer.ok) {
+    selectedId = id;
+    markRead(id);
+  }
   render();
   poll();
 }
@@ -691,6 +746,7 @@ function noticeRow(entry) {
     row.type = "button";
     row.addEventListener("click", () => openFromNotice(entry));
   }
+  if (!entry.read) row.addEventListener("click", () => markRead(entry.id));
   const tone = entry.read ? "muted" : entry.tone;
   const head = el("span", "notice-head");
   head.append(el("b", "tone-" + tone, glyphText(entry.mark) + " " + entry.title), el("span", "age muted", entry.age));
@@ -935,6 +991,7 @@ $("list").addEventListener("touchmove", onPullMove, { passive: false });
 $("list").addEventListener("touchend", onPullEnd);
 $("list").addEventListener("touchcancel", onPullEnd);
 $("sheet-resume").addEventListener("click", resumeFromSheet);
+$("sheet-open").addEventListener("click", () => sheet && markRead(sheet.id));
 window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", () => { frameTimerMs = -1; render(); });
 $("open-new").addEventListener("click", () => openNew());
 $("new-cancel").addEventListener("click", closeNew);
