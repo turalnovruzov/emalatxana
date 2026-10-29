@@ -3482,7 +3482,7 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
 
 
 def _write_places(lines: list, setting: Setting, wanted: list, edited_place: str = "") -> list:
-    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), appends what is new.
+    """Keeps the lines still wanted and the ones emx can't read, a repeat of an earlier name included (they are his to fix), appends what is new.
 
     `edited_place` is the name the edited place had before the edit: the first
     unwanted line of that name is rewritten where it stands, so an edit, a
@@ -3490,18 +3490,23 @@ def _write_places(lines: list, setting: Setting, wanted: list, edited_place: str
     the edited place when `wanted` holds a new line of the same name. Otherwise
     it was removed and is dropped.
     """
+    taken = set()
+
     def readable(raw):
         parts = _split_line(raw)
         place = parse_place(parts[1])[0] if parts and parts[0] == setting.key and parts[1] else None
-        return None if place is None else place_line(place)
+        if place is None or place.name in taken:
+            return None
+        taken.add(place.name)
+        return place_line(place)
 
-    on_file = {line for line in map(readable, lines) if line is not None}
+    readable_lines = [readable(raw) for raw in lines]
+    on_file = {line for line in readable_lines if line is not None}
     edited = {line.split()[0]: line for line in wanted if line not in on_file}
     if edited_place and len(edited) == 1:
         edited = {edited_place: next(iter(edited.values()))}
     out, present, last = [], set(), None
-    for raw in lines:
-        line = readable(raw)
+    for raw, line in zip(lines, readable_lines):
         if line is None:
             out.append(raw)
             continue

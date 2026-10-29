@@ -1596,8 +1596,18 @@ class ConfigFile(unittest.TestCase):
 
     def test_write_places_edit_lands_on_its_own_line_with_duplicate_names(self):
         text = "## Routines\nplace = w user a\nplace = w user b\nplace = x user c\n"
-        edited = core.write_config_text(text, {"place": ["w user a", "w user b", "x user c2"]}, CFG_HOME)
+        menu = core.read_config(text, CFG_HOME)[0]["place"]
+        self.assertEqual(menu, ["w user a", "x user c"])
+        edited = core.write_config_text(text, {"place": ["w user a", "x user c2"]}, CFG_HOME)
         self.assertEqual(edited, text.replace("x user c\n", "x user c2\n"))
+        renamed = core.write_config_text(text, {"place": ["w user a", "y user c"]}, CFG_HOME, "x")
+        self.assertEqual(renamed, text.replace("x user c\n", "y user c\n"))
+        first = core.write_config_text(text, {"place": ["w user a2", "x user c"]}, CFG_HOME)
+        self.assertEqual(first, text.replace("w user a\n", "w user a2\n"))
+        removed = core.write_config_text(text, {"place": ["w user a"]}, CFG_HOME)
+        self.assertEqual(removed, text.replace("place = x user c\n", ""))
+        for result in (edited, renamed, first, removed):
+            self.assertIn("place = w user b\n", result)
 
     def test_rename_a_place_keeps_its_line(self):
         text = "## Routines\n# note\nplace = a user x\nplace = s3 server srv3\n# another\nplace = c user z\nside = right\n"
@@ -1605,7 +1615,7 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(edited, text.replace("place = s3 server srv3\n", "place = s3b server srv3 user bot\n"))
         self.assertEqual(core.read_config(edited, CFG_HOME)[0]["place"], ["a user x", "s3b server srv3 user bot", "c user z"])
         twin = "place = w user a\nplace = w user b\nplace = x user c\n"
-        self.assertEqual(core.write_config_text(twin, {"place": ["w user a", "w user b", "y user c"]}, CFG_HOME, "x"),
+        self.assertEqual(core.write_config_text(twin, {"place": ["w user a", "y user c"]}, CFG_HOME, "x"),
                          twin.replace("x user c", "y user c"))
 
     def test_place_lines_round_trip(self):
