@@ -6620,5 +6620,56 @@ class ColourSchemes(unittest.TestCase):
             self.assertEqual(core.scheme(core.load_prefs(path)), "terminal")
 
 
+class RoutinesRows(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(self.restore_zone, old)
+
+    @staticmethod
+    def restore_zone(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    def places(self, *names):
+        return [core.PlaceView(core.Place(name, None, "bot" if i else None)) for i, name in enumerate(names)]
+
+    def test_tabs_scroll_off_the_front_so_the_selected_one_stays_in_view(self):
+        views = self.places("this user", "worker", "server-2", "another-place")
+        text, start, end = core.tab_chips(views, 3, 30)
+        self.assertLessEqual(core.display_width(text), 30)
+        self.assertEqual(text[start:end], " another-place ")
+
+    def test_step_run_holds_at_both_ends_and_starts_at_the_first(self):
+        choices = [(0, 0), (0, 1), (1, 0)]
+        self.assertEqual(core.step_run(choices, None, 0), (0, 0))
+        self.assertEqual(core.step_run(choices, (0, 1), 1), (1, 0))
+        self.assertEqual(core.step_run(choices, (1, 0), 1), (1, 0))
+        self.assertEqual(core.step_run(choices, (0, 0), -1), (0, 0))
+        self.assertIsNone(core.step_run([], None, 1))
+
+    def test_run_choices_leave_out_missed_times(self):
+        view = core.RoutineView("a", "passed", "done", ((3.0, core.PASSED, ""), (2.0, core.MISSED, ""), (1.0, core.FAILED, "1")))
+        self.assertEqual(core.run_choices(core.PlaceView(core.Place("this user"), (view,))), [(0, 0), (0, 2)])
+
+    def test_rows_before_the_first_answer_are_the_title_and_one_line(self):
+        rows = core.routines_rows(None, 0, None, 40, self.NOW)
+        self.assertEqual([r[0] for r in rows], [core.ROUTINES_TITLE, core.ROUTINES_LOADING])
+
+    def test_no_row_is_wider_than_the_width(self):
+        view = core.RoutineView("x" * 80, "passed", "done", ((self.NOW - 60, core.PASSED, ""),), self.NOW + 60, "n" * 90,
+                                sessions=((core.RunSession("a", "t" * 90, 0.0, 0.0, core.FINISHED),) * 2,), detail="d" * 90)
+        views = [core.PlaceView(core.Place("p" * 90), (view,), "e" * 90)]
+        for width in (20, 40, 120):
+            for row in core.routines_rows(views, 0, (0, 0), width, self.NOW, reading="a"):
+                self.assertLessEqual(core.display_width(row[0]), width, row)
+
+
 if __name__ == "__main__":
     unittest.main()

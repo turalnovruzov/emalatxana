@@ -6,7 +6,7 @@ import shutil
 
 from emx import core, places, probe
 
-NO_SYSTEMD = "Routines are read from systemd user timers, and this machine has none."
+NO_SYSTEMD = "Routines are read from systemd, and this place has none."
 TIMER_PROPS = "Id,Unit,TimersCalendar,NextElapseUSecRealtime,ActiveState,LoadState,ActiveEnterTimestamp"
 SERVICE_PROPS = "Id,ActiveState,Result,ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,WorkingDirectory"
 LONG_SERVICE_PROPS = ("Id,FragmentPath,ActiveState,SubState,Result,ExecMainStartTimestamp,ExecMainExitTimestamp,"

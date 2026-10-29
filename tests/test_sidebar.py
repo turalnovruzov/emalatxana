@@ -7499,6 +7499,33 @@ class AppBuildsNoHelper(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(tmp, "notify")))
 
 
+ROUTINES_NOW = 1_800_000_000.0
+HERE_PLACE = sidebar.places.HERE
+WORKER_PLACE = core.Place("worker", None, "bot")
+
+
+def routine_runs(*kinds):
+    """(events, sessions) for runs given as (seconds before ROUTINES_NOW, kind, session count)."""
+    events = tuple((ROUTINES_NOW - ago, kind, "") for ago, kind, _ in kinds)
+    sessions = tuple(tuple(core.RunSession(f"s{i}-{n}", "", ROUTINES_NOW - ago, ROUTINES_NOW - ago + 60, core.FINISHED)
+                           for n in range(count)) for i, (ago, _, count) in enumerate(kinds))
+    return events, sessions
+
+
+def timer_view(name="backup-nightly", kinds=((5400, core.PASSED, 1), (5400 + 86400, core.PASSED, 0)), **more):
+    events, sessions = routine_runs(*kinds)
+    return core.RoutineView(name, "passed", "done", events, None, sessions=sessions, **more)
+
+
+def worker_view():
+    first = core.RunSession("pick-id", "pick", ROUTINES_NOW - 1800, ROUTINES_NOW - 1700, core.FINISHED)
+    second = core.RunSession("build-id", "build", ROUTINES_NOW - 1600, ROUTINES_NOW - 1500, core.LIMIT, "till 21:40")
+    last = core.RunSession("old-id", "TICKET-11", ROUTINES_NOW - 50000, ROUTINES_NOW - 49000, core.FINISHED)
+    return core.RoutineView(
+        "loop", "usage limit", "needs", ((ROUTINES_NOW - 1800, core.LIMIT, ""), (ROUTINES_NOW - 50000, core.FINISHED, "")),
+        None, kind="service", sessions=((first, second), (last,)), detail="waiting on the usage limit till 21:40")
+
+
 class Routines(AppCase):
     def setUp(self):
         super().setUp()
@@ -7506,19 +7533,19 @@ class Routines(AppCase):
         os.environ["TZ"] = "UTC"
         time.tzset()
         self.addCleanup(self.restore_zone, old)
-        self.scr = TallScr()
+        self.scr = TallScr(width=60)
         self.app.scr = self.scr
         self.reads = []
         self.gate = threading.Event()
         self.gate.set()
-        self.answer = ([core.RoutineView("backup-nightly", "passed", "done", ((1_800_000_000.0, core.PASSED, ""),), None)], None)
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(),), None)]
 
-        def read(now):
-            self.reads.append(now)
+        def read(now, place_list, prefs, exclude):
+            self.reads.append((now, place_list, exclude))
             self.gate.wait(5)
             return self.answer
 
-        patch = mock.patch.object(sidebar.routines, "read", read)
+        patch = mock.patch.object(sidebar.routines, "read_places", read)
         patch.start()
         self.addCleanup(patch.stop)
         self.addCleanup(self.gate.set)
@@ -7538,12 +7565,25 @@ class Routines(AppCase):
         self.app.refresh()
 
     def drawn(self):
-        self.app.draw()
-        return [t.strip() for t in self.scr.text()]
+        with mock.patch.object(sidebar.time, "time", return_value=ROUTINES_NOW):
+            self.app.draw()
+        grid = {}
+        for (y, x), (text, _) in self.scr.drawn.items():
+            row = grid.setdefault(y, {})
+            row.update({x + k: ch for k, ch in enumerate(text)})
+        return [("".join(grid[y].get(x, " ") for x in range(1, max(grid[y], default=0) + 1))).rstrip() for y in sorted(grid)]
+
+    def open_view(self):
+        self.app.handle_key("R")
+        self.settle()
+        return self.drawn()
+
+    def two_places(self):
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(),), None), core.PlaceView(WORKER_PLACE, (worker_view(),), None)]
 
     def test_R_opens_the_view_and_starts_one_reader_and_R_or_Esc_closes_it(self):
         self.app.handle_key("R")
-        self.assertEqual(self.app.routines_view, 0)
+        self.assertEqual(self.app.routines_view["place"], 0)
         self.settle()
         self.assertEqual(len(self.reads), 1)
         self.app.handle_key("R")
@@ -7561,85 +7601,195 @@ class Routines(AppCase):
         self.settle()
         self.assertEqual(len(self.reads), 1)
 
-    def test_enter_right_and_clicks_open_no_session_behind_the_view(self):
+    def test_the_reader_is_given_every_place_and_the_sessions_emx_lists(self):
+        self.poll(session("a", "/p/alpha"))
+        self.app.refresh()
+        self.app.prefs = {**self.app.prefs, "place": ["worker user bot"]}
+        self.open_view()
+        _, place_list, exclude = self.reads[0]
+        self.assertEqual([p.name for p in place_list], ["this user", "worker"])
+        self.assertEqual(exclude, frozenset({"a"}))
+
+    def test_clicks_open_no_session_behind_the_view(self):
         self.poll(session("a", "/p/alpha"))
         self.app.refresh()
         y = next(y for y, item in self.app.row_map.items() if item == ("session", "a"))
         activated = []
         self.app.activate = activated.append
         self.app.handle_key("R")
-        for key in ("\n", curses.KEY_RIGHT):
-            self.app.handle_key(key)
         with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)):
             self.app.handle_key(curses.KEY_MOUSE)
         self.assertEqual((self.opened, activated), ([], []))
-        self.assertEqual(self.app.routines_view, 0)
+        self.assertIsNotNone(self.app.routines_view)
 
     def test_the_panel_is_busy_while_the_view_is_open(self):
         self.assertFalse(self.app.update_busy())
         self.app.handle_key("R")
         self.assertTrue(self.app.update_busy())
 
-    def test_the_frame_shows_the_title_and_routine_names_but_no_session(self):
+    def test_title_is_two_days(self):
+        drawn = self.open_view()
+        self.assertEqual(drawn[0], "Routines · past 2 days")
+        self.assertEqual(sidebar.ROUTINES_TITLE, "Routines · past 2 days")
+        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
+        self.assertEqual(sidebar.ROUTINES_HINT, "Tab place  ↑↓ run  Enter read  R back")
+
+    def test_the_frame_shows_routine_names_but_no_session(self):
         self.poll(session("a", "/p/alpha"))
         self.app.refresh()
-        self.app.handle_key("R")
-        self.settle()
-        drawn = self.drawn()
-        self.assertIn(sidebar.ROUTINES_TITLE, drawn)
+        drawn = self.open_view()
         self.assertTrue(any(t.startswith("backup-nightly") for t in drawn), drawn)
         self.assertFalse(any("alpha" in t for t in drawn), drawn)
-        self.assertNotIn(sidebar.ROUTINES_HINT, drawn)
-        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
 
     def test_it_says_reading_until_the_first_answer(self):
         self.gate.clear()
         self.app.handle_key("R")
         self.assertIn(sidebar.ROUTINES_LOADING, self.drawn())
 
-    def test_a_journal_error_shows_on_its_routine(self):
-        self.answer = ([core.RoutineView("backup-nightly", "passed", "done", ((1_800_000_000.0, core.PASSED, ""),), None,
-                                         error="No journal files were found.")], None)
-        self.app.handle_key("R")
-        self.settle()
+    def test_tab_row_puts_this_user_first_and_marks_the_selected(self):
+        self.two_places()
+        self.open_view()
+        rows = core.routines_rows(self.app.place_views, 1, None, 60, ROUTINES_NOW)
+        text, tone, kind = rows[1]
+        self.assertEqual((text, tone), (" this user  worker ", "muted"))
+        self.assertEqual(kind, ("tabs", 11, 19))
+        self.assertEqual(text[11:19], " worker ")
+        self.assertEqual(core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)[1][2], ("tabs", 0, 11))
+        chip = [attr for t, attr in self.scr.drawn.values() if t == " this user "]
+        self.assertTrue(chip and chip[0] & curses.A_REVERSE and chip[0] & curses.A_BOLD)
+
+    def test_tab_switches_place_and_wraps(self):
+        self.two_places()
+        self.open_view()
+        self.app.handle_key("\t")
+        self.assertEqual(self.app.routines_view["place"], 1)
         drawn = self.drawn()
-        self.assertIn("No journal files were found.", drawn)
+        self.assertTrue(any(t.startswith("loop") for t in drawn), drawn)
+        self.assertFalse(any(t.startswith("backup-nightly") for t in drawn), drawn)
+        self.app.handle_key("\t")
+        self.assertEqual(self.app.routines_view["place"], 0)
+        self.app.handle_key(curses.KEY_BTAB)
+        self.assertEqual(self.app.routines_view["place"], 1)
+
+    def test_problems_line_on_every_place(self):
+        self.two_places()
+        drawn = self.open_view()
+        self.assertEqual(self.app.routines_view["place"], 0)
+        self.assertIn("⚠ 1 usage limit · worker, 07:30", drawn)
+        self.app.handle_key("\t")
+        self.assertIn("⚠ 1 usage limit · worker, 07:30", self.drawn())
+
+    def test_problems_line_is_error_toned_for_its_count_and_muted_for_the_rest(self):
+        self.two_places()
+        self.open_view()
+        text = "⚠ 1 usage limit · worker, 07:30"
+        rows = core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)
+        self.assertIn((text, "error", ("lead", len("⚠ 1 usage limit"))), rows)
+
+    def test_runs_split_into_today_and_yesterday(self):
+        drawn = self.open_view()
+        self.assertEqual(drawn.index("  today") + 1, drawn.index("  06:30 ✓  1 session  ↵ read"))
+        self.assertLess(drawn.index("  today"), drawn.index("  yesterday"))
+        self.assertEqual(drawn[drawn.index("  yesterday") + 1], "  06:30 ✓")
+
+    def test_selected_run_on_its_own_row_with_read_hint(self):
+        drawn = self.open_view()
+        self.assertIn("  06:30 ✓  1 session  ↵ read", drawn)
+        rows = core.routines_rows(self.app.place_views, 0, (0, 0), 60, ROUTINES_NOW)
+        self.assertEqual([r for r in rows if r[2] == "selected"], [("  06:30 ✓  1 session  ↵ read", "plain", "selected")])
+        fill = [attr for t, attr in self.scr.drawn.values() if t == " " * 60]
+        self.assertEqual(len(fill), 1)
+
+    def test_arrows_skip_missed_slots(self):
+        events = ((ROUTINES_NOW - 3000, core.PASSED, ""), (ROUTINES_NOW - 6000, core.MISSED, ""), (ROUTINES_NOW - 9000, core.FAILED, "1"))
+        view = core.RoutineView("backup-nightly", "passed", "done", events, None, sessions=((), (), ()))
+        self.answer = [core.PlaceView(HERE_PLACE, (view,), None)]
+        drawn = self.open_view()
+        self.assertIn("  07:10 ✓  no Claude session", drawn)
+        self.app.handle_key(curses.KEY_DOWN)
+        self.assertEqual(self.app.routines_run(), (0, 2))
+        self.assertIn("  05:30 ✗1  no Claude session", self.drawn())
+        self.app.handle_key("j")
+        self.assertEqual(self.app.routines_run(), (0, 2))
+        self.app.handle_key("k")
+        self.assertEqual(self.app.routines_run(), (0, 0))
+        self.app.handle_key(curses.KEY_UP)
+        self.assertEqual(self.app.routines_run(), (0, 0))
+
+    def test_session_row_under_a_run_with_two_sessions(self):
+        self.two_places()
+        self.open_view()
+        self.app.handle_key("\t")
+        drawn = self.drawn()
+        self.assertIn("  07:30 usage limit  build  2 sessions  ↵ read", drawn)
+        self.assertIn("     pick ✓  build ⚠", drawn)
+        rows = core.routines_rows(self.app.place_views, 1, (0, 0), 60, ROUTINES_NOW, reading="build-id")
+        self.assertIn("     pick ✓  build ⚠ ▎", [r[0] for r in rows])
+
+    def test_a_run_with_one_session_has_no_session_row(self):
+        self.two_places()
+        self.open_view()
+        self.app.handle_key("\t")
+        self.app.handle_key("j")
+        drawn = self.drawn()
+        self.assertTrue(any(t.endswith("1 session  ↵ read") for t in drawn), drawn)
+        self.assertFalse(any("pick" in t for t in drawn), drawn)
+
+    def test_no_claude_session_line(self):
+        view = timer_view(kinds=((5400, core.PASSED, 0), (5400 + 86400, core.PASSED, 0)))
+        self.answer = [core.PlaceView(HERE_PLACE, (view,), None)]
+        drawn = self.open_view()
+        self.assertIn("  06:30 ✓  no Claude session", drawn)
+        self.assertEqual(drawn.count("  no Claude session"), 1)
+        self.assertNotIn("↵ read", " ".join(drawn))
+
+    def test_unreachable_place_shows_one_error_line(self):
+        line = "Can't reach srv2: Connection refused"
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(),), None), core.PlaceView(core.Place("server-2", "srv2", None), (), line)]
+        self.open_view()
+        self.app.handle_key("\t")
+        drawn = self.drawn()
+        self.assertEqual(drawn[1:], [" this user  server-2", "", "  " + line])
+        self.app.handle_key("\t")
+        self.assertTrue(any(t.startswith("backup-nightly") for t in self.drawn()))
+
+    def test_view_without_places_is_this_user_only(self):
+        drawn = self.open_view()
+        self.assertEqual(drawn[1], " this user")
+        self.assertEqual(self.app.routines_place().place, HERE_PLACE)
+        self.app.handle_key("\t")
+        self.assertEqual(self.app.routines_view["place"], 0)
+
+    def test_a_journal_error_shows_on_its_routine(self):
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(error="No journal files were found."),), None)]
+        drawn = self.open_view()
+        self.assertIn("  No journal files were found.", drawn)
         self.assertTrue(any(t.startswith("backup-nightly") for t in drawn), drawn)
 
     def test_a_failed_second_listing_shows_above_the_routines(self):
         message = "Switched-off timers couldn't be read: x"
-        self.answer = (self.answer[0], message)
-        self.app.scr = self.scr = TallScr(width=300)
-        self.app.handle_key("R")
-        self.settle()
-        drawn = self.drawn()
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(),), message)]
+        drawn = self.open_view()
         error_at = next(i for i, t in enumerate(drawn) if message in t)
         routine_at = next(i for i, t in enumerate(drawn) if t.startswith("backup-nightly"))
         self.assertLess(error_at, routine_at)
 
     def test_a_failed_second_listing_with_no_loaded_timers_is_only_the_error(self):
         message = "Switched-off timers couldn't be read: x"
-        self.answer = ([], message)
-        self.app.scr = self.scr = TallScr(width=300)
-        self.app.handle_key("R")
-        self.settle()
-        drawn = self.drawn()
-        self.assertTrue(any(message in t for t in drawn))
+        self.answer = [core.PlaceView(HERE_PLACE, (), message)]
+        drawn = self.open_view()
+        self.assertIn("  " + message, drawn)
         self.assertNotIn(sidebar.ROUTINES_NONE, drawn)
 
-    def test_a_machine_without_systemd_gets_the_one_line(self):
-        self.answer = (None, sidebar.routines.NO_SYSTEMD)
-        self.app.handle_key("R")
-        self.settle()
-        drawn = " ".join(self.drawn())
-        self.assertIn("Routines are read from systemd user timers", drawn)
+    def test_a_place_without_systemd_gets_the_one_line(self):
+        self.answer = [core.PlaceView(HERE_PLACE, (), sidebar.routines.NO_SYSTEMD)]
+        drawn = self.open_view()
+        self.assertIn("  " + sidebar.routines.NO_SYSTEMD, drawn)
 
-    def test_no_timers_says_so_and_names_no_file(self):
-        self.answer = ([], None)
-        self.app.scr = self.scr = TallScr(width=300)
-        self.app.handle_key("R")
-        self.settle()
-        drawn = self.drawn()
+    def test_no_routines_says_so_and_names_no_file(self):
+        self.scr = self.app.scr = TallScr(width=300)
+        self.answer = [core.PlaceView(HERE_PLACE, (), None)]
+        drawn = self.open_view()
         self.assertIn(sidebar.ROUTINES_NONE, drawn)
         self.assertFalse(any(os.environ["XDG_CONFIG_HOME"] in t for t in drawn), drawn)
 
@@ -7662,10 +7812,23 @@ class Routines(AppCase):
         self.app.handle_key("R")
         self.gate.set()
         self.settle()
-        self.assertIsNone(self.app.routine_views)
+        self.assertIsNone(self.app.place_views)
+
+    def test_the_wheel_scrolls_without_moving_the_selection(self):
+        self.scr = self.app.scr = TallScr(height=8, width=60)
+        self.two_places()
+        self.open_view()
+        self.app.handle_key("\t")
+        self.drawn()
+        before = self.app.routines_run()
+        self.app.wheel(sidebar.WHEEL_ROWS)
+        self.drawn()
+        self.assertGreater(self.app.routines_view["scroll"], 0)
+        self.assertEqual(self.app.routines_run(), before)
 
     def test_the_help_has_the_R_line(self):
-        self.assertTrue(any(key == "R" for key, _ in sidebar.HELP))
+        self.assertTrue(any(key == "R" and "2 days" in words for key, words in sidebar.HELP))
+        self.assertTrue(any(key == "R" and "2 days" in words for key, words in sidebar.NARROW_HELP))
 
 
 class ViewTmux(ClientTmux):
@@ -8186,10 +8349,13 @@ class PhonePanel(AppCase):
         self.assertEqual(self.opened, [])
 
     def test_the_routines_view_fits_48_columns_and_R_or_esc_returns(self):
-        answer = ([core.RoutineView("a-very-long-routine-name-backup-nightly-and-more", "passed", "done",
-                                    tuple((1_800_000_000.0 + i, core.PASSED, "a long note about the run " * 3) for i in range(4)),
-                                    1_800_000_500.0, "a note that is far longer than the forty eight columns of a phone")], None)
-        with mock.patch.object(sidebar.routines, "read", lambda now: answer):
+        view = core.RoutineView("a-very-long-routine-name-backup-nightly-and-more", "passed", "done",
+                                tuple((1_800_000_000.0 + i, core.PASSED, "a long note about the run " * 3) for i in range(4)),
+                                1_800_000_500.0, "a note that is far longer than the forty eight columns of a phone",
+                                sessions=((),) * 4, detail="a detail line that is also longer than the forty eight columns")
+        answer = [core.PlaceView(sidebar.places.HERE, (view,), None),
+                  core.PlaceView(core.Place("a-place-with-a-name-much-longer-than-forty-eight-columns", "srv2", None), (), "Can't reach srv2: " + "x" * 80)]
+        with mock.patch.object(sidebar.routines, "read_places", lambda now, place_list, prefs, exclude: answer):
             for back in ("R", "\x1b"):
                 with self.subTest(back=back):
                     self.app.handle_key("R")
@@ -8199,8 +8365,12 @@ class PhonePanel(AppCase):
                     lines = [line for line in self.scr.cells.values()]
                     self.assertIn(sidebar.ROUTINES_TITLE, " ".join(lines))
                     self.assertTrue(any("a-very-long" in line for line in lines), lines)
-                    for line in lines:
-                        self.assertLessEqual(core.display_width(line), PHONE_WIDTH, line)
+                    for tab in range(2):
+                        for line in lines:
+                            self.assertLessEqual(core.display_width(line), PHONE_WIDTH, line)
+                        self.app.handle_key("\t")
+                        self.app.draw()
+                        lines = [line for line in self.scr.cells.values()]
                     self.app.handle_key(back)
                     self.assertIsNone(self.app.routines_view)
 
@@ -8224,7 +8394,8 @@ class PhonePanel(AppCase):
     def test_help_on_a_laptop_still_closes_on_any_key_and_is_2_10_0s(self):
         wheel = ("wheel", "scroll; the selection stays, ↑↓ brings it back")
         settings = ("c", "settings: side, width, mode, colours, updates and more; c or Esc back")
-        expected = HELP_2_10_0[:3] + (wheel,) + HELP_2_10_0[3:]
+        routines = ("R", "routines: the past 2 days, every place; Tab place, Enter read a run; R or Esc back")
+        expected = tuple(routines if key == "R" else (key, what) for key, what in HELP_2_10_0[:3] + (wheel,) + HELP_2_10_0[3:])
         at = [key for key, _ in expected].index("N")
         self.assertEqual(sidebar.HELP, expected[:at] + (settings,) + expected[at:])
         self.app.window_width = 120
@@ -8276,7 +8447,7 @@ class PhonePanel(AppCase):
                 self.app.draw()
                 y = next(y for y, item in self.app.row_map.items() if item == ("session", "b"))
                 with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, y, 0, curses.BUTTON1_CLICKED)), \
-                        mock.patch.object(sidebar.routines, "read", lambda path, now: ([], None)):
+                        mock.patch.object(sidebar.routines, "read_places", lambda *args: [core.PlaceView(sidebar.places.HERE)]):
                     self.app.handle_key(key)
                 self.assertTrue(done(), token)
 
@@ -8966,13 +9137,13 @@ class ScrollBar(WheelCase):
         self.assertIn(("entry", 1), self.app.row_map.values())
 
     def test_routines_scroll_three_rows_and_show_the_bar(self):
-        self.app.routines_view = 0
-        self.app.routines_error = "x " * 400
+        self.app.routines_view = {"place": 0, "run": None, "scroll": 0, "follow": False}
+        self.app.place_views = [core.PlaceView(sidebar.places.HERE, (), "x " * 400)]
         self.app.draw()
         self.assertEqual(self.column()[1], "┃")
         self.wheel()
         self.app.draw()
-        self.assertEqual(self.app.routines_view, sidebar.WHEEL_ROWS)
+        self.assertEqual(self.app.routines_view["scroll"], sidebar.WHEEL_ROWS)
 
     def test_the_wide_help_scrolls_on_a_short_screen_and_keys_still_close_it(self):
         self.app.handle_key("?")

@@ -2715,6 +2715,125 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     return [(fit(text, width), tone) for text, tone in rows]
 
 
+ROUTINES_TITLE = "Routines · past 2 days"
+ROUTINES_NONE = "No routines here: no systemd user timers, and no user service that started Claude."
+ROUTINES_LOADING = "Reading routines…"
+SESSION_MARKS = {FINISHED: "✓", ERRORED: "✗", LIMIT: "⚠", GOING: "…"}
+SESSION_OPEN = "▎"
+
+
+def tab_chips(place_views: list, at: int, width: int) -> tuple:
+    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+    chips = [f" {fit(view.place.name, max(1, width - 2))} " for view in place_views]
+    first = 0
+    while first < at and sum(display_width(c) for c in chips[first:]) > width:
+        first += 1
+    start = sum(display_width(c) for c in chips[first:at])
+    text = "".join(chips[first:])
+    return fit(text, width), start, min(width, start + display_width(chips[at]))
+
+
+def run_choices(place_view: PlaceView) -> list:
+    """(routine index, event index) of every run with a start in the place, in the order the view shows them; missed times are not runs."""
+    return [(ri, ei) for ri, view in enumerate(place_view.views) for ei, (_, kind, _) in enumerate(view.events) if kind != MISSED]
+
+
+def step_run(choices: list, run, step: int):
+    """The run `step` places from `run` among `choices`, held at either end; the first when `run` is not one of them."""
+    if not choices:
+        return None
+    if run not in choices:
+        return choices[0]
+    return choices[max(0, min(len(choices) - 1, choices.index(run) + step))]
+
+
+def run_label(view: RoutineView, ei: int) -> str:
+    """The title of the latest titled session behind run `ei`."""
+    return next((one.title for one in reversed(view.sessions[ei] if ei < len(view.sessions) else ()) if one.title), "")
+
+
+def routines_rows(place_views, at: int, selected, width: int, now: float, local: Callable = time.localtime, reading: str = "") -> list:
+    """(text, tone, kind) for each row of the Routines view: the title, a tab row, the problems of every place, then the routines of place `at`.
+
+    `selected` is the run (routine index, event index) drawn on its own row;
+    `reading` is the id of the session open in the reader. `kind` is "" for a
+    plain row, "title", ("tabs", start, end) with the selected tab's columns,
+    ("lead", n) for a row whose first n characters take the tone and the rest
+    are muted, "selected", or "sessions".
+    """
+    rows = [(fit(ROUTINES_TITLE, width), "plain", "title")]
+    if not place_views:
+        return rows + [(ROUTINES_LOADING, "muted", "")]
+    at = max(0, min(at, len(place_views) - 1))
+    text, start, end = tab_chips(place_views, at, width)
+    rows += [(text, "muted", ("tabs", start, end)), ("", "plain", "")]
+    problems = problems_line(place_views, local)
+    if problems:
+        lines = wrap_words(problems, width)
+        rows.append((lines[0], "error", ("lead", lines[0].index(" ·") if " ·" in lines[0] else len(lines[0]))))
+        rows += [(line, "muted", "") for line in lines[1:]] + [("", "plain", "")]
+    here = place_views[at]
+    if here.error:
+        rows += [("  " + line, "error", "") for line in wrap_words(here.error, max(1, width - 2))]
+        if here.views:
+            rows.append(("", "plain", ""))
+    elif not here.views:
+        return rows + [(line, "muted", "") for line in wrap_words(ROUTINES_NONE, width)]
+    for ri, view in enumerate(here.views):
+        if ri:
+            rows.append(("", "plain", ""))
+        rows += _routine_rows(view, ri, selected, width, now, local, reading)
+    return rows
+
+
+def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, local: Callable, reading: str) -> list:
+    tag = fit(view.tag, width)
+    name = fit(view.name, max(0, width - display_width(tag) - 1))
+    gap = max(1, width - display_width(name) - display_width(tag)) if name else max(0, width - display_width(tag))
+    rows = [(name + " " * gap + tag, view.tone, "")]
+    if view.detail:
+        rows.append(("  " + view.detail, "muted", ""))
+    if view.error:
+        rows += [("  " + line, "error", "") for line in wrap_words(view.error, max(1, width - 2))]
+    pending = []
+
+    def flush():
+        for line in wrap_words("  ".join(pending), max(1, width - 2)) if pending else ():
+            rows.append(("  " + line.replace("\xa0", " "), "muted", ""))
+        pending.clear()
+
+    for day in ("today", "yesterday"):
+        events = [i for i, (when, _, _) in enumerate(view.events) if day_word(when, now, local) == day]
+        if not events:
+            continue
+        rows.append(("  " + day, "muted", ""))
+        for ei in events:
+            when, kind, status = view.events[ei]
+            stamp = f"{time.strftime('%H:%M', local(when))} {RUN_MARKS[kind]}" + (status if kind == FAILED else "")
+            if (ri, ei) != selected:
+                pending.append(stamp.replace(" ", "\xa0"))
+                continue
+            flush()
+            found = view.sessions[ei] if ei < len(view.sessions) else ()
+            tail = f"{len(found)} session{'' if len(found) == 1 else 's'}  ↵ read" if found else "no Claude session"
+            rows.append(("  " + "  ".join(part for part in (stamp, run_label(view, ei), tail) if part), "plain", "selected"))
+            if len(found) > 1:
+                names = [f"{one.title or f'session {n}'} {SESSION_MARKS[one.ending]}" + (f" {SESSION_OPEN}" if one.id == reading else "")
+                         for n, one in enumerate(found, start=1)]
+                for line in wrap_words("  ".join(name.replace(" ", "\xa0") for name in names), max(1, width - 5)):
+                    rows.append(("     " + line.replace("\xa0", " "), "muted", "sessions"))
+        flush()
+    _, upcoming = routine_words(view, now, local)
+    if upcoming:
+        rows.append(("  " + upcoming, "muted", ""))
+    elif view.note:
+        rows.append(("  " + view.note, "muted", ""))
+    real = [i for i, (_, kind, _) in enumerate(view.events) if kind != MISSED]
+    if view.kind == "timer" and real and not any(i < len(view.sessions) and view.sessions[i] for i in real):
+        rows.append(("  no Claude session", "muted", ""))
+    return [(fit(text, width), tone, kind) for text, tone, kind in rows]
+
+
 def has_control(text: str) -> bool:
     """Whether `text` holds a control character or a line break; one written to the config file would start a line of its own."""
     return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in text)
