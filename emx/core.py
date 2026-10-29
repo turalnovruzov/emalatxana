@@ -5559,6 +5559,47 @@ def unread_entries(history: list) -> list:
     return out
 
 
+UNREAD_TITLE = "Unread"
+UNREAD_ROWS = 5
+UNREAD_LIST_MIN = 3
+UNREAD_MORE = "… {n} more"
+UNREAD_MIN_WIDTH = 12
+
+
+def unread_box(items: list, width: int, height: int) -> list:
+    """The Unread box at the top of the panel as (target, kind, parts) lines, parts being (x, text, part) with part one of frame, title, mark, name, text and more.
+
+    `items` are (sid, kind, name, text). The box spans x=1 to x=width-2 and
+    shows at most `UNREAD_ROWS` lines, always leaving the list below it
+    `UNREAD_LIST_MIN` of the `height` rows; when not every item fits the last
+    line is "… N more". `target` is the item's session id, "more" or None for
+    the frame. Empty when there is nothing to show or no room.
+    """
+    shown = min(len(items), UNREAD_ROWS, height - 2 - UNREAD_LIST_MIN)
+    if not items or shown < 1 or width < UNREAD_MIN_WIDTH:
+        return []
+    box = width - 2
+    title = fit(UNREAD_TITLE, box - 5)
+    top = [(1, "╭─ ", "frame"), (4, title, "title"),
+           (4 + display_width(title), " " + "─" * max(0, box - 5 - display_width(title)) + "╮", "frame")]
+    lines = [(None, None, top)]
+    room = width - 8
+    cut = len(items) - shown + 1 if shown < len(items) else 0
+    for sid, kind, name, text in items[:shown - 1 if cut else shown]:
+        text = " ".join(text.split())
+        shown_name = fit(name, room // 2 if text else room)
+        text_room = room - display_width(shown_name) - 1
+        parts = [(1, "│", "frame"), (3, HISTORY_MARKS.get(kind, "·"), "mark"), (5, shown_name, "name")]
+        if text and text_room >= 4:
+            parts.append((6 + display_width(shown_name), fit(text, text_room), "text"))
+        parts.append((width - 2, "│", "frame"))
+        lines.append((sid, kind, parts))
+    if cut:
+        lines.append(("more", None, [(1, "│", "frame"), (3, fit(UNREAD_MORE.format(n=cut), room + 2), "more"), (width - 2, "│", "frame")]))
+    lines.append((None, None, [(1, "╰" + "─" * (box - 2) + "╯", "frame")]))
+    return lines
+
+
 def history_unread(history: list) -> int:
     return sum(1 for e in history if not e.read)
 

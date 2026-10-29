@@ -4749,6 +4749,106 @@ class UnreadDot(AppCase):
         self.assertNotIn(core.UNREAD_DOT, [d[2] for d in self.app.scr.drawn])
 
 
+class UnreadBoxDrawn(AppCase):
+    def setUp(self):
+        super().setUp()
+        self.scr = AttrScr(20, 40)
+        self.app.scr = self.scr
+        self.app.palette = TonePalette()
+
+    def show(self, sessions, *entries):
+        self.poll(*sessions)
+        self.app.refresh()
+        self.app.poller.notices.outbox = list(entries)
+        self.app.refresh()
+        self.app.draw()
+
+    def row(self, y):
+        return self.scr.cells.get(y, "")
+
+    def two(self):
+        now = time.monotonic()
+        self.show([session("s1", "/p/alpha"), session("s2", "/p/alpha")],
+                  entry("s1", "Alpha needs you.", now - 5, core.NOTICE_NEEDS), entry("s2", "Beta is done.", now - 1))
+
+    def test_unread_sessions_show_in_a_box_above_the_first_group(self):
+        self.two()
+        self.assertTrue(self.row(0).startswith(" ╭─ Unread"), self.row(0))
+        self.assertTrue(self.row(1).startswith(" │ ✓ emx-test-s2 Beta is done."), self.row(1))
+        self.assertTrue(self.row(2).startswith(" │ ● emx-test-s1 Alpha needs you."), self.row(2))
+        self.assertTrue(self.row(3).startswith(" ╰"), self.row(3))
+        self.assertTrue(self.row(4).startswith("▾"), self.row(4))
+
+    def test_the_box_tones(self):
+        self.two()
+        pal = TonePalette()
+        cell = {(y, x): attr for y, x, t, attr in self.scr.drawn}
+        self.assertEqual(cell[(0, 1)], pal.attr("muted"))
+        self.assertEqual(cell[(0, 4)], pal.attr("plain") | curses.A_BOLD)
+        self.assertEqual(cell[(1, 3)], pal.attr("done"))
+        self.assertEqual(cell[(2, 3)], pal.attr("needs"))
+        self.assertEqual(cell[(2, 5)], pal.attr("plain") | curses.A_BOLD)
+
+    def test_the_box_is_gone_when_nothing_is_unread(self):
+        self.show([session("s1", "/p/alpha")])
+        self.assertTrue(self.row(0).startswith("▾"), self.row(0))
+
+    def test_an_unlisted_sessions_notice_is_not_in_the_box(self):
+        self.show([session("s1", "/p/alpha")], entry("gone", "Left.", time.monotonic()))
+        self.assertTrue(self.row(0).startswith("▾"), self.row(0))
+
+    def test_a_click_on_a_box_line_opens_that_session(self):
+        self.two()
+        self.app.handle_mouse(event=(0, 5, 1, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.opened, [("s2", core.OPEN)])
+        self.app.tmux = SwitchTmux(False)
+        self.app.me = "%1"
+        self.app.__dict__.pop("switch_to")
+        self.app.handle_mouse(event=(0, 5, 2, 0, curses.BUTTON1_CLICKED))
+        self.app.draw()
+        self.assertEqual([e.id for e in core.unread_entries(self.app.history)], ["s2"])
+        self.assertNotIn("emx-test-s1 Alpha", "".join(self.row(y) for y in range(20)))
+
+    def test_a_click_on_a_row_below_the_box_still_hits_that_row(self):
+        self.two()
+        rows = {y: item for y, item in self.app.row_map.items() if item[0] == "session"}
+        self.assertTrue(rows)
+        self.assertGreaterEqual(min(rows), 5)
+        y, item = next(iter(rows.items()))
+        self.app.handle_mouse(event=(0, 5, y, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.opened, [(item[1], core.OPEN)])
+
+    def test_a_click_on_more_opens_the_history(self):
+        now = time.monotonic()
+        sids = [f"s{i}" for i in range(7)]
+        self.scr.size = (30, 40)
+        self.show([session(sid, "/p/alpha") for sid in sids], *[entry(sid, "Done.", now - i) for i, sid in enumerate(sids)])
+        y = next(y for y, item in self.app.row_map.items() if item[0] == "unread-more")
+        self.assertIn("… 3 more", self.row(y))
+        self.app.handle_mouse(event=(0, 5, y, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.app.history_view, 0)
+
+    def test_the_box_is_not_drawn_over_history_routines_help_or_settings(self):
+        self.two()
+        for name, set_up in (("history", lambda: setattr(self.app, "history_view", 0)),
+                             ("routines", lambda: setattr(self.app, "routines_view", {"place": 0, "run": None, "scroll": 0, "follow": True})),
+                             ("help", lambda: setattr(self.app, "help", True)),
+                             ("settings", self.app.open_settings)):
+            with self.subTest(view=name):
+                self.app.history_view, self.app.routines_view, self.app.help, self.app.settings = None, None, False, None
+                set_up()
+                self.app.draw()
+                self.assertNotIn("Unread", "".join(self.row(y) for y in range(20)))
+
+    def test_a_phone_layout_tap_on_a_box_line_opens_rather_than_selects(self):
+        self.app.window_width = 40
+        self.assertTrue(self.app.narrow)
+        self.two()
+        self.app.handle_mouse(event=(0, 5, 1, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.opened, [("s2", core.OPEN)])
+        self.assertEqual(self.app.cursor, ("session", "s2"))
+
+
 class PanelGround(AppCase):
     """2.6.0 gave the panel its own background; it is the terminal's again, and a workspace upgrading from 2.6.0 loses the option."""
 

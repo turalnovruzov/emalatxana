@@ -3285,6 +3285,12 @@ class App:
                 self.menu_key(item[1])
                 return
             self.close_menu()
+        if item and item[0] == "unread":
+            self.open_listed(item[1])
+            return
+        if item and item[0] == "unread-more":
+            self.open_history()
+            return
         if item and item[0] == "link":
             self.open_in_app(self.session(item[1]))
             return
@@ -4134,8 +4140,13 @@ class App:
             self.put(list_top + 2, 7, "n", curses.A_BOLD)
             self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
+            rows, hits = self.draw_unread(list_top, list_bottom, w)
+            list_top += rows
             self.put(list_top, 1, FIND_NONE, curses.A_DIM)
+            self.row_map.update(hits)
         else:
+            rows, hits = self.draw_unread(list_top, list_bottom, w)
+            list_top += rows
             layout = self.list_layout(w, max(1, list_bottom - list_top))
             room = core.peek_room(h, w, len(bottom))
             peek_rows = self.draw_peek(list_bottom, w, room, self.cursor_rows(layout)) if self.peeking else 0
@@ -4143,10 +4154,35 @@ class App:
             if core.scroll_thumb(sum(layout[2]), list_height, 0) is not None:
                 w, layout = w - 1, self.list_layout(w - 1, max(1, list_bottom - list_top))
             self.draw_list(list_top, list_bottom - peek_rows, w, layout)
+            self.row_map.update(hits)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
+
+    def unread_items(self) -> list:
+        """(id, kind, live name, text) of each unread notice whose session is listed."""
+        items = []
+        for e in core.unread_entries(self.history):
+            listed = self.session(e.id)
+            if listed is not None:
+                items.append((e.id, e.kind, listed.name, e.text))
+        return items
+
+    def draw_unread(self, top: int, bottom: int, width: int) -> tuple:
+        """Draw the Unread box from row `top` and return (rows taken, {screen row: row_map item}) for its clickable lines."""
+        box = core.unread_box(self.unread_items(), width, bottom - top)
+        pal = self.palette
+        hits = {}
+        for i, (target, kind, parts) in enumerate(box):
+            if target == "more":
+                hits[top + i] = ("unread-more", None)
+            elif target is not None:
+                hits[top + i] = ("unread", target)
+            for x, text, part in parts:
+                tone = CATEGORY_TONE[kind] if part in ("mark", "text") else "muted" if part in ("frame", "more") else "plain"
+                self.put(top + i, x, text, pal.attr(tone) | (curses.A_BOLD if part in ("title", "name") else 0))
+        return len(box), hits
 
     def draw_peek(self, bottom: int, width: int, room: int, cursor_rows: int = 1) -> int:
         """Draw the peek box ending above row `bottom`, in the `room` rows `core.peek_room` gives, and return how many rows it took (0 when it doesn't fit)."""

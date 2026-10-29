@@ -866,6 +866,65 @@ class RowLayout(unittest.TestCase):
                 self.assertLessEqual(max([x + core.display_width(t) for x, t, _ in parts] or [0]), max(0, width - 1))
 
 
+class UnreadBox(unittest.TestCase):
+    ITEMS = [("s1", core.NOTICE_NEEDS, "api-fix", "approve npm test?"), ("s2", core.NOTICE_DONE, "docs-pass", "updated 3 pages")]
+
+    def box(self, items=None, width=40, height=30):
+        return core.unread_box(self.ITEMS if items is None else items, width, height)
+
+    def test_no_items_no_box(self):
+        self.assertEqual(self.box([]), [])
+
+    def test_the_box_is_framed_and_titled(self):
+        lines = self.box()
+        top, bottom = lines[0][2], lines[-1][2]
+        self.assertEqual(top[0], (1, "╭─ ", "frame"))
+        self.assertEqual(top[1], (4, "Unread", "title"))
+        self.assertTrue(top[-1][1].endswith("╮"))
+        self.assertTrue(bottom[0][1].startswith("╰") and bottom[0][1].endswith("╯"))
+        for _, _, parts in lines:
+            x, text, _ = parts[-1]
+            self.assertEqual(x + core.display_width(text), 39)
+        self.assertEqual((lines[0][0], lines[-1][0]), (None, None))
+
+    def test_an_item_line_has_mark_name_and_cut_text(self):
+        lines = self.box()
+        (target, kind, parts) = lines[1]
+        self.assertEqual((target, kind), ("s1", core.NOTICE_NEEDS))
+        self.assertEqual(parts[1:3], [(3, "●", "mark"), (5, "api-fix", "name")])
+        self.assertEqual(lines[2][2][1], (3, "✓", "mark"))
+        self.assertEqual(parts[-1], (38, "│", "frame"))
+        long = self.box([("s1", core.NOTICE_DONE, "api-fix", "word " * 30)])[1][2]
+        text = next(t for _, t, p in long if p == "text")
+        self.assertTrue(text.endswith("…"))
+        self.assertEqual(long[-1], (38, "│", "frame"))
+        x, text_part = next((x, t) for x, t, p in long if p == "text")
+        self.assertEqual(x + core.display_width(text_part), 37)
+
+    def test_more_than_fit_ends_with_a_more_line(self):
+        items = [(f"s{i}", core.NOTICE_DONE, f"n{i}", "x") for i in range(7)]
+        lines = self.box(items, height=40)
+        self.assertEqual(len(lines), 1 + 5 + 1)
+        self.assertEqual([t for t, _, _ in lines[1:5]], ["s0", "s1", "s2", "s3"])
+        self.assertEqual(lines[5][0], "more")
+        self.assertEqual(lines[5][2][1], (3, "… 3 more", "more"))
+
+    def test_the_box_leaves_the_list_its_rows(self):
+        one = [self.ITEMS[0]]
+        self.assertEqual(self.box(one, height=5), [])
+        lines = self.box(one, height=6)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(6 - len(lines), core.UNREAD_LIST_MIN)
+
+    def test_too_narrow_no_box(self):
+        self.assertEqual(self.box(width=core.UNREAD_MIN_WIDTH - 1), [])
+        self.assertNotEqual(self.box(width=core.UNREAD_MIN_WIDTH), [])
+        for width in range(core.UNREAD_MIN_WIDTH, 40):
+            for _, _, parts in self.box(width=width):
+                x, text, _ = parts[-1]
+                self.assertEqual(x + core.display_width(text), width - 1, width)
+
+
 class TwoLineRows(unittest.TestCase):
     """A live row is the name over its whole status, however many lines that takes; a stopped one is one line."""
 
