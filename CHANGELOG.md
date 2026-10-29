@@ -2,6 +2,13 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.23.0 — 2026-10-28
+
+- The mouse works in the Routines view: click a place's tab to switch to it, click a run to select it, and click the selected run to read it. The wheel scrolls, as before.
+- The mouse works in the reader too: the wheel scrolls it, and a click on `session 2 of 2` in its header goes to the run's next session, as `Tab` does.
+- `e` in Settings and `emx config` open the config file in your editor: `$VISUAL`, then `$EDITOR`, then `editor`, `nano` or `vi`, whichever the machine has. Only when none is found do they give the file's path.
+- Places are added, edited and removed in Settings, with no file: `c`, then Places, `Enter`. `a` adds one with three questions (name, server, user), `Enter` on a place edits it, and `x` twice removes it. Each answer is checked as you go, and an edited place keeps its line in the file. The `routines` page now describes it first and the file line second.
+
 ## 2.22.0 — 2026-10-28
 
 - Routines now cover every place you list. A place is a machine and a user on it: this machine as another user, another server as you, or another server as another user there. Add one with a line in the config file, for example `place = worker user bot` or `place = far server srv2 user bot`; moving a routine to another server is changing that one line. `place_user_command` (default `sudo -n -u`) sets how another user is reached. `this user` is always first.

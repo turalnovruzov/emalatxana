@@ -1,12 +1,14 @@
 # Routines
 
-A routine is something on a machine that runs Claude by itself: a systemd user timer, or a long-running systemd user service you made. `R` in the panel opens a view of what the routines of every place did today and yesterday, and `Enter` on a run opens the Claude session behind it, read-only. The mouse wheel scrolls the view. `R` or `Esc` goes back to the session list. The phone page has the same view (`emx docs phone`).
+A routine is something on a machine that runs Claude by itself: a systemd user timer, or a long-running systemd user service you made. `R` in the panel opens a view of what the routines of every place did today and yesterday, and `Enter` on a run opens the Claude session behind it, read-only. The mouse wheel scrolls the view, and a click on a place's tab or on a run works as `Tab` and the arrow keys do. `R` or `Esc` goes back to the session list. The phone page has the same view (`emx docs phone`).
 
 emx only reads. It never starts, stops or changes a routine, never sends anything to a session, and never resumes one.
 
 ## Places
 
-A place is a machine and a user on it. The view shows one place at a time, as a row of tabs under the title; `Tab` goes to the next place and `Shift+Tab` to the one before. `this user`, this machine as you, is always first. Add the others with one line each in the config file (`emx config`, or `e` in Settings under `c`):
+A place is a machine and a user on it. The view shows one place at a time, as a row of tabs under the title; `Tab` goes to the next place and `Shift+Tab` to the one before. `this user`, this machine as you, is always first. Add, change and remove the others in Settings: `c`, then Places, `Enter`. `a` (or `+ add a place`) asks three things, one at a time: the **name** (letters, digits, dots, dashes and underscores, for example `worker`), the **server** (as you would type it after `ssh`, for example `srv2`; leave empty for this machine) and the **user** (a login on that machine, for example `bot`; leave empty for yourself). A wrong answer shows why and waits. At least one of server and user is needed. `Enter` on a place changes it (it keeps its tab and its line in the file), and `x` twice removes it. Each change is saved into the config file at once.
+
+The same places are one line each in the config file (`emx config`, or `e` in Settings), if you would rather write them there:
 
 ```
 place = worker user bot
@@ -61,6 +63,8 @@ A routine whose runs started no Claude session says `no Claude session · a plai
 | `Tab` `Shift+Tab` | Next place, the one before. |
 | `↑↓` `j` `k` | Select a run. |
 | `Enter` | Read the selected run's Claude session. |
+| `click` | A place's tab switches to it, a run selects it, and a click on the selected run reads it. |
+| `wheel` | Scrolls the view. |
 | `R` `Esc` | Back to the session list. |
 
 `Enter` puts the session in the big pane, next to the panel, opened at the end: your prompt for the run, Claude's replies, one line per tool call with `✓` or `✗ exit 1`, and errors in red. The last line says where it stopped, for example `■ stopped here · 19:55 · the run ended: usage limit`. A run with no session says `No Claude session behind that run.`
@@ -71,6 +75,8 @@ A routine whose runs started no Claude session says `no Claude session · a plai
 | `PgUp` `PgDn` | Scroll a page. |
 | `g` `G` | Top, end. |
 | `Tab` | The run's other session, when it has more than one. |
+| `wheel` | Scrolls three lines at a time. |
+| `click` | On `session 2 of 2` in the header, goes to the run's next session, as `Tab` does. |
 | `Esc` | Back to the list; the session you had open before comes back. |
 
 Every other key does nothing: the reader can't resume, answer or stop the session. A session still going refreshes every few seconds at this machine and as another user; over `server`, it is read when you open it and when you press `Tab`. Only the last 8 MB of a long session are read.

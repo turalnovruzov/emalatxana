@@ -14,7 +14,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `emx hush` | Stops the voice now, without muting later notices. |
 | `emx remote` | `emx remote <host>` opens the emx running on a server over ssh (host from your SSH config); closing it leaves the server's sessions running. |
 | `emx phone` | Prints the address of the phone page, or why it isn't up. |
-| `emx config` | Opens the settings file in `$EDITOR`, or prints its path when `EDITOR` isn't set. |
+| `emx config` | Opens the settings file in your editor (`$VISUAL`, `$EDITOR`, else `editor`, `nano` or `vi`), or prints its path when none is found. |
 | `emx update` | Installs the newest version now, a new major version included. |
 | `emx uninstall` | Removes the installed emx and its link; settings and state are kept. |
 
@@ -72,9 +72,10 @@ On a screen narrower than 70 columns (`emx docs phone`) the panel and the sessio
 | --- | --- |
 | `↑↓` `j` `k` | Move over the settings. |
 | `←→` | Change the selected setting: the other side, a narrower or wider panel, the next or previous choice. |
-| `Enter` | Type a value (a number or a command; `Enter` saves, `Esc` cancels), or open Favourites. |
-| `e` | Open the config file in `$EDITOR`, in a popup. With no `EDITOR`, the notice gives the file's path. |
-| `x` | In Favourites, remove the selected folder; `+ add a folder` takes a typed folder. |
+| `Enter` | Type a value (a number or a command; `Enter` saves, `Esc` cancels), or open Favourites or Places. |
+| `e` | Open the config file in your editor (`$VISUAL`, `$EDITOR`, else `editor`, `nano` or `vi`), in a popup. With none found, the notice gives the file's path. |
+| `x` | In Favourites, remove the selected folder; `+ add a folder` takes a typed folder. In Places, `x` twice removes the selected place. |
+| `a` | In Places, add a place: name, server, then user, one question each. `Enter` on a place changes it. |
 | `Esc` `c` | Close the menu (`Esc` in Favourites goes back to the list). |
 
 Every change is saved into the config file.
@@ -88,6 +89,8 @@ Opened with `R`. Details in `emx docs routines`.
 | `Tab` `Shift+Tab` | Next place, the one before. |
 | `↑↓` `j` `k` | Select a run. |
 | `Enter` | Read the selected run's Claude session in the big pane. |
+| `click` | A place's tab switches to it, a run selects it, a click on the selected run reads it. |
+| `wheel` | Scrolls the view. |
 | `R` `Esc` | Back to the session list. |
 
 ## In the reader
@@ -100,6 +103,8 @@ Opened with `Enter` on a run; it only reads.
 | `PgUp` `PgDn` | Scroll a page. |
 | `g` `G` | Top, end. |
 | `Tab` | The run's other session. |
+| `wheel` | Scrolls three lines at a time. |
+| `click` | On `session 2 of 2` in the header, the run's next session. |
 | `Esc` | Back to the list. |
 
 ## Settings
@@ -143,7 +148,7 @@ A line is `key = value`; a line starting with `#` is a comment, and `## Name` li
 | `update_check_seconds` | 5 or more | `600` | How often to check for a new version. |
 | `phone_port` | 1024 to 65535 | `8787` | The port of the phone page. Applies at the next start. |
 | `favourite_folders` | a folder, once per line | none | Starred folders for new sessions. |
-| `place` | a name, then `server <host>` and/or `user <login>`, once per line | none | Other places whose routines `R` shows. |
+| `place` | a name, then `server <host>` and/or `user <login>`, once per line | none | Other places whose routines `R` shows. Also set in Settings, under Places. |
 | `place_user_command` | a command | `sudo -n -u` | The command that runs emx's reads as another user; the login follows it. |
 | `claude_command` | a command | `claude` | The command sessions start claude with. Applies at the next start. |
 | `remote_command` | a command | `emx` | emx's command on the server, for `emx remote`. |
