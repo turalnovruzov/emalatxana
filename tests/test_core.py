@@ -1599,6 +1599,15 @@ class ConfigFile(unittest.TestCase):
         edited = core.write_config_text(text, {"place": ["w user a", "w user b", "x user c2"]}, CFG_HOME)
         self.assertEqual(edited, text.replace("x user c\n", "x user c2\n"))
 
+    def test_rename_a_place_keeps_its_line(self):
+        text = "## Routines\n# note\nplace = a user x\nplace = s3 server srv3\n# another\nplace = c user z\nside = right\n"
+        edited = core.write_config_text(text, {"place": ["a user x", "s3b server srv3 user bot", "c user z"]}, CFG_HOME, "s3")
+        self.assertEqual(edited, text.replace("place = s3 server srv3\n", "place = s3b server srv3 user bot\n"))
+        self.assertEqual(core.read_config(edited, CFG_HOME)[0]["place"], ["a user x", "s3b server srv3 user bot", "c user z"])
+        twin = "place = w user a\nplace = w user b\nplace = x user c\n"
+        self.assertEqual(core.write_config_text(twin, {"place": ["w user a", "w user b", "y user c"]}, CFG_HOME, "x"),
+                         twin.replace("x user c", "y user c"))
+
     def test_place_lines_round_trip(self):
         text = BOARD + "# my note\nplace = worker   user bot\nfavourite_folders = ~/a\n"
         self.assertEqual(core.read_config(text, CFG_HOME)[0]["place"], ["worker user bot"])

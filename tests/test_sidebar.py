@@ -9775,6 +9775,18 @@ class SettingsMenu(AppCase):
         self.assertEqual(after[:old] + after[old + 1:], before[:old] + before[old + 1:])
         self.assertEqual([p.name for p in sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files))], ["this user", "worker", "far", "w3"])
 
+    def test_renaming_a_place_in_the_form_keeps_its_file_line(self):
+        self.with_places()
+        before = self.config_lines()
+        old = before.index("place = far server srv2 user bot")
+        self.go_to("Places")
+        self.press("\n", "j", "\n")
+        self.type_form("farther", "srv2", "bot")
+        after = self.config_lines()
+        self.assertEqual(after[old], "place = farther server srv2 user bot")
+        self.assertEqual(after[:old] + after[old + 1:], before[:old] + before[old + 1:])
+        self.assertEqual([p.name for p in sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files))], ["this user", "worker", "farther", "w3"])
+
     def test_remove_a_place_needs_two_x(self):
         self.tall()
         self.with_places()

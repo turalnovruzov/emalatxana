@@ -3481,13 +3481,14 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
     return _insert_under_section(out, setting, new, last) if new else out
 
 
-def _write_places(lines: list, setting: Setting, wanted: list) -> list:
+def _write_places(lines: list, setting: Setting, wanted: list, edited_place: str = "") -> list:
     """Keeps the lines still wanted and the ones emx can't read (they are his to fix), appends what is new.
 
-    A place line no longer wanted is the edited place when `wanted` holds a
-    line of the same name that is on no line yet: it is then rewritten where it
-    stands, so an edit keeps its line and its tab. Otherwise it was removed and
-    is dropped.
+    `edited_place` is the name the edited place had before the edit: the first
+    unwanted line of that name is rewritten where it stands, so an edit, a
+    rename included, keeps its line and its tab. Without it, an unwanted line is
+    the edited place when `wanted` holds a new line of the same name. Otherwise
+    it was removed and is dropped.
     """
     def readable(raw):
         parts = _split_line(raw)
@@ -3496,6 +3497,8 @@ def _write_places(lines: list, setting: Setting, wanted: list) -> list:
 
     on_file = {line for line in map(readable, lines) if line is not None}
     edited = {line.split()[0]: line for line in wanted if line not in on_file}
+    if edited_place and len(edited) == 1:
+        edited = {edited_place: next(iter(edited.values()))}
     out, present, last = [], set(), None
     for raw in lines:
         line = readable(raw)
@@ -3516,8 +3519,8 @@ def _write_places(lines: list, setting: Setting, wanted: list) -> list:
     return _insert_under_section(out, setting, new, last) if new else out
 
 
-def write_config_text(text: str, changes: Mapping, home: str) -> str:
-    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. Raises OSError for a value that would break a line."""
+def write_config_text(text: str, changes: Mapping, home: str, edited_place: str = "") -> str:
+    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. `edited_place` names the place being edited (see `_write_places`). Raises OSError for a value that would break a line."""
     for key, value in changes.items():
         if any(has_control(v) for v in (value if isinstance(value, list) else [value]) if isinstance(v, str)):
             raise OSError(f"{key}: {UNSAFE_TEXT}")
@@ -3528,7 +3531,7 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
         if setting.kind == "folders":
             lines = _write_favourites(lines, setting, changes[setting.key], home)
         elif setting.kind == "places":
-            lines = _write_places(lines, setting, changes[setting.key])
+            lines = _write_places(lines, setting, changes[setting.key], edited_place)
         else:
             lines = _write_scalar(lines, setting, changes[setting.key])
         text = "".join(lines)
@@ -3642,7 +3645,7 @@ def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
     return merged
 
 
-def save_prefs(files: PrefsFiles, prefs: dict) -> None:
+def save_prefs(files: PrefsFiles, prefs: dict, edited_place: str = "") -> None:
     """Writes the changed settings into the config text and the state keys into the state file. Callers hold `prefs_lock` (see `change_prefs`)."""
     prefs = normalize_prefs(prefs)
     home = _home()
@@ -3666,18 +3669,18 @@ def save_prefs(files: PrefsFiles, prefs: dict) -> None:
     parsed = read_config(text, home)[0]
     changes = {k: v for k, v in wanted.items() if v != parsed[k]}
     if changes:
-        new = refresh_template_comments(write_config_text(text, changes, home))
+        new = refresh_template_comments(write_config_text(text, changes, home, edited_place))
         if new != text:
             _atomic_write(files.config, new, mode=files.config.stat().st_mode & 0o777)
 
 
-def change_prefs(files: PrefsFiles, fn: Callable) -> dict:
+def change_prefs(files: PrefsFiles, fn: Callable, edited_place: str = "") -> dict:
     """Reads the settings, applies `fn` and writes the result, all under the cross-process lock; returns what `fn` gave."""
     with prefs_lock(files):
         disk = load_prefs(files)
         new = fn(disk)
         if new != disk:
-            save_prefs(files, new)
+            save_prefs(files, new, edited_place)
         return new
 
 

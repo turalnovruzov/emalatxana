@@ -2090,11 +2090,11 @@ class App:
     def prefs_stamp(self) -> tuple:
         return self.file_mtime(self.prefs_files.config), self.file_mtime(self.prefs_files.state)
 
-    def save_prefs(self) -> bool:
+    def save_prefs(self, edited_place: str = "") -> bool:
         """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept; whether it wrote."""
         try:
             with PREFS_LOCK:
-                merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
+                merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk), edited_place)
         except OSError as exc:
             self.say(f"Couldn't save settings: {exc}", error=True)
             return False
@@ -3700,10 +3700,10 @@ class App:
         elif setting.kind == "choice":
             self.apply_setting(core.cycle(setting, self.prefs, step))
 
-    def apply_setting(self, new: dict) -> None:
+    def apply_setting(self, new: dict, edited_place: str = "") -> None:
         old = self.prefs
         self.prefs = new
-        self.save_prefs()
+        self.save_prefs(edited_place)
         self.apply_prefs(old)
 
     def settings_enter(self, setting) -> None:
@@ -3850,12 +3850,14 @@ class App:
                 edit["hint"] = why
                 return
             lines = self.place_list()
+            old_name = ""
             if form["index"] is None:
                 lines.append(line)
                 self.settings["places"] = len(lines) - 1
             else:
+                old_name = lines[form["index"]].split()[0]
                 lines[form["index"]] = line
-            self.apply_setting({**self.prefs, "place": lines})
+            self.apply_setting({**self.prefs, "place": lines}, old_name)
             self.settings["edit"] = None
             return
         form["step"] = step + 1
