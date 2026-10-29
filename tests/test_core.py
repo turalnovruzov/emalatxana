@@ -6646,6 +6646,28 @@ class RoutinesRows(unittest.TestCase):
         self.assertLessEqual(core.display_width(text), 30)
         self.assertEqual(text[start:end], " another-place ")
 
+    def test_tab_spans_cover_every_shown_chip(self):
+        views = self.places("this user", "worker", "server-2", "another-place")
+        text, _, _ = core.tab_chips(views, 3, 30)
+        spans = core.tab_spans(views, 3, 30)
+        self.assertEqual([i for _, _, i in spans], sorted(i for _, _, i in spans))
+        self.assertEqual(text[spans[-1][0]:spans[-1][1]], " another-place ")
+        self.assertEqual(spans[-1][2], 3)
+        self.assertTrue(all(x1 <= 30 and text[x0:x1].strip() for x0, x1, _ in spans))
+        for (_, end, _), (start, _, _) in zip(spans, spans[1:]):
+            self.assertEqual(end, start)
+
+    def test_packed_runs_carry_each_runs_columns(self):
+        events = tuple((self.NOW - ago, core.PASSED, "") for ago in (600, 1200, 1800))
+        view = core.RoutineView("job", "passed", "done", events, None, sessions=((), (), ()))
+        rows = core.routines_rows([core.PlaceView(core.Place("this user"), (view,))], 0, None, 60, self.NOW)
+        packed = [r for r in rows if isinstance(r[2], tuple) and r[2][0] == "runs"]
+        self.assertEqual(len(packed), 1)
+        text, _, (_, spans) = packed[0]
+        self.assertEqual([t for _, _, t in spans], [(0, 0), (0, 1), (0, 2)])
+        for x0, x1, _ in spans:
+            self.assertRegex(text[x0:x1], r"^\d\d:\d\d \S+$")
+
     def test_step_run_holds_at_both_ends_and_starts_at_the_first(self):
         choices = [(0, 0), (0, 1), (1, 0)]
         self.assertEqual(core.step_run(choices, None, 0), (0, 0))

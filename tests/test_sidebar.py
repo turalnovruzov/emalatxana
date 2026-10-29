@@ -7622,6 +7622,79 @@ class Routines(AppCase):
         self.assertEqual((self.opened, activated), ([], []))
         self.assertIsNotNone(self.app.routines_view)
 
+    def click(self, x, y):
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, x, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+
+    def find_row(self, text):
+        self.drawn()
+        return next(y for (y, x), (t, _) in self.scr.drawn.items() if text in t)
+
+    def test_a_click_on_a_chip_switches_place(self):
+        self.two_places()
+        self.open_view()
+        y = self.find_row(" this user ")
+        self.click(1 + len(" this user ") + 2, y)
+        self.assertEqual(self.app.routines_view["place"], 1)
+        self.assertIsNone(self.app.routines_view["run"])
+        self.drawn()
+        self.click(3, y)
+        self.assertEqual(self.app.routines_view["place"], 0)
+
+    def run_row(self, stamp):
+        self.drawn()
+        return next((y, x) for (y, x), (t, _) in self.scr.drawn.items() if t.strip().startswith(stamp))
+
+    def test_a_click_on_a_run_selects_it(self):
+        tmux = self.app.tmux = SwitchToTmux()
+        self.open_view()
+        y, x = self.run_row("06:30")
+        self.assertEqual(self.app.routines_view["run"], None)
+        yesterday = [(yy, xx) for (yy, xx), (t, _) in self.scr.drawn.items() if "06:30" in t and yy > y]
+        self.assertTrue(yesterday, self.scr.text())
+        yy, xx = yesterday[0]
+        self.click(xx + 4, yy)
+        self.assertEqual(self.app.routines_view["run"], (0, 1))
+        self.assertEqual([c for c in tmux.calls if c[0] == "respawn"], [])
+
+    def test_a_click_on_the_selected_run_opens_the_reader(self):
+        self.app.me = "%1"
+        self.app.attached = 1
+        tmux = self.app.tmux = SwitchToTmux()
+        self.open_view()
+        self.assertIsNone(self.app.routines_view["run"])
+        y = next(y for (y, x), (t, _) in self.scr.drawn.items() if "↵ read" in t)
+        self.click(10, y)
+        respawns = [c for c in tmux.calls if c[0] == "respawn"]
+        self.assertEqual(len(respawns), 1)
+        self.assertIn(" read ", respawns[0][2])
+
+    def test_a_click_between_runs_does_nothing(self):
+        kinds = ((600, core.PASSED, 1), (1200, core.PASSED, 0), (1800, core.PASSED, 0))
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(kinds=kinds),), None)]
+        self.open_view()
+        before = dict(self.app.routines_view)
+        self.drawn()
+        y, x = next((y, x) for (y, x), (t, _) in self.scr.drawn.items() if "07:" in t and "read" not in t)
+        row = self.scr.drawn[(y, x)][0]
+        gap = x + row.index("  ", 2)
+        self.click(gap, y)
+        self.click(gap + 1, y)
+        self.click(3, self.find_row("backup-nightly") + 1)
+        self.assertEqual(self.app.routines_view, before)
+
+    def test_the_wheel_scrolls_the_routines_view(self):
+        self.answer = [core.PlaceView(HERE_PLACE, tuple(timer_view(f"job-{i}") for i in range(12)), None)]
+        self.scr = TallScr(width=60, height=12)
+        self.app.scr = self.scr
+        self.open_view()
+        self.drawn()
+        before = self.app.routines_view["run"]
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, 5, 0, sidebar.WHEEL_DOWN)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual(self.app.routines_view["scroll"], 3)
+        self.assertEqual(self.app.routines_view["run"], before)
+
     def test_the_panel_is_busy_while_the_view_is_open(self):
         self.assertFalse(self.app.update_busy())
         self.app.handle_key("R")
@@ -7652,9 +7725,10 @@ class Routines(AppCase):
         rows = core.routines_rows(self.app.place_views, 1, None, 60, ROUTINES_NOW)
         text, tone, kind = rows[1]
         self.assertEqual((text, tone), (" this user  worker ", "muted"))
-        self.assertEqual(kind, ("tabs", 11, 19))
+        self.assertEqual(kind[:3], ("tabs", 11, 19))
+        self.assertEqual(kind[3], [(0, 11, 0), (11, 19, 1)])
         self.assertEqual(text[11:19], " worker ")
-        self.assertEqual(core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)[1][2], ("tabs", 0, 11))
+        self.assertEqual(core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)[1][2][:3], ("tabs", 0, 11))
         chip = [attr for t, attr in self.scr.drawn.values() if t == " this user "]
         self.assertTrue(chip and chip[0] & curses.A_REVERSE and chip[0] & curses.A_BOLD)
 

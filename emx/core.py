@@ -2722,15 +2722,32 @@ SESSION_MARKS = {FINISHED: "✓", ERRORED: "✗", LIMIT: "⚠", GOING: "…"}
 SESSION_OPEN = "▎"
 
 
-def tab_chips(place_views: list, at: int, width: int) -> tuple:
-    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+def _visible_chips(place_views: list, at: int, width: int) -> tuple:
     chips = [f" {fit(view.place.name, max(1, width - 2))} " for view in place_views]
     first = 0
     while first < at and sum(display_width(c) for c in chips[first:]) > width:
         first += 1
+    return chips, first
+
+
+def tab_chips(place_views: list, at: int, width: int) -> tuple:
+    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+    chips, first = _visible_chips(place_views, at, width)
     start = sum(display_width(c) for c in chips[first:at])
     text = "".join(chips[first:])
     return fit(text, width), start, min(width, start + display_width(chips[at]))
+
+
+def tab_spans(place_views: list, at: int, width: int) -> list:
+    """(x0, x1, index) for each chip shown in the tab row, the columns cut at `width`."""
+    chips, first = _visible_chips(place_views, at, width)
+    spans, x = [], 0
+    for index in range(first, len(chips)):
+        if x >= width:
+            break
+        spans.append((x, min(width, x + display_width(chips[index])), index))
+        x += display_width(chips[index])
+    return spans
 
 
 def run_choices(place_view: PlaceView) -> list:
@@ -2757,7 +2774,9 @@ def routines_rows(place_views, at: int, selected, width: int, now: float, local:
 
     `selected` is the run (routine index, event index) drawn on its own row;
     `reading` is the id of the session open in the reader. `kind` is "" for a
-    plain row, "title", ("tabs", start, end) with the selected tab's columns,
+    plain row, "title", ("tabs", start, end, spans) with the selected tab's columns
+    and every shown tab's (x0, x1, index), ("runs", spans) for a line of runs packed
+    together with each run's (x0, x1, (routine, event)),
     ("lead", n) for a row whose first n characters take the tone and the rest
     are muted, "selected", or "sessions".
     """
@@ -2766,7 +2785,7 @@ def routines_rows(place_views, at: int, selected, width: int, now: float, local:
         return rows + [(ROUTINES_LOADING, "muted", "")]
     at = max(0, min(at, len(place_views) - 1))
     text, start, end = tab_chips(place_views, at, width)
-    rows += [(text, "muted", ("tabs", start, end)), ("", "plain", "")]
+    rows += [(text, "muted", ("tabs", start, end, tab_spans(place_views, at, width))), ("", "plain", "")]
     problems = problems_line(place_views, local)
     if problems:
         lines = wrap_words(problems, width)
@@ -2803,8 +2822,16 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
     plain_script = view.kind == "timer" and bool(real) and not any(i < len(view.sessions) and view.sessions[i] for i in real)
 
     def flush():
-        for line in wrap_words("  ".join(pending), max(1, width - 2)) if pending else ():
-            rows.append(("  " + line.replace("\xa0", " "), "muted", ""))
+        lines = wrap_words("  ".join(stamp for stamp, _ in pending), max(1, width - 2)) if pending else ()
+        used = 0
+        for line in lines:
+            spans, x = [], 0
+            while used < len(pending) and line.startswith(pending[used][0], x):
+                stamp, target = pending[used]
+                spans.append((2 + x, min(width, 2 + x + display_width(stamp)), target))
+                x += len(stamp) + 2
+                used += 1
+            rows.append(("  " + line.replace("\xa0", " "), "muted", ("runs", tuple(spans))))
         pending.clear()
 
     for day in ("today", "yesterday"):
@@ -2816,7 +2843,7 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
             when, kind, status = view.events[ei]
             stamp = f"{time.strftime('%H:%M', local(when))} {RUN_MARKS[kind]}" + (status if kind == FAILED else "")
             if (ri, ei) != selected:
-                pending.append(stamp.replace(" ", "\xa0"))
+                pending.append((stamp.replace(" ", "\xa0"), (ri, ei)))
                 continue
             flush()
             found = view.sessions[ei] if ei < len(view.sessions) else ()

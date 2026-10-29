@@ -1987,6 +1987,7 @@ class App:
         self.bound = None
         self.prompt = None
         self.row_map = {}
+        self.routines_hits = {}
         self.row_actions = {}
         self.menu_at = None
         self.scroll = 0
@@ -3249,13 +3250,14 @@ class App:
     def handle_mouse(self, busy: bool = False, event: tuple | None = None) -> None:
         """`busy`: an input, a view or a close was open when the tap came, so a tap on the selected row opens no actions menu."""
         try:
-            _, _, y, _, state = event or curses.getmouse()
+            _, x, y, _, state = event or curses.getmouse()
         except curses.error:
             return
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
         item = self.row_map.get(y)
         if self.routines_view is not None:
+            self.routines_tap(x, y)
             return
         if self.settings is not None:
             self.settings_tap(item)
@@ -3559,6 +3561,19 @@ class App:
         elif key in (curses.KEY_UP, "k", curses.KEY_DOWN, "j") and self.routines_place() is not None:
             step = -1 if key in (curses.KEY_UP, "k") else 1
             view.update(run=core.step_run(core.run_choices(self.routines_place()), self.routines_run(), step), follow=True)
+
+    def routines_tap(self, x: int, y: int) -> None:
+        """A click in the Routines view: a place chip switches place, a run selects it, the selected run (or its sessions' names) opens the reader."""
+        view = self.routines_view
+        target = next((t for x0, x1, t in self.routines_hits.get(y, ()) if x0 <= x < x1), None)
+        if target is None:
+            return
+        if target[0] == "place":
+            view.update(place=target[1], run=None, follow=True, scroll=0)
+        elif target[0] == "run":
+            view.update(run=target[1], follow=True)
+        else:
+            self.open_reader()
 
     def open_reader(self) -> None:
         """Show the Claude session behind the selected run in the big pane, read-only, and go to it; the session he was reading before comes back when the reader ends."""
@@ -3982,6 +3997,7 @@ class App:
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
+        self.routines_hits = {}
         self.extent = (0, 0)
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 0, h - len(bottom)
@@ -4106,6 +4122,12 @@ class App:
         self.extent = (len(rows), height)
         bar = core.selection_bar(True, self.focused is not False)
         for y, (text, tone, kind) in enumerate(rows[view["scroll"]:view["scroll"] + height], start=top):
+            if kind in ("selected", "sessions"):
+                self.routines_hits[y] = [(0, width, ("open",))]
+            elif isinstance(kind, tuple) and kind[0] == "tabs":
+                self.routines_hits[y] = [(x0 + 1, x1 + 1, ("place", index)) for x0, x1, index in kind[3]]
+            elif isinstance(kind, tuple) and kind[0] == "runs":
+                self.routines_hits[y] = [(x0 + 1, x1 + 1, ("run", target)) for x0, x1, target in kind[1]]
             if kind == "selected":
                 self.put(y, 0, " " * width, self.palette.attr("plain", bar))
                 self.put(y, 1, text, self.palette.attr("plain", bar))
@@ -4113,7 +4135,7 @@ class App:
                 self.put(y, 1, text, curses.A_BOLD)
             elif isinstance(kind, tuple) and kind[0] == "tabs":
                 self.put(y, 1, text, self.palette.attr("muted"))
-                _, start, end = kind
+                start, end = kind[1:3]
                 self.put(y, 1 + start, text[start:end], self.palette.attr("accent") | curses.A_REVERSE | curses.A_BOLD)
             elif isinstance(kind, tuple) and kind[0] == "lead":
                 self.put(y, 1, text[:kind[1]], self.palette.attr(tone))
