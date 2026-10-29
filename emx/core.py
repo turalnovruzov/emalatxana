@@ -2834,6 +2834,174 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
     return [(fit(text, width), tone, kind) for text, tone, kind in rows]
 
 
+PROMPT_LINES = 6
+READER_LIVE_SECONDS = 300
+READER_HEADER_ROWS = 2
+READER_INDENT = 9
+END_WORDS = {FINISHED: "finished", ERRORED: "failed", LIMIT: "usage limit"}
+
+
+@dataclass(frozen=True)
+class Step:
+    """One thing a session did, for the reader. `kind` is prompt, reply, tool, error or cut (earlier steps the read left out); `mark` is a tool's result."""
+    at_ms: float | None
+    kind: str
+    text: str
+    mark: str = ""
+    tone: str = "plain"
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(_text(b.get("text")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return _text(content)
+
+
+def _exit_code(text: str):
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    found = re.fullmatch(r"Exit code (\d+)", first)
+    return found.group(1) if found else None
+
+
+def _tool_line(name: str, given: Mapping) -> str:
+    line = describe_tool(name, given)[0]
+    return name + line[len(name) + 1:] if line.startswith(name + ":") else line
+
+
+def reader_steps(text: str) -> list:
+    """What a session did, oldest first, from its transcript `text` (the probe's `read`): his prompt, Claude's replies, one step per tool call with its result, and an error step under a tool that failed or an API error. Subagent, meta and summary entries are left out. Never raises."""
+    steps, calls = [], {}
+    for raw in (text or "").splitlines():
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if "emx_probe_cut" in entry:
+            steps.append(Step(None, "cut", "earlier steps weren't loaded", tone="muted"))
+            continue
+        if entry.get("type") not in ("user", "assistant") or entry.get("isSidechain") is True or entry.get("isCompactSummary"):
+            continue
+        at = _iso_ms(entry.get("timestamp"))
+        if entry.get("isApiErrorMessage") is True:
+            said = " ".join(" ".join(_text(b.get("text")) for b in _blocks(entry)).split())
+            steps.append(Step(at, "error", "! " + (said or "the API returned an error"), tone="error"))
+            continue
+        for block in _blocks(entry):
+            kind = block.get("type")
+            if entry["type"] == "user" and kind == "tool_result":
+                index = calls.get(block.get("tool_use_id"))
+                if index is None:
+                    continue
+                result = _result_text(block)
+                code = _exit_code(result)
+                failed = code is not None or block.get("is_error") is True
+                steps[index] = replace(steps[index], mark=f"✗ exit {code}" if code is not None else "✗" if failed else "✓",
+                                       tone="error" if failed else "plain")
+                if failed:
+                    lines = [line.strip() for line in result.splitlines() if line.strip()]
+                    detail = lines[1] if code is not None and len(lines) > 1 else lines[0] if lines and code is None else ""
+                    if detail:
+                        steps.insert(index + 1, Step(at, "error", "! " + detail, tone="error"))
+                        calls = {k: (v + 1 if v > index else v) for k, v in calls.items()}
+            elif entry["type"] == "user":
+                said = _said_by_user(entry, block)
+                if said is not None and said[0] == "request":
+                    shown = said[1].splitlines()
+                    body = "\n".join(shown[:PROMPT_LINES]) + ("\n…" if len(shown) > PROMPT_LINES else "")
+                    steps.append(Step(at, "prompt", "Prompt: " + body))
+            elif kind == "text" and _text(block.get("text")).strip():
+                steps.append(Step(at, "reply", "Claude: " + _text(block.get("text")).strip()))
+            elif kind == "tool_use" and isinstance(block.get("name"), str):
+                given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                steps.append(Step(at, "tool", "▸ " + _tool_line(block["name"], given)))
+                if isinstance(block.get("id"), str):
+                    calls[block["id"]] = len(steps) - 1
+    return steps
+
+
+def reader_title(text: str) -> str:
+    """The session's own name, else Claude's title for it, from its transcript `text`."""
+    titles = {"custom-title": "", "ai-title": ""}
+    for raw in (text or "").splitlines():
+        if "-title" not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and entry.get("type") in titles:
+            titles[entry["type"]] = _one_line(entry.get("customTitle" if entry["type"] == "custom-title" else "aiTitle")) or titles[entry["type"]]
+    return titles["custom-title"] or titles["ai-title"]
+
+
+def reader_ending(text: str, now: float, local: Callable = time.localtime) -> tuple | None:
+    """(ending, when, detail) of the session in `text`, or None when it holds no turn. A session cut off mid-step counts as going while its last entry is under READER_LIVE_SECONDS old."""
+    last = None
+    for raw in (text or "").splitlines():
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and entry.get("type") in ("user", "assistant") and entry.get("isSidechain") is not True \
+                and not entry.get("isCompactSummary"):
+            last = entry
+    if last is None:
+        return None
+    at = (_iso_ms(last.get("timestamp")) or 0) / 1000
+    ending, detail = session_ending({"tail": [last]}, now - at <= READER_LIVE_SECONDS, local)
+    return ending, at, detail
+
+
+def reader_rows(steps: list, header: tuple, ending: tuple | None, width: int, local: Callable = time.localtime) -> list:
+    """(text, tone, spans, step) for each row of the reader: two header rows, then every step with a hanging indent, then the end line.
+
+    `header` is (label, note). `spans` are (start, end, tone) colours laid over
+    a row, "bold" among the tones. `step` is the index of the step a row
+    belongs to, -1 for the header and the end line.
+    """
+    label, note = header
+    top = fit(f"{label}  {note}", width)
+    rows = [(top, "plain", ((0, min(len(label), len(top)), "bold"), (len(label), len(top), "muted")), -1),
+            ("─" * width, "muted", (), -1)]
+    room = max(1, width - READER_INDENT)
+    for i, step in enumerate(steps):
+        stamp = "" if step.at_ms is None else time.strftime("%H:%M", local(step.at_ms / 1000))
+        lead = f"{stamp:<5}  "
+        if step.kind == "cut":
+            rows.append((fit(lead + step.text, width), "muted", (), i))
+            continue
+        text = "".join(c if c.isprintable() or c == "\n" else " " for c in step.text)
+        if step.kind == "error":
+            rows += [(fit(" " * READER_INDENT + line, width), "error", (), i) for line in wrap_words(text, room)]
+            continue
+        parts = text.split("\n")
+        parts[-1] += f"  {step.mark}" if step.mark else ""
+        lines = [line for part in parts for line in wrap_words(part, room)]
+        named = re.match(r"▸ \S+", text)
+        for n, line in enumerate(lines):
+            row = (lead if n == 0 else " " * READER_INDENT) + line
+            spans = []
+            if n == 0:
+                spans.append((0, 5, "muted"))
+                if named:
+                    spans += [(len(lead), len(lead) + len(named.group()), "accent"), (len(lead) + len(named.group()), len(row), "muted")]
+            if step.mark and n == len(lines) - 1:
+                spans.append((len(row) - len(step.mark), len(row), "error" if step.tone == "error" else "done"))
+            rows.append((fit(row, width), "plain", tuple(spans), i))
+    if ending is not None:
+        kind, at, detail = ending
+        stamp = time.strftime("%H:%M", local(at))
+        if kind == GOING:
+            rows.append((fit(f"… still going · {stamp}", width), "plain", (), -1))
+        else:
+            word = END_WORDS[kind] + (f" {detail}" if detail else "")
+            rows.append((fit(f"■ stopped here · {stamp} · the run ended: {word}", width), "needs", (), -1))
+    return rows
+
+
 def has_control(text: str) -> bool:
     """Whether `text` holds a control character or a line break; one written to the config file would start a line of its own."""
     return any(unicodedata.category(c) in ("Cc", "Zl", "Zp") for c in text)

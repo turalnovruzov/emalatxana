@@ -8099,6 +8099,134 @@ class SlotTending(AppCase):
         self.assertEqual(self.tend(ViewTmux(slot=self.VIEWER)), [])
 
 
+class ReaderTmux(ViewTmux):
+    """ViewTmux that also records the pane it selects."""
+
+    def select(self, pane):
+        self.calls.append(("select", pane))
+
+
+class ReaderPanel(AppCase):
+    """Enter on a run puts the reader in the big pane, and its end gives the pane back."""
+
+    READER = Pane("%2", "@1", False, "reader", "", 100, 141, view="build-id")
+
+    def setUp(self):
+        super().setUp()
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(Routines.restore_zone, old)
+        self.app.me = "%1"
+        self.app.attached = 1
+        self.scr = TallScr(width=60)
+        self.app.scr = self.scr
+        self.app.place_views = [core.PlaceView(HERE_PLACE, (timer_view(),), None), core.PlaceView(WORKER_PLACE, (worker_view(),), None)]
+        self.app.routines_view = {"place": 1, "run": None, "scroll": 0, "follow": True}
+
+    def parked(self):
+        return [
+            ("respawn", "%2", sidebar.self_command("blank", sidebar.PLACEHOLDER_TEXT)),
+            ("set_pane_option", "%2", sidebar.ROLE, "placeholder"), ("unset_pane_option", "%2", sidebar.VIEW_OPT),
+        ]
+
+    def tend(self, tmux):
+        self.app.tmux = tmux
+        self.app.main_pane = tmux.slot_pane
+        sidebar.App.tend_slot(self.app, tmux.slot_pane)
+        return tmux.calls
+
+    def test_enter_respawns_the_reader_and_focuses_it(self):
+        tmux = self.app.tmux = SwitchToTmux()
+        self.app.handle_key("\n")
+        label = "loop · 07:30 run · build"
+        command = sidebar.self_command("read", "emx-test-switch", "worker", label, "pick-id", "build-id")
+        self.assertEqual(tmux.calls, [
+            ("respawn", "%2", command, None), ("set_pane_option", "%2", sidebar.ROLE, "reader"),
+            ("set_pane_option", "%2", sidebar.VIEW_OPT, "build-id"), ("select", "%2"),
+        ])
+        self.assertEqual((self.app.main_pane.role, self.app.main_pane.view), ("reader", "build-id"))
+        self.assertEqual(self.app.reader_back, "")
+        self.assertIsNotNone(self.app.routines_view)
+
+    def test_enter_remembers_the_session_that_was_showing(self):
+        slot = Pane("%2", "@1", False, "viewer", "", 100, 141, view=KEY_A)
+        self.app.tmux = SwitchToTmux(slot=slot)
+        self.app.handle_key(curses.KEY_RIGHT)
+        self.assertEqual(self.app.reader_back, KEY_A)
+
+    def test_enter_on_a_run_with_no_session_opens_nothing(self):
+        self.app.routines_view["place"] = 0
+        self.app.routines_view["run"] = (0, 1)
+        tmux = self.app.tmux = SwitchToTmux()
+        self.app.handle_key("\n")
+        self.assertEqual(tmux.calls, [])
+        self.assertEqual(self.app.notice, sidebar.NO_RUN_SESSION)
+
+    def test_no_key_of_the_view_resumes_sends_or_stops(self):
+        tmux = self.app.tmux = SwitchToTmux()
+        for key in ("\t", "j", "k", curses.KEY_UP, curses.KEY_DOWN, "x", sidebar.CTRL_X, "r", "t", "a", " "):
+            self.app.handle_key(key)
+        self.assertEqual([c for c in tmux.calls if c[0] in ("respawn", "kill", "swap", "new_hidden_window")], [])
+
+    def test_the_session_open_in_the_reader_is_marked_in_the_list(self):
+        self.app.main_pane = self.READER
+        with mock.patch.object(sidebar.time, "time", return_value=ROUTINES_NOW):
+            self.app.draw()
+        self.assertIn("     pick ✓  build ⚠ ▎", [t.rstrip() for t in self.scr.text()])
+
+    def test_dead_reader_gives_back_the_previous_session(self):
+        self.app.reader_back = KEY_A
+        calls = self.tend(ReaderTmux(slot=replace(self.READER, dead=True)))
+        self.assertEqual(calls, [
+            ("link_agent", "@5", KEY_A), ("clear_history", "%2"), ("respawn", "%2", f"viewer {KEY_A}"),
+            ("set_pane_option", "%2", sidebar.ROLE, "viewer"), ("set_pane_option", "%2", sidebar.VIEW_OPT, KEY_A),
+            ("select", "%1"),
+        ])
+        self.assertEqual(self.app.reader_back, "")
+        self.assertIsNotNone(self.app.routines_view)
+
+    def test_dead_reader_with_nothing_before_parks(self):
+        calls = self.tend(ReaderTmux(slot=replace(self.READER, dead=True)))
+        self.assertEqual(calls, self.parked() + [("select", "%1")])
+
+    def test_dead_reader_whose_session_has_gone_parks(self):
+        self.app.reader_back = KEY_A
+        calls = self.tend(ReaderTmux(slot=replace(self.READER, dead=True), held=None))
+        self.assertEqual(calls, self.parked() + [("select", "%1")])
+
+    def test_a_live_reader_is_left_alone(self):
+        self.assertEqual(self.tend(ReaderTmux(slot=self.READER)), [])
+
+    def test_opening_a_session_from_the_list_meanwhile_forgets_where_to_go_back(self):
+        self.app.reader_back = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        self.app.tmux = ReaderTmux(slot=self.READER)
+        sidebar.App.show(self.app, self.READER, KEY_A, "@5")
+        self.assertEqual(self.app.reader_back, "")
+        self.app.reader_back = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+        sidebar.App.park(self.app, self.READER)
+        self.assertEqual(self.app.reader_back, "")
+
+    def test_bar_shows_reader_keys_when_main_focused(self):
+        self.app.main_pane = self.READER
+        self.app.focused = False
+        self.assertEqual(self.app.bar_hints(), (sidebar.READER_HINT, "Esc back"))
+        self.assertEqual(sidebar.READER_HINT, "↑↓ scroll  g top  G end  Tab other session  Esc back to the list")
+        self.app.focused = True
+        self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
+
+    def test_narrow_treats_reader_like_viewer(self):
+        tmux = self.app.tmux = ReaderTmux(slot=self.READER)
+        sidebar_pane = Pane("%1", "@1", False, "sidebar", "", 40, 141, active=True)
+        self.app.main_pane = self.READER
+        self.app.tend_narrow(sidebar_pane, self.READER)
+        self.assertEqual(tmux.calls, self.parked())
+        tmux.calls.clear()
+        self.app.tend_narrow(replace(sidebar_pane, active=False), replace(self.READER, active=True))
+        self.assertTrue(self.app.slot_active)
+        self.assertEqual(tmux.calls, [])
+
+
 PHONE_WIDTH = 48
 HELP_2_10_0 = (
     ("→ Enter", "open the session and go to it"),

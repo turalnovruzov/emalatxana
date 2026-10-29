@@ -1,0 +1,10 @@
+{"type": "ai-title", "aiTitle": "Build TICKET-12"}
+{"type": "attachment", "timestamp": "2027-01-15T19:42:00.000Z", "isSidechain": false, "attachment": {"type": "environment"}}
+{"type": "user", "timestamp": "2027-01-15T19:42:01.000Z", "isSidechain": false, "entrypoint": "sdk-cli", "message": {"role": "user", "content": "Build TICKET-12.\nRun the tests when done."}}
+{"type": "user", "timestamp": "2027-01-15T19:42:02.000Z", "isSidechain": false, "isMeta": true, "message": {"role": "user", "content": "meta text that is not his"}}
+{"type": "assistant", "timestamp": "2027-01-15T19:42:05.000Z", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git status --short"}}]}}
+{"type": "user", "timestamp": "2027-01-15T19:42:06.000Z", "isSidechain": false, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "M file.txt"}]}}
+{"type": "assistant", "timestamp": "2027-01-15T19:42:10.000Z", "isSidechain": true, "message": {"role": "assistant", "content": [{"type": "text", "text": "subagent chatter"}]}}
+{"type": "assistant", "timestamp": "2027-01-15T19:42:30.000Z", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "make test"}}]}}
+{"type": "user", "timestamp": "2027-01-15T19:42:40.000Z", "isSidechain": false, "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": true, "content": "Exit code 1\n401 Unauthorized: token expired\nmake: *** [test] Error 1"}]}}
+{"type": "assistant", "timestamp": "2027-01-15T19:43:00.000Z", "isSidechain": false, "message": {"role": "assistant", "content": [{"type": "text", "text": "The tests failed with an authorization error, so I stopped."}]}}
