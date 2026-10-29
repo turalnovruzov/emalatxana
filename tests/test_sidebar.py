@@ -6607,6 +6607,7 @@ class NoticeWiring(AppCase):
         self.step(*[replace(s, state="done") for s in unnamed])
         self.assertEqual([n.id for n in self.pending()], ["b"])
 
+
 class NoticeForASessionOnScreen(AppCase):
     """A session shown in an attached slot but idle past AWAY_SECONDS still notifies, and lands read."""
 
