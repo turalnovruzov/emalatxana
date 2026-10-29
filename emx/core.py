@@ -5510,15 +5510,40 @@ class Entry:
 
 
 def history_add(history: list, entry: Entry, opened: dict) -> list:
-    """`history` with `entry` in, newest first, cut to `HISTORY_KEPT`. A session keeps every entry; one whose transition came before he last opened that session lands already read."""
+    """`history` with `entry` in, newest first, cut to `HISTORY_KEPT`. A session has at most one unread entry, its newest by `at` (notices are worded asynchronously and can land out of order): every other entry of that session turns read. An entry whose transition came before he last opened that session lands already read."""
     last_open = opened.get(entry.id)
     if last_open is not None and last_open >= entry.at:
         entry = replace(entry, read=True)
-    return sorted([*history, entry], key=lambda e: e.at, reverse=True)[:HISTORY_KEPT]
+    merged = sorted([*history, entry], key=lambda e: e.at, reverse=True)
+    newest_seen = False
+    out = []
+    for e in merged:
+        if e.id == entry.id:
+            if newest_seen and not e.read:
+                e = replace(e, read=True)
+            newest_seen = True
+        out.append(e)
+    return out[:HISTORY_KEPT]
 
 
 def history_read(history: list, sid: str) -> list:
     return [replace(e, read=True) if e.id == sid else e for e in history]
+
+
+UNREAD_DOT = "●"
+
+
+def unread_entries(history: list) -> list:
+    """The unread entries, one per session: the newest of each session, kept only when it is unread, in history order."""
+    seen = set()
+    out = []
+    for e in history:
+        if e.id in seen:
+            continue
+        seen.add(e.id)
+        if not e.read:
+            out.append(e)
+    return out
 
 
 def history_unread(history: list) -> int:

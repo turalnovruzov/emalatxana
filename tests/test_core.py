@@ -4880,7 +4880,32 @@ class History(unittest.TestCase):
         self.assertEqual(len(read), 3)
         self.assertEqual([(e.id, e.read) for e in read], [("s1", True), ("s2", False), ("s1", True)])
         self.assertEqual(core.history_unread(read), 1)
-        self.assertEqual(core.history_unread(history), 3)
+        self.assertEqual(core.history_unread(history), 2)
+
+    def test_a_newer_notice_reads_the_sessions_older_ones(self):
+        history = self.added(self.item("s1", 1), self.item("s1", 5), self.item("s2", 3))
+        self.assertEqual([(e.id, e.at) for e in history if not e.read], [("s1", 5), ("s2", 3)])
+        self.assertEqual(core.history_unread(history), 2)
+
+    def test_a_late_arriving_older_notice_lands_read_and_the_newer_stays_unread(self):
+        history = self.added(self.item("s1", 100), self.item("s1", 50))
+        self.assertEqual([(e.at, e.read) for e in history], [(100, False), (50, True)])
+        self.assertEqual([e.at for e in core.unread_entries(history)], [100])
+
+    def test_unread_entries_are_the_newest_unread_per_session_newest_first(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2, kind=core.NOTICE_NEEDS), self.item("s1", 3), self.item("s3", 0))
+        got = core.unread_entries(history)
+        self.assertEqual([(e.id, e.at, e.kind) for e in got],
+                         [("s1", 3, core.NOTICE_DONE), ("s2", 2, core.NOTICE_NEEDS), ("s3", 0, core.NOTICE_DONE)])
+
+    def test_unread_entries_skip_a_session_whose_newest_is_read(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        history = core.history_read(history, "s1")
+        self.assertEqual([e.id for e in core.unread_entries(history)], ["s2"])
+
+    def test_an_entry_from_before_the_last_open_still_lands_read(self):
+        history = self.added(self.item("s1", 5), opened={"s1": 10})
+        self.assertEqual(core.unread_entries(history), [])
 
     def test_history_prune_drops_a_session_gone_for_stale_after_misses_listings(self):
         history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
