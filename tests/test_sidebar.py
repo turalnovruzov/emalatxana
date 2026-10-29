@@ -9322,6 +9322,12 @@ class SettingsMenu(AppCase):
         self.assertFalse(any(line.startswith("favourite_folders = ") for line in self.config_lines()))
         self.assertEqual(core.favourite_folders(self.app.prefs), [])
 
+    def test_places_row_points_to_the_file(self):
+        self.go_to("Places")
+        self.press("\n")
+        self.assertEqual(self.app.notice, "Places are set in the file; e opens it.")
+        self.assertIsNone(self.app.settings["edit"])
+
     def test_a_folder_with_a_line_break_is_refused_and_adds_no_line(self):
         folder = os.path.realpath(tempfile.mkdtemp()) + "\nscheme = dark"
         os.makedirs(folder)

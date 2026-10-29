@@ -120,6 +120,8 @@ A line is `key = value`; a line starting with `#` is a comment, and `## Name` li
 | `update_check_seconds` | 5 or more | `600` | How often to check for a new version. |
 | `phone_port` | 1024 to 65535 | `8787` | The port of the phone page. Applies at the next start. |
 | `favourite_folders` | a folder, once per line | none | Starred folders for new sessions. |
+| `place` | a name, then `server <host>` and/or `user <login>`, once per line | none | Other places whose routines `R` shows. |
+| `place_user_command` | a command | `sudo -n -u` | The command that runs emx's reads as another user; the login follows it. |
 | `claude_command` | a command | `claude` | The command sessions start claude with. Applies at the next start. |
 | `remote_command` | a command | `emx` | emx's command on the server, for `emx remote`. |
 

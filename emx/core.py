@@ -2497,7 +2497,17 @@ def normalize_prefs(raw) -> dict:
         value = raw.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and not _check(SETTING_BY_KEY[key], str(value), "")[1]:
             prefs[key] = value
-    for key in ("claude_command", "remote_command"):
+    places = raw.get("place")
+    if isinstance(places, list):
+        kept, names = [], set()
+        for line in places:
+            place = parse_place(line)[0] if isinstance(line, str) and not has_control(line) else None
+            if place is not None and place.name not in names:
+                names.add(place.name)
+                kept.append(place_line(place))
+        if kept:
+            prefs["place"] = kept
+    for key in ("claude_command", "remote_command", "place_user_command"):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() and not has_control(text):
             prefs[key] = text.strip()
@@ -2581,6 +2591,51 @@ class Setting:
     next_start: bool = False
 
 
+@dataclass(frozen=True)
+class Place:
+    """Where routines are read: a server (None is this machine) and a login there (None is whoever emx runs as)."""
+    name: str
+    host: str | None = None
+    login: str | None = None
+
+
+PLACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PLACE_LOGIN = re.compile(r"[a-z_][a-z0-9_.-]*")
+PLACE_WORDS = ("server", "user")
+
+
+def parse_place(text: str) -> tuple:
+    """`(Place, "")` for `<name> [server <host>] [user <login>]` in either word order, else `(None, why)`."""
+    words = text.split()
+    if not words:
+        return None, "place needs a name"
+    name, rest = words[0], words[1:]
+    if PLACE_NAME.fullmatch(name) is None:
+        return None, f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+    found = {}
+    for i in range(0, len(rest), 2):
+        word = rest[i]
+        if word not in PLACE_WORDS:
+            return None, f'place has an unknown word "{word}"; use server <host> or user <login>'
+        if word in found:
+            return None, f"place says {word} twice"
+        if i + 1 >= len(rest):
+            return None, f"place {word} needs a {'host' if word == 'server' else 'login'}"
+        found[word] = rest[i + 1]
+    if not found:
+        return None, "place needs server <host> or user <login>"
+    host, login = found.get("server"), found.get("user")
+    if host is not None and remote_host(host) is None:
+        return None, f'place host "{host}" is not a host name from your SSH config'
+    if login is not None and PLACE_LOGIN.fullmatch(login) is None:
+        return None, f'place login "{login}" is not a login name'
+    return Place(name, host, login), ""
+
+
+def place_line(place: Place) -> str:
+    return " ".join([place.name, *(["server", place.host] if place.host else []), *(["user", place.login] if place.login else [])])
+
+
 SETTINGS = (
     Setting("side", "Panel", "Side", "choice", "right", "Which side of the window the panel sits on: left or right",
             "Which side of the window the panel sits on.", choices=SIDES, wide_only=True),
@@ -2602,6 +2657,12 @@ SETTINGS = (
             low=1024, high=65535, next_start=True),
     Setting("favourite_folders", "Folders", "Favourites", "folders", [], "Starred folders for new sessions, one per line",
             "Folders starred for new sessions."),
+    Setting("place", "Routines", "Places", "places", [],
+            "Other places whose routines R shows, one per line: a name, then server <host> and/or user <login>",
+            "Other places whose routines the Routines view shows."),
+    Setting("place_user_command", "Routines", "Run as another user", "text", "sudo -n -u",
+            "How a place's user is reached; the login name follows it",
+            "The command that runs emx's reads as another user; the login follows it."),
     Setting("claude_command", "Commands", "Claude command", "text", "claude",
             "The claude command sessions start with (takes effect at the next start)",
             "The command sessions start claude with.", next_start=True),
@@ -2692,7 +2753,7 @@ def _check(setting: Setting, text: str, home: str) -> tuple:
 
 def read_config(text: str, home: str) -> tuple:
     """`(values, lines, problems)`: every key's value (the default where its line is bad or missing), the first line of each key that has one, and a message per line emx can't use."""
-    values = {s.key: (list(s.default) if s.kind == "folders" else s.default) for s in SETTINGS}
+    values = {s.key: (list(s.default) if s.kind in ("folders", "places") else s.default) for s in SETTINGS}
     lines, problems = {}, []
     for number, raw in enumerate(_lines(text), 1):
         parts = _split_line(raw)
@@ -2713,6 +2774,16 @@ def read_config(text: str, home: str) -> tuple:
                 if folder not in values[key]:
                     values[key].append(folder)
             continue
+        if setting.kind == "places":
+            lines.setdefault(key, number)
+            place, why = parse_place(value)
+            if place is None:
+                problems.append(f"line {number}: {why}")
+            elif any(parse_place(have)[0].name == place.name for have in values[key]):
+                problems.append(f'line {number}: place "{place.name}" is already set')
+            else:
+                values[key].append(place_line(place))
+            continue
         if key in lines:
             problems.append(f"line {number}: {key} is already set on line {lines[key]}")
             continue
@@ -2728,6 +2799,8 @@ def read_config(text: str, home: str) -> tuple:
 def _setting_lines(setting: Setting, value, home: str) -> list:
     if setting.kind == "folders":
         return [f"{setting.key} = {tilde_path(folder, home)}" for folder in value]
+    if setting.kind == "places":
+        return [f"{setting.key} = {line}" for line in value]
     return [f"{setting.key} = {value}"]
 
 
@@ -2791,6 +2864,26 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
     return _insert_under_section(out, setting, new, last) if new else out
 
 
+def _write_places(lines: list, setting: Setting, wanted: list) -> list:
+    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), drops the rest, appends what is new."""
+    out, present, last = [], set(), None
+    for raw in lines:
+        parts = _split_line(raw)
+        if parts and parts[0] == setting.key and parts[1]:
+            place = parse_place(parts[1])[0]
+            if place is not None:
+                line = place_line(place)
+                if line not in wanted:
+                    continue
+                present.add(line)
+            out.append(raw)
+            last = len(out) - 1
+        else:
+            out.append(raw)
+    new = [f"{setting.key} = {line}" for line in wanted if line not in present]
+    return _insert_under_section(out, setting, new, last) if new else out
+
+
 def write_config_text(text: str, changes: Mapping, home: str) -> str:
     """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. Raises OSError for a value that would break a line."""
     for key, value in changes.items():
@@ -2802,6 +2895,8 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
         lines = _lines(text)
         if setting.kind == "folders":
             lines = _write_favourites(lines, setting, changes[setting.key], home)
+        elif setting.kind == "places":
+            lines = _write_places(lines, setting, changes[setting.key])
         else:
             lines = _write_scalar(lines, setting, changes[setting.key])
         text = "".join(lines)
@@ -3018,6 +3113,8 @@ def shown_value(setting: Setting, prefs: Mapping, selected: bool) -> str:
         return f"{value // 60}m" if value % 60 == 0 else f"{value}s"
     if setting.kind == "folders":
         return f"{len(value)} ›"
+    if setting.kind == "places":
+        return str(len(value))
     return str(value)
 
 

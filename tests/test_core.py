@@ -1488,7 +1488,7 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(lines[:len(want)], want)
         for setting in core.SETTINGS:
             above = lines.index(f"# {setting.comment}")
-            if setting.kind != "folders":
+            if setting.kind not in ("folders", "places"):
                 self.assertTrue(lines[above + 1].startswith(setting.key + " = "))
 
     def test_comments_and_sections_are_skipped(self):
@@ -1525,6 +1525,60 @@ class ConfigFile(unittest.TestCase):
         values, lines, problems = core.read_config(text, CFG_HOME)
         self.assertEqual(values["favourite_folders"], [CFG_HOME + "/a", CFG_HOME + "/b"])
         self.assertEqual((lines["favourite_folders"], problems), (1, []))
+
+    def test_bad_place_lines_are_problems(self):
+        text = ("place = worker user bot\n"
+                "place = lonely\n"
+                "place = a server -oProxyCommand=x\n"
+                "place = b user Root\n"
+                "place = worker server srv2\n"
+                "place = box-2 server srv2 user bot\n")
+        values, lines, problems = core.read_config(text, CFG_HOME)
+        self.assertEqual(values["place"], ["worker user bot", "box-2 server srv2 user bot"])
+        self.assertEqual([p.split(":")[0] for p in problems], ["line 2", "line 3", "line 4", "line 5"])
+        self.assertEqual(problems[0], "line 2: place needs server <host> or user <login>")
+        self.assertIn('"worker" is already set', problems[3])
+        self.assertEqual(lines["place"], 1)
+
+    def test_no_place_lines_means_this_user_only(self):
+        from emx import places
+
+        self.assertEqual(places.from_prefs(defaults()), [places.HERE])
+        self.assertEqual(places.from_prefs(core.read_config("", CFG_HOME)[0]), [places.HERE])
+
+    def test_place_lines_round_trip(self):
+        text = BOARD + "# my note\nplace = worker   user bot\nfavourite_folders = ~/a\n"
+        self.assertEqual(core.read_config(text, CFG_HOME)[0]["place"], ["worker user bot"])
+        new = core.write_config_text(text, {"place": ["worker user bot", "far server srv2 user bot"]}, CFG_HOME)
+        self.assertTrue(new.startswith(text))
+        values, _, problems = core.read_config(new, CFG_HOME)
+        self.assertEqual((values["place"], problems), (["worker user bot", "far server srv2 user bot"], []))
+        gone = core.write_config_text(new, {"place": ["far server srv2 user bot"]}, CFG_HOME)
+        self.assertNotIn("place = worker", gone)
+        self.assertEqual(core.read_config(gone, CFG_HOME)[0]["place"], ["far server srv2 user bot"])
+        self.assertEqual([line for line in new.splitlines() if "place" not in line],
+                         [line for line in gone.splitlines() if "place" not in line])
+
+    def test_a_place_the_menu_keeps_survives_a_save_and_load(self):
+        self.write_config(BOARD + "place = worker user bot\n")
+        prefs = core.load_prefs(self.files)
+        self.assertEqual(prefs["place"], ["worker user bot"])
+        before = self.config_text()
+        core.save_prefs(self.files, {**prefs, "pinned": ["a"]})
+        self.assertEqual(self.config_text(), before)
+
+    def test_places_shown_as_count(self):
+        by = core.SETTING_BY_KEY
+        self.assertEqual(core.shown_value(by["place"], {"place": ["a user b", "c user d"]}, False), "2")
+        self.assertEqual(core.shown_value(by["place"], {}, True), "0")
+        self.assertEqual(core.shown_value(by["place_user_command"], {}, False), "sudo -n -u")
+
+    def test_the_template_has_a_routines_section(self):
+        template = core.config_template(defaults(), CFG_HOME)
+        at = template.index("## Routines")
+        self.assertIn("# Other places whose routines R shows", template[at:])
+        self.assertIn("# How a place's user is reached", template[at:])
+        self.assertIn("place_user_command = sudo -n -u", template[at:])
 
     def test_a_write_changes_only_that_line(self):
         import difflib
@@ -1786,7 +1840,7 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(wide, [s.key for s in core.SETTINGS])
         self.assertEqual([k for k in wide if k not in narrow], ["side", "panel_width"])
         heads = [r[1] for r in core.settings_rows(True) if r[0] == "head"]
-        self.assertEqual(heads, ["Panel", "Notices", "Look", "Updates", "Phone", "Folders", "Commands"])
+        self.assertEqual(heads, ["Panel", "Notices", "Look", "Updates", "Phone", "Folders", "Routines", "Commands"])
         self.assertEqual(core.settings_rows(False)[0], ("head", "Panel"))
 
     def test_cycle_wraps_choices_and_steps_width(self):

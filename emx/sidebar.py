@@ -3608,6 +3608,8 @@ class App:
             self.settings_change(setting, 1)
         elif setting.kind == "folders":
             self.settings["folders"] = 0
+        elif setting.kind == "places":
+            self.say("Places are set in the file; e opens it.")
         else:
             current = self.panel_width() if setting.key == "panel_width" else self.prefs.get(setting.key, setting.default)
             self.settings["edit"] = {"setting": setting, "label": setting.label, "text": str(current), "hint": ""}
