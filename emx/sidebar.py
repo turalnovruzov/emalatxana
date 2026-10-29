@@ -4658,6 +4658,8 @@ class App:
         now, wall = time.monotonic(), time.time()
         for session in events:
             if not core.in_front_any(session.id, views, wall):
+                if core.shown_any(session.id, views):
+                    self.opened[session.id] = now
                 self.poller.notices.add(core.Notice(session.id, core.category(session), session.name, session.cwd, now, session.named))
 
     def take_notices(self) -> None:

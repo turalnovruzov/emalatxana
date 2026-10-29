@@ -6607,6 +6607,57 @@ class NoticeWiring(AppCase):
         self.step(*[replace(s, state="done") for s in unnamed])
         self.assertEqual([n.id for n in self.pending()], ["b"])
 
+
+class NoticeForASessionOnScreen(AppCase):
+    """A session shown in an attached slot but idle past AWAY_SECONDS still notifies, and lands read."""
+
+    def listing(self, *sessions):
+        self.poll(*sessions)
+        self.app.refresh()
+        notices = self.app.poller.notices
+        notices.want(sessions)
+        notices.pending = [replace(n, at=n.at - core.NOTICE_SETTLE_SECONDS) for n in notices.pending]
+        with mock.patch.object(sidebar, "announce", lambda *args: (None, "no haiku")), \
+                mock.patch.object(sidebar, "summary_scratch", lambda: "/tmp/emx-test-scratch"):
+            while self.app.poller.notices.step():
+                pass
+        self.app.take_notices()
+
+    answered = core.Transcript(prompt="Do it", reply="Done.", reply_line="Done.", answered=False, latest="reply")
+
+    def stopped(self, sid):
+        return replace(session(sid, "/p/alpha", "done"), reply="Done.", stop_key="k1", asking=False)
+
+    def finish(self, shown):
+        self.app.poller.transcripts.found = {"a": self.answered, "b": self.answered}
+        idle = (1, "1", "%2", core.AWAY_SECONDS + 1.0)
+        self.app.main_pane = Pane("%2", "@1", False, "viewer", "", 100, 141, view=shown)
+        self.app.tmux = ClientTmux(idle, shows=shown)
+        self.listing(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.listing(session("a", "/p/alpha", "working"), session("b", "/p/alpha", "working"))
+        self.listing(self.stopped("a"), self.stopped("b"))
+
+    def test_the_shown_session_notifies_but_lands_read_with_no_dot_or_box_line(self):
+        self.finish("a")
+        self.assertEqual({e.id: e.read for e in self.app.history}, {"a": True, "b": False})
+        self.assertEqual([i[0] for i in self.app.unread_items()], ["b"])
+        scr = AttrScr(20, 60)
+        self.app.scr, self.app.palette = scr, TonePalette()
+        self.app.draw()
+        self.assertEqual(len([d for d in scr.drawn if d[2] == core.UNREAD_DOT and d[1] > 4]), 1)
+
+    def test_a_newer_notice_for_the_session_still_on_screen_lands_read_too(self):
+        self.finish("a")
+        self.app.history = []
+        self.listing(session("a", "/p/alpha", "working"))
+        self.listing(replace(self.stopped("a"), stop_key="k2"))
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("a", True)])
+
+    def test_a_session_not_shown_lands_unread(self):
+        self.finish("other")
+        self.assertEqual({e.id: e.read for e in self.app.history}, {"a": False, "b": False})
+
+
 class NoticesWaitForTheVerdict(AppCase):
     """A stop Haiku reads as needing him is never announced as done, in either mode."""
 
