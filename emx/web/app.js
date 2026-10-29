@@ -778,7 +778,13 @@ function renderPlaces(answer) {
   routinesPlace = Math.max(0, Math.min(routinesPlace, answer.places.length - 1));
   placeChips(answer);
   if (answer.error) box.append(el("p", "empty tone-error", answer.error));
-  if (answer.problems) box.append(el("p", "problems tone-error", answer.problems));
+  if (answer.problems) {
+    const cut = answer.problems.indexOf(" ·");
+    const line = el("p", "problems muted");
+    line.append(el("span", "tone-error", cut < 0 ? answer.problems : answer.problems.slice(0, cut)));
+    if (cut >= 0) line.append(answer.problems.slice(cut));
+    box.append(line);
+  }
   const place = answer.places[routinesPlace];
   if (!place) return;
   if (place.error) box.append(el("p", "empty tone-error", place.error));
@@ -843,9 +849,9 @@ function renderRun(answer) {
       if (space >= 0) card.append(el("div", "small muted", step.text.slice(space + 1)));
       box.append(card);
     } else if (step.kind === "error") {
-      box.append(el("div", "small tone-error step-error", step.text));
+      box.append(el("div", "small tone-error step-error", step.text.replace(/^! /, "")));
     } else {
-      box.append(el("p", "step-text" + (step.kind === "cut" ? " muted" : ""), step.text));
+      box.append(el("p", "step-text" + (step.kind === "cut" ? " muted" : ""), step.kind === "prompt" ? step.text.replace(/^Prompt: /, "") : step.text));
     }
   }
   const end = $("reader-end");

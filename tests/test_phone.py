@@ -1144,7 +1144,7 @@ class Page(ServerCase):
         css, response = self.text("/tokens.css")
         self.assertTrue(response.getheader("Content-Type").startswith("text/css"))
         for want in ("--needs:#ffd75f", "--done:#87d787", "--idle:#8787af", "--stopped:#626262", "--muted:#8a8a8a",
-                     "--accent:#5fafff", "--error:#ff5f5f", "--copper:#d7875f", "--ground:#1c1c1c", "--selected:#303030"):
+                     "--accent:#5fafff", "--error:#ff5f5f", "--copper:#d7875f", "--ground:#1c1c1c", "--selected:#303030", "--bar:#005f87"):
             self.assertIn(want, css)
 
     def test_the_stylesheet_has_no_colour_literal_of_its_own(self):
@@ -1154,6 +1154,19 @@ class Page(ServerCase):
         used = set(re.findall(r"var\(--([a-z]+)\)", css))
         defined = set(re.findall(r"--([a-z]+):", self.text("/tokens.css")[0]))
         self.assertLessEqual(used, defined)
+
+    def test_place_chips_wrap_and_the_selected_one_takes_the_bar_colour(self):
+        css, _ = self.text("/app.css")
+        flat = re.sub(r"\s+", " ", css)
+        self.assertRegex(flat, r"\.chips \{[^}]*flex-wrap: wrap")
+        self.assertNotRegex(flat, r"\.chips \{[^}]*overflow-x")
+        self.assertRegex(flat, r"\.chip\.selected \{[^}]*background: var\(--bar\)")
+
+    def test_the_phone_drops_the_panels_error_and_prompt_marks_and_tones_only_the_problem_count(self):
+        js, _ = self.text("/app.js")
+        self.assertIn('replace(/^! /, "")', js)
+        self.assertIn('replace(/^Prompt: /, "")', js)
+        self.assertIn('el("p", "problems muted")', js)
 
     def test_the_stopped_row_has_no_detail_line_and_the_close_window_matches_the_panel(self):
         css, _ = self.text("/app.css")

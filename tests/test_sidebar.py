@@ -7705,10 +7705,10 @@ class Routines(AppCase):
         view = core.RoutineView("backup-nightly", "passed", "done", events, None, sessions=((), (), ()))
         self.answer = [core.PlaceView(HERE_PLACE, (view,), None)]
         drawn = self.open_view()
-        self.assertIn("  07:10 ✓  no Claude session", drawn)
+        self.assertIn("  07:10 ✓", drawn)
         self.app.handle_key(curses.KEY_DOWN)
         self.assertEqual(self.app.routines_run(), (0, 2))
-        self.assertIn("  05:30 ✗1  no Claude session", self.drawn())
+        self.assertIn("  05:30 ✗1", self.drawn())
         self.app.handle_key("j")
         self.assertEqual(self.app.routines_run(), (0, 2))
         self.app.handle_key("k")
@@ -7739,9 +7739,21 @@ class Routines(AppCase):
         view = timer_view(kinds=((5400, core.PASSED, 0), (5400 + 86400, core.PASSED, 0)))
         self.answer = [core.PlaceView(HERE_PLACE, (view,), None)]
         drawn = self.open_view()
-        self.assertIn("  06:30 ✓  no Claude session", drawn)
-        self.assertEqual(drawn.count("  no Claude session"), 1)
+        self.assertIn("  06:30 ✓", drawn)
+        self.assertEqual(drawn.count("  no Claude session · a plain script"), 1)
+        self.assertEqual(sum("no Claude session" in t for t in drawn), 1)
         self.assertNotIn("↵ read", " ".join(drawn))
+
+    def test_a_long_run_label_is_shortened_before_the_read_hint_is_cut(self):
+        title = "TICKET-12 a very long title that cannot fit"
+        events = ((ROUTINES_NOW - 3000, core.PASSED, ""),)
+        one = core.RunSession("long-id", title, ROUTINES_NOW - 3000, ROUTINES_NOW - 2900, core.FINISHED)
+        view = core.RoutineView("worker", "passed", "done", events, None, kind="service", sessions=((one,),))
+        for width, hint in ((40, "1 session  ↵ read"), (28, "↵ read")):
+            row = [r[0] for r in core.routines_rows([core.PlaceView(HERE_PLACE, (view,), None)], 0, (0, 0), width, ROUTINES_NOW) if r[2] == "selected"][0]
+            self.assertTrue(row.endswith(hint), row)
+            self.assertIn("…", row)
+            self.assertLessEqual(len(row), width)
 
     def test_unreachable_place_shows_one_error_line(self):
         line = "Can't reach srv2: Connection refused"

@@ -288,6 +288,20 @@ class ReaderKeys(unittest.TestCase):
         view.key(curses.KEY_DOWN)
         self.assertTrue(view.pinned)
 
+    def test_header_names_the_shown_session_and_never_repeats_a_title(self):
+        def titled(name):
+            return self.fetcher.texts[self.A] + "\n" + json.dumps({"type": "custom-title", "customTitle": name}) + "\n"
+
+        view, _ = self.make(sids=[self.A], texts={self.A: titled("plan")})
+        self.assertEqual(view.header(), ("worker · 19:42 run", "read-only · plan"))
+        view.label = "worker · 19:42 run · plan"
+        self.assertEqual(view.header(), ("worker · 19:42 run · plan", "read-only"))
+        view.sids = [self.A, self.B]
+        view.at = 0
+        self.assertEqual(view.header()[1], "read-only · session 1 of 2")
+        view.label = "worker · 19:42 run · build"
+        self.assertEqual(view.header()[1], "read-only · session 1 of 2 (plan)")
+
     def test_tab_switches_session_and_header_says_2_of_2(self):
         view, scr = self.make()
         self.assertIn("session 2 of 2", scr.lines()[0])

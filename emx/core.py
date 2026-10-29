@@ -2786,6 +2786,9 @@ def routines_rows(place_views, at: int, selected, width: int, now: float, local:
     return rows
 
 
+RUN_LABEL_MIN = 4
+
+
 def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, local: Callable, reading: str) -> list:
     tag = fit(view.tag, width)
     name = fit(view.name, max(0, width - display_width(tag) - 1))
@@ -2796,6 +2799,8 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
     if view.error:
         rows += [("  " + line, "error", "") for line in wrap_words(view.error, max(1, width - 2))]
     pending = []
+    real = [i for i, (_, kind, _) in enumerate(view.events) if kind != MISSED]
+    plain_script = view.kind == "timer" and bool(real) and not any(i < len(view.sessions) and view.sessions[i] for i in real)
 
     def flush():
         for line in wrap_words("  ".join(pending), max(1, width - 2)) if pending else ():
@@ -2815,8 +2820,18 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
                 continue
             flush()
             found = view.sessions[ei] if ei < len(view.sessions) else ()
-            tail = f"{len(found)} session{'' if len(found) == 1 else 's'}  ↵ read" if found else "no Claude session"
-            rows.append(("  " + "  ".join(part for part in (stamp, run_label(view, ei), tail) if part), "plain", "selected"))
+            lead = f"  {stamp}  "
+            if found:
+                label, count = run_label(view, ei), f"{len(found)} session{'' if len(found) == 1 else 's'}  ↵ read"
+                if label and display_width(lead) + display_width(label) + 2 + display_width(count) > width:
+                    label = fit(label, max(RUN_LABEL_MIN, width - display_width(lead) - display_width(count) - 2))
+                    if display_width(lead) + display_width(label) + 2 + display_width(count) > width:
+                        count = "↵ read"
+                        label = fit(run_label(view, ei), max(RUN_LABEL_MIN, width - display_width(lead) - display_width(count) - 2))
+                row = lead + "  ".join(part for part in (label, count) if part)
+            else:
+                row = "  " + "  ".join(part for part in (stamp, run_label(view, ei), "" if plain_script else "no Claude session") if part)
+            rows.append((row, "plain", "selected"))
             if len(found) > 1:
                 names = [f"{one.title or f'session {n}'} {SESSION_MARKS[one.ending]}" + (f" {SESSION_OPEN}" if one.id == reading else "")
                          for n, one in enumerate(found, start=1)]
@@ -2828,9 +2843,8 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
         rows.append(("  " + upcoming, "muted", ""))
     elif view.note:
         rows.append(("  " + view.note, "muted", ""))
-    real = [i for i, (_, kind, _) in enumerate(view.events) if kind != MISSED]
-    if view.kind == "timer" and real and not any(i < len(view.sessions) and view.sessions[i] for i in real):
-        rows.append(("  no Claude session", "muted", ""))
+    if plain_script:
+        rows.append(("  no Claude session · a plain script", "muted", ""))
     return [(fit(text, width), tone, kind) for text, tone, kind in rows]
 
 

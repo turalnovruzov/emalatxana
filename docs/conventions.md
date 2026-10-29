@@ -431,6 +431,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: ``"# Panel width in columns, 16 to 500 (< and > change it too)": "# Panel width in columns, 16 to 500 (dragging the pane border changes it too)"``
 4. **Gotcha**: the match is the whole line minus its ending, with no strip, so an indented or edited copy is his and stays; the refresh runs only when there are changes, and `test_no_current_comment_is_an_old_one` guards the map.
 
+### Anything emx reads at a place goes through `places.run`, and Claude's files there only through the probe
+
+1. **Rule**: anything emx reads at a place goes through `places.run` (it never raises; the ssh builders plus `place_user_command`). Claude's files there are read only by the self-contained `emx/probe.py`, sent as `python3 -I -c`.
+2. **Why**: another user or server can't import emx, and the probe is the one audited allowlist of what is opened.
+3. **Minimal example**: ``places.run(place, probe.command("read", sid), prefs, timeout=READER_TIMEOUT)``
+4. **Gotcha**: the probe must import nothing from emx. A new read at a place is a new probe verb, covered by `test_only_session_files_are_opened`.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

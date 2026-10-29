@@ -205,7 +205,7 @@ STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 MANIFEST_TYPE = "application/manifest+json; charset=utf-8"
-CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252}
+CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252, "bar": core.SCHEME_BAR[core.DARK]["focused"]}
 
 
 def tokens_css() -> str:

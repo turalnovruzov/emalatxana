@@ -67,6 +67,8 @@ class Reader:
     def header(self) -> tuple:
         n = len(self.sids)
         title = self.docs[self.sid].title if self.sid in self.docs else ""
+        if title and title in self.label:
+            title = ""
         note = "read-only"
         if n > 1:
             note += f" · session {self.at + 1} of {n}" + (f" ({title})" if title else "")
