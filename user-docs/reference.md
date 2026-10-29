@@ -46,7 +46,7 @@ Every command, key and setting. Each is written as a code span so a test can che
 | `^r` | Rename, via `/rename` in the session; `Tab` there suggests a name. |
 | `c` | Settings: side, width, view, mode, colours, updates and more, in a list that edits the config file; `c` or `Esc` closes it. |
 | `N` | Notifications: the last 20; `Enter` opens one. |
-| `R` | Routines: what ran in the past 24 hours; `R` or `Esc` goes back. |
+| `R` | Routines of every place, today and yesterday; `R` or `Esc` goes back. Keys below. |
 | `h` | Stop the voice now (voice mode). |
 | `^\` | Jump to the session and back. |
 | `^q` | Hide the panel. |
@@ -78,6 +78,29 @@ On a screen narrower than 70 columns (`emx docs phone`) the panel and the sessio
 | `Esc` `c` | Close the menu (`Esc` in Favourites goes back to the list). |
 
 Every change is saved into the config file.
+
+## In the Routines view
+
+Opened with `R`. Details in `emx docs routines`.
+
+| Key | What it does |
+| --- | --- |
+| `Tab` `Shift+Tab` | Next place, the one before. |
+| `↑↓` `j` `k` | Select a run. |
+| `Enter` | Read the selected run's Claude session in the big pane. |
+| `R` `Esc` | Back to the session list. |
+
+## In the reader
+
+Opened with `Enter` on a run; it only reads.
+
+| Key | What it does |
+| --- | --- |
+| `↑↓` `j` `k` | Scroll a line. |
+| `PgUp` `PgDn` | Scroll a page. |
+| `g` `G` | Top, end. |
+| `Tab` | The run's other session. |
+| `Esc` | Back to the list. |
 
 ## Settings
 
@@ -120,6 +143,8 @@ A line is `key = value`; a line starting with `#` is a comment, and `## Name` li
 | `update_check_seconds` | 5 or more | `600` | How often to check for a new version. |
 | `phone_port` | 1024 to 65535 | `8787` | The port of the phone page. Applies at the next start. |
 | `favourite_folders` | a folder, once per line | none | Starred folders for new sessions. |
+| `place` | a name, then `server <host>` and/or `user <login>`, once per line | none | Other places whose routines `R` shows. |
+| `place_user_command` | a command | `sudo -n -u` | The command that runs emx's reads as another user; the login follows it. |
 | `claude_command` | a command | `claude` | The command sessions start claude with. Applies at the next start. |
 | `remote_command` | a command | `emx` | emx's command on the server, for `emx remote`. |
 

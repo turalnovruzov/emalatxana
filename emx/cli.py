@@ -41,6 +41,7 @@ emx follow is internal too: it streams the notices of this emx to stdout, for a 
 emx copied <socket> is internal too: what every copy in copy mode runs; a copy made in a view hands it on to that terminal's clipboard.
 emx paste <socket> <relay file> <pane> <session id> is internal too: what Ctrl+V in a session runs on a server; it asks the laptop on emx remote for its clipboard image.
 emx paste-image <pane> <session id> <id> is internal too: what emx remote runs on the server to save that image and paste its path.
+emx read <socket> <place> <label> <session id>... is internal too: what the Routines view runs in the main pane to show a run's session.
 emx open <session id> is internal too: what a click on one of emx's notifications runs; it prints the bundle id
 of the terminal emx runs in, for the click to bring forward, and with no emx window open it opens emx in a new
 terminal window with that session.)
@@ -833,6 +834,13 @@ def main(argv: list) -> int:
         return paste_check(argv[1:])
     if argv[0] == "paste-image" and len(argv) == 4:
         return paste_image(argv[1:])
+    if argv[0] == "read" and len(argv) >= 5:
+        if private_socket(argv[1]) is None:
+            print(SOCKET_REFUSAL, file=sys.stderr)
+            return 2
+        from emx.reader import run
+
+        return run(argv[1], argv[2], argv[3], argv[4:])
     if argv[0] == "blank":
         return blank(argv[1] if len(argv) > 1 else "")
     print(USAGE, file=sys.stderr)

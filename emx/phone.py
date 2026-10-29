@@ -23,7 +23,7 @@ from typing import Callable, NamedTuple
 from urllib.parse import parse_qs
 
 import emx
-from emx import core, routines, sidebar
+from emx import core, places, reader, routines, sidebar
 from emx.cli import read_changelog
 from emx.engine import AGENT, bridge_link
 from emx.tmux import TmuxError
@@ -205,7 +205,7 @@ STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 MANIFEST_TYPE = "application/manifest+json; charset=utf-8"
-CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252}
+CHROME_INDEX = {"ground": 234, "raised": 235, "selected": 236, "border": 238, "plain": 252, "bar": core.SCHEME_BAR[core.DARK]["focused"]}
 
 
 def tokens_css() -> str:
@@ -232,6 +232,10 @@ ROUTINES_WAIT_SECONDS = 10
 STILL_FRAME = 2
 FIND_MAX = 200
 PEEK_TEXT_MAX = 4000
+RUN_STEPS_MAX = 1000
+RUN_GONE = "That run isn't listed any more."
+NOT_A_PLACE = "That is not a place in the config."
+BAD_RUN = "That is not a session of a run."
 GROUP_MAX = 200
 NAME_OFFERED_TEXT_MAX = 200
 NOT_A_SESSION = "That is not a session of emx's."
@@ -287,13 +291,14 @@ class PanelSources(NamedTuple):
 class PhoneApi:
     """What the page asks for and does, through emx's own listing, close and rename. It decides nothing about what a state means."""
 
-    def __init__(self, engine, home: str, state, prefs_files, read_routines: Callable = routines.read,
+    def __init__(self, engine, home: str, state, prefs_files, read_routines: Callable = routines.read_places,
                  wait_running: Callable = sidebar.wait_until_running, sources: PanelSources = PanelSources(),
                  namer: Callable = sidebar.Namer, closer: Callable = sidebar.Closer, changelog: Callable = read_changelog):
         self.engine, self.home, self.state, self.prefs_files = engine, home, Path(state), prefs_files
         self.sources, self.namer, self.closer, self.changelog = sources, namer, closer, changelog
         self.name_lock = threading.Lock()
-        self.routines = RoutinesCache(read_routines)
+        self.read_routines = read_routines
+        self.routines = RoutinesCache(self.read_places)
         self.wait_running = wait_running
         self.action_lock = threading.Lock()
         self.count_lock = threading.Lock()
@@ -324,6 +329,8 @@ class PhoneApi:
             return 200, self.routines_view()
         if path == "/api/peek":
             return self.peek(first("id"))
+        if path == "/api/run":
+            return self.run(first("place"), first("id"))
         if path == "/api/notifications":
             return 200, self.notifications()
         if path == "/api/whats-new":
@@ -679,16 +686,109 @@ class PhoneApi:
             "major": major, "major_line": core.major_line(major) if major else "",
         }
 
+    def read_places(self, now: float) -> tuple:
+        prefs = core.load_prefs(self.prefs_files)
+        sessions, _ = self.engine.list_sessions()
+        return self.read_routines(now, places.from_prefs(prefs), prefs, frozenset(s.id for s in sessions or ())), None
+
     def routines_view(self) -> dict:
-        views, error = self.routines.get()
+        place_views, error = self.routines.get()
         now, out = time.time(), []
-        for view in views or []:
-            runs, upcoming = core.routine_words(view, now)
+        for place_view in place_views or []:
             out.append({
-                "name": view.name, "tag": view.tag, "tone": view.tone, "error": view.error,
-                "runs": runs, "next": upcoming or view.note,
+                "name": place_view.place.name, "error": place_view.error,
+                "problem": any(core.routine_problem(view) for view in place_view.views),
+                "routines": [self.routine_json(view, now) for view in place_view.views],
             })
-        return {"routines": out, "error": error, "title": sidebar.ROUTINES_TITLE, "none": sidebar.ROUTINES_NONE}
+        return {
+            "places": out, "error": error, "problems": core.problems_line(place_views or []),
+            "title": sidebar.ROUTINES_TITLE, "none": sidebar.ROUTINES_NONE,
+        }
+
+    @staticmethod
+    def routine_json(view: core.RoutineView, now: float) -> dict:
+        days = []
+        for day in ("today", "yesterday"):
+            runs = []
+            for i, (at, kind, status) in enumerate(view.events):
+                if core.day_word(at, now) != day:
+                    continue
+                found = view.sessions[i] if i < len(view.sessions) else ()
+                runs.append({
+                    "at": time.strftime("%H:%M", time.localtime(at)),
+                    "word": core.RUN_MARKS[kind] + (status if kind == core.FAILED else ""),
+                    "tone": core.EVENT_TONES[kind], "label": core.run_label(view, i),
+                    "problem": kind in (core.FAILED, core.ERRORED, core.LIMIT),
+                    "sessions": [{"id": one.id, "title": one.title, "ending": core.END_WORDS.get(one.ending, "working")}
+                                 for one in found],
+                })
+            if runs:
+                days.append({"day": day.capitalize(), "runs": runs})
+        _, upcoming = core.routine_words(view, now)
+        return {
+            "name": view.name, "tag": view.tag, "tone": view.tone, "detail": view.detail, "error": view.error,
+            "next": upcoming or view.note, "days": days,
+            "plain": view.kind == "timer" and not any(run["sessions"] for day in days for run in day["runs"]) and bool(days),
+        }
+
+    def listed_run(self, place_name: str, sid: str):
+        """(routine, event index) of the run in the latest answer for the place that has session `sid`, else None."""
+        place_views, _ = self.routines.get()
+        for place_view in place_views or []:
+            if place_view.place.name != place_name:
+                continue
+            for view in place_view.views:
+                for i, found in enumerate(view.sessions):
+                    if any(one.id == sid for one in found):
+                        return view, i
+        return None
+
+    def run(self, place_name: str, sid: str) -> tuple:
+        place = places.find(core.load_prefs(self.prefs_files), place_name)
+        if place is None:
+            return 400, {"ok": False, "message": NOT_A_PLACE}
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": BAD_RUN}
+        found = self.listed_run(place_name, sid)
+        if found is None:
+            return 200, {"ok": False, "message": RUN_GONE}
+        view, i = found
+        fetch, _ = reader.runner(place, core.load_prefs(self.prefs_files))
+        text, error = fetch(sid)
+        if error:
+            return 200, {"ok": False, "message": error}
+        now = time.time()
+        steps = core.reader_steps(text)
+        ending = core.reader_ending(text, now)
+        cut = lambda value: value if len(value) <= PEEK_TEXT_MAX else value[:PEEK_TEXT_MAX - 1] + "…"
+        shown = steps[-RUN_STEPS_MAX:]
+        title = f"{view.name} · {time.strftime('%H:%M', time.localtime(view.events[i][0]))}"
+        label = core.run_label(view, i)
+        order = [one.id for one in view.sessions[i]]
+        sub = "Read-only"
+        if len(order) > 1:
+            sub += f" · session {order.index(sid) + 1} of {len(order)}"
+        own = core.reader_title(text)
+        if own:
+            sub += f" · {own}"
+        end = {"text": "", "tone": "plain"}
+        if ending is not None:
+            kind, at, detail = ending
+            stamp = time.strftime("%H:%M", time.localtime(at))
+            if kind == core.GOING:
+                end = {"text": f"Still going · {stamp}", "tone": "plain"}
+            else:
+                end = {"text": f"Stopped here · {stamp} · {core.end_word(kind, detail)}", "tone": "needs"}
+        return 200, {
+            "ok": True, "title": title + (f" · {label}" if label else ""), "sub": sub,
+            "earlier": len(steps) - len(shown), "end": end, "sessions": order,
+            "live": ending is not None and ending[0] == core.GOING, "remote": place.host is not None,
+            "steps": [{
+                "at": "" if step.at_ms is None else time.strftime("%H:%M", time.localtime(step.at_ms / 1000)),
+                "kind": step.kind, "mark": step.mark, "tone": step.tone,
+                "text": cut(step.text.removeprefix("▸ ").removeprefix("Claude: ")),
+            } for step in shown],
+        }
 
 
 class PhoneServer(ThreadingHTTPServer):

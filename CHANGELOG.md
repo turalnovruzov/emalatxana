@@ -2,6 +2,17 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.22.0 — 2026-10-28
+
+- Routines now cover every place you list. A place is a machine and a user on it: this machine as another user, another server as you, or another server as another user there. Add one with a line in the config file, for example `place = worker user bot` or `place = far server srv2 user bot`; moving a routine to another server is changing that one line. `place_user_command` (default `sudo -n -u`) sets how another user is reached. `this user` is always first.
+- `Tab` in the Routines view goes to the next place, and `Shift+Tab` to the one before. A place that can't be reached shows one red line, and the others still show.
+- A line at the top, `⚠ 1 failed · worker, 19:42`, counts the routines whose latest run failed or hit the usage limit, in every place, whichever one you are on.
+- The view now shows today and yesterday instead of the past 24 hours, and its title says `Routines · past 2 days`.
+- A long-running service you made that starts Claude sessions is a routine too; each stretch of sessions is a run, and its tag says whether it is working, finished, failed or waiting on the usage limit.
+- `↑↓` selects a run, and `Enter` opens the Claude session behind it in the big pane, read-only, at its end: your prompt, Claude's replies, one line per tool call, errors in red. `Tab` switches between a run's sessions, `g` and `G` go to the top and end, `Esc` goes back. Nothing you type reaches the session.
+- The phone page has the same: a chip for each place, the problems line, runs under Today and Yesterday, and `Read ›` on a run opens its session.
+- The `routines` docs page no longer says emx doesn't open a run; it describes places, the reader and the phone.
+
 ## 2.21.0 — 2026-10-24
 
 - Settings now change in one place only: the config file, through `c` in the panel or `emx config`.

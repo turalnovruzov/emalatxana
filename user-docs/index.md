@@ -14,7 +14,7 @@ Read a page with `emx docs <page>`, using the page name in brackets below. `emx 
 - [voice-and-notifications](voice-and-notifications.md): how emx tells you a session is done or needs you.
 - [remote](remote.md): use the emx running on a server from your laptop.
 - [phone](phone.md): emx on a phone: the web page over Tailscale, and the terminal layout over SSH.
-- [routines](routines.md): see what your server's scheduled routines ran in the past 24 hours.
+- [routines](routines.md): see what the routines of each place ran today and yesterday, and read the Claude session behind a run.
 - [update-and-uninstall](update-and-uninstall.md): how emx updates itself, and how to remove it.
 
 ## Concepts

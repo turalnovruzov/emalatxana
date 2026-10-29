@@ -20,7 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import emx
-from emx import __version__, core, install, notify, remote, routines
+from emx import __version__, core, install, notify, places, remote, routines
 from emx.cli import CONFIG, PLACEHOLDER_TEXT, read_changelog, self_command
 from emx.engine import AGENT, Engine, allowed_transcript, bridge_file, bridge_link, claude_home
 from emx.tmux import (
@@ -81,7 +81,7 @@ HELP = (
     ("^r", "rename, via /rename in the session; Tab there suggests a name"),
     ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
-    ("R", "routines: what ran in the past 24 hours; R or Esc back"),
+    ("R", "routines: the past 2 days, every place; Tab place, Enter read a run; R or Esc back"),
     ("h", "stop the voice now (voice mode)"),
     ("^\\", "jump to main and back"),
     ("^q", "hide the panel; ^q again, ^\\ or ← brings it back"),
@@ -105,7 +105,7 @@ NARROW_HELP = (
     ("^r", "rename, via /rename in the session"),
     ("c", "settings: side, width, mode, colours, updates and more; c or Esc back"),
     ("N", "notifications: the last 20; Enter opens one"),
-    ("R", "routines: what ran in the past 24 hours; R or Esc back"),
+    ("R", "routines: the past 2 days, every place; Tab place, ↵ read a run; R or Esc back"),
     ("h", "stop the voice now (voice mode)"),
     ("q", "detach; sessions keep running"),
     ("?", "close this help; ↑↓ scroll it"),
@@ -136,10 +136,12 @@ OWN_WIDTH_NOTE = "This terminal's own width; the file's panel_width is your lapt
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
 HISTORY_EMPTY = "No notifications yet."
 ROUTINES_SECONDS = 60
-ROUTINES_HINT = "↑↓ scroll · R or Esc back"
-ROUTINES_TITLE = "Routines · past 24 hours"
-ROUTINES_NONE = "No systemd user timers on this machine."
-ROUTINES_LOADING = "Reading routines…"
+ROUTINES_HINT = "Tab place  ↑↓ run  Enter read  R back"
+READER_HINT = "↑↓ scroll  g top  G end  Tab other session  Esc back to the list"
+NO_RUN_SESSION = "No Claude session behind that run."
+ROUTINES_TITLE = core.ROUTINES_TITLE
+ROUTINES_NONE = core.ROUTINES_NONE
+ROUTINES_LOADING = core.ROUTINES_LOADING
 OPEN_GONE = "That session isn't listed any more."
 APP_LINE = "↗ open in the Claude app"
 MENU_CLOSE_NOTE = "(it goes offline in the app)"
@@ -719,17 +721,18 @@ class Starter(threading.Thread):
 
 
 class RoutinesReader(threading.Thread):
-    """Reads the routines off the main thread: the answer comes from three systemd tools, each of which can be slow."""
+    """Reads the routines of every place off the main thread: each place answers from several systemd tools, and a far one can be slow."""
 
-    def __init__(self):
+    def __init__(self, place_list: list, prefs: dict, exclude: frozenset):
         super().__init__(daemon=True)
+        self.place_list, self.prefs, self.exclude = place_list, prefs, exclude
         self.result = None
 
     def run(self) -> None:
         try:
-            self.result = routines.read(time.time())
+            self.result = routines.read_places(time.time(), self.place_list, self.prefs, self.exclude)
         except Exception as exc:
-            self.result = (None, core.error_line(exc))
+            self.result = [core.PlaceView(self.place_list[0], (), core.error_line(exc))]
 
 
 class Resolver(threading.Thread):
@@ -2000,8 +2003,8 @@ class App:
         self.history_scroll = 0
         self.routines_view = None
         self.settings = None
-        self.routine_views = None
-        self.routines_error = None
+        self.place_views = None
+        self.reader_back = ""
         self.routines_reader = None
         self.routines_read_at = 0.0
         self.opened = {}
@@ -2368,14 +2371,15 @@ class App:
         active with no session in it hands back to the panel. Nothing here
         writes prefs: the hidden panel and the widths saved are the laptop's.
         """
-        self.slot_active = slot.active and slot.role == "viewer"
+        showing = slot.role in ("viewer", "reader")
+        self.slot_active = slot.active and showing
         if sidebar.active:
-            if slot.role == "viewer":
+            if showing:
                 self.park(slot)
             if not sidebar.zoomed:
                 self.tmux.show_alone(sidebar.id)
         elif slot.active:
-            if slot.role != "viewer":
+            if not showing:
                 self.tmux.show_alone(sidebar.id)
             elif not slot.zoomed:
                 self.tmux.show_alone(slot.id)
@@ -2414,6 +2418,9 @@ class App:
         claims the session's width back from a device that used it meanwhile.
         Showing it again never starts a session's process.
         """
+        if slot.role == "reader" and slot.dead:
+            self.end_reader(slot)
+            slot = self.main_pane
         if slot.role == "viewer" and slot.view:
             held = core.live_or_dead_agent(self.tmux.panes(), slot.view)
             if slot.dead or held is None:
@@ -2449,6 +2456,17 @@ class App:
         else:
             self.show(slot, key, held.window)
 
+    def end_reader(self, slot: Pane) -> None:
+        """The reader ended: the session it covered comes back if its process still runs, else the placeholder, and the panel gets his keys again."""
+        back, self.reader_back = self.reader_back, ""
+        held = core.live_or_dead_agent(self.tmux.panes(), back) if back else None
+        if held is not None and not held.dead:
+            self.show(slot, back, held.window)
+        else:
+            self.park(slot)
+        if not self.narrow:
+            self.tmux.select(self.me)
+
     def say_why_the_viewer_closed(self, slot: Pane) -> None:
         try:
             line = core.viewer_last_line(*self.tmux.dead_pane_output(slot.id))
@@ -2461,6 +2479,8 @@ class App:
         """Show session `key`, whose pane is in `window`, in the slot through a viewer; the session's pane itself never moves."""
         if slot.role == "viewer" and slot.view == key and not slot.dead:
             return
+        if slot.role == "reader":
+            self.reader_back = ""
         self.tmux.link_agent(window, key, self_command("blank", ""))
         self.tmux.clear_history(slot.id)
         self.tmux.respawn(slot.id, self.tmux.viewer_command(key))
@@ -2471,6 +2491,8 @@ class App:
     def park(self, slot: Pane) -> None:
         """Put the placeholder in the slot."""
         park_slot(self.tmux, slot.id)
+        if slot.role == "reader":
+            self.reader_back = ""
         if slot.session:
             self.tmux.unset_pane_option(slot.id, SESSION_OPT)
         self.main_pane = replace(slot, role="placeholder", view="", session="", dead=False)
@@ -3274,7 +3296,7 @@ class App:
             self.history_scroll = core.wheel_scroll(self.history_scroll, delta, total, height)
             self.held = ("history", self.history_view)
         elif self.routines_view is not None:
-            self.routines_view = core.wheel_scroll(self.routines_view, delta, total, height)
+            self.routines_view["scroll"] = core.wheel_scroll(self.routines_view["scroll"], delta, total, height)
         elif self.help:
             self.help_scroll = core.wheel_scroll(self.help_scroll, delta, total, height)
         elif self.settings is not None:
@@ -3502,23 +3524,73 @@ class App:
             self.open_entry()
 
     def open_routines(self) -> None:
-        self.routines_view = 0
+        self.routines_view = {"place": 0, "run": None, "scroll": 0, "follow": True}
         self.peeking = False
         if self.routines_reader is None:
             self.start_routines()
 
     def start_routines(self) -> None:
-        self.routines_reader = RoutinesReader()
+        listed = frozenset(s.id for s in self.sessions)
+        self.routines_reader = RoutinesReader(places.from_prefs(self.prefs), self.prefs, listed)
         self.routines_read_at = time.monotonic()
         self.routines_reader.start()
 
+    def routines_place(self):
+        """The PlaceView the Routines view is on, or None before the first answer."""
+        if not self.place_views:
+            return None
+        return self.place_views[max(0, min(self.routines_view["place"], len(self.place_views) - 1))]
+
+    def routines_run(self):
+        """The selected run: the one kept in the view when the place still has it, else the place's newest."""
+        here = self.routines_place()
+        choices = core.run_choices(here) if here is not None else []
+        return core.step_run(choices, self.routines_view["run"], 0)
+
     def routines_key(self, key) -> None:
+        view = self.routines_view
         if key in ("\x1b", "R"):
             self.routines_view = None
-        elif key in (curses.KEY_UP, "k"):
-            self.routines_view = max(0, self.routines_view - 1)
-        elif key in (curses.KEY_DOWN, "j"):
-            self.routines_view += 1
+        elif key in ("\t", curses.KEY_BTAB) and self.place_views:
+            step = -1 if key == curses.KEY_BTAB else 1
+            view.update(place=(view["place"] + step) % len(self.place_views), run=None, follow=True, scroll=0)
+        elif key in ENTER_KEYS or key == curses.KEY_RIGHT:
+            self.open_reader()
+        elif key in (curses.KEY_UP, "k", curses.KEY_DOWN, "j") and self.routines_place() is not None:
+            step = -1 if key in (curses.KEY_UP, "k") else 1
+            view.update(run=core.step_run(core.run_choices(self.routines_place()), self.routines_run(), step), follow=True)
+
+    def open_reader(self) -> None:
+        """Show the Claude session behind the selected run in the big pane, read-only, and go to it; the session he was reading before comes back when the reader ends."""
+        here, run = self.routines_place(), self.routines_run()
+        if here is None or run is None:
+            return
+        view, found = here.views[run[0]], here.views[run[0]].sessions[run[1]] if run[1] < len(here.views[run[0]].sessions) else ()
+        if not found:
+            self.say(NO_RUN_SESSION, seconds=RESTORED_NOTICE_SECONDS)
+            return
+        label = f"{view.name} · {time.strftime('%H:%M', time.localtime(view.events[run[1]][0]))} run"
+        if core.run_label(view, run[1]):
+            label += f" · {core.run_label(view, run[1])}"
+        try:
+            _, main = self.layout_panes(self.my_panes())
+            if main is None:
+                self.say("The main pane is missing; restart emx.", error=True)
+                return
+            if main.role != "reader":
+                self.reader_back = main.view if main.role == "viewer" else ""
+            sids = [one.id for one in found]
+            self.tmux.respawn(main.id, self_command("read", self.tmux.socket, here.place.name, label, *sids))
+            self.tmux.set_pane_option(main.id, ROLE, "reader")
+            self.tmux.set_pane_option(main.id, VIEW_OPT, sids[-1])
+            self.main_pane = replace(main, role="reader", view=sids[-1], dead=False)
+            if self.narrow:
+                self.tmux.show_alone(main.id)
+                self.slot_active = True
+            else:
+                self.tmux.select(main.id)
+        except TmuxError as exc:
+            self.say(f"tmux: {exc}", error=True)
 
     def open_settings(self) -> None:
         self.settings = {"at": 0, "scroll": 0, "edit": None, "folders": None}
@@ -3608,6 +3680,8 @@ class App:
             self.settings_change(setting, 1)
         elif setting.kind == "folders":
             self.settings["folders"] = 0
+        elif setting.kind == "places":
+            self.say("Places are set in the file; e opens it.")
         else:
             current = self.panel_width() if setting.key == "panel_width" else self.prefs.get(setting.key, setting.default)
             self.settings["edit"] = {"setting": setting, "label": setting.label, "text": str(current), "hint": ""}
@@ -3688,7 +3762,7 @@ class App:
         if reader is not None and not reader.is_alive():
             self.routines_reader = None
             if self.routines_view is not None and reader.result is not None:
-                self.routine_views, self.routines_error = reader.result
+                self.place_views = reader.result
         if (self.routines_view is not None and self.routines_reader is None
                 and time.monotonic() - self.routines_read_at >= ROUTINES_SECONDS):
             self.start_routines()
@@ -3781,6 +3855,8 @@ class App:
             return core.hint_variants(core.PEEK_HINTS)
         if self.history_view is not None:
             return (HISTORY_HINT, "Esc back")
+        if self.main_pane is not None and self.main_pane.role == "reader" and self.focused is False:
+            return (READER_HINT, "Esc back")
         if self.routines_view is not None:
             return (ROUTINES_HINT, "Esc back")
         if self.help:
@@ -4012,35 +4088,39 @@ class App:
                 y += 1
         self.draw_scroll_bar(top, height, sum(heights), self.history_scroll, width)
 
-    def routine_rows(self, width: int) -> list:
-        """(text, tone) for each row of the view, or the one message that stands in for them."""
-        inner = max(1, width - 2)
-        if self.routine_views is None and self.routines_error is None:
-            return [(ROUTINES_LOADING, "muted")]
-        error_rows = [(t, "error") for t in core.wrap_words(self.routines_error, inner)] if self.routines_error else []
-        if self.routines_error and not self.routine_views:
-            return error_rows
-        if not self.routine_views:
-            return [(t, "muted") for t in core.wrap_words(ROUTINES_NONE, inner)]
-        rows, now = [], time.time()
-        for view in self.routine_views:
-            if rows:
-                rows.append(("", "plain"))
-            rows += core.routine_lines(view, inner, now)
-        return error_rows + [("", "plain")] + rows if error_rows else rows
-
     def draw_routines(self, top: int, bottom: int, width: int) -> None:
-        self.put(top, 1, ROUTINES_TITLE, curses.A_BOLD)
-        top, height = top + 1, max(1, bottom - top - 1)
-        rows = self.routine_rows(width)
+        view, height, now = self.routines_view, max(1, bottom - top), time.time()
+        selected = self.routines_run()
+        reading = self.main_pane.view if self.main_pane is not None and self.main_pane.role == "reader" else ""
+
+        def build(room: int) -> list:
+            return core.routines_rows(self.place_views, view["place"], selected, room, now, time.localtime, reading)
+
+        rows = build(width - 2)
         if core.scroll_thumb(len(rows), height, 0) is not None:
             width -= 1
-            rows = self.routine_rows(width)
-        self.routines_view = core.list_window([1] * len(rows), -1, self.routines_view, height)
+            rows = build(width - 2)
+        at = next((i for i, (_, _, kind) in enumerate(rows) if kind == "selected"), -1) if view["follow"] else -1
+        view["follow"] = False
+        view["scroll"] = core.list_window([1] * len(rows), at, view["scroll"], height)
         self.extent = (len(rows), height)
-        for y, (text, tone) in enumerate(rows[self.routines_view:self.routines_view + height], start=top):
-            self.put(y, 1, text, self.palette.attr(tone))
-        self.draw_scroll_bar(top, height, len(rows), self.routines_view, width)
+        bar = core.selection_bar(True, self.focused is not False)
+        for y, (text, tone, kind) in enumerate(rows[view["scroll"]:view["scroll"] + height], start=top):
+            if kind == "selected":
+                self.put(y, 0, " " * width, self.palette.attr("plain", bar))
+                self.put(y, 1, text, self.palette.attr("plain", bar))
+            elif kind == "title":
+                self.put(y, 1, text, curses.A_BOLD)
+            elif isinstance(kind, tuple) and kind[0] == "tabs":
+                self.put(y, 1, text, self.palette.attr("muted"))
+                _, start, end = kind
+                self.put(y, 1 + start, text[start:end], self.palette.attr("accent") | curses.A_REVERSE | curses.A_BOLD)
+            elif isinstance(kind, tuple) and kind[0] == "lead":
+                self.put(y, 1, text[:kind[1]], self.palette.attr(tone))
+                self.put(y, 1 + kind[1], text[kind[1]:], self.palette.attr("muted"))
+            else:
+                self.put(y, 1, text, self.palette.attr(tone))
+        self.draw_scroll_bar(top, height, len(rows), view["scroll"], width)
 
     def draw_help(self, top: int, bottom: int, width: int) -> None:
         """The key help, scrolled by `help_scroll`: it can be taller than the screen."""

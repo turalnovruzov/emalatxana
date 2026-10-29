@@ -76,7 +76,7 @@ class DocsMatchEmx(unittest.TestCase):
         self.assertIn("c", panel_key_tokens())
 
     def test_no_internal_command_is_parsed_as_public(self):
-        internal = {f"emx {w}" for w in ("hook", "install", "relaunch", "follow", "open", "sidebar", "left", "blank", "paste", "paste-image")}
+        internal = {f"emx {w}" for w in ("hook", "install", "relaunch", "follow", "open", "sidebar", "left", "blank", "paste", "paste-image", "read")}
         self.assertEqual(public_commands() & internal, set())
 
     def test_every_panel_key_is_in_the_reference(self):

@@ -2180,7 +2180,24 @@ def updated_heading(version: str) -> str:
 
 ROUTINES_WINDOW = 86400
 MISSED_SLACK = 300
-CALENDAR_CAP = 1500
+CALENDAR_CAP = 3000
+CYCLE_GAP = 300
+MATCH_SLACK = 5
+
+
+def _seconds_into_day(at: float, local: Callable) -> int:
+    t = local(at)
+    return t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
+
+
+def routines_since(now: float, local: Callable = time.localtime) -> float:
+    """Local midnight of yesterday, where the Routines view starts: it covers yesterday and today."""
+    midnight = int(now) - _seconds_into_day(now, local)
+    return midnight - 1 - _seconds_into_day(midnight - 1, local)
+
+
+def day_word(at: float, now: float, local: Callable = time.localtime) -> str:
+    return "today" if tuple(local(at))[:3] == tuple(local(now))[:3] else "yesterday"
 
 MSG_START = "7d4958e842da4a758f6c1cdc7b36dcc5"
 MSG_DONE = "39f53479d3a045ac8e11786248231fbf"
@@ -2191,31 +2208,50 @@ MSG_CLEAN_END = "7ad2d189f7e94e70a38c781354912448"
 RUN_MESSAGES = (MSG_START, MSG_DONE, MSG_EXITED, MSG_UNIT_FAILED, MSG_JOB_FAILED, MSG_CLEAN_END)
 
 PASSED, FAILED, RUNNING, UNKNOWN, MISSED = "PASSED", "FAILED", "RUNNING", "UNKNOWN", "MISSED"
-RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?", MISSED: "⚠ missed"}
-EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted"}
+FINISHED, ERRORED, LIMIT, GOING = "FINISHED", "ERRORED", "LIMIT", "GOING"
+RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?", MISSED: "⚠ missed",
+             FINISHED: "finished", ERRORED: "failed", LIMIT: "usage limit", GOING: "working"}
+EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted",
+               FINISHED: "done", ERRORED: "error", LIMIT: "needs", GOING: "plain"}
 
 
-def timer_units(text: str) -> list:
-    """Unit names from `systemctl list-units --plain` rows: the first `.timer` token of each, sorted, once each."""
+def _units(text: str, suffix: str) -> list:
     units = set()
     for line in text.splitlines():
-        unit = next((tok for tok in line.split() if tok.endswith(".timer")), None)
-        if unit and not unit.startswith("-"):
+        unit = next((tok for tok in line.split() if tok.endswith(suffix)), None)
+        if unit and not unit.startswith("-") and not unit.endswith("@" + suffix):
             units.add(unit)
     return sorted(units)
 
 
-def timer_unit_files(text: str) -> list:
-    """Timer names from `systemctl list-unit-files --plain` rows, sorted, once each. Templates and aliases are left out: a template name fails the whole `show`, and an alias comes back under its target's name."""
+def _unit_files(text: str, suffix: str) -> list:
     units = set()
     for line in text.splitlines():
         tokens = line.split()
-        if not tokens or not tokens[0].endswith(".timer") or tokens[0].startswith("-") or tokens[0].endswith("@.timer"):
+        if not tokens or not tokens[0].endswith(suffix) or tokens[0].startswith("-") or tokens[0].endswith("@" + suffix):
             continue
         if len(tokens) > 1 and tokens[1] == "alias":
             continue
         units.add(tokens[0])
     return sorted(units)
+
+
+def timer_units(text: str) -> list:
+    """Unit names from `systemctl list-units --plain` rows: the first `.timer` token of each, sorted, once each."""
+    return _units(text, ".timer")
+
+
+def timer_unit_files(text: str) -> list:
+    """Timer names from `systemctl list-unit-files --plain` rows, sorted, once each. Templates and aliases are left out: a template name fails the whole `show`, and an alias comes back under its target's name."""
+    return _unit_files(text, ".timer")
+
+
+def service_units(text: str) -> list:
+    return _units(text, ".service")
+
+
+def service_unit_files(text: str) -> list:
+    return _unit_files(text, ".service")
 
 
 def show_blocks(text: str) -> dict:
@@ -2272,9 +2308,11 @@ def calendar_times(text: str) -> list:
 
 @dataclass(frozen=True)
 class Run:
+    """`end` is the latest lifecycle stamp of a finished invocation, None while it runs."""
     start: float
     result: str
     status: str = ""
+    end: float | None = None
 
 
 def journal_runs(text: str, active: frozenset) -> dict:
@@ -2299,13 +2337,14 @@ def journal_runs(text: str, active: frozenset) -> dict:
             found.append(_run_of(lines))
         found.sort(key=lambda run: run.start)
         if found and unit in active and found[-1].result != FAILED:
-            found[-1] = replace(found[-1], result=RUNNING)
+            found[-1] = replace(found[-1], result=RUNNING, end=None)
         runs[unit] = found
     return runs
 
 
 def _run_of(lines: list) -> Run:
     start = min(stamp for stamp, _ in lines)
+    end = max(stamp for stamp, _ in lines)
     failed, passed, status = False, False, ""
     for _, entry in lines:
         message, job = entry["MESSAGE_ID"], entry.get("JOB_RESULT")
@@ -2321,8 +2360,8 @@ def _run_of(lines: list) -> Run:
         if entry.get("EXIT_STATUS") and not status:
             status = str(entry["EXIT_STATUS"])
     if failed:
-        return Run(start, FAILED, status)
-    return Run(start, PASSED if passed else UNKNOWN)
+        return Run(start, FAILED, status, end)
+    return Run(start, PASSED if passed else UNKNOWN, "", end)
 
 
 def missed_times(slots: list, starts: list, since: float, now: float) -> list:
@@ -2347,6 +2386,27 @@ class RoutineView:
     next_at: float | None = None
     note: str = ""
     error: str = ""
+    kind: str = "timer"
+    sessions: tuple = ()
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class RunSession:
+    """A Claude session behind a run; `first` and `last` are epoch seconds."""
+    id: str
+    title: str
+    first: float
+    last: float
+    ending: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class PlaceView:
+    place: Place
+    views: tuple = ()
+    error: str | None = None
 
 
 ACTIVE_WHILE_RUNNING = ("activating", "deactivating", "reloading")
@@ -2367,25 +2427,33 @@ def _status_word(run_status: str) -> str:
     return f"failed · exit {run_status}" if run_status else "failed"
 
 
+def window_runs(runs: list, service: dict | None, since: float) -> list:
+    """A routine's runs in the window: the journal's, else the one run systemd's own record of the service gives."""
+    runs = [run for run in runs if run.start >= since]
+    started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
+    if runs or started is None or started < since:
+        return runs
+    if service_running(service):
+        return [Run(started, RUNNING)]
+    exited = show_time(service.get("ExecMainExitTimestamp", ""))
+    if service.get("Result") == "success":
+        return [Run(started, PASSED, "", exited)]
+    return [Run(started, FAILED, service.get("ExecMainStatus", ""), exited)]
+
+
 def routine_view(name: str, timer: dict | None, service: dict | None, runs: list, slots: list,
-                 now: float, capped: bool = False, journal_error: str = "") -> RoutineView:
+                 now: float, capped: bool = False, journal_error: str = "", matched: Mapping | None = None,
+                 local: Callable = time.localtime) -> RoutineView:
     """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times, `journal_error` why the journal couldn't be read.
 
     Missed times are judged against a journal that was read. When it holds no run of this routine in the window, systemd's own record of the last start decides: none in the window agrees nothing ran, so the times are judged; a start in the window means the journal lost it (rotated, say), so they are not."""
     if not timer or timer.get("LoadState") == "not-found":
         return RoutineView(name, "not found", "error")
-    window = now - ROUTINES_WINDOW
-    runs = [run for run in runs if run.start >= window]
+    window = routines_since(now, local)
     started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
     systemd_ran = started is not None and started >= window
-    judged = not journal_error and (bool(runs) or not systemd_ran)
-    if not runs and systemd_ran:
-        if service_running(service):
-            runs = [Run(started, RUNNING)]
-        elif service.get("Result") == "success":
-            runs = [Run(started, PASSED)]
-        else:
-            runs = [Run(started, FAILED, service.get("ExecMainStatus", ""))]
+    judged = not journal_error and (any(run.start >= window for run in runs) or not systemd_ran)
+    runs = window_runs(runs, service, window)
     events = [(run.start, run.result, run.status) for run in runs]
     calendar = bool(calendar_specs(timer.get("TimersCalendar", "")))
     on = timer.get("ActiveState") == "active"
@@ -2399,15 +2467,220 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
         events += [(slot, MISSED, "") for slot in missed_times(slots, starts, floor, now)]
     events.sort(key=lambda event: event[0], reverse=True)
     next_at = show_time(timer.get("NextElapseUSecRealtime", ""))
+    behind = {run.start: tuple(run_session(found, run.result == RUNNING, local) for found in (matched or {}).get(run.start, ()))
+              for run in runs}
+    sessions = tuple(behind.get(at, ()) if kind != MISSED else () for at, kind, _ in events)
     if not on:
-        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error)
+        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error, "timer", sessions)
     if events:
         _, kind, status = events[0]
         tag = {PASSED: "passed", RUNNING: "running", MISSED: "missed", UNKNOWN: "unknown"}.get(kind) or _status_word(status)
-        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error)
+        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error, "timer", sessions)
     if not judged and any(floor <= slot <= now - MISSED_SLACK for slot in slots):
         return RoutineView(name, "unknown", "muted", (), next_at, note, journal_error)
     return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
+
+
+def _limit_reset(entry: dict, local: Callable) -> str:
+    """`till HH:MM` from the usage-limit line's own reset stamp (epoch seconds or milliseconds), else nothing."""
+    params = entry.get("apiErrorParams")
+    info = params.get("rate_limit_info") if isinstance(params, dict) else None
+    at = info.get("resetsAt") if isinstance(info, dict) else None
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or at <= 0:
+        return ""
+    return "till " + time.strftime("%H:%M", local(at / 1000 if at > 1e11 else at))
+
+
+def session_ending(summary: dict, live_unit: bool, local: Callable = time.localtime) -> tuple:
+    """(ending, detail) of one Claude session from the probe's summary of it. A usage limit is the final assistant line flagged as an API error with error `rate_limit`, never matched on its text."""
+    tail = summary.get("tail") or []
+    last = tail[-1] if tail and isinstance(tail[-1], dict) else {}
+    if last.get("type") == "assistant":
+        if last.get("isApiErrorMessage") is True:
+            if last.get("error") == "rate_limit":
+                return LIMIT, _limit_reset(last, local)
+            return ERRORED, ""
+        message = last.get("message")
+        blocks = [b for b in (message.get("content") if isinstance(message, dict) else None) or [] if isinstance(b, dict)]
+        if any(b.get("type") == "text" and _text(b.get("text")).strip() for b in blocks) and not any(b.get("type") == "tool_use" for b in blocks):
+            return FINISHED, ""
+    return (GOING, "") if live_unit else (ERRORED, "ended mid-step")
+
+
+def run_session(summary: dict, live_unit: bool, local: Callable = time.localtime) -> RunSession:
+    ending, detail = session_ending(summary, live_unit, local)
+    first = summary["first"] / 1000
+    last = summary["last"] / 1000 if isinstance(summary.get("last"), (int, float)) else first
+    return RunSession(summary["id"], _text(summary.get("title")), first, last, ending, detail)
+
+
+def probe_sessions(text: str) -> list:
+    """The session summaries of the probe's `list` output; a line that is no JSON object is skipped."""
+    found = []
+    for line in (text or "").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and is_session_id(entry.get("id")) and isinstance(entry.get("first"), (int, float)):
+            found.append(entry)
+    return found
+
+
+def _inside(cwd, folder: str) -> bool:
+    return isinstance(cwd, str) and (cwd == folder or cwd.startswith(folder.rstrip("/") + "/"))
+
+
+def workdir_of(props: Mapping) -> str:
+    folder = (props.get("WorkingDirectory") or "").lstrip("!")
+    return "" if folder.startswith("~") else folder
+
+
+SERVICE_ACTIVE = ("active", "activating", "reloading", "deactivating")
+
+
+def candidate_service(props: Mapping, since: float) -> bool:
+    """A service the user made (its file is under `~/.config/systemd/user`), that no timer starts, and that was active at some point since `since`."""
+    if "/.config/systemd/user/" not in (props.get("FragmentPath") or "") or ".timer" in (props.get("TriggeredBy") or ""):
+        return False
+    if props.get("ActiveState") in SERVICE_ACTIVE:
+        return True
+    stamps = [show_time(props.get(key, "")) for key in ("ExecMainStartTimestamp", "ExecMainExitTimestamp", "ActiveEnterTimestamp")]
+    return any(at is not None and at >= since for at in stamps)
+
+
+def _service_active_at(props: Mapping, at: float) -> bool:
+    entered = show_time(props.get("ActiveEnterTimestamp", ""))
+    if entered is not None and at < entered - MATCH_SLACK:
+        return False
+    if props.get("ActiveState") not in SERVICE_ACTIVE:
+        exited = show_time(props.get("ExecMainExitTimestamp", ""))
+        return exited is None or at <= exited + MATCH_SLACK
+    return True
+
+
+def match_runs(timers: Mapping, services: Mapping, sessions: list, now: float, exclude=frozenset()) -> tuple:
+    """(by timer, by service): which Claude sessions each run started.
+
+    `timers` is `name -> (working directory, runs)`, `services` `name -> systemctl show properties`, `sessions` the probe's summaries. Sessions an interactive claude started (an entrypoint other than `sdk-cli`) or that emx lists itself (`exclude`) never match; one with no entrypoint at all does. A timer run takes the sessions that began within its time (and under its working directory, when it has one). Of two timers' runs that fit a session, the routine whose other sessions share its folder wins, then the run that began last. What no timer took goes to a long-running service active when it began: the one whose working directory holds the session's folder, else the only candidate. Results are `{timer: {run start: [sessions]}}` and `{service: [[sessions of one run], ...]}`, a new run after `CYCLE_GAP` seconds without a session.
+    """
+    eligible = sorted(
+        (s for s in sessions if s.get("id") not in exclude and s.get("entrypoint") in (None, "sdk-cli")),
+        key=lambda s: s["first"])
+    fits = {}
+    for found in eligible:
+        at = found["first"] / 1000
+        for name, (workdir, runs) in timers.items():
+            if workdir and not _inside(found.get("cwd"), workdir):
+                continue
+            for run in runs:
+                if run.start - MATCH_SLACK <= at <= (run.end if run.end is not None else now) + MATCH_SLACK:
+                    fits.setdefault(found["id"], []).append((name, run))
+    taken = {}
+    for found in eligible:
+        names = {name for name, _ in fits.get(found["id"], ())}
+        if len(names) == 1:
+            taken[found["id"]] = next(iter(names))
+    for found in eligible:
+        names = {name for name, _ in fits.get(found["id"], ())}
+        if len(names) < 2:
+            continue
+        shared = {n: sum(1 for other in eligible if taken.get(other["id"]) == n and other.get("cwd") == found.get("cwd")) for n in names}
+        newest = {n: max(run.start for name, run in fits[found["id"]] if name == n) for n in names}
+        taken[found["id"]] = max(names, key=lambda n: (shared[n], newest[n], n))
+    by_timer, left = {}, []
+    for found in eligible:
+        name = taken.get(found["id"])
+        if name is None:
+            left.append(found)
+            continue
+        run = max((r for n, r in fits[found["id"]] if n == name), key=lambda r: r.start)
+        by_timer.setdefault(name, {}).setdefault(run.start, []).append(found)
+    owned = {}
+    for found in left:
+        at = found["first"] / 1000
+        active = {n: p for n, p in services.items() if _service_active_at(p, at)}
+        inside = [n for n, p in active.items() if workdir_of(p) and _inside(found.get("cwd"), workdir_of(p))]
+        if inside:
+            owned.setdefault(max(inside, key=lambda n: (len(workdir_of(active[n])), n)), []).append(found)
+        elif len(active) == 1:
+            owned.setdefault(next(iter(active)), []).append(found)
+    by_service = {}
+    for name, found in owned.items():
+        cycles, reach = [], None
+        for one in found:
+            if reach is None or one["first"] / 1000 - reach > CYCLE_GAP:
+                cycles.append([])
+            cycles[-1].append(one)
+            reach = (one["last"] if isinstance(one.get("last"), (int, float)) else one["first"]) / 1000
+        by_service[name] = cycles
+    return by_timer, by_service
+
+
+def service_view(name: str, props: Mapping, cycles: list, local: Callable = time.localtime) -> RoutineView:
+    """A long-running service as a routine: each cycle of sessions is a run, ended as its last session ended (a session still going wins)."""
+    active = props.get("ActiveState") in SERVICE_ACTIVE
+    events, sessions = [], []
+    for i, cycle in enumerate(cycles):
+        newest = i == len(cycles) - 1
+        behind = tuple(run_session(found, active and newest and j == len(cycle) - 1, local) for j, found in enumerate(cycle))
+        kind = GOING if any(one.ending == GOING for one in behind) else behind[-1].ending
+        events.append((behind[0].first, kind, ""))
+        sessions.append(behind)
+    events.reverse()
+    sessions.reverse()
+    latest = events[0][1] if events else None
+    if not active:
+        tag, tone = "stopped", "muted"
+    elif latest is None:
+        tag, tone = "between runs", "muted"
+    else:
+        tag, tone = RUN_MARKS[latest], EVENT_TONES[latest]
+    detail = ""
+    if latest == LIMIT:
+        reset = sessions[0][-1].detail
+        detail = ("waiting on the usage limit " + reset).strip()
+    elif latest == GOING:
+        detail = "working"
+    elif active:
+        detail = "between runs"
+    return RoutineView(name, tag, tone, tuple(events), None, "", "", "service", tuple(sessions), detail)
+
+
+def routine_problem(view: RoutineView) -> tuple | None:
+    """("failed" or "usage limit", when) for a routine whose latest run failed or hit the usage limit, else None; missed times are not runs."""
+    for i, (at, kind, _) in enumerate(view.events):
+        if kind == MISSED:
+            continue
+        ending = view.sessions[i][-1].ending if i < len(view.sessions) and view.sessions[i] else None
+        if kind in (FAILED, ERRORED) or (kind != LIMIT and ending == ERRORED):
+            return "failed", at
+        if kind == LIMIT or ending == LIMIT:
+            return "usage limit", at
+        return None
+    return None
+
+
+def problems_line(place_views: list, local: Callable = time.localtime) -> str:
+    """`⚠ 1 failed · worker, 19:42` for one problem (its place and when), `⚠ 2 failed, 1 usage limit · this user, worker` for several (the places, in tab order); nothing when all is fine. Every place counts, whichever one is on screen."""
+    found = []
+    for place_view in place_views:
+        for view in place_view.views:
+            problem = routine_problem(view)
+            if problem:
+                found.append((place_view.place.name, *problem))
+    if not found:
+        return ""
+    counts = []
+    for word in ("failed", "usage limit"):
+        n = sum(1 for _, w, _ in found if w == word)
+        if n:
+            counts.append(f"{n} {word}")
+    if len(found) == 1:
+        where = f"{found[0][0]}, {time.strftime('%H:%M', local(found[0][2]))}"
+    else:
+        where = ", ".join(dict.fromkeys(name for name, _, _ in found))
+    return f"⚠ {', '.join(counts)} · {where}"
 
 
 def routine_words(view: RoutineView, now: float, local: Callable = time.localtime) -> tuple:
@@ -2440,6 +2713,310 @@ def routine_lines(view: RoutineView, width: int, now: float, local: Callable = t
     elif view.note:
         rows.append((fit("  " + view.note, width), "muted"))
     return [(fit(text, width), tone) for text, tone in rows]
+
+
+ROUTINES_TITLE = "Routines · past 2 days"
+ROUTINES_NONE = "No routines here: no systemd user timers, and no user service that started Claude."
+ROUTINES_LOADING = "Reading routines…"
+SESSION_MARKS = {FINISHED: "✓", ERRORED: "✗", LIMIT: "⚠", GOING: "…"}
+SESSION_OPEN = "▎"
+
+
+def tab_chips(place_views: list, at: int, width: int) -> tuple:
+    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+    chips = [f" {fit(view.place.name, max(1, width - 2))} " for view in place_views]
+    first = 0
+    while first < at and sum(display_width(c) for c in chips[first:]) > width:
+        first += 1
+    start = sum(display_width(c) for c in chips[first:at])
+    text = "".join(chips[first:])
+    return fit(text, width), start, min(width, start + display_width(chips[at]))
+
+
+def run_choices(place_view: PlaceView) -> list:
+    """(routine index, event index) of every run with a start in the place, in the order the view shows them; missed times are not runs."""
+    return [(ri, ei) for ri, view in enumerate(place_view.views) for ei, (_, kind, _) in enumerate(view.events) if kind != MISSED]
+
+
+def step_run(choices: list, run, step: int):
+    """The run `step` places from `run` among `choices`, held at either end; the first when `run` is not one of them."""
+    if not choices:
+        return None
+    if run not in choices:
+        return choices[0]
+    return choices[max(0, min(len(choices) - 1, choices.index(run) + step))]
+
+
+def run_label(view: RoutineView, ei: int) -> str:
+    """The title of the latest titled session behind run `ei`."""
+    return next((one.title for one in reversed(view.sessions[ei] if ei < len(view.sessions) else ()) if one.title), "")
+
+
+def routines_rows(place_views, at: int, selected, width: int, now: float, local: Callable = time.localtime, reading: str = "") -> list:
+    """(text, tone, kind) for each row of the Routines view: the title, a tab row, the problems of every place, then the routines of place `at`.
+
+    `selected` is the run (routine index, event index) drawn on its own row;
+    `reading` is the id of the session open in the reader. `kind` is "" for a
+    plain row, "title", ("tabs", start, end) with the selected tab's columns,
+    ("lead", n) for a row whose first n characters take the tone and the rest
+    are muted, "selected", or "sessions".
+    """
+    rows = [(fit(ROUTINES_TITLE, width), "plain", "title")]
+    if not place_views:
+        return rows + [(ROUTINES_LOADING, "muted", "")]
+    at = max(0, min(at, len(place_views) - 1))
+    text, start, end = tab_chips(place_views, at, width)
+    rows += [(text, "muted", ("tabs", start, end)), ("", "plain", "")]
+    problems = problems_line(place_views, local)
+    if problems:
+        lines = wrap_words(problems, width)
+        rows.append((lines[0], "error", ("lead", lines[0].index(" ·") if " ·" in lines[0] else len(lines[0]))))
+        rows += [(line, "muted", "") for line in lines[1:]] + [("", "plain", "")]
+    here = place_views[at]
+    if here.error:
+        rows += [("  " + line, "error", "") for line in wrap_words(here.error, max(1, width - 2))]
+        if here.views:
+            rows.append(("", "plain", ""))
+    elif not here.views:
+        return rows + [(line, "muted", "") for line in wrap_words(ROUTINES_NONE, width)]
+    for ri, view in enumerate(here.views):
+        if ri:
+            rows.append(("", "plain", ""))
+        rows += _routine_rows(view, ri, selected, width, now, local, reading)
+    return rows
+
+
+RUN_LABEL_MIN = 4
+
+
+def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, local: Callable, reading: str) -> list:
+    tag = fit(view.tag, width)
+    name = fit(view.name, max(0, width - display_width(tag) - 1))
+    gap = max(1, width - display_width(name) - display_width(tag)) if name else max(0, width - display_width(tag))
+    rows = [(name + " " * gap + tag, view.tone, "")]
+    if view.detail:
+        rows.append(("  " + view.detail, "muted", ""))
+    if view.error:
+        rows += [("  " + line, "error", "") for line in wrap_words(view.error, max(1, width - 2))]
+    pending = []
+    real = [i for i, (_, kind, _) in enumerate(view.events) if kind != MISSED]
+    plain_script = view.kind == "timer" and bool(real) and not any(i < len(view.sessions) and view.sessions[i] for i in real)
+
+    def flush():
+        for line in wrap_words("  ".join(pending), max(1, width - 2)) if pending else ():
+            rows.append(("  " + line.replace("\xa0", " "), "muted", ""))
+        pending.clear()
+
+    for day in ("today", "yesterday"):
+        events = [i for i, (when, _, _) in enumerate(view.events) if day_word(when, now, local) == day]
+        if not events:
+            continue
+        rows.append(("  " + day, "muted", ""))
+        for ei in events:
+            when, kind, status = view.events[ei]
+            stamp = f"{time.strftime('%H:%M', local(when))} {RUN_MARKS[kind]}" + (status if kind == FAILED else "")
+            if (ri, ei) != selected:
+                pending.append(stamp.replace(" ", "\xa0"))
+                continue
+            flush()
+            found = view.sessions[ei] if ei < len(view.sessions) else ()
+            lead = f"  {stamp}  "
+            if found:
+                label, count = run_label(view, ei), f"{len(found)} session{'' if len(found) == 1 else 's'}  ↵ read"
+                if label and display_width(lead) + display_width(label) + 2 + display_width(count) > width:
+                    label = fit(label, max(RUN_LABEL_MIN, width - display_width(lead) - display_width(count) - 2))
+                    if display_width(lead) + display_width(label) + 2 + display_width(count) > width:
+                        count = "↵ read"
+                        label = fit(run_label(view, ei), max(RUN_LABEL_MIN, width - display_width(lead) - display_width(count) - 2))
+                row = lead + "  ".join(part for part in (label, count) if part)
+            else:
+                row = "  " + "  ".join(part for part in (stamp, run_label(view, ei), "" if plain_script else "no Claude session") if part)
+            rows.append((row, "plain", "selected"))
+            if len(found) > 1:
+                names = [f"{one.title or f'session {n}'} {SESSION_MARKS[one.ending]}" + (f" {SESSION_OPEN}" if one.id == reading else "")
+                         for n, one in enumerate(found, start=1)]
+                for line in wrap_words("  ".join(name.replace(" ", "\xa0") for name in names), max(1, width - 5)):
+                    rows.append(("     " + line.replace("\xa0", " "), "muted", "sessions"))
+        flush()
+    _, upcoming = routine_words(view, now, local)
+    if upcoming:
+        rows.append(("  " + upcoming, "muted", ""))
+    elif view.note:
+        rows.append(("  " + view.note, "muted", ""))
+    if plain_script:
+        rows.append(("  no Claude session · a plain script", "muted", ""))
+    return [(fit(text, width), tone, kind) for text, tone, kind in rows]
+
+
+PROMPT_LINES = 6
+READER_LIVE_SECONDS = 300
+READER_HEADER_ROWS = 2
+READER_INDENT = 9
+END_WORDS = {FINISHED: "finished", ERRORED: "failed", LIMIT: "usage limit"}
+
+
+@dataclass(frozen=True)
+class Step:
+    """One thing a session did, for the reader. `kind` is prompt, reply, tool, error or cut (earlier steps the read left out); `mark` is a tool's result."""
+    at_ms: float | None
+    kind: str
+    text: str
+    mark: str = ""
+    tone: str = "plain"
+
+
+def _result_text(block: dict) -> str:
+    content = block.get("content")
+    if isinstance(content, list):
+        return "\n".join(_text(b.get("text")) for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return _text(content)
+
+
+def _exit_code(text: str):
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    found = re.fullmatch(r"Exit code (\d+)", first)
+    return found.group(1) if found else None
+
+
+def _tool_line(name: str, given: Mapping) -> str:
+    line = describe_tool(name, given)[0]
+    return name + line[len(name) + 1:] if line.startswith(name + ":") else line
+
+
+def reader_steps(text: str) -> list:
+    """What a session did, oldest first, from its transcript `text` (the probe's `read`): his prompt, Claude's replies, one step per tool call with its result, and an error step under a tool that failed or an API error. Subagent, meta and summary entries are left out. Never raises."""
+    steps, calls = [], {}
+    for raw in (text or "").splitlines():
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if "emx_probe_cut" in entry:
+            steps.append(Step(None, "cut", "earlier steps weren't loaded", tone="muted"))
+            continue
+        if entry.get("type") not in ("user", "assistant") or entry.get("isSidechain") is True or entry.get("isCompactSummary"):
+            continue
+        at = _iso_ms(entry.get("timestamp"))
+        if entry.get("isApiErrorMessage") is True:
+            said = " ".join(" ".join(_text(b.get("text")) for b in _blocks(entry)).split())
+            steps.append(Step(at, "error", "! " + (said or "the API returned an error"), tone="error"))
+            continue
+        for block in _blocks(entry):
+            kind = block.get("type")
+            if entry["type"] == "user" and kind == "tool_result":
+                index = calls.get(block.get("tool_use_id"))
+                if index is None:
+                    continue
+                result = _result_text(block)
+                code = _exit_code(result)
+                failed = code is not None or block.get("is_error") is True
+                steps[index] = replace(steps[index], mark=f"✗ exit {code}" if code is not None else "✗" if failed else "✓",
+                                       tone="error" if failed else "plain")
+                if failed:
+                    lines = [line.strip() for line in result.splitlines() if line.strip()]
+                    detail = lines[1] if code is not None and len(lines) > 1 else lines[0] if lines and code is None else ""
+                    if detail:
+                        steps.insert(index + 1, Step(at, "error", "! " + detail, tone="error"))
+                        calls = {k: (v + 1 if v > index else v) for k, v in calls.items()}
+            elif entry["type"] == "user":
+                said = _said_by_user(entry, block)
+                if said is not None and said[0] == "request":
+                    shown = said[1].splitlines()
+                    body = "\n".join(shown[:PROMPT_LINES]) + ("\n…" if len(shown) > PROMPT_LINES else "")
+                    steps.append(Step(at, "prompt", "Prompt: " + body))
+            elif kind == "text" and _text(block.get("text")).strip():
+                steps.append(Step(at, "reply", "Claude: " + _text(block.get("text")).strip()))
+            elif kind == "tool_use" and isinstance(block.get("name"), str):
+                given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                steps.append(Step(at, "tool", "▸ " + _tool_line(block["name"], given)))
+                if isinstance(block.get("id"), str):
+                    calls[block["id"]] = len(steps) - 1
+    return steps
+
+
+def reader_title(text: str) -> str:
+    """The session's own name, else Claude's title for it, from its transcript `text`."""
+    titles = {"custom-title": "", "ai-title": ""}
+    for raw in (text or "").splitlines():
+        if "-title" not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and entry.get("type") in titles:
+            titles[entry["type"]] = _one_line(entry.get("customTitle" if entry["type"] == "custom-title" else "aiTitle")) or titles[entry["type"]]
+    return titles["custom-title"] or titles["ai-title"]
+
+
+def reader_ending(text: str, now: float, local: Callable = time.localtime) -> tuple | None:
+    """(ending, when, detail) of the session in `text`, or None when it holds no turn. A session cut off mid-step counts as going while its last entry is under READER_LIVE_SECONDS old."""
+    last = None
+    for raw in (text or "").splitlines():
+        try:
+            entry = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(entry, dict) and entry.get("type") in ("user", "assistant") and entry.get("isSidechain") is not True \
+                and not entry.get("isCompactSummary"):
+            last = entry
+    if last is None:
+        return None
+    at = (_iso_ms(last.get("timestamp")) or 0) / 1000
+    ending, detail = session_ending({"tail": [last]}, now - at <= READER_LIVE_SECONDS, local)
+    return ending, at, detail
+
+
+def end_word(kind: str, detail: str = "") -> str:
+    return END_WORDS[kind] + (f" {detail}" if detail else "")
+
+
+def reader_rows(steps: list, header: tuple, ending: tuple | None, width: int, local: Callable = time.localtime) -> list:
+    """(text, tone, spans, step) for each row of the reader: two header rows, then every step with a hanging indent, then the end line.
+
+    `header` is (label, note). `spans` are (start, end, tone) colours laid over
+    a row, "bold" among the tones. `step` is the index of the step a row
+    belongs to, -1 for the header and the end line.
+    """
+    label, note = header
+    top = fit(f"{label}  {note}", width)
+    rows = [(top, "plain", ((0, min(len(label), len(top)), "bold"), (len(label), len(top), "muted")), -1),
+            ("─" * width, "muted", (), -1)]
+    room = max(1, width - READER_INDENT)
+    for i, step in enumerate(steps):
+        stamp = "" if step.at_ms is None else time.strftime("%H:%M", local(step.at_ms / 1000))
+        lead = f"{stamp:<5}  "
+        if step.kind == "cut":
+            rows.append((fit(lead + step.text, width), "muted", (), i))
+            continue
+        text = "".join(c if c.isprintable() or c == "\n" else " " for c in step.text)
+        if step.kind == "error":
+            rows += [(fit(" " * READER_INDENT + line, width), "error", (), i) for line in wrap_words(text, room)]
+            continue
+        parts = text.split("\n")
+        parts[-1] += f"  {step.mark}" if step.mark else ""
+        lines = [line for part in parts for line in wrap_words(part, room)]
+        named = re.match(r"▸ \S+", text)
+        for n, line in enumerate(lines):
+            row = (lead if n == 0 else " " * READER_INDENT) + line
+            spans = []
+            if n == 0:
+                spans.append((0, 5, "muted"))
+                if named:
+                    spans += [(len(lead), len(lead) + len(named.group()), "accent"), (len(lead) + len(named.group()), len(row), "muted")]
+            if step.mark and n == len(lines) - 1:
+                spans.append((len(row) - len(step.mark), len(row), "error" if step.tone == "error" else "done"))
+            rows.append((fit(row, width), "plain", tuple(spans), i))
+    if ending is not None:
+        kind, at, detail = ending
+        stamp = time.strftime("%H:%M", local(at))
+        if kind == GOING:
+            rows.append((fit(f"… still going · {stamp}", width), "plain", (), -1))
+        else:
+            rows.append((fit(f"■ stopped here · {stamp} · the run ended: {end_word(kind, detail)}", width), "needs", (), -1))
+    return rows
 
 
 def has_control(text: str) -> bool:
@@ -2497,7 +3074,17 @@ def normalize_prefs(raw) -> dict:
         value = raw.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and not _check(SETTING_BY_KEY[key], str(value), "")[1]:
             prefs[key] = value
-    for key in ("claude_command", "remote_command"):
+    places = raw.get("place")
+    if isinstance(places, list):
+        kept, names = [], set()
+        for line in places:
+            place = parse_place(line)[0] if isinstance(line, str) and not has_control(line) else None
+            if place is not None and place.name not in names:
+                names.add(place.name)
+                kept.append(place_line(place))
+        if kept:
+            prefs["place"] = kept
+    for key in ("claude_command", "remote_command", "place_user_command"):
         text = raw.get(key)
         if isinstance(text, str) and text.strip() and not has_control(text):
             prefs[key] = text.strip()
@@ -2581,6 +3168,51 @@ class Setting:
     next_start: bool = False
 
 
+@dataclass(frozen=True)
+class Place:
+    """Where routines are read: a server (None is this machine) and a login there (None is whoever emx runs as)."""
+    name: str
+    host: str | None = None
+    login: str | None = None
+
+
+PLACE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+PLACE_LOGIN = re.compile(r"[a-z_][a-z0-9_.-]*")
+PLACE_WORDS = ("server", "user")
+
+
+def parse_place(text: str) -> tuple:
+    """`(Place, "")` for `<name> [server <host>] [user <login>]` in either word order, else `(None, why)`."""
+    words = text.split()
+    if not words:
+        return None, "place needs a name"
+    name, rest = words[0], words[1:]
+    if PLACE_NAME.fullmatch(name) is None:
+        return None, f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+    found = {}
+    for i in range(0, len(rest), 2):
+        word = rest[i]
+        if word not in PLACE_WORDS:
+            return None, f'place has an unknown word "{word}"; use server <host> or user <login>'
+        if word in found:
+            return None, f"place says {word} twice"
+        if i + 1 >= len(rest):
+            return None, f"place {word} needs a {'host' if word == 'server' else 'login'}"
+        found[word] = rest[i + 1]
+    if not found:
+        return None, "place needs server <host> or user <login>"
+    host, login = found.get("server"), found.get("user")
+    if host is not None and remote_host(host) is None:
+        return None, f'place host "{host}" is not a host name from your SSH config'
+    if login is not None and PLACE_LOGIN.fullmatch(login) is None:
+        return None, f'place login "{login}" is not a login name'
+    return Place(name, host, login), ""
+
+
+def place_line(place: Place) -> str:
+    return " ".join([place.name, *(["server", place.host] if place.host else []), *(["user", place.login] if place.login else [])])
+
+
 SETTINGS = (
     Setting("side", "Panel", "Side", "choice", "right", "Which side of the window the panel sits on: left or right",
             "Which side of the window the panel sits on.", choices=SIDES, wide_only=True),
@@ -2602,6 +3234,12 @@ SETTINGS = (
             low=1024, high=65535, next_start=True),
     Setting("favourite_folders", "Folders", "Favourites", "folders", [], "Starred folders for new sessions, one per line",
             "Folders starred for new sessions."),
+    Setting("place", "Routines", "Places", "places", [],
+            "Other places whose routines R shows, one per line: a name, then server <host> and/or user <login>",
+            "Other places whose routines the Routines view shows."),
+    Setting("place_user_command", "Routines", "Run as another user", "text", "sudo -n -u",
+            "How a place's user is reached; the login name follows it",
+            "The command that runs emx's reads as another user; the login follows it."),
     Setting("claude_command", "Commands", "Claude command", "text", "claude",
             "The claude command sessions start with (takes effect at the next start)",
             "The command sessions start claude with.", next_start=True),
@@ -2692,7 +3330,7 @@ def _check(setting: Setting, text: str, home: str) -> tuple:
 
 def read_config(text: str, home: str) -> tuple:
     """`(values, lines, problems)`: every key's value (the default where its line is bad or missing), the first line of each key that has one, and a message per line emx can't use."""
-    values = {s.key: (list(s.default) if s.kind == "folders" else s.default) for s in SETTINGS}
+    values = {s.key: (list(s.default) if s.kind in ("folders", "places") else s.default) for s in SETTINGS}
     lines, problems = {}, []
     for number, raw in enumerate(_lines(text), 1):
         parts = _split_line(raw)
@@ -2713,6 +3351,16 @@ def read_config(text: str, home: str) -> tuple:
                 if folder not in values[key]:
                     values[key].append(folder)
             continue
+        if setting.kind == "places":
+            lines.setdefault(key, number)
+            place, why = parse_place(value)
+            if place is None:
+                problems.append(f"line {number}: {why}")
+            elif any(parse_place(have)[0].name == place.name for have in values[key]):
+                problems.append(f'line {number}: place "{place.name}" is already set')
+            else:
+                values[key].append(place_line(place))
+            continue
         if key in lines:
             problems.append(f"line {number}: {key} is already set on line {lines[key]}")
             continue
@@ -2728,6 +3376,8 @@ def read_config(text: str, home: str) -> tuple:
 def _setting_lines(setting: Setting, value, home: str) -> list:
     if setting.kind == "folders":
         return [f"{setting.key} = {tilde_path(folder, home)}" for folder in value]
+    if setting.kind == "places":
+        return [f"{setting.key} = {line}" for line in value]
     return [f"{setting.key} = {value}"]
 
 
@@ -2791,6 +3441,26 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
     return _insert_under_section(out, setting, new, last) if new else out
 
 
+def _write_places(lines: list, setting: Setting, wanted: list) -> list:
+    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), drops the rest, appends what is new."""
+    out, present, last = [], set(), None
+    for raw in lines:
+        parts = _split_line(raw)
+        if parts and parts[0] == setting.key and parts[1]:
+            place = parse_place(parts[1])[0]
+            if place is not None:
+                line = place_line(place)
+                if line not in wanted:
+                    continue
+                present.add(line)
+            out.append(raw)
+            last = len(out) - 1
+        else:
+            out.append(raw)
+    new = [f"{setting.key} = {line}" for line in wanted if line not in present]
+    return _insert_under_section(out, setting, new, last) if new else out
+
+
 def write_config_text(text: str, changes: Mapping, home: str) -> str:
     """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. Raises OSError for a value that would break a line."""
     for key, value in changes.items():
@@ -2802,6 +3472,8 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
         lines = _lines(text)
         if setting.kind == "folders":
             lines = _write_favourites(lines, setting, changes[setting.key], home)
+        elif setting.kind == "places":
+            lines = _write_places(lines, setting, changes[setting.key])
         else:
             lines = _write_scalar(lines, setting, changes[setting.key])
         text = "".join(lines)
@@ -3018,6 +3690,8 @@ def shown_value(setting: Setting, prefs: Mapping, selected: bool) -> str:
         return f"{value // 60}m" if value % 60 == 0 else f"{value}s"
     if setting.kind == "folders":
         return f"{len(value)} ›"
+    if setting.kind == "places":
+        return str(len(value))
     return str(value)
 
 
