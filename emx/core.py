@@ -3209,14 +3209,26 @@ PLACE_LOGIN = re.compile(r"[a-z_][a-z0-9_.-]*")
 PLACE_WORDS = ("server", "user")
 
 
+def place_name_problem(name: str) -> str:
+    return "" if PLACE_NAME.fullmatch(name) else f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+
+
+def place_host_problem(host: str) -> str:
+    return "" if remote_host(host) is not None else f'place host "{host}" is not a host name from your SSH config'
+
+
+def place_login_problem(login: str) -> str:
+    return "" if PLACE_LOGIN.fullmatch(login) else f'place login "{login}" is not a login name'
+
+
 def parse_place(text: str) -> tuple:
     """`(Place, "")` for `<name> [server <host>] [user <login>]` in either word order, else `(None, why)`."""
     words = text.split()
     if not words:
         return None, "place needs a name"
     name, rest = words[0], words[1:]
-    if PLACE_NAME.fullmatch(name) is None:
-        return None, f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+    if problem := place_name_problem(name):
+        return None, problem
     found = {}
     for i in range(0, len(rest), 2):
         word = rest[i]
@@ -3230,10 +3242,10 @@ def parse_place(text: str) -> tuple:
     if not found:
         return None, "place needs server <host> or user <login>"
     host, login = found.get("server"), found.get("user")
-    if host is not None and remote_host(host) is None:
-        return None, f'place host "{host}" is not a host name from your SSH config'
-    if login is not None and PLACE_LOGIN.fullmatch(login) is None:
-        return None, f'place login "{login}" is not a login name'
+    if host is not None and (problem := place_host_problem(host)):
+        return None, problem
+    if login is not None and (problem := place_login_problem(login)):
+        return None, problem
     return Place(name, host, login), ""
 
 
@@ -3264,7 +3276,7 @@ SETTINGS = (
             "Folders starred for new sessions."),
     Setting("place", "Routines", "Places", "places", [],
             "Other places whose routines R shows, one per line: a name, then server <host> and/or user <login>",
-            "Other places whose routines the Routines view shows."),
+            "Other places whose routines the Routines view shows; Enter lists them."),
     Setting("place_user_command", "Routines", "Run as another user", "text", "sudo -n -u",
             "How a place's user is reached; the login name follows it",
             "The command that runs emx's reads as another user; the login follows it."),
@@ -3470,21 +3482,37 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
 
 
 def _write_places(lines: list, setting: Setting, wanted: list) -> list:
-    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), drops the rest, appends what is new."""
-    out, present, last = [], set(), None
-    for raw in lines:
+    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), appends what is new.
+
+    A place line no longer wanted is the edited place when the k-th readable
+    place line of the file and `wanted[k]` meet there and `wanted[k]` is on no
+    line yet: it is then rewritten where it stands, so an edit keeps its line
+    and its tab. Otherwise it was removed and is dropped.
+    """
+    def readable(raw):
         parts = _split_line(raw)
-        if parts and parts[0] == setting.key and parts[1]:
-            place = parse_place(parts[1])[0]
-            if place is not None:
-                line = place_line(place)
-                if line not in wanted:
-                    continue
-                present.add(line)
+        place = parse_place(parts[1])[0] if parts and parts[0] == setting.key and parts[1] else None
+        return None if place is None else place_line(place)
+
+    on_file = {line for line in map(readable, lines) if line is not None}
+    out, present, last, k = [], set(), None, 0
+    for raw in lines:
+        line = readable(raw)
+        if line is None:
             out.append(raw)
-            last = len(out) - 1
+            continue
+        if line in wanted:
+            present.add(line)
+        elif k < len(wanted) and wanted[k] not in on_file | present:
+            line = wanted[k]
+            present.add(line)
+            raw = f"{setting.key} = {line}" + ("\n" if raw.endswith("\n") else "")
         else:
-            out.append(raw)
+            k += 1
+            continue
+        k += 1
+        out.append(raw)
+        last = len(out) - 1
     new = [f"{setting.key} = {line}" for line in wanted if line not in present]
     return _insert_under_section(out, setting, new, last) if new else out
 
@@ -3719,7 +3747,7 @@ def shown_value(setting: Setting, prefs: Mapping, selected: bool) -> str:
     if setting.kind == "folders":
         return f"{len(value)} ›"
     if setting.kind == "places":
-        return str(len(value))
+        return f"{len(value)} ›"
     return str(value)
 
 

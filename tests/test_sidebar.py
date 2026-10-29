@@ -9719,11 +9719,126 @@ class SettingsMenu(AppCase):
         self.assertFalse(any(line.startswith("favourite_folders = ") for line in self.config_lines()))
         self.assertEqual(core.favourite_folders(self.app.prefs), [])
 
-    def test_places_row_points_to_the_file(self):
+    THREE = ["worker user bot", "far server srv2 user bot", "w3 user x"]
+
+    def with_places(self, lines=None):
+        self.app.apply_setting({**self.app.prefs, "place": list(lines or self.THREE)})
+
+    def places_on_file(self):
+        return [line for line in self.config_lines() if line.startswith("place = ")]
+
+    def type_form(self, *fields):
+        for text in fields:
+            self.press(sidebar.CTRL_U, *text, "\n")
+
+    def test_enter_on_places_opens_the_list(self):
+        self.tall()
+        self.with_places(["worker user bot", "server-2 server srv2"])
+        self.go_to("Places")
+        self.assertIn("2 ›", self.screen())
+        self.press("\n")
+        self.assertEqual(self.app.settings["places"], 0)
+        rows = [line.strip().rstrip() for line in self.screen().splitlines()]
+        for expected in ("worker user bot", "server-2 server srv2", "+ add a place"):
+            self.assertTrue(any(row.endswith(expected) for row in rows), (expected, rows))
+
+    def test_add_a_place_each_combination(self):
+        for fields, line in ((("w2", "", "bot"), "place = w2 user bot"), (("s3", "srv3", ""), "place = s3 server srv3"),
+                             (("f4", "srv4", "bot"), "place = f4 server srv4 user bot")):
+            with self.subTest(fields=fields):
+                self.go_to("Places")
+                self.press("\n", "a")
+                self.type_form(*fields)
+                self.assertIsNone(self.app.settings["edit"])
+                self.assertEqual(self.places_on_file()[-1], line)
+                place = core.parse_place(line[len("place = "):])[0]
+                self.assertIn(place, sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files)))
+                self.press("c")
+        self.go_to("Places")
+        self.press("\n", "a")
+        before = self.places_on_file()
+        self.type_form("me", "", "")
+        self.assertEqual(self.app.settings["edit"]["hint"], "place needs server <host> or user <login>")
+        self.assertEqual(self.places_on_file(), before)
+
+    def test_edit_a_place(self):
+        self.with_places()
+        before = self.config_lines()
+        old = before.index("place = far server srv2 user bot")
+        self.go_to("Places")
+        self.press("\n", "j", "\n")
+        self.assertEqual(self.app.settings["edit"]["place"]["name"], "far")
+        self.press("\n", "\n")
+        self.type_form("bot2")
+        after = self.config_lines()
+        self.assertEqual(after[old], "place = far server srv2 user bot2")
+        self.assertEqual(after[:old] + after[old + 1:], before[:old] + before[old + 1:])
+        self.assertEqual([p.name for p in sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files))], ["this user", "worker", "far", "w3"])
+
+    def test_remove_a_place_needs_two_x(self):
+        self.tall()
+        self.with_places()
         self.go_to("Places")
         self.press("\n")
-        self.assertEqual(self.app.notice, "Places are set in the file; e opens it.")
-        self.assertIsNone(self.app.settings["edit"])
+        clock = [100.0]
+        with mock.patch.object(sidebar.time, "monotonic", lambda: clock[0]):
+            before = self.places_on_file()
+            self.press("x")
+            self.assertEqual(self.places_on_file(), before)
+            self.assertIn("x again to remove worker", self.screen())
+            self.press("x")
+            self.assertEqual(self.places_on_file(), ["place = far server srv2 user bot", "place = w3 user x"])
+            self.press("x", "j", "x")
+            self.assertEqual(len(self.places_on_file()), 2)
+            self.press("k")
+            self.press("x")
+            clock[0] += core.CONFIRM_SECONDS + 1
+            self.assertNotIn("x again to remove", self.screen())
+            self.press("x")
+            self.assertEqual(len(self.places_on_file()), 2)
+            self.assertIn("x again to remove far", self.screen())
+
+    def test_bad_server_and_user_are_refused_with_the_reason(self):
+        self.with_places(["worker user bot"])
+        self.go_to("Places")
+        self.press("\n", "a")
+        before = self.config_lines()
+        self.type_form("a b")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_name_problem("a b"))
+        self.type_form("worker")
+        self.assertEqual(self.app.settings["edit"]["hint"], 'place "worker" is already set')
+        self.type_form("okay")
+        self.assertEqual(self.app.settings["edit"]["place"]["step"], 1)
+        self.type_form("-oProxyCommand=x")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_host_problem("-oProxyCommand=x"))
+        self.assertEqual(self.app.settings["edit"]["place"]["step"], 1)
+        self.type_form("srv9")
+        self.type_form("Bad")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_login_problem("Bad"))
+        self.assertIsNotNone(self.app.settings["edit"])
+        self.assertEqual(self.config_lines(), before)
+
+    def test_the_form_shows_an_example_for_each_field(self):
+        self.tall()
+        self.go_to("Places")
+        self.press("\n", "a")
+        examples = ("e.g. worker", "e.g. srv2", "e.g. bot")
+        for step, mine in enumerate(examples):
+            shown = self.screen()
+            self.assertIn(mine, shown)
+            for other in examples:
+                if other != mine:
+                    self.assertNotIn(other, shown)
+            self.press(*"w", "\n") if step == 0 else self.press("\n")
+        self.assertIn("place = w", self.screen())
+
+    def test_places_enter_no_longer_says_set_in_the_file(self):
+        self.go_to("Places")
+        self.press("\n")
+        self.assertEqual(self.app.notice, "")
+        self.assertEqual(self.app.settings["places"], 0)
+        source = (Path(sidebar.__file__)).read_text(encoding="utf-8")
+        self.assertNotIn("Places are set in the file", source)
 
     def test_a_folder_with_a_line_break_is_refused_and_adds_no_line(self):
         folder = os.path.realpath(tempfile.mkdtemp()) + "\nscheme = dark"

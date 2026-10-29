@@ -27,6 +27,7 @@ def setUpModule():
     unittest.addModuleCleanup(patch.stop)
     os.environ.pop("EMX_CONFIG_HOME", None)
 
+
 class FindEditor(unittest.TestCase):
     def test_find_editor_order(self):
         def finds(*names):
@@ -1565,6 +1566,34 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(places.from_prefs(defaults()), [places.HERE])
         self.assertEqual(places.from_prefs(core.read_config("", CFG_HOME)[0]), [places.HERE])
 
+    def test_parse_place_reasons_unchanged(self):
+        host_reason = 'place host "-oProxy" is not a host name from your SSH config'
+        login_reason = 'place login "Bad User" is not a login name'
+        self.assertEqual(core.parse_place(""), (None, "place needs a name"))
+        self.assertEqual(core.parse_place("a b"), (None, 'place has an unknown word "b"; use server <host> or user <login>'))
+        self.assertEqual(core.parse_place("-x user bot")[1], 'place name "-x" can only hold letters, digits, dots, dashes and underscores')
+        self.assertEqual(core.parse_place("a"), (None, "place needs server <host> or user <login>"))
+        self.assertEqual(core.parse_place("a server -oProxy"), (None, host_reason))
+        self.assertEqual(core.parse_place("a user Bad"), (None, 'place login "Bad" is not a login name'))
+        self.assertEqual(core.parse_place("a user x user y"), (None, "place says user twice"))
+        self.assertEqual(core.parse_place("a user"), (None, "place user needs a login"))
+        self.assertEqual(core.parse_place("w server s1 user bot"), (core.Place("w", "s1", "bot"), ""))
+        self.assertEqual(core.place_host_problem("-oProxy"), host_reason)
+        self.assertEqual(core.place_login_problem("Bad User"), login_reason)
+        self.assertEqual((core.place_host_problem("srv2"), core.place_login_problem("bot"), core.place_name_problem("worker")), ("", "", ""))
+
+    def test_write_places_edits_in_place(self):
+        text = f"## Routines\n# {core.SETTING_BY_KEY['place'].comment}\nplace = a user x\n# a note\nplace = b user y\nplace = c user z\nside = right\n"
+        a, b, c = "a user x", "b user y", "c user z"
+        edited = core.write_config_text(text, {"place": [a, "b user q", c]}, CFG_HOME)
+        self.assertEqual(edited, text.replace("place = b user y", "place = b user q"))
+        gone = core.write_config_text(text, {"place": [a, c]}, CFG_HOME)
+        self.assertEqual(gone, text.replace("place = b user y\n", ""))
+        added = core.write_config_text(text, {"place": [a, b, c, "d user w"]}, CFG_HOME)
+        self.assertEqual(added, text.replace("place = c user z\n", "place = c user z\nplace = d user w\n"))
+        first = core.write_config_text(text, {"place": [b, c]}, CFG_HOME)
+        self.assertEqual(first, text.replace("place = a user x\n", ""))
+
     def test_place_lines_round_trip(self):
         text = BOARD + "# my note\nplace = worker   user bot\nfavourite_folders = ~/a\n"
         self.assertEqual(core.read_config(text, CFG_HOME)[0]["place"], ["worker user bot"])
@@ -1588,8 +1617,8 @@ class ConfigFile(unittest.TestCase):
 
     def test_places_shown_as_count(self):
         by = core.SETTING_BY_KEY
-        self.assertEqual(core.shown_value(by["place"], {"place": ["a user b", "c user d"]}, False), "2")
-        self.assertEqual(core.shown_value(by["place"], {}, True), "0")
+        self.assertEqual(core.shown_value(by["place"], {"place": ["a user b", "c user d"]}, False), "2 ›")
+        self.assertEqual(core.shown_value(by["place"], {}, True), "0 ›")
         self.assertEqual(core.shown_value(by["place_user_command"], {}, False), "sudo -n -u")
 
     def test_the_template_has_a_routines_section(self):
