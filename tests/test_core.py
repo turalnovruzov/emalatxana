@@ -6319,6 +6319,22 @@ class InFrontAny(unittest.TestCase):
         self.assertTrue(core.in_front_any(VIEW_KEY, [phone, self.view()], self.NOW))
 
 
+class ShownAny(unittest.TestCase):
+    def view(self, **change):
+        args = {"name": "emx", "attached": 1, "focus": "0", "activity": None, "width": 200, "shows": VIEW_KEY, "slot_active": False}
+        return View(**{**args, **change})
+
+    def test_shown_in_a_view_with_a_client_whatever_its_focus_pane_and_input(self):
+        self.assertTrue(core.shown_any(VIEW_KEY, [self.view()]))
+        self.assertTrue(core.shown_any(VIEW_KEY, [self.view(shows="other"), self.view(name="emx-view-1")]))
+
+    def test_shown_but_detached_or_not_shown_is_not(self):
+        self.assertFalse(core.shown_any(VIEW_KEY, [self.view(attached=0)]))
+        self.assertFalse(core.shown_any(VIEW_KEY, [self.view(shows="other")]))
+        self.assertFalse(core.shown_any(VIEW_KEY, []))
+        self.assertFalse(core.shown_any("", [self.view(shows="")]))
+
+
 class ViewsQuiet(unittest.TestCase):
     def test_clients_add_up_and_the_latest_input_of_any_counts(self):
         views = [

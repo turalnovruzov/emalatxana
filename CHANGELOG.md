@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.24.1 — 2026-10-29
+
+- A session you have on screen no longer gets a dot or an Unread line when it finishes or needs you, even after you have not typed for a while.
+
 ## 2.24.0 — 2026-10-29
 
 - A session with an unread notification now shows a coloured dot on its row, just before its age: yellow when it needs you, green when it is done. A session has at most one, its newest.

@@ -5099,6 +5099,15 @@ def in_front_any(sid: str, views, now: float) -> bool:
     )
 
 
+def shown_any(sid: str, views) -> bool:
+    """Whether some view with a client attached shows `sid` in its slot, whatever the focus, the active pane or the last input.
+
+    A notice for such a session still goes out, but it lands already read: he
+    has it on screen, so a dot would point him at what he is looking at.
+    """
+    return any(bool(sid) and v.shows == sid and v.attached > 0 for v in views)
+
+
 def summaries_record(found: dict) -> dict:
     """What the primary panel writes to `summaries.json` for the other views' panels: each session's line and the state it is for, nothing else."""
     return {sid: {"text": s.text, "state": s.category} for sid, s in found.items() if is_session_id(sid)}
