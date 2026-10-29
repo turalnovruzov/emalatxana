@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import tempfile
 import textwrap
 import time
@@ -3841,6 +3842,19 @@ def remember_opened(prefs: dict, folder: str) -> dict:
 def present_folders(folders, readable: Mapping) -> list:
     """`folders` without those a read has found missing or unreadable; one not read yet stays."""
     return [f for f in folders if readable.get(f) is not False]
+
+
+def find_editor(env: Mapping, which: Callable | None = None) -> str:
+    """The editor command to run: $VISUAL, $EDITOR, else the first of `editor`, `nano`, `vi` on PATH; "" when none is found. A $VISUAL or $EDITOR naming a program not on PATH is skipped."""
+    which = which or shutil.which
+    for value in (env.get("VISUAL", ""), env.get("EDITOR", ""), "editor", "nano", "vi"):
+        try:
+            words = shlex.split(value)
+        except ValueError:
+            continue
+        if words and which(words[0]):
+            return value.strip()
+    return ""
 
 
 def tilde_path(path: str, home: str) -> str:

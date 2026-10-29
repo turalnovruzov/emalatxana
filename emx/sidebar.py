@@ -3759,10 +3759,10 @@ class App:
             st["edit"] = {"setting": core.SETTING_BY_KEY["favourite_folders"], "label": "Add a folder", "text": "", "hint": "", "add": True}
 
     def edit_config_file(self) -> None:
-        """`e`: the file in a popup running `$EDITOR`; the file's own change is then read like any other edit."""
+        """`e`: the file in a popup running his editor (`core.find_editor`); the file's own change is then read like any other edit."""
         path = self.prefs_files.config
         where = f"The config file is {core.tilde_path(str(path), self.home)}"
-        editor = os.environ.get("EDITOR", "").strip()
+        editor = core.find_editor(os.environ)
         if not editor:
             self.say(where)
             return

@@ -9557,7 +9557,7 @@ class SettingsMenu(AppCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        for name in ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND", "EDITOR"):
+        for name in ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND", "EDITOR", "VISUAL"):
             os.environ.pop(name, None)
 
     def screen(self):
@@ -9769,16 +9769,32 @@ class SettingsMenu(AppCase):
 
     def test_e_opens_a_popup_with_the_editor(self):
         os.environ["EDITOR"] = "vi"
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("vi",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.press("c", "e")
         self.app.tmux.popup.assert_called_once_with(f"exec vi {shlex.quote(str(self.app.prefs_files.config))}", " emx config ")
 
+    def test_e_uses_the_machines_editor_when_editor_is_unset(self):
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("nano",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.press("c", "e")
+        self.app.tmux.popup.assert_called_once_with(f"exec nano {shlex.quote(str(self.app.prefs_files.config))}", " emx config ")
+
     def test_e_without_an_editor_says_where_the_file_is(self):
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in () else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.press("c", "e")
         self.app.tmux.popup.assert_not_called()
         self.assertEqual(self.app.notice, "The config file is " + core.tilde_path(str(self.app.prefs_files.config), self.app.home))
 
     def test_e_when_tmux_refuses_says_where_the_file_is(self):
         os.environ["EDITOR"] = "vi"
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("vi",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.app.tmux.popup.side_effect = sidebar.TmuxError("no client")
         self.press("c", "e")
         self.assertTrue(self.app.notice.startswith("The config file is "))

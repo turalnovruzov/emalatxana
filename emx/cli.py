@@ -52,7 +52,7 @@ docs prints the emx docs index (start there); docs <page> prints one page.
 hush stops the voice now (the sentence being spoken and any waiting behind it) without muting later notices.
 remote <host> opens the emx running on that server over ssh (host from your SSH config), in this terminal; closing it leaves the server's sessions running.
 phone prints the address of the phone page this emx serves over Tailscale, or why it isn't up.
-config opens emx's settings file in $EDITOR, or prints its path when EDITOR isn't set; c in the panel opens the same settings as a menu.
+config opens emx's settings file in your editor ($VISUAL, $EDITOR, else editor, nano or vi), or prints its path when none is found; c in the panel opens the same settings as a menu.
 update installs the newest version of an installed emx now, a new major version included; the running panel switches to it at a quiet moment.
 uninstall removes the installed emx and its link; your settings and emx's state are kept.
 Environment: EMX_SOCKET names the tmux socket (default "emx").
@@ -693,7 +693,7 @@ def config_command(args: list) -> int:
     except OSError as exc:
         print(f"emx: couldn't write the config file: {exc}", file=sys.stderr)
         return 1
-    editor = os.environ.get("EDITOR", "").strip()
+    editor = core.find_editor(os.environ)
     if not editor:
         print(files.config)
         return 0

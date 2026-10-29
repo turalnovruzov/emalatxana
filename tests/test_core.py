@@ -27,6 +27,25 @@ def setUpModule():
     unittest.addModuleCleanup(patch.stop)
     os.environ.pop("EMX_CONFIG_HOME", None)
 
+class FindEditor(unittest.TestCase):
+    def test_find_editor_order(self):
+        def finds(*names):
+            return lambda program: "/bin/" + program if program in names else None
+
+        both = {"VISUAL": "code -w", "EDITOR": "vim"}
+        self.assertEqual(core.find_editor(both, finds("code", "vim", "nano")), "code -w")
+        self.assertEqual(core.find_editor(both, finds("vim", "nano")), "vim")
+        self.assertEqual(core.find_editor({}, finds("editor", "vi")), "editor")
+        self.assertEqual(core.find_editor({}, finds("vi")), "vi")
+        self.assertEqual(core.find_editor({}, finds()), "")
+        self.assertEqual(core.find_editor({"EDITOR": "missing"}, finds("nano", "vi")), "nano")
+        self.assertEqual(core.find_editor({"VISUAL": "  ", "EDITOR": "'unclosed"}, finds("vi")), "vi")
+
+    def test_find_editor_uses_shutil_which_at_call_time(self):
+        with mock.patch.object(core.shutil, "which", lambda program: "/x" if program == "nano" else None):
+            self.assertEqual(core.find_editor({}), "nano")
+
+
 class TestSessionsHidden(unittest.TestCase):
     def setUp(self):
         saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
