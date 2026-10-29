@@ -1225,6 +1225,13 @@ class Page(ServerCase):
         self.assertLess(body.index("await poll()"), body.index("markRead(id)"))
         self.assertIn("openHidden(item.id)", js)
 
+    def test_a_failed_poll_in_openhidden_shows_the_offline_banner_not_the_gone_toast(self):
+        js, _ = self.text("/app.js")
+        body = re.search(r"async function openHidden\(id\) \{(.*?)\n\}\n", js, re.S).group(1)
+        self.assertIn('if (!$("offline").hidden) return;', body)
+        self.assertLess(body.index("await poll()"), body.index('$("offline").hidden'))
+        self.assertLess(body.index('$("offline").hidden'), body.index("toast("))
+
     def test_the_unread_section_comes_before_the_no_match_line_and_takes_its_title_from_data(self):
         js, _ = self.text("/app.js")
         self.assertLess(js.index("list.append(renderUnread())"), js.index("data.look.find_none"))

@@ -268,6 +268,7 @@ async function openHidden(id) {
   $("find-clear").hidden = true;
   findText = "";
   await poll();
+  if (!$("offline").hidden) return;
   const found = findSession(id);
   if (!found) {
     toast(data.look ? data.look.open_gone : "That session isn't listed any more.");

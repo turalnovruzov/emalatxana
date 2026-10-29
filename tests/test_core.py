@@ -833,6 +833,14 @@ class UnreadText(unittest.TestCase):
     def test_the_name_alone_leaves_nothing(self):
         self.assertEqual(core.unread_text("api-fix", "api-fix"), "")
 
+    def test_a_longer_name_that_continues_with_a_hyphen_or_underscore_is_unchanged(self):
+        self.assertEqual(core.unread_text("api-fix", "api-fix-v2 is done"), "api-fix-v2 is done")
+        self.assertEqual(core.unread_text("api", "api_fix is done"), "api_fix is done")
+
+    def test_the_boundary_is_checked_on_the_original_text_when_lowercasing_changes_its_length(self):
+        self.assertEqual(core.unread_text("i", "\u0130 is done"), "\u0130 is done")
+        self.assertEqual(core.unread_text("\u0130", "\u0130 is done"), "Is done")
+
 
 class UnreadBox(unittest.TestCase):
     ITEMS = [("s1", core.NOTICE_NEEDS, "api-fix", "approve npm test?"), ("s2", core.NOTICE_DONE, "docs-pass", "updated 3 pages")]

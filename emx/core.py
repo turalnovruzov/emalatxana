@@ -5542,7 +5542,8 @@ UNREAD_MIN_WIDTH = 12
 
 def unread_text(name: str, text: str) -> str:
     """A notice's text for the Unread line, without a leading copy of the session's name (the line shows the name), capitalised."""
-    if name and text.lower().startswith(name.lower()) and not text[len(name):len(name) + 1].isalnum():
+    after = text[len(name):len(name) + 1]
+    if name and text[:len(name)].lower() == name.lower() and not (after.isalnum() or after in ("-", "_")):
         text = text[len(name):].lstrip(" ,:;.-–—")
         return text[:1].upper() + text[1:]
     return text
