@@ -3285,6 +3285,12 @@ class App:
                 self.menu_key(item[1])
                 return
             self.close_menu()
+        if item and item[0] == "unread":
+            self.open_listed(item[1])
+            return
+        if item and item[0] == "unread-more":
+            self.open_history()
+            return
         if item and item[0] == "link":
             self.open_in_app(self.session(item[1]))
             return
@@ -4012,13 +4018,6 @@ class App:
             return core.hint_variants(core.CLOSING_HINTS)
         return core.hint_variants(core.session_hints(s, s.id in core.pinned_ids(self.prefs), listing))
 
-    def notice_key_live(self) -> bool:
-        """Whether `N` opens the notifications now: not while a prompt, find, rename, help, the history or the routines view has the keys."""
-        return (
-            self.history_view is None and self.routines_view is None and self.settings is None and not self.help
-            and self.prompt is None and self.find is None and self.rename_edit is None
-        )
-
     def narrow_hints(self) -> tuple:
         """The key hints a phone's bar offers over its panel: the phone's own on a row or a header, the panel's own anywhere else."""
         if self.menu is not None:
@@ -4060,8 +4059,7 @@ class App:
             return
         tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         parts = core.bar_parts(
-            __version__, core.bar_counts(self.sessions), self.history[0] if self.history else None,
-            time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded, self.notice_key_live(),
+            __version__, core.bar_counts(self.sessions), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded,
         )
         self.bar.push(bar_format(parts, core.scheme(self.prefs)))
 
@@ -4134,8 +4132,13 @@ class App:
             self.put(list_top + 2, 7, "n", curses.A_BOLD)
             self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
+            rows, hits = self.draw_unread(list_top, list_bottom, w)
+            list_top += rows
             self.put(list_top, 1, FIND_NONE, curses.A_DIM)
+            self.row_map.update(hits)
         else:
+            rows, hits = self.draw_unread(list_top, list_bottom, w)
+            list_top += rows
             layout = self.list_layout(w, max(1, list_bottom - list_top))
             room = core.peek_room(h, w, len(bottom))
             peek_rows = self.draw_peek(list_bottom, w, room, self.cursor_rows(layout)) if self.peeking else 0
@@ -4143,10 +4146,35 @@ class App:
             if core.scroll_thumb(sum(layout[2]), list_height, 0) is not None:
                 w, layout = w - 1, self.list_layout(w - 1, max(1, list_bottom - list_top))
             self.draw_list(list_top, list_bottom - peek_rows, w, layout)
+            self.row_map.update(hits)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
         scr.noutrefresh()
         curses.doupdate()
+
+    def unread_items(self) -> list:
+        """(id, kind, live name, text) of each unread notice whose session is listed."""
+        items = []
+        for e in core.unread_entries(self.history):
+            listed = self.session(e.id)
+            if listed is not None:
+                items.append((e.id, e.kind, listed.name, core.unread_text(listed.name, e.text)))
+        return items
+
+    def draw_unread(self, top: int, bottom: int, width: int) -> tuple:
+        """Draw the Unread box from row `top` and return (rows taken, {screen row: row_map item}) for its clickable lines."""
+        box = core.unread_box(self.unread_items(), width, bottom - top)
+        pal = self.palette
+        hits = {}
+        for i, (target, kind, parts) in enumerate(box):
+            if target == "more":
+                hits[top + i] = ("unread-more", None)
+            elif target is not None:
+                hits[top + i] = ("unread", target)
+            for x, text, part in parts:
+                tone = CATEGORY_TONE[kind] if part in ("mark", "text") else "muted" if part in ("frame", "more") else "plain"
+                self.put(top + i, x, text, pal.attr(tone) | (curses.A_BOLD if part in ("title", "name") else 0))
+        return len(box), hits
 
     def draw_peek(self, bottom: int, width: int, room: int, cursor_rows: int = 1) -> int:
         """Draw the peek box ending above row `bottom`, in the `room` rows `core.peek_room` gives, and return how many rows it took (0 when it doesn't fit)."""
@@ -4515,15 +4543,20 @@ class App:
     def worktree(self, s) -> str:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
+    def unread_kinds(self) -> dict:
+        """Session id to the kind of its unread notice, for the dots and the Unread box."""
+        return {e.id: e.kind for e in core.unread_entries(self.history)}
+
     def session_lines(
         self, s, width: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
         max_lines: int = 0, inline: str | None = None, no_app: bool = False,
     ) -> list:
         """The row's lines as `core.row_lines` gives them, with `inline` placed on the last one when it fits, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) and not core.idle(s) else core.state_word(s)
+        unread = self.unread_kinds()
         age = core.session_age(s, now_ms)
         detail = NO_APP_DETAIL if no_app else core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
-        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED, max_lines)
+        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED, max_lines, s.id in unread)
         if s.id in self.closing:
             return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
         if armed is not None:
@@ -4568,6 +4601,9 @@ class App:
                 if part in ("confirm", "rename"):
                     tone = "error" if part == "confirm" else "accent"
                     self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
+                    continue
+                if part == "unread":
+                    self.put(y + i, x, text, pal.attr(CATEGORY_TONE[self.unread_kinds()[s.id]], selected))
                     continue
                 emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
                 if part == "hint":
@@ -4627,6 +4663,14 @@ class App:
     def take_notices(self) -> None:
         for sid, kind, title, text, at in self.poller.notices.take():
             self.history = core.history_add(self.history, core.Entry(sid, kind, title, text, at), self.opened)
+
+    def take_phone_reads(self) -> None:
+        """Sessions the phone page opened count as opened here: their notices turn read, as an open from the panel does."""
+        if self.phone is None:
+            return
+        for sid in self.phone.take_reads():
+            self.opened[sid] = time.monotonic()
+            self.history = core.history_read(self.history, sid)
 
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
@@ -4715,6 +4759,7 @@ class App:
             self.take_transcripts()
             self.take_summaries()
             self.take_notices()
+            self.take_phone_reads()
             # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
             if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False

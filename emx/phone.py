@@ -303,6 +303,7 @@ class PhoneApi:
         self.action_lock = threading.Lock()
         self.count_lock = threading.Lock()
         self.acting = 0
+        self.reads, self.reads_lock = set(), threading.Lock()
 
     def busy(self) -> bool:
         """True while a POST runs, so the panel does not relaunch for an update under it."""
@@ -340,7 +341,7 @@ class PhoneApi:
     def post(self, path: str, body: dict):
         actions = {
             "/api/new": self.new, "/api/rename": self.rename, "/api/close": self.close, "/api/resume": self.resume,
-            "/api/pin": self.pin, "/api/close-group": self.close_group,
+            "/api/pin": self.pin, "/api/close-group": self.close_group, "/api/read": self.read,
         }
         action = actions.get(path)
         if action is None and path != "/api/suggest-name":
@@ -371,7 +372,31 @@ class PhoneApi:
         except TmuxError:
             return False
 
-    def row(self, s, panes, summaries, transcripts: dict, now_ms: float, placement=None, pinned: bool = False) -> dict:
+    def history(self) -> list:
+        """The panel's notification history with the reads the page has posted since the panel last drained them applied, so the page sees a read at once."""
+        history = self.sources.history()
+        with self.reads_lock:
+            pending = set(self.reads)
+        for sid in pending:
+            history = core.history_read(history, sid)
+        return history
+
+    def take_reads(self) -> set:
+        with self.reads_lock:
+            taken, self.reads = self.reads, set()
+        return taken
+
+    def read(self, body: dict) -> tuple:
+        sid = body.get("id")
+        if not core.is_session_id(sid):
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        if self.listed(sid)[0] is None:
+            return 400, {"ok": False, "message": NOT_A_SESSION}
+        with self.reads_lock:
+            self.reads.add(sid)
+        return 200, {"ok": True}
+
+    def row(self, s, panes, summaries, transcripts: dict, now_ms: float, placement=None, pinned: bool = False, unread: str | None = None) -> dict:
         pane = core.live_viewer(panes, s.id) if s.running else None
         link = core.app_link(bridge_link(pane.pid, s.session_id)) if pane is not None and pane.pid > 1 else None
         stopped = core.category(s) == core.STOPPED
@@ -387,6 +412,7 @@ class PhoneApi:
             "stopped": stopped, "status": not stopped, "detail": detail if detail.strip() else "",
             "age": core.session_age(s, now_ms), "running": s.running, "link": link, "app": core.app_line(AGENT, link),
             "worktree": placement.worktree if placement is not None else "", "pinned": pinned,
+            "unread": sidebar.CATEGORY_TONE[unread] if unread else None,
         }
 
     def grouped(self, sessions, find: str, prefs: dict) -> list:
@@ -398,7 +424,7 @@ class PhoneApi:
         find = find.strip()[:FIND_MAX]
         sessions, error = self.engine.list_sessions()
         if sessions is None:
-            return {"error": error, "counts": [], "groups": [], "unread": 0, "version": emx.__version__}
+            return {"error": error, "counts": [], "groups": [], "unread": 0, "unread_list": [], "version": emx.__version__}
         try:
             panes = self.engine.tmux.panes()
         except TmuxError:
@@ -407,6 +433,9 @@ class PhoneApi:
         placements = self.sources.placements()
         pinned = core.pinned_ids(prefs)
         summaries, transcripts, now_ms = self.summaries(), self.sources.transcripts(), time.time() * 1000
+        history = self.history()
+        names = {s.id: s.name for s in sessions}
+        unread = {e.id: e for e in core.unread_entries(history)}
         panel_groups, groups = self.grouped(sessions, find, prefs), []
         for g in panel_groups:
             start = core.default_folder(("group", g.key), panel_groups, sessions, core.PROJECT, prefs.get("last_folder", ""))
@@ -416,16 +445,23 @@ class PhoneApi:
                 "base": core.PINNED_LABEL if g.key == core.PINNED else os.path.basename(g.key.rstrip("/")) or g.key,
                 "new_folder": core.tilde_path(start, self.home) if start else None,
                 "sessions": [
-                    self.row(s, panes, summaries, transcripts, now_ms, placements.get(s.cwd), s.id in pinned) for s in g.sessions
+                    self.row(s, panes, summaries, transcripts, now_ms, placements.get(s.cwd), s.id in pinned,
+                             unread[s.id].kind if s.id in unread else None)
+                    for s in g.sessions
                 ],
             })
         return {
             "error": None, "finding": bool(find), "version": emx.__version__,
             "look": {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
                      "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL, "worktree_mark": core.WORKTREE_MARK,
-                     "find_none": FIND_NONE, "open_gone": GONE},
+                     "find_none": FIND_NONE, "open_gone": GONE, "dot": core.UNREAD_DOT, "unread_title": core.UNREAD_TITLE},
             "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
-            "unread": core.history_unread(self.sources.history()),
+            "unread": core.history_unread(history),
+            "unread_list": [
+                {"id": e.id, "name": names[e.id], "mark": core.HISTORY_MARKS.get(e.kind, "·"),
+                 "tone": sidebar.CATEGORY_TONE.get(e.kind, "plain"), "text": core.unread_text(names[e.id], e.text)}
+                for e in unread.values() if e.id in names
+            ],
             "groups": groups,
         }
 
@@ -660,7 +696,7 @@ class PhoneApi:
         return 200, {"ok": False, "message": NAME_UNFIT_PAGE if error == sidebar.NAME_UNFIT else error}
 
     def notifications(self) -> dict:
-        history = self.sources.history()
+        history = self.history()
         live = {s.id for s in (self.engine.list_sessions()[0] or [])}
         now = time.monotonic()
         return {
@@ -953,6 +989,10 @@ class PhoneService(threading.Thread):
 
     def busy(self) -> bool:
         return self.api.busy()
+
+    def take_reads(self) -> set:
+        """The session ids the page has opened since the last call, for the panel to mark read."""
+        return self.api.take_reads()
 
     def take_notice(self) -> tuple | None:
         """(line, seconds it stays up or None for until replaced), oldest first. A problem is said for a while; the address stays until another notice replaces it, since nobody may be attached when it first appears."""

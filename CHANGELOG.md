@@ -2,6 +2,15 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.24.0 — 2026-10-29
+
+- A session with an unread notification now shows a coloured dot on its row, just before its age: yellow when it needs you, green when it is done. A session has at most one, its newest.
+- An `Unread` box sits at the top of the panel, one line for each session with an unread notification: its mark, name and what it said. A click on a line opens that session. The box is gone when nothing is unread.
+- The bar no longer shows the latest notification or `N all`. It keeps the version, the counts and the key hints. `N` still opens the list of the last 20 notifications.
+- The phone page has the same: a dot on each such row, an `Unread` section above the first folder, and no banner. Opening a session from the page marks it read, and its dot and entry go.
+- A line in the `Unread` box no longer starts with the session's name again, as emx's own plain line did (`api-fix, in emalatxana, needs you.` reads `In emalatxana, needs you.`).
+- Mac notifications and the voice are unchanged.
+
 ## 2.23.0 — 2026-10-28
 
 - The mouse works in the Routines view: click a place's tab to switch to it, click a run to select it, and click the selected run to read it. The wheel scrolls, as before.

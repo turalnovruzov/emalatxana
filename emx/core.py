@@ -1168,9 +1168,7 @@ def mode_tag(mode: str, helper: str, relayed: bool = False) -> str:
 
 BAR_NAME = "emx"
 BAR_SEP = "  │  "
-BAR_NOTICE_MIN = 12
 BAR_COUNT_ORDER = (NEEDS_INPUT, WORKING, DONE, "idle")
-NOTICE_KEY = "N all"
 HINT_GAP = 2
 PEEK_EDGE = "→ open · ␣ close"
 REST_HINTS = (("→", "open"), ("␣", "peek"), ("n", "new"), ("^f", "find"), ("^x", "close"), ("?", "keys"))
@@ -1192,19 +1190,18 @@ def bar_counts(sessions) -> list:
 
 
 BAR_COUNT_TONES = {NEEDS_INPUT: "needs", WORKING: "muted", DONE: "done", "idle": "idle"}
-_BAR_MARK_TONES = {NEEDS_INPUT: "needs", DONE: "done"}
 
 
-def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True, notice_key: bool = False) -> list:
+def bar_parts(version: str, counts: list, tag: str | None, remote: str | None, hints: tuple, width: int, loaded: bool = True) -> list:
     """(text, tone, bold) parts of the bar across the window's bottom, exactly `width` columns wide.
 
-    Left: the mark, the name, the version, the remote host and the mode tag, then the newest notification (`latest`, an Entry or None).
+    Left: the mark, the name, the version, the remote host and the mode tag.
     Right: a count per state, then the first of `hints` that fits. A fill of spaces sits between.
     A hint variant is a string (drawn as one muted part) or a tuple of (key, label) pairs
-    (keys bold, labels muted). With `notice_key`, `N all` follows the notification and goes with it.
-    Room runs out in this order: the notification text is cut (down to `BAR_NOTICE_MIN`), the hints step
-    through their variants, the notification goes, the hints go, then the version, the tag, the host
-    (cut, then the mark), the name; the counts are cut from the right last, and the mark stays.
+    (keys bold, labels muted). Notifications are not in the bar: they are the dots and the Unread box, so it takes no notice and no clock.
+    Room runs out in this order: the hints step through their variants, the hints go, then the
+    version, the tag, the host (cut, then the mark), the name; the counts are cut from the right
+    last, and the mark stays.
     """
     if width <= 0:
         return []
@@ -1212,25 +1209,18 @@ def bar_parts(version: str, counts: list, latest, now: float, tag: str | None, r
         return [("⚒"[:width] if width == 1 else " ⚒", "copper", False)]
     count_parts = _bar_count_parts(counts, loaded)
     variants = list(hints)
-    last = len(variants) - 1 if variants else None
-    if latest is not None:
-        stages = [("flex", i) for i in range(len(variants))] or [("flex", None)]
-        stages += [("off", last)] if variants else []
-        stages.append(("off", None))
-    else:
-        stages = [("off", i) for i in range(len(variants))] + [("off", None)]
+    stages = list(range(len(variants))) + [None]
     # (name, version, tag, host) kept at each step once the hints are gone.
     shrinking = [
         (True, False, True, "full"), (True, False, False, "full"),
         (True, False, False, "cut"), (True, False, False, None), (False, False, False, None),
     ]
-    attempts = [((True, True, True, "full"), notice, hint) for notice, hint in stages]
-    attempts += [(head, "off", None) for head in shrinking]
-    for (name, show_version, show_tag, host), notice, hint in attempts:
+    attempts = [((True, True, True, "full"), hint) for hint in stages]
+    attempts += [(head, None) for head in shrinking]
+    for (name, show_version, show_tag, host), hint in attempts:
         built = _bar_try(
-            version if show_version else None, count_parts, latest if notice == "flex" else None, now,
-            tag if show_tag else None, remote if host else None, host, name,
-            variants[hint] if hint is not None else "", width, notice_key,
+            version if show_version else None, count_parts, tag if show_tag else None,
+            remote if host else None, host, name, variants[hint] if hint is not None else "", width,
         )
         if built:
             return built
@@ -1316,7 +1306,7 @@ def _bar_count_parts(counts: list, loaded: bool) -> list:
     return parts
 
 
-def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, width, notice_key=False):
+def _bar_try(version, count_parts, tag, remote, host, name, hint, width):
     left = [(" ", "plain", False), (LOGO, "copper", False)]
     if name:
         left.append((f" {BAR_NAME}", "plain", True))
@@ -1337,23 +1327,7 @@ def _bar_try(version, count_parts, latest, now, tag, remote, host, name, hint, w
     def size(parts):
         return sum(display_width(t) for t, _, _ in parts)
 
-    if latest is not None:
-        age = format_age(now - latest.at)
-        tone = "muted" if latest.read else "plain"
-        left.append((BAR_SEP, "muted", False))
-        left.append(("✻", "muted" if latest.read else _BAR_MARK_TONES.get(latest.kind, "plain"), False))
-        left.append((f" {age} ", tone, False))
-        notice_at = len(left)
-        left.append((latest.text, tone, False))
-        if notice_key:
-            left.append(("  " + NOTICE_KEY, "muted", False))
-        room = width - 1 - size(left[:notice_at]) - size(left[notice_at + 1:]) - size(right)
-        if notice_key:
-            room -= 1
-        if room < BAR_NOTICE_MIN:
-            return None
-        left[notice_at] = (fit(latest.text, room), tone, False)
-    elif host_at is not None and host == "cut":
+    if host_at is not None and host == "cut":
         room = width - 1 - size(left[:host_at]) - size(left[host_at + 1:]) - size(right)
         if room < 2:
             return None
@@ -1674,14 +1648,16 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, age: str, width: int) -> list:
-    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra" and "age".
+def row_layout(name: str, worktree: str, age: str, width: int, dot: bool = False) -> list:
+    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra", "age" and, with `dot`, "unread".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
-    right-aligned one column in from the edge. As space runs out, in order: the
-    worktree's branch shortens, down to BRANCH_MIN, then goes, leaving the bare
-    mark; the name is cut to whatever is left, keeping the bare mark when the
-    whole name alone would have fitted.
+    right-aligned one column in from the edge. The unread dot sits one space
+    before the age and takes its two columns from the name's room; with no room
+    for it, or no room for the name at all, the dot is left out. As space runs
+    out, in order: the worktree's branch shortens, down to BRANCH_MIN, then
+    goes, leaving the bare mark; the name is cut to whatever is left, keeping
+    the bare mark when the whole name alone would have fitted.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -1689,6 +1665,16 @@ def row_layout(name: str, worktree: str, age: str, width: int) -> list:
     room = age_x - 1 - ROW_LEAD
     if room <= 0:
         return [(age_x, age, "age")] if age else []
+    show_dot = dot and room - 2 > 0
+    if show_dot:
+        room -= 2
+    parts = _name_parts(name, worktree, age, age_x, room)
+    if show_dot:
+        parts.append((age_x - 2, UNREAD_DOT, "unread"))
+    return parts
+
+
+def _name_parts(name: str, worktree: str, age: str, age_x: int, room: int) -> list:
     name_w = display_width(name)
     extra = ""
     if worktree:
@@ -1716,6 +1702,7 @@ def _row(name: str, extra: str, age: str, age_x: int) -> list:
 
 def row_lines(
     name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False, max_lines: int = 0,
+    dot: bool = False,
 ) -> list:
     """A session row as lines of (x, text, part).
 
@@ -1728,7 +1715,7 @@ def row_lines(
     A row taller than `max_lines` (when given) can never be shown whole, so it
     ends there with the last line cut short by an ellipsis.
     """
-    first = row_layout(name, worktree, age, width)
+    first = row_layout(name, worktree, age, width, dot)
     room = width - 1 - ROW_LEAD
     detail = detail if detail.strip() else ""
     if stopped or not (word or detail) or room < 2:
@@ -5510,15 +5497,90 @@ class Entry:
 
 
 def history_add(history: list, entry: Entry, opened: dict) -> list:
-    """`history` with `entry` in, newest first, cut to `HISTORY_KEPT`. A session keeps every entry; one whose transition came before he last opened that session lands already read."""
+    """`history` with `entry` in, newest first, cut to `HISTORY_KEPT`. A session has at most one unread entry, its newest by `at` (notices are worded asynchronously and can land out of order): every other entry of that session turns read. An entry whose transition came before he last opened that session lands already read."""
     last_open = opened.get(entry.id)
     if last_open is not None and last_open >= entry.at:
         entry = replace(entry, read=True)
-    return sorted([*history, entry], key=lambda e: e.at, reverse=True)[:HISTORY_KEPT]
+    merged = sorted([*history, entry], key=lambda e: e.at, reverse=True)
+    newest_seen = False
+    out = []
+    for e in merged:
+        if e.id == entry.id:
+            if newest_seen and not e.read:
+                e = replace(e, read=True)
+            newest_seen = True
+        out.append(e)
+    return out[:HISTORY_KEPT]
 
 
 def history_read(history: list, sid: str) -> list:
     return [replace(e, read=True) if e.id == sid else e for e in history]
+
+
+UNREAD_DOT = "●"
+
+
+def unread_entries(history: list) -> list:
+    """The unread entries, one per session: the newest of each session, kept only when it is unread, in history order."""
+    seen = set()
+    out = []
+    for e in history:
+        if e.id in seen:
+            continue
+        seen.add(e.id)
+        if not e.read:
+            out.append(e)
+    return out
+
+
+UNREAD_TITLE = "Unread"
+UNREAD_ROWS = 5
+UNREAD_LIST_MIN = 3
+UNREAD_MORE = "… {n} more"
+UNREAD_MIN_WIDTH = 12
+
+
+def unread_text(name: str, text: str) -> str:
+    """A notice's text for the Unread line, without a leading copy of the session's name (the line shows the name), capitalised."""
+    after = text[len(name):len(name) + 1]
+    if name and text[:len(name)].lower() == name.lower() and not (after.isalnum() or after in ("-", "_")):
+        text = text[len(name):].lstrip(" ,:;.-–—")
+        return text[:1].upper() + text[1:]
+    return text
+
+
+def unread_box(items: list, width: int, height: int) -> list:
+    """The Unread box at the top of the panel as (target, kind, parts) lines, parts being (x, text, part) with part one of frame, title, mark, name, text and more.
+
+    `items` are (sid, kind, name, text). The box spans x=1 to x=width-2 and
+    shows at most `UNREAD_ROWS` lines, always leaving the list below it
+    `UNREAD_LIST_MIN` of the `height` rows; when not every item fits the last
+    line is "… N more". `target` is the item's session id, "more" or None for
+    the frame. Empty when there is nothing to show or no room.
+    """
+    shown = min(len(items), UNREAD_ROWS, height - 2 - UNREAD_LIST_MIN)
+    if not items or shown < 1 or width < UNREAD_MIN_WIDTH:
+        return []
+    box = width - 2
+    title = fit(UNREAD_TITLE, box - 5)
+    top = [(1, "╭─ ", "frame"), (4, title, "title"),
+           (4 + display_width(title), " " + "─" * max(0, box - 5 - display_width(title)) + "╮", "frame")]
+    lines = [(None, None, top)]
+    room = width - 8
+    cut = len(items) - shown + 1 if shown < len(items) else 0
+    for sid, kind, name, text in items[:shown - 1 if cut else shown]:
+        text = " ".join(text.split())
+        shown_name = fit(name, room // 2 if text else room)
+        text_room = room - display_width(shown_name) - 1
+        parts = [(1, "│", "frame"), (3, HISTORY_MARKS.get(kind, "·"), "mark"), (5, shown_name, "name")]
+        if text and text_room >= 4:
+            parts.append((6 + display_width(shown_name), fit(text, text_room), "text"))
+        parts.append((width - 2, "│", "frame"))
+        lines.append((sid, kind, parts))
+    if cut:
+        lines.append(("more", None, [(1, "│", "frame"), (3, fit(UNREAD_MORE.format(n=cut), room + 2), "more"), (width - 2, "│", "frame")]))
+    lines.append((None, None, [(1, "╰" + "─" * (box - 2) + "╯", "frame")]))
+    return lines
 
 
 def history_unread(history: list) -> int:

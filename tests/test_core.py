@@ -437,12 +437,11 @@ class BarCounts(unittest.TestCase):
 
 class BarParts(unittest.TestCase):
     COUNTS = [("needs_input", 1), ("working", 2), ("done", 1), ("idle", 1)]
-    ENTRY = core.Entry("s1", core.NOTICE_NEEDS, "t-fix · proj", "test-fix wants to run Bash for a long while", 100.0)
     HINTS = core.hint_variants(core.REST_HINTS)
     REST = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
 
     def bar(self, width, **kw):
-        args = dict(version="2.6.0", counts=self.COUNTS, latest=self.ENTRY, now=220.0, tag=None, remote=None, hints=self.HINTS, width=width)
+        args = dict(version="2.6.0", counts=self.COUNTS, tag=None, remote=None, hints=self.HINTS, width=width)
         args.update(kw)
         return core.bar_parts(**args)
 
@@ -455,7 +454,6 @@ class BarParts(unittest.TestCase):
         self.assertTrue(text.startswith(" ⚒ emx 2.6.0"), text)
         self.assertTrue(text.endswith(self.REST + " "), text)
         self.assertEqual(core.display_width(text), 140)
-        self.assertIn("✻ 2m test-fix wants to run Bash for a long while", text)
 
     def test_the_counts_are_four_parts_in_their_tones(self):
         counts = [(t, tone, bold) for t, tone, bold in self.bar(120) if re.fullmatch(r"✻\d", t) and bold]
@@ -464,26 +462,17 @@ class BarParts(unittest.TestCase):
     def test_the_width_is_exact_and_the_mark_stays_from_120_down_to_8(self):
         for tag, remote in ((None, None), ("voice", "myserver")):
             for width in range(120, 7, -1):
-                for notice_key in (False, True):
-                    text = self.text(self.bar(width, tag=tag, remote=remote, notice_key=notice_key))
-                    self.assertEqual(core.display_width(text), width, (width, text))
-                    self.assertIn("⚒", text)
+                text = self.text(self.bar(width, tag=tag, remote=remote))
+                self.assertEqual(core.display_width(text), width, (width, text))
+                self.assertIn("⚒", text)
+
+    ORDER = ["long hints", "any hints", "version", "tag", "host", "mark", "name"]
 
     def test_room_runs_out_in_the_stated_order(self):
-        for notice_key in (False, True):
-            with self.subTest(notice_key=notice_key):
-                self.assertEqual(self.order_of_loss(notice_key), self.ORDER)
-
-    ORDER = ["long hints", "notice", "any hints", "version", "tag", "host", "mark", "name"]
-
-    def order_of_loss(self, notice_key):
         def stage(width):
-            text = self.text(self.bar(width, tag="voice", remote="myserver-host", notice_key=notice_key))
-            if notice_key:
-                self.assertEqual("N all" in text, "test-fix" in text, (width, text))
+            text = self.text(self.bar(width, tag="voice", remote="myserver-host"))
             return (
-                bool(re.search(r"✻ 2m [^│]*…", text)), "test-fix" in text, "^x close" in text,
-                "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
+                "^x close" in text, "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
                 "⇄" in text, "emx" in text,
             )
         seen = []
@@ -491,22 +480,10 @@ class BarParts(unittest.TestCase):
             now = stage(width)
             if not seen or seen[-1] != now:
                 seen.append(now)
-        names = ["notice cut", "notice", "long hints", "any hints", "version", "tag", "host", "mark", "name"]
-        gone = []
-        for before, after in zip(seen, seen[1:]):
-            gone.append([n for n, b, a in zip(names, before, after) if b != a])
-        self.assertEqual(seen[0], (False,) + (True,) * 8)
-        return [n for step in gone for n in step if n != "notice cut"]
-
-    def test_the_notice_is_cut_with_an_ellipsis_before_anything_else_goes(self):
-        text = ""
-        for width in range(120, 40, -1):
-            text = self.text(self.bar(width))
-            if "…" in text:
-                break
-        self.assertRegex(text, r"✻ 2m [^│]*…")
-        self.assertIn(self.REST, text)
-        self.assertIn("2.6.0", text)
+        names = ["long hints", "any hints", "version", "tag", "host", "mark", "name"]
+        gone = [[n for n, b, a in zip(names, before, after) if b != a] for before, after in zip(seen, seen[1:])]
+        self.assertEqual(seen[0], (True,) * 7)
+        self.assertEqual([n for step in gone for n in step], self.ORDER)
 
     def test_the_short_hint_shows_after_the_long_one(self):
         for width in range(120, 20, -1):
@@ -514,7 +491,6 @@ class BarParts(unittest.TestCase):
             if "^x close" not in text:
                 break
         self.assertIn("? keys", text)
-        self.assertRegex(text, r"✻ 2m test-fix w[^│]*…")
 
     def test_a_remote_host_shows_in_the_remote_tone_bold(self):
         parts = self.bar(120, remote="myserver")
@@ -530,25 +506,13 @@ class BarParts(unittest.TestCase):
         self.assertIn((" notifications blocked", "error", False), blocked)
         self.assertIn((" voice", "muted", False), self.bar(120, tag="voice"))
 
-    def test_a_read_entry_is_muted_throughout(self):
-        read = replace(self.ENTRY, read=True)
-        parts = self.bar(140, latest=read)
-        self.assertIn(("✻", "muted", False), parts)
-        self.assertIn((" 2m ", "muted", False), parts)
-        self.assertIn(("test-fix wants to run Bash for a long while", "muted", False), parts)
-
-    def test_an_unread_needs_entry_has_a_needs_mark_and_plain_text(self):
-        parts = self.bar(140)
-        self.assertIn(("✻", "needs", False), parts)
-        self.assertIn(("test-fix wants to run Bash for a long while", "plain", False), parts)
-
     def test_not_loaded_shows_an_ellipsis_for_the_counts(self):
         text = self.text(self.bar(120, loaded=False))
         self.assertNotRegex(text, r"✻\d")
         self.assertIn(" …  ", text)
 
-    def test_no_notification_still_fills_the_width(self):
-        text = self.text(self.bar(80, latest=None))
+    def test_the_bar_fills_the_width(self):
+        text = self.text(self.bar(80))
         self.assertEqual(core.display_width(text), 80)
         self.assertTrue(text.endswith(self.REST + " "))
 
@@ -563,16 +527,6 @@ class BarParts(unittest.TestCase):
 
     def test_a_string_hint_is_one_muted_part(self):
         self.assertIn(("^x to confirm", "muted", False), self.bar(120, hints=("^x to confirm",)))
-
-    def test_n_all_follows_the_notice_only_when_asked(self):
-        self.assertIn("a long while  N all", self.text(self.bar(200, notice_key=True)))
-        self.assertNotIn("N all", self.text(self.bar(200, notice_key=False)))
-        self.assertNotIn("N all", self.text(self.bar(200, latest=None, notice_key=True)))
-
-    def test_n_all_shows_exactly_when_the_notice_does(self):
-        for width in range(200, 7, -1):
-            text = self.text(self.bar(width, notice_key=True))
-            self.assertEqual("N all" in text, "test-fix" in text, (width, text))
 
 
 class HintVariants(unittest.TestCase):
@@ -833,6 +787,118 @@ class RowLayout(unittest.TestCase):
 
     def test_no_age(self):
         self.assertNotIn("age", [p for _, _, p in self.row(30, age="")])
+
+    def test_no_dot_gives_the_same_parts_as_before(self):
+        for width in range(0, 70):
+            for name in ("x", "emx-test-a-very-long-session-name", "日本語の名前"):
+                for worktree in ("", "feat"):
+                    with self.subTest(width=width, name=name, worktree=worktree):
+                        self.assertEqual(core.row_layout(name, worktree, "12m", width, dot=False),
+                                         core.row_layout(name, worktree, "12m", width))
+
+    def test_the_dot_sits_one_space_before_the_age(self):
+        plain = self.row(40)
+        dotted = core.row_layout("emx-test-perm", "", "12m", 40, dot=True)
+        age_x = next(x for x, _, p in plain if p == "age")
+        self.assertIn((age_x - 2, core.UNREAD_DOT, "unread"), dotted)
+        self.assertEqual(next(x for x, _, p in dotted if p == "age"), age_x)
+
+    def test_the_dot_takes_its_room_from_the_name(self):
+        name = "emx-test-" + "n" * 9
+        fits = core.row_layout(name, "", "12m", 3 + len(name) + 1 + 3 + 1)
+        self.assertEqual(fits[0][1], name)
+        cut = core.row_layout(name, "", "12m", 3 + len(name) + 1 + 3 + 1, dot=True)
+        self.assertTrue(cut[0][1].endswith("…"))
+        self.assertEqual(core.display_width(cut[0][1]), len(name) - 2)
+
+    def test_with_no_room_for_it_or_no_age_there_is_no_dot(self):
+        for width in range(0, 70):
+            with self.subTest(width=width):
+                parts = core.row_layout("emx-test-perm", "", "12m", width, dot=True)
+                if not any(p == "name" for _, _, p in parts):
+                    self.assertNotIn("unread", [p for _, _, p in parts])
+                self.assertLessEqual(max([x + core.display_width(t) for x, t, _ in parts] or [0]), max(0, width - 1))
+
+
+class UnreadText(unittest.TestCase):
+    def test_the_fallback_line_loses_the_name_and_starts_capitalised(self):
+        text = core.fallback_notice("emalatxana", "api-fix", True, core.NOTICE_NEEDS)
+        self.assertEqual(core.unread_text("api-fix", text), "In emalatxana, needs you.")
+
+    def test_a_text_that_does_not_start_with_the_name_is_unchanged(self):
+        self.assertEqual(core.unread_text("api-fix", "approve npm test?"), "approve npm test?")
+        self.assertEqual(core.unread_text("api", "apiary is down"), "apiary is down")
+        self.assertEqual(core.unread_text("", "hello"), "hello")
+
+    def test_the_name_alone_leaves_nothing(self):
+        self.assertEqual(core.unread_text("api-fix", "api-fix"), "")
+
+    def test_a_longer_name_that_continues_with_a_hyphen_or_underscore_is_unchanged(self):
+        self.assertEqual(core.unread_text("api-fix", "api-fix-v2 is done"), "api-fix-v2 is done")
+        self.assertEqual(core.unread_text("api", "api_fix is done"), "api_fix is done")
+
+    def test_the_boundary_is_checked_on_the_original_text_when_lowercasing_changes_its_length(self):
+        self.assertEqual(core.unread_text("i", "\u0130 is done"), "\u0130 is done")
+        self.assertEqual(core.unread_text("\u0130", "\u0130 is done"), "Is done")
+
+
+class UnreadBox(unittest.TestCase):
+    ITEMS = [("s1", core.NOTICE_NEEDS, "api-fix", "approve npm test?"), ("s2", core.NOTICE_DONE, "docs-pass", "updated 3 pages")]
+
+    def box(self, items=None, width=40, height=30):
+        return core.unread_box(self.ITEMS if items is None else items, width, height)
+
+    def test_no_items_no_box(self):
+        self.assertEqual(self.box([]), [])
+
+    def test_the_box_is_framed_and_titled(self):
+        lines = self.box()
+        top, bottom = lines[0][2], lines[-1][2]
+        self.assertEqual(top[0], (1, "╭─ ", "frame"))
+        self.assertEqual(top[1], (4, "Unread", "title"))
+        self.assertTrue(top[-1][1].endswith("╮"))
+        self.assertTrue(bottom[0][1].startswith("╰") and bottom[0][1].endswith("╯"))
+        for _, _, parts in lines:
+            x, text, _ = parts[-1]
+            self.assertEqual(x + core.display_width(text), 39)
+        self.assertEqual((lines[0][0], lines[-1][0]), (None, None))
+
+    def test_an_item_line_has_mark_name_and_cut_text(self):
+        lines = self.box()
+        (target, kind, parts) = lines[1]
+        self.assertEqual((target, kind), ("s1", core.NOTICE_NEEDS))
+        self.assertEqual(parts[1:3], [(3, "●", "mark"), (5, "api-fix", "name")])
+        self.assertEqual(lines[2][2][1], (3, "✓", "mark"))
+        self.assertEqual(parts[-1], (38, "│", "frame"))
+        long = self.box([("s1", core.NOTICE_DONE, "api-fix", "word " * 30)])[1][2]
+        text = next(t for _, t, p in long if p == "text")
+        self.assertTrue(text.endswith("…"))
+        self.assertEqual(long[-1], (38, "│", "frame"))
+        x, text_part = next((x, t) for x, t, p in long if p == "text")
+        self.assertEqual(x + core.display_width(text_part), 37)
+
+    def test_more_than_fit_ends_with_a_more_line(self):
+        items = [(f"s{i}", core.NOTICE_DONE, f"n{i}", "x") for i in range(7)]
+        lines = self.box(items, height=40)
+        self.assertEqual(len(lines), 1 + 5 + 1)
+        self.assertEqual([t for t, _, _ in lines[1:5]], ["s0", "s1", "s2", "s3"])
+        self.assertEqual(lines[5][0], "more")
+        self.assertEqual(lines[5][2][1], (3, "… 3 more", "more"))
+
+    def test_the_box_leaves_the_list_its_rows(self):
+        one = [self.ITEMS[0]]
+        self.assertEqual(self.box(one, height=5), [])
+        lines = self.box(one, height=6)
+        self.assertEqual(len(lines), 3)
+        self.assertEqual(6 - len(lines), core.UNREAD_LIST_MIN)
+
+    def test_too_narrow_no_box(self):
+        self.assertEqual(self.box(width=core.UNREAD_MIN_WIDTH - 1), [])
+        self.assertNotEqual(self.box(width=core.UNREAD_MIN_WIDTH), [])
+        for width in range(core.UNREAD_MIN_WIDTH, 40):
+            for _, _, parts in self.box(width=width):
+                x, text, _ = parts[-1]
+                self.assertEqual(x + core.display_width(text), width - 1, width)
 
 
 class TwoLineRows(unittest.TestCase):
@@ -4880,7 +4946,32 @@ class History(unittest.TestCase):
         self.assertEqual(len(read), 3)
         self.assertEqual([(e.id, e.read) for e in read], [("s1", True), ("s2", False), ("s1", True)])
         self.assertEqual(core.history_unread(read), 1)
-        self.assertEqual(core.history_unread(history), 3)
+        self.assertEqual(core.history_unread(history), 2)
+
+    def test_a_newer_notice_reads_the_sessions_older_ones(self):
+        history = self.added(self.item("s1", 1), self.item("s1", 5), self.item("s2", 3))
+        self.assertEqual([(e.id, e.at) for e in history if not e.read], [("s1", 5), ("s2", 3)])
+        self.assertEqual(core.history_unread(history), 2)
+
+    def test_a_late_arriving_older_notice_lands_read_and_the_newer_stays_unread(self):
+        history = self.added(self.item("s1", 100), self.item("s1", 50))
+        self.assertEqual([(e.at, e.read) for e in history], [(100, False), (50, True)])
+        self.assertEqual([e.at for e in core.unread_entries(history)], [100])
+
+    def test_unread_entries_are_the_newest_unread_per_session_newest_first(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2, kind=core.NOTICE_NEEDS), self.item("s1", 3), self.item("s3", 0))
+        got = core.unread_entries(history)
+        self.assertEqual([(e.id, e.at, e.kind) for e in got],
+                         [("s1", 3, core.NOTICE_DONE), ("s2", 2, core.NOTICE_NEEDS), ("s3", 0, core.NOTICE_DONE)])
+
+    def test_unread_entries_skip_a_session_whose_newest_is_read(self):
+        history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))
+        history = core.history_read(history, "s1")
+        self.assertEqual([e.id for e in core.unread_entries(history)], ["s2"])
+
+    def test_an_entry_from_before_the_last_open_still_lands_read(self):
+        history = self.added(self.item("s1", 5), opened={"s1": 10})
+        self.assertEqual(core.unread_entries(history), [])
 
     def test_history_prune_drops_a_session_gone_for_stale_after_misses_listings(self):
         history = self.added(self.item("s1", 1), self.item("s2", 2), self.item("s1", 3))

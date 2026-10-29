@@ -570,7 +570,7 @@ class StateView(ApiCase):
         self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
                                 "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL,
                                 "worktree_mark": core.WORKTREE_MARK, "find_none": "No session matches.",
-                                "open_gone": sidebar.OPEN_GONE})
+                                "open_gone": sidebar.OPEN_GONE, "dot": core.UNREAD_DOT, "unread_title": core.UNREAD_TITLE})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")
@@ -1209,6 +1209,48 @@ class Page(ServerCase):
         self.assertRegex(js, r'"branch tone-path", glyphText\(')
         self.assertEqual(len(re.findall(r'"more", glyphText\("⋯"\)', js)), 2)
 
+    def test_the_script_draws_the_unread_section_and_dot_from_data(self):
+        js, _ = self.text("/app.js")
+        for text in ("data.unread_list", "data.look.dot", '"/api/read"', '"unread-entry"'):
+            self.assertIn(text, js)
+        # The routines chip's own " ●" is the only dot literal; the unread dot comes from data.look.dot.
+        self.assertEqual(js.count(core.UNREAD_DOT), 1)
+        self.assertIn('el("span", "tone-error", " ●")', js)
+
+    def test_an_unread_entry_hidden_by_find_is_opened_and_marked_read(self):
+        js, _ = self.text("/app.js")
+        body = re.search(r"async function openHidden\(id\) \{(.*?)\n\}\n", js, re.S).group(1)
+        for text in ('findText = ""', "await poll()", "markRead(id)", "openSheet(id)", "resume(id)"):
+            self.assertIn(text, body)
+        self.assertLess(body.index("await poll()"), body.index("markRead(id)"))
+        self.assertIn("openHidden(item.id)", js)
+
+    def test_a_failed_poll_in_openhidden_shows_the_offline_banner_not_the_gone_toast(self):
+        js, _ = self.text("/app.js")
+        body = re.search(r"async function openHidden\(id\) \{(.*?)\n\}\n", js, re.S).group(1)
+        self.assertIn('if (!$("offline").hidden) return;', body)
+        self.assertLess(body.index("await poll()"), body.index('$("offline").hidden'))
+        self.assertLess(body.index('$("offline").hidden'), body.index("toast("))
+
+    def test_the_unread_section_comes_before_the_no_match_line_and_takes_its_title_from_data(self):
+        js, _ = self.text("/app.js")
+        self.assertLess(js.index("list.append(renderUnread())"), js.index("data.look.find_none"))
+        self.assertIn("data.look.unread_title", js)
+        self.assertNotIn('"Unread"', js)
+
+    def test_opening_a_read_notice_marks_its_session_read_too(self):
+        js, _ = self.text("/app.js")
+        self.assertIn('row.addEventListener("click", () => markRead(entry.id));', js)
+        self.assertNotIn("if (!entry.read) row.addEventListener", js)
+
+    def test_the_unread_box_matches_the_design(self):
+        css, _ = self.text("/app.css")
+        rule = lambda selector: re.search(re.escape(selector) + r" \{([^}]*)\}", css).group(1)
+        self.assertIn("border-radius: 10px", rule(".unread"))
+        self.assertIn("border: 1px solid var(--border)", rule(".unread"))
+        self.assertIn("text-overflow: ellipsis", rule(".unread-entry .unread-text"))
+        self.assertIn("display: flex", rule(".unread-entry"))
+
     def test_the_script_respects_reduced_motion(self):
         js, _ = self.text("/app.js")
         self.assertIn("prefers-reduced-motion", js)
@@ -1772,6 +1814,66 @@ class Notifications(ApiCase):
         data = self.api().get("/api/notifications", "")[1]
         self.assertEqual((data["entries"], data["unread"]), ([], 0))
 
+    def rows(self, data):
+        return {r["id"]: r for g in data["groups"] for r in g["sessions"]}
+
+    def test_a_row_carries_its_unread_tone(self):
+        rows = self.rows(self.api().get("/api/state", "")[1])
+        self.assertEqual(rows[self.sessions[1].id]["unread"], "needs")
+        self.assertIsNone(rows[self.sessions[0].id]["unread"])
+
+    def test_the_snapshot_lists_unread_sessions_newest_first_with_mark_tone_and_text(self):
+        now = time.monotonic()
+        self.history.insert(0, core.Entry(self.sessions[0].id, core.NOTICE_DONE, "a · emalatxana", "Fresh", now - 5))
+        self.history.pop()
+        data = self.api().get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"], [
+            {"id": self.sessions[0].id, "name": "a", "mark": "✓", "tone": "done", "text": "Fresh"},
+            {"id": self.sessions[1].id, "name": "b", "mark": "●", "tone": "needs", "text": "Asks which file"},
+        ])
+        self.assertNotIn("c" * 8 + "-cccc-4ccc-8ccc-" + "c" * 12, [e["id"] for e in data["unread_list"]])
+
+    def test_the_unread_line_drops_a_leading_copy_of_the_name(self):
+        self.history[0] = core.Entry(self.sessions[1].id, core.NOTICE_NEEDS, "b · emalatxana", "b, in emalatxana, needs you.", time.monotonic() - 30)
+        data = self.api().get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"][-1]["text"], "In emalatxana, needs you.")
+
+    def test_look_carries_the_unread_title(self):
+        self.assertEqual(self.api().get("/api/state", "")[1]["look"]["unread_title"], core.UNREAD_TITLE)
+
+    def test_a_read_post_for_an_id_that_is_not_listed_is_refused(self):
+        api = self.api()
+        self.assertEqual(api.post("/api/read", {"id": "d" * 8 + "-dddd-4ddd-8ddd-" + "d" * 12})[0], 400)
+        self.assertEqual(api.take_reads(), set())
+
+    def test_the_snapshot_has_an_empty_unread_list_when_none_or_on_error(self):
+        self.history = []
+        self.assertEqual(self.api().get("/api/state", "")[1]["unread_list"], [])
+        data = super().api(FakeEngine(None), sources=phone.PanelSources(history=lambda: self.history)).get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"], [])
+
+    def test_look_carries_the_dot(self):
+        self.assertEqual(self.api().get("/api/state", "")[1]["look"]["dot"], core.UNREAD_DOT)
+
+    def test_a_read_post_marks_it_read_at_once(self):
+        api = self.api()
+        b = self.sessions[1].id
+        self.assertEqual(api.post("/api/read", {"id": b}), (200, {"ok": True}))
+        data = api.get("/api/state", "")[1]
+        self.assertIsNone(self.rows(data)[b]["unread"])
+        self.assertEqual((data["unread_list"], data["unread"]), ([], 1))
+        entry = next(e for e in api.get("/api/notifications", "")[1]["entries"] if e["id"] == b)
+        self.assertTrue(entry["read"])
+        self.assertEqual(api.take_reads(), {b})
+        self.assertEqual(api.take_reads(), set())
+
+    def test_a_read_post_with_a_bad_id_is_refused(self):
+        api = self.api()
+        for bad in ("nope", "", None, 5, "../x"):
+            with self.subTest(bad=bad):
+                self.assertEqual(api.post("/api/read", {"id": bad})[0], 400)
+        self.assertEqual(api.take_reads(), set())
+
 
 class WhatsNew(ApiCase):
     CHANGELOG = "# Changelog\n\n## 99.0.0 — soon\n\n- Newest line\n\n## 2.14.0 — then\n\n- Older line\n\n## 2.13.0\n\n- Oldest line\n"
@@ -1818,7 +1920,7 @@ class RoutineWords(ApiCase):
 
 class NewRoutesAreGuarded(ServerCase):
     GETS = ("/api/peek?id=" + KEY, "/api/notifications", "/api/whats-new?since=2.0.0")
-    POSTS = ("/api/pin", "/api/close-group", "/api/suggest-name")
+    POSTS = ("/api/pin", "/api/close-group", "/api/suggest-name", "/api/read")
 
     def test_another_tailscale_user_is_refused_everywhere_with_no_session_data(self):
         self.tailnet = StubTailnet(user=7777)

@@ -17,7 +17,7 @@ In voice mode, `h` in the panel stops the voice now: the sentence being spoken a
 
 ## The history
 
-The newest notification shows in the bar at the bottom of the window. Press `N` in the panel to see the last 20 notifications, newest first. `↑` and `↓` move, the mouse wheel scrolls, `Enter` or a click opens that session, `Esc` goes back. Opening a session dims its entries.
+A session with an unread notification has a coloured dot on its row, before its age, and a line in the `Unread` box at the top of the panel (a click on the line opens the session). Opening the session clears its dot and its line. Press `N` in the panel to see the last 20 notifications, newest first. `↑` and `↓` move, the mouse wheel scrolls, `Enter` or a click opens that session, `Esc` goes back. Opening a session dims its entries.
 
 ## Click a notification
 
