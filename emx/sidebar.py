@@ -4664,6 +4664,14 @@ class App:
         for sid, kind, title, text, at in self.poller.notices.take():
             self.history = core.history_add(self.history, core.Entry(sid, kind, title, text, at), self.opened)
 
+    def take_phone_reads(self) -> None:
+        """Sessions the phone page opened count as opened here: their notices turn read, as an open from the panel does."""
+        if self.phone is None:
+            return
+        for sid in self.phone.take_reads():
+            self.opened[sid] = time.monotonic()
+            self.history = core.history_read(self.history, sid)
+
     def take_placements(self) -> None:
         placements = self.poller.resolver.take()
         if placements is not None:
@@ -4751,6 +4759,7 @@ class App:
             self.take_transcripts()
             self.take_summaries()
             self.take_notices()
+            self.take_phone_reads()
             # The cursor moves to a neighbour when its session goes; the peek closes rather than follow it.
             if self.peeking and (self.peeked() is None or self.peeked().id != getattr(peeked, "id", None)):
                 self.peeking = False

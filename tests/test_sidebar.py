@@ -6924,6 +6924,23 @@ class HistoryWiring(AppCase):
         self.assertEqual(self.app.poller.notices.pending, [])
         self.assertEqual(self.app.history, [])
 
+    def test_a_phone_read_marks_the_panels_history_and_opened(self):
+        class Phone:
+            def take_reads(self):
+                return {"s1"}
+
+        self.listed("s1", "s2")
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("s2", "Beta is done.", time.monotonic() - 9))
+        self.app.phone = Phone()
+        self.app.refresh()
+        self.assertEqual([(e.id, e.read) for e in self.app.history], [("s1", True), ("s2", False)])
+        self.assertIn("s1", self.app.opened)
+        self.assertEqual([i[0] for i in self.app.unread_items()], ["s2"])
+        scr = RecordingScr(20, 60)
+        self.app.scr = scr
+        self.app.draw()
+        self.assertNotIn("Alpha is done.", "".join(scr.cells.values()))
+
     def test_opening_the_session_takes_it_out_of_the_unread_box(self):
         self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
         self.open_s1()

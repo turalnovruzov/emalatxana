@@ -1772,6 +1772,53 @@ class Notifications(ApiCase):
         data = self.api().get("/api/notifications", "")[1]
         self.assertEqual((data["entries"], data["unread"]), ([], 0))
 
+    def rows(self, data):
+        return {r["id"]: r for g in data["groups"] for r in g["sessions"]}
+
+    def test_a_row_carries_its_unread_tone(self):
+        rows = self.rows(self.api().get("/api/state", "")[1])
+        self.assertEqual(rows[self.sessions[1].id]["unread"], "needs")
+        self.assertIsNone(rows[self.sessions[0].id]["unread"])
+
+    def test_the_snapshot_lists_unread_sessions_newest_first_with_mark_tone_and_text(self):
+        now = time.monotonic()
+        self.history.insert(0, core.Entry(self.sessions[0].id, core.NOTICE_DONE, "a · emalatxana", "Fresh", now - 5))
+        self.history.pop()
+        data = self.api().get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"], [
+            {"id": self.sessions[0].id, "name": "a", "mark": "✓", "tone": "done", "text": "Fresh"},
+            {"id": self.sessions[1].id, "name": "b", "mark": "●", "tone": "needs", "text": "Asks which file"},
+        ])
+        self.assertNotIn("c" * 8 + "-cccc-4ccc-8ccc-" + "c" * 12, [e["id"] for e in data["unread_list"]])
+
+    def test_the_snapshot_has_an_empty_unread_list_when_none_or_on_error(self):
+        self.history = []
+        self.assertEqual(self.api().get("/api/state", "")[1]["unread_list"], [])
+        data = super().api(FakeEngine(None), sources=phone.PanelSources(history=lambda: self.history)).get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"], [])
+
+    def test_look_carries_the_dot(self):
+        self.assertEqual(self.api().get("/api/state", "")[1]["look"]["dot"], core.UNREAD_DOT)
+
+    def test_a_read_post_marks_it_read_at_once(self):
+        api = self.api()
+        b = self.sessions[1].id
+        self.assertEqual(api.post("/api/read", {"id": b}), (200, {"ok": True}))
+        data = api.get("/api/state", "")[1]
+        self.assertIsNone(self.rows(data)[b]["unread"])
+        self.assertEqual((data["unread_list"], data["unread"]), ([], 1))
+        entry = next(e for e in api.get("/api/notifications", "")[1]["entries"] if e["id"] == b)
+        self.assertTrue(entry["read"])
+        self.assertEqual(api.take_reads(), {b})
+        self.assertEqual(api.take_reads(), set())
+
+    def test_a_read_post_with_a_bad_id_is_refused(self):
+        api = self.api()
+        for bad in ("nope", "", None, 5, "../x"):
+            with self.subTest(bad=bad):
+                self.assertEqual(api.post("/api/read", {"id": bad})[0], 400)
+        self.assertEqual(api.take_reads(), set())
+
 
 class WhatsNew(ApiCase):
     CHANGELOG = "# Changelog\n\n## 99.0.0 — soon\n\n- Newest line\n\n## 2.14.0 — then\n\n- Older line\n\n## 2.13.0\n\n- Oldest line\n"
@@ -1818,7 +1865,7 @@ class RoutineWords(ApiCase):
 
 class NewRoutesAreGuarded(ServerCase):
     GETS = ("/api/peek?id=" + KEY, "/api/notifications", "/api/whats-new?since=2.0.0")
-    POSTS = ("/api/pin", "/api/close-group", "/api/suggest-name")
+    POSTS = ("/api/pin", "/api/close-group", "/api/suggest-name", "/api/read")
 
     def test_another_tailscale_user_is_refused_everywhere_with_no_session_data(self):
         self.tailnet = StubTailnet(user=7777)
