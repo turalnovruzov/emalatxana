@@ -131,6 +131,12 @@ FIND_HINT = "↑↓ move · Enter open · Esc clear"
 SETTINGS_HINT = "↑↓ move · ←→ change · ↵ edit · Esc back"
 SETTINGS_FOOTER = "←→ change  ↵ edit  e file  ? keys"
 FAVOURITES_HINT = "↑↓ move · x remove · ↵ add · Esc back"
+PLACES_HINT = "↑↓ move · ↵ edit · a add · x remove · Esc back"
+PLACE_FIELDS = (
+    ("Name", "e.g. worker"),
+    ("Server (empty = this machine)", "e.g. srv2, as you would type it after ssh; empty = this machine"),
+    ("User (empty = you)", "e.g. bot, a login on that machine; empty = you"),
+)
 EDIT_FOOTER = "Enter save · Esc cancel"
 OWN_WIDTH_NOTE = "This terminal's own width; the file's panel_width is your laptop's."
 HISTORY_HINT = "↑↓ move · Enter open · Esc back"
@@ -1987,6 +1993,7 @@ class App:
         self.bound = None
         self.prompt = None
         self.row_map = {}
+        self.routines_hits = {}
         self.row_actions = {}
         self.menu_at = None
         self.scroll = 0
@@ -2083,11 +2090,11 @@ class App:
     def prefs_stamp(self) -> tuple:
         return self.file_mtime(self.prefs_files.config), self.file_mtime(self.prefs_files.state)
 
-    def save_prefs(self) -> bool:
+    def save_prefs(self, edited_place: str = "") -> bool:
         """Write this panel's changes over what is on file now, so a change another view's panel saved meanwhile is kept; whether it wrote."""
         try:
             with PREFS_LOCK:
-                merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk))
+                merged = core.change_prefs(self.prefs_files, lambda disk: core.merge_prefs(self.prefs_base, self.prefs, disk), edited_place)
         except OSError as exc:
             self.say(f"Couldn't save settings: {exc}", error=True)
             return False
@@ -3249,13 +3256,14 @@ class App:
     def handle_mouse(self, busy: bool = False, event: tuple | None = None) -> None:
         """`busy`: an input, a view or a close was open when the tap came, so a tap on the selected row opens no actions menu."""
         try:
-            _, _, y, _, state = event or curses.getmouse()
+            _, x, y, _, state = event or curses.getmouse()
         except curses.error:
             return
         if not state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED):
             return
         item = self.row_map.get(y)
         if self.routines_view is not None:
+            self.routines_tap(x, y)
             return
         if self.settings is not None:
             self.settings_tap(item)
@@ -3560,6 +3568,19 @@ class App:
             step = -1 if key in (curses.KEY_UP, "k") else 1
             view.update(run=core.step_run(core.run_choices(self.routines_place()), self.routines_run(), step), follow=True)
 
+    def routines_tap(self, x: int, y: int) -> None:
+        """A click in the Routines view: a place chip switches place, a run selects it, the selected run (or its sessions' names) opens the reader."""
+        view = self.routines_view
+        target = next((t for x0, x1, t in self.routines_hits.get(y, ()) if x0 <= x < x1), None)
+        if target is None:
+            return
+        if target[0] == "place":
+            view.update(place=target[1], run=None, follow=True, scroll=0)
+        elif target[0] == "run":
+            view.update(run=target[1], follow=True)
+        else:
+            self.open_reader()
+
     def open_reader(self) -> None:
         """Show the Claude session behind the selected run in the big pane, read-only, and go to it; the session he was reading before comes back when the reader ends."""
         here, run = self.routines_place(), self.routines_run()
@@ -3593,7 +3614,7 @@ class App:
             self.say(f"tmux: {exc}", error=True)
 
     def open_settings(self) -> None:
-        self.settings = {"at": 0, "scroll": 0, "edit": None, "folders": None}
+        self.settings = {"at": 0, "scroll": 0, "edit": None, "folders": None, "places": None, "remove": None}
         self.peeking = False
         self.say("")
 
@@ -3623,6 +3644,9 @@ class App:
         if st["folders"] is not None:
             self.favourites_key(key)
             return
+        if st["places"] is not None:
+            self.places_key(key)
+            return
         items = self.settings_items()
         st["at"] = max(0, min(st["at"], len(items) - 1))
         setting = items[st["at"]]
@@ -3650,6 +3674,13 @@ class App:
                     self.favourites_key("\n")
                 st["folders"] = item[1]
             return
+        if st["places"] is not None:
+            if item[0] == "place":
+                if item[1] == st["places"]:
+                    self.places_key("\n")
+                if self.settings is not None and self.settings["edit"] is None:
+                    st["places"] = item[1]
+            return
         if item[0] != "setting":
             return
         if item[1] == st["at"]:
@@ -3669,10 +3700,10 @@ class App:
         elif setting.kind == "choice":
             self.apply_setting(core.cycle(setting, self.prefs, step))
 
-    def apply_setting(self, new: dict) -> None:
+    def apply_setting(self, new: dict, edited_place: str = "") -> None:
         old = self.prefs
         self.prefs = new
-        self.save_prefs()
+        self.save_prefs(edited_place)
         self.apply_prefs(old)
 
     def settings_enter(self, setting) -> None:
@@ -3681,7 +3712,7 @@ class App:
         elif setting.kind == "folders":
             self.settings["folders"] = 0
         elif setting.kind == "places":
-            self.say("Places are set in the file; e opens it.")
+            self.settings["places"] = 0
         else:
             current = self.panel_width() if setting.key == "panel_width" else self.prefs.get(setting.key, setting.default)
             self.settings["edit"] = {"setting": setting, "label": setting.label, "text": str(current), "hint": ""}
@@ -3713,6 +3744,9 @@ class App:
                 self.apply_setting(core.toggle_favourite(self.prefs, folder)[0])
             self.settings["edit"] = None
             return
+        if edit.get("place"):
+            self.place_submit(edit)
+            return
         value, error = core.parse_value(setting, edit["text"], self.home)
         if error:
             edit["hint"] = error
@@ -3743,11 +3777,106 @@ class App:
         elif key in ENTER_KEYS and at == len(folders):
             st["edit"] = {"setting": core.SETTING_BY_KEY["favourite_folders"], "label": "Add a folder", "text": "", "hint": "", "add": True}
 
+    def place_list(self) -> list:
+        return list(self.prefs.get("place", []))
+
+    def places_key(self, key) -> None:
+        st = self.settings
+        configured = self.place_list()
+        st["places"] = at = max(0, min(st["places"], len(configured)))
+        armed, st["remove"] = st["remove"], None
+        if key == "c":
+            self.settings = None
+        elif key in ("\x1b", curses.KEY_LEFT):
+            st["places"] = None
+        elif key in (curses.KEY_UP, "k"):
+            st["places"] = max(0, at - 1)
+        elif key in (curses.KEY_DOWN, "j"):
+            st["places"] = min(len(configured), at + 1)
+        elif key == "a" or (key in ENTER_KEYS and at == len(configured)):
+            self.open_place_form(None)
+        elif key in ENTER_KEYS:
+            self.open_place_form(at)
+        elif key == "x" and at < len(configured):
+            if armed is not None and armed[0] == at and time.monotonic() - armed[1] < core.CONFIRM_SECONDS:
+                self.apply_setting({**self.prefs, "place": configured[:at] + configured[at + 1:]})
+                st["places"] = min(at, len(self.place_list()))
+            else:
+                st["remove"] = (at, time.monotonic())
+
+    def removal_armed(self) -> str:
+        """The name of the place whose `x` is waiting for its second press, or ""."""
+        st, configured = self.settings, self.place_list()
+        if st["remove"] is None or st["places"] is None:
+            return ""
+        at, since = st["remove"]
+        if at != st["places"] or at >= len(configured) or time.monotonic() - since >= core.CONFIRM_SECONDS:
+            return ""
+        return configured[at].split()[0]
+
+    def open_place_form(self, index) -> None:
+        place = core.parse_place(self.place_list()[index])[0] if index is not None else None
+        form = {"step": 0, "name": place.name if place else "", "host": place.host or "" if place else "",
+                "login": place.login or "" if place else "", "index": index}
+        self.settings["edit"] = {"setting": core.SETTING_BY_KEY["place"], "label": PLACE_FIELDS[0][0], "text": form["name"], "hint": "", "place": form}
+
+    def place_submit(self, edit: dict) -> None:
+        form, text = edit["place"], edit["text"].strip()
+        step = form["step"]
+        if step == 0:
+            others = [core.parse_place(line)[0].name for i, line in enumerate(self.place_list()) if i != form["index"]]
+            problem = core.place_name_problem(text) if text else "place needs a name"
+            if not problem and text in others:
+                problem = f'place "{text}" is already set'
+            if problem:
+                edit["hint"] = problem
+                return
+            form["name"] = text
+        elif step == 1:
+            problem = core.place_host_problem(text) if text else ""
+            if problem:
+                edit["hint"] = problem
+                return
+            form["host"] = text
+        else:
+            problem = core.place_login_problem(text) if text else ""
+            if problem:
+                edit["hint"] = problem
+                return
+            form["login"] = text
+            line = core.place_line(core.Place(form["name"], form["host"] or None, form["login"] or None))
+            place, why = core.parse_place(line)
+            if place is None:
+                edit["hint"] = why
+                return
+            lines = self.place_list()
+            old_name = ""
+            if form["index"] is None:
+                lines.append(line)
+                self.settings["places"] = len(lines) - 1
+            else:
+                old_name = lines[form["index"]].split()[0]
+                lines[form["index"]] = line
+            self.apply_setting({**self.prefs, "place": lines}, old_name)
+            self.settings["edit"] = None
+            return
+        form["step"] = step + 1
+        edit["label"] = PLACE_FIELDS[step + 1][0]
+        edit["text"] = form["host" if step == 0 else "login"]
+        edit["hint"] = ""
+
+    def place_form_lines(self, edit: dict, width: int) -> list:
+        form = edit["place"]
+        name, host, login = (edit["text"].strip() if form["step"] == i else form[key] for i, key in enumerate(("name", "host", "login")))
+        so_far = "place = " + (name or "<name>") + (f" server {host}" if host else "") + (f" user {login}" if login else "")
+        return ([(t, curses.A_DIM) for t in core.wrap_words(PLACE_FIELDS[form["step"]][1], width)[:3]]
+                + [(core.fit(so_far, width), curses.A_DIM)])
+
     def edit_config_file(self) -> None:
-        """`e`: the file in a popup running `$EDITOR`; the file's own change is then read like any other edit."""
+        """`e`: the file in a popup running his editor (`core.find_editor`); the file's own change is then read like any other edit."""
         path = self.prefs_files.config
         where = f"The config file is {core.tilde_path(str(path), self.home)}"
-        editor = os.environ.get("EDITOR", "").strip()
+        editor = core.find_editor(os.environ)
         if not editor:
             self.say(where)
             return
@@ -3844,6 +3973,8 @@ class App:
             lines += [(t, 0) for t in core.wrap("> " + edit["text"] + "▏", width)[-3:]]
             if edit["hint"]:
                 lines += [(t, curses.A_DIM) for t in core.wrap_words(edit["hint"], width)[:3]]
+            if edit.get("place"):
+                lines += self.place_form_lines(edit, width)
             return lines + [(EDIT_FOOTER, curses.A_DIM)]
         return lines
 
@@ -3982,6 +4113,7 @@ class App:
         scr.erase()
         h, w = scr.getmaxyx()
         self.row_map = {}
+        self.routines_hits = {}
         self.extent = (0, 0)
         bottom = self.bottom_lines(max(1, w - 1), h)
         list_top, list_bottom = 0, h - len(bottom)
@@ -4106,6 +4238,12 @@ class App:
         self.extent = (len(rows), height)
         bar = core.selection_bar(True, self.focused is not False)
         for y, (text, tone, kind) in enumerate(rows[view["scroll"]:view["scroll"] + height], start=top):
+            if kind in ("selected", "sessions"):
+                self.routines_hits[y] = [(0, width, ("open",))]
+            elif isinstance(kind, tuple) and kind[0] == "tabs":
+                self.routines_hits[y] = [(x0 + 1, x1 + 1, ("place", index)) for x0, x1, index in kind[3]]
+            elif isinstance(kind, tuple) and kind[0] == "runs":
+                self.routines_hits[y] = [(x0 + 1, x1 + 1, ("run", target)) for x0, x1, target in kind[1]]
             if kind == "selected":
                 self.put(y, 0, " " * width, self.palette.attr("plain", bar))
                 self.put(y, 1, text, self.palette.attr("plain", bar))
@@ -4113,7 +4251,7 @@ class App:
                 self.put(y, 1, text, curses.A_BOLD)
             elif isinstance(kind, tuple) and kind[0] == "tabs":
                 self.put(y, 1, text, self.palette.attr("muted"))
-                _, start, end = kind
+                start, end = kind[1:3]
                 self.put(y, 1 + start, text[start:end], self.palette.attr("accent") | curses.A_REVERSE | curses.A_BOLD)
             elif isinstance(kind, tuple) and kind[0] == "lead":
                 self.put(y, 1, text[:kind[1]], self.palette.attr(tone))
@@ -4156,52 +4294,59 @@ class App:
     def draw_settings(self, top: int, bottom: int, width: int) -> None:
         """Board A: the settings in sections, the selected one's description and the file under them."""
         st = self.settings
-        folders = st["folders"] is not None
-        title, back = ("Favourites", "Esc back") if folders else ("Settings", "c or Esc back")
+        folders, placing = st["folders"] is not None, st["places"] is not None
+        listing = folders or placing
+        kind_of, chosen_at = ("folder", st["folders"]) if folders else ("place", st["places"])
+        title, back = ("Favourites", "Esc back") if folders else ("Places", "Esc back") if placing else ("Settings", "c or Esc back")
         self.put(top, 1, title, curses.A_BOLD)
         self.put(top, max(len(title) + 3, width - 1 - len(back)), back, curses.A_DIM)
         items = self.settings_items()
         st["at"] = at = max(0, min(st["at"], len(items) - 1))
-        if folders:
-            lines, footer = [], [FAVOURITES_HINT]
+        if listing:
+            lines, footer = [], core.wrap_words(FAVOURITES_HINT if folders else PLACES_HINT, max(1, width - 2))
+            if placing and self.removal_armed():
+                footer = core.wrap_words(f"x again to remove {self.removal_armed()}", max(1, width - 2)) + footer
         else:
             saved = "saved to " + core.tilde_path(str(self.prefs_files.config), self.home)
             footer = core.wrap_words(self.setting_description(items[at]), max(1, width - 2))[:3] + [saved]
         list_top = top + 2
-        if not folders and bottom - list_top - len(footer) - 2 >= 3:
+        if not listing and bottom - list_top - len(footer) - 2 >= 3:
             footer += ["", SETTINGS_FOOTER]
         list_height = max(1, bottom - list_top - len(footer))
         if folders:
             lines = self.favourite_lines()
+        elif placing:
+            lines = self.place_lines()
         else:
             lines = self.setting_lines(items)
         wide = width
         if core.scroll_thumb(len(lines), list_height, 0) is not None:
             wide = width - 1
-        selected_line = next((i for i, line in enumerate(lines) if line[0] == ("folder" if folders else "setting") and line[1] == (st["folders"] if folders else at)), -1)
-        key = ("settings", st["folders"] if folders else at)
+        selected_line = next((i for i, line in enumerate(lines) if line[0] == (kind_of if listing else "setting") and line[1] == (chosen_at if listing else at)), -1)
+        key = ("settings", chosen_at if listing else at)
         want = -1 if self.held == key else selected_line
         if want >= 0:
             self.held = None
         st["scroll"] = core.list_window([1] * len(lines), want, st["scroll"], list_height)
         self.extent = (len(lines), list_height)
-        self.row_map = core.row_hits([line if line[0] in ("setting", "folder") else None for line in lines], [1] * len(lines), st["scroll"], list_top, list_height)
+        self.row_map = core.row_hits([line if line[0] in ("setting", "folder", "place") else None for line in lines], [1] * len(lines), st["scroll"], list_top, list_height)
         shown = self.settings_shown_prefs()
         pal = self.palette
         for y, line in enumerate(lines[st["scroll"]:st["scroll"] + list_height], start=list_top):
             kind = line[0]
             if kind == "head":
                 self.put(y, 1, line[1], pal.attr("muted"))
-            elif kind in ("setting", "folder"):
-                chosen = line[1] == (st["folders"] if folders else at)
+            elif kind in ("setting", "folder", "place"):
+                chosen = line[1] == (chosen_at if listing else at)
                 bar = core.selection_bar(chosen, self.focused is not False)
                 if bar:
                     self.put(y, 0, " " * wide, pal.attr("plain", bar))
                 bold = curses.A_BOLD if chosen else 0
                 if chosen:
                     self.put(y, 0, "▎", pal.attr("accent", bar) | curses.A_BOLD)
-                if kind == "folder":
-                    self.put(y, 2, core.fit(line[2], max(1, wide - 3)), pal.attr("plain" if line[1] < len(core.favourite_folders(self.prefs)) else "muted", bar) | bold)
+                if kind in ("folder", "place"):
+                    real = len(core.favourite_folders(self.prefs)) if kind == "folder" else len(self.place_list())
+                    self.put(y, 2, core.fit(line[2], max(1, wide - 3)), pal.attr("plain" if line[1] < real else "muted", bar) | bold)
                     continue
                 setting = items[line[1]]
                 value = core.shown_value(setting, shown, chosen)
@@ -4227,6 +4372,10 @@ class App:
     def favourite_lines(self) -> list:
         folders = core.favourite_folders(self.prefs)
         return [("folder", i, core.tilde_path(f, self.home)) for i, f in enumerate(folders)] + [("folder", len(folders), "+ add a folder")]
+
+    def place_lines(self) -> list:
+        configured = self.place_list()
+        return [("place", i, line) for i, line in enumerate(configured)] + [("place", len(configured), "+ add a place")]
 
     def draw_scroll_bar(self, top: int, height: int, total: int, scroll: int, x: int) -> None:
         thumb = core.scroll_thumb(total, height, scroll)

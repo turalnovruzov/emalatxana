@@ -27,6 +27,26 @@ def setUpModule():
     unittest.addModuleCleanup(patch.stop)
     os.environ.pop("EMX_CONFIG_HOME", None)
 
+
+class FindEditor(unittest.TestCase):
+    def test_find_editor_order(self):
+        def finds(*names):
+            return lambda program: "/bin/" + program if program in names else None
+
+        both = {"VISUAL": "code -w", "EDITOR": "vim"}
+        self.assertEqual(core.find_editor(both, finds("code", "vim", "nano")), "code -w")
+        self.assertEqual(core.find_editor(both, finds("vim", "nano")), "vim")
+        self.assertEqual(core.find_editor({}, finds("editor", "vi")), "editor")
+        self.assertEqual(core.find_editor({}, finds("vi")), "vi")
+        self.assertEqual(core.find_editor({}, finds()), "")
+        self.assertEqual(core.find_editor({"EDITOR": "missing"}, finds("nano", "vi")), "nano")
+        self.assertEqual(core.find_editor({"VISUAL": "  ", "EDITOR": "'unclosed"}, finds("vi")), "vi")
+
+    def test_find_editor_uses_shutil_which_at_call_time(self):
+        with mock.patch.object(core.shutil, "which", lambda program: "/x" if program == "nano" else None):
+            self.assertEqual(core.find_editor({}), "nano")
+
+
 class TestSessionsHidden(unittest.TestCase):
     def setUp(self):
         saved = os.environ.pop("EMX_SHOW_TEST_SESSIONS", None)
@@ -1546,6 +1566,58 @@ class ConfigFile(unittest.TestCase):
         self.assertEqual(places.from_prefs(defaults()), [places.HERE])
         self.assertEqual(places.from_prefs(core.read_config("", CFG_HOME)[0]), [places.HERE])
 
+    def test_parse_place_reasons_unchanged(self):
+        host_reason = 'place host "-oProxy" is not a host name from your SSH config'
+        login_reason = 'place login "Bad User" is not a login name'
+        self.assertEqual(core.parse_place(""), (None, "place needs a name"))
+        self.assertEqual(core.parse_place("a b"), (None, 'place has an unknown word "b"; use server <host> or user <login>'))
+        self.assertEqual(core.parse_place("-x user bot")[1], 'place name "-x" can only hold letters, digits, dots, dashes and underscores')
+        self.assertEqual(core.parse_place("a"), (None, "place needs server <host> or user <login>"))
+        self.assertEqual(core.parse_place("a server -oProxy"), (None, host_reason))
+        self.assertEqual(core.parse_place("a user Bad"), (None, 'place login "Bad" is not a login name'))
+        self.assertEqual(core.parse_place("a user x user y"), (None, "place says user twice"))
+        self.assertEqual(core.parse_place("a user"), (None, "place user needs a login"))
+        self.assertEqual(core.parse_place("w server s1 user bot"), (core.Place("w", "s1", "bot"), ""))
+        self.assertEqual(core.place_host_problem("-oProxy"), host_reason)
+        self.assertEqual(core.place_login_problem("Bad User"), login_reason)
+        self.assertEqual((core.place_host_problem("srv2"), core.place_login_problem("bot"), core.place_name_problem("worker")), ("", "", ""))
+
+    def test_write_places_edits_in_place(self):
+        text = f"## Routines\n# {core.SETTING_BY_KEY['place'].comment}\nplace = a user x\n# a note\nplace = b user y\nplace = c user z\nside = right\n"
+        a, b, c = "a user x", "b user y", "c user z"
+        edited = core.write_config_text(text, {"place": [a, "b user q", c]}, CFG_HOME)
+        self.assertEqual(edited, text.replace("place = b user y", "place = b user q"))
+        gone = core.write_config_text(text, {"place": [a, c]}, CFG_HOME)
+        self.assertEqual(gone, text.replace("place = b user y\n", ""))
+        added = core.write_config_text(text, {"place": [a, b, c, "d user w"]}, CFG_HOME)
+        self.assertEqual(added, text.replace("place = c user z\n", "place = c user z\nplace = d user w\n"))
+        first = core.write_config_text(text, {"place": [b, c]}, CFG_HOME)
+        self.assertEqual(first, text.replace("place = a user x\n", ""))
+
+    def test_write_places_edit_lands_on_its_own_line_with_duplicate_names(self):
+        text = "## Routines\nplace = w user a\nplace = w user b\nplace = x user c\n"
+        menu = core.read_config(text, CFG_HOME)[0]["place"]
+        self.assertEqual(menu, ["w user a", "x user c"])
+        edited = core.write_config_text(text, {"place": ["w user a", "x user c2"]}, CFG_HOME)
+        self.assertEqual(edited, text.replace("x user c\n", "x user c2\n"))
+        renamed = core.write_config_text(text, {"place": ["w user a", "y user c"]}, CFG_HOME, "x")
+        self.assertEqual(renamed, text.replace("x user c\n", "y user c\n"))
+        first = core.write_config_text(text, {"place": ["w user a2", "x user c"]}, CFG_HOME)
+        self.assertEqual(first, text.replace("w user a\n", "w user a2\n"))
+        removed = core.write_config_text(text, {"place": ["w user a"]}, CFG_HOME)
+        self.assertEqual(removed, text.replace("place = x user c\n", ""))
+        for result in (edited, renamed, first, removed):
+            self.assertIn("place = w user b\n", result)
+
+    def test_rename_a_place_keeps_its_line(self):
+        text = "## Routines\n# note\nplace = a user x\nplace = s3 server srv3\n# another\nplace = c user z\nside = right\n"
+        edited = core.write_config_text(text, {"place": ["a user x", "s3b server srv3 user bot", "c user z"]}, CFG_HOME, "s3")
+        self.assertEqual(edited, text.replace("place = s3 server srv3\n", "place = s3b server srv3 user bot\n"))
+        self.assertEqual(core.read_config(edited, CFG_HOME)[0]["place"], ["a user x", "s3b server srv3 user bot", "c user z"])
+        twin = "place = w user a\nplace = w user b\nplace = x user c\n"
+        self.assertEqual(core.write_config_text(twin, {"place": ["w user a", "y user c"]}, CFG_HOME, "x"),
+                         twin.replace("x user c", "y user c"))
+
     def test_place_lines_round_trip(self):
         text = BOARD + "# my note\nplace = worker   user bot\nfavourite_folders = ~/a\n"
         self.assertEqual(core.read_config(text, CFG_HOME)[0]["place"], ["worker user bot"])
@@ -1569,8 +1641,8 @@ class ConfigFile(unittest.TestCase):
 
     def test_places_shown_as_count(self):
         by = core.SETTING_BY_KEY
-        self.assertEqual(core.shown_value(by["place"], {"place": ["a user b", "c user d"]}, False), "2")
-        self.assertEqual(core.shown_value(by["place"], {}, True), "0")
+        self.assertEqual(core.shown_value(by["place"], {"place": ["a user b", "c user d"]}, False), "2 ›")
+        self.assertEqual(core.shown_value(by["place"], {}, True), "0 ›")
         self.assertEqual(core.shown_value(by["place_user_command"], {}, False), "sudo -n -u")
 
     def test_the_template_has_a_routines_section(self):
@@ -6645,6 +6717,28 @@ class RoutinesRows(unittest.TestCase):
         text, start, end = core.tab_chips(views, 3, 30)
         self.assertLessEqual(core.display_width(text), 30)
         self.assertEqual(text[start:end], " another-place ")
+
+    def test_tab_spans_cover_every_shown_chip(self):
+        views = self.places("this user", "worker", "server-2", "another-place")
+        text, _, _ = core.tab_chips(views, 3, 30)
+        spans = core.tab_spans(views, 3, 30)
+        self.assertEqual([i for _, _, i in spans], sorted(i for _, _, i in spans))
+        self.assertEqual(text[spans[-1][0]:spans[-1][1]], " another-place ")
+        self.assertEqual(spans[-1][2], 3)
+        self.assertTrue(all(x1 <= 30 and text[x0:x1].strip() for x0, x1, _ in spans))
+        for (_, end, _), (start, _, _) in zip(spans, spans[1:]):
+            self.assertEqual(end, start)
+
+    def test_packed_runs_carry_each_runs_columns(self):
+        events = tuple((self.NOW - ago, core.PASSED, "") for ago in (600, 1200, 1800))
+        view = core.RoutineView("job", "passed", "done", events, None, sessions=((), (), ()))
+        rows = core.routines_rows([core.PlaceView(core.Place("this user"), (view,))], 0, None, 60, self.NOW)
+        packed = [r for r in rows if isinstance(r[2], tuple) and r[2][0] == "runs"]
+        self.assertEqual(len(packed), 1)
+        text, _, (_, spans) = packed[0]
+        self.assertEqual([t for _, _, t in spans], [(0, 0), (0, 1), (0, 2)])
+        for x0, x1, _ in spans:
+            self.assertRegex(text[x0:x1], r"^\d\d:\d\d \S+$")
 
     def test_step_run_holds_at_both_ends_and_starts_at_the_first(self):
         choices = [(0, 0), (0, 1), (1, 0)]

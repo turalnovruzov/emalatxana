@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import tempfile
 import textwrap
 import time
@@ -2722,15 +2723,32 @@ SESSION_MARKS = {FINISHED: "✓", ERRORED: "✗", LIMIT: "⚠", GOING: "…"}
 SESSION_OPEN = "▎"
 
 
-def tab_chips(place_views: list, at: int, width: int) -> tuple:
-    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+def _visible_chips(place_views: list, at: int, width: int) -> tuple:
     chips = [f" {fit(view.place.name, max(1, width - 2))} " for view in place_views]
     first = 0
     while first < at and sum(display_width(c) for c in chips[first:]) > width:
         first += 1
+    return chips, first
+
+
+def tab_chips(place_views: list, at: int, width: int) -> tuple:
+    """(row text, start, end) of the tab row and the columns of the selected tab, in a row `width` wide. Tabs scroll off the front when they don't fit, so the selected one stays in view."""
+    chips, first = _visible_chips(place_views, at, width)
     start = sum(display_width(c) for c in chips[first:at])
     text = "".join(chips[first:])
     return fit(text, width), start, min(width, start + display_width(chips[at]))
+
+
+def tab_spans(place_views: list, at: int, width: int) -> list:
+    """(x0, x1, index) for each chip shown in the tab row, the columns cut at `width`."""
+    chips, first = _visible_chips(place_views, at, width)
+    spans, x = [], 0
+    for index in range(first, len(chips)):
+        if x >= width:
+            break
+        spans.append((x, min(width, x + display_width(chips[index])), index))
+        x += display_width(chips[index])
+    return spans
 
 
 def run_choices(place_view: PlaceView) -> list:
@@ -2757,7 +2775,9 @@ def routines_rows(place_views, at: int, selected, width: int, now: float, local:
 
     `selected` is the run (routine index, event index) drawn on its own row;
     `reading` is the id of the session open in the reader. `kind` is "" for a
-    plain row, "title", ("tabs", start, end) with the selected tab's columns,
+    plain row, "title", ("tabs", start, end, spans) with the selected tab's columns
+    and every shown tab's (x0, x1, index), ("runs", spans) for a line of runs packed
+    together with each run's (x0, x1, (routine, event)),
     ("lead", n) for a row whose first n characters take the tone and the rest
     are muted, "selected", or "sessions".
     """
@@ -2766,7 +2786,7 @@ def routines_rows(place_views, at: int, selected, width: int, now: float, local:
         return rows + [(ROUTINES_LOADING, "muted", "")]
     at = max(0, min(at, len(place_views) - 1))
     text, start, end = tab_chips(place_views, at, width)
-    rows += [(text, "muted", ("tabs", start, end)), ("", "plain", "")]
+    rows += [(text, "muted", ("tabs", start, end, tab_spans(place_views, at, width))), ("", "plain", "")]
     problems = problems_line(place_views, local)
     if problems:
         lines = wrap_words(problems, width)
@@ -2803,8 +2823,16 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
     plain_script = view.kind == "timer" and bool(real) and not any(i < len(view.sessions) and view.sessions[i] for i in real)
 
     def flush():
-        for line in wrap_words("  ".join(pending), max(1, width - 2)) if pending else ():
-            rows.append(("  " + line.replace("\xa0", " "), "muted", ""))
+        lines = wrap_words("  ".join(stamp for stamp, _ in pending), max(1, width - 2)) if pending else ()
+        used = 0
+        for line in lines:
+            spans, x = [], 0
+            while used < len(pending) and line.startswith(pending[used][0], x):
+                stamp, target = pending[used]
+                spans.append((2 + x, min(width, 2 + x + display_width(stamp)), target))
+                x += len(stamp) + 2
+                used += 1
+            rows.append(("  " + line.replace("\xa0", " "), "muted", ("runs", tuple(spans))))
         pending.clear()
 
     for day in ("today", "yesterday"):
@@ -2816,7 +2844,7 @@ def _routine_rows(view: RoutineView, ri: int, selected, width: int, now: float, 
             when, kind, status = view.events[ei]
             stamp = f"{time.strftime('%H:%M', local(when))} {RUN_MARKS[kind]}" + (status if kind == FAILED else "")
             if (ri, ei) != selected:
-                pending.append(stamp.replace(" ", "\xa0"))
+                pending.append((stamp.replace(" ", "\xa0"), (ri, ei)))
                 continue
             flush()
             found = view.sessions[ei] if ei < len(view.sessions) else ()
@@ -3181,14 +3209,26 @@ PLACE_LOGIN = re.compile(r"[a-z_][a-z0-9_.-]*")
 PLACE_WORDS = ("server", "user")
 
 
+def place_name_problem(name: str) -> str:
+    return "" if PLACE_NAME.fullmatch(name) else f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+
+
+def place_host_problem(host: str) -> str:
+    return "" if remote_host(host) is not None else f'place host "{host}" is not a host name from your SSH config'
+
+
+def place_login_problem(login: str) -> str:
+    return "" if PLACE_LOGIN.fullmatch(login) else f'place login "{login}" is not a login name'
+
+
 def parse_place(text: str) -> tuple:
     """`(Place, "")` for `<name> [server <host>] [user <login>]` in either word order, else `(None, why)`."""
     words = text.split()
     if not words:
         return None, "place needs a name"
     name, rest = words[0], words[1:]
-    if PLACE_NAME.fullmatch(name) is None:
-        return None, f'place name "{name}" can only hold letters, digits, dots, dashes and underscores'
+    if problem := place_name_problem(name):
+        return None, problem
     found = {}
     for i in range(0, len(rest), 2):
         word = rest[i]
@@ -3202,10 +3242,10 @@ def parse_place(text: str) -> tuple:
     if not found:
         return None, "place needs server <host> or user <login>"
     host, login = found.get("server"), found.get("user")
-    if host is not None and remote_host(host) is None:
-        return None, f'place host "{host}" is not a host name from your SSH config'
-    if login is not None and PLACE_LOGIN.fullmatch(login) is None:
-        return None, f'place login "{login}" is not a login name'
+    if host is not None and (problem := place_host_problem(host)):
+        return None, problem
+    if login is not None and (problem := place_login_problem(login)):
+        return None, problem
     return Place(name, host, login), ""
 
 
@@ -3236,7 +3276,7 @@ SETTINGS = (
             "Folders starred for new sessions."),
     Setting("place", "Routines", "Places", "places", [],
             "Other places whose routines R shows, one per line: a name, then server <host> and/or user <login>",
-            "Other places whose routines the Routines view shows."),
+            "Other places whose routines the Routines view shows; Enter lists them."),
     Setting("place_user_command", "Routines", "Run as another user", "text", "sudo -n -u",
             "How a place's user is reached; the login name follows it",
             "The command that runs emx's reads as another user; the login follows it."),
@@ -3441,28 +3481,51 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
     return _insert_under_section(out, setting, new, last) if new else out
 
 
-def _write_places(lines: list, setting: Setting, wanted: list) -> list:
-    """Keeps the lines still wanted and the ones emx can't read (they are his to fix), drops the rest, appends what is new."""
-    out, present, last = [], set(), None
-    for raw in lines:
+def _write_places(lines: list, setting: Setting, wanted: list, edited_place: str = "") -> list:
+    """Keeps the lines still wanted and the ones emx can't read, a repeat of an earlier name included (they are his to fix), appends what is new.
+
+    `edited_place` is the name the edited place had before the edit: the first
+    unwanted line of that name is rewritten where it stands, so an edit, a
+    rename included, keeps its line and its tab. Without it, an unwanted line is
+    the edited place when `wanted` holds a new line of the same name. Otherwise
+    it was removed and is dropped.
+    """
+    taken = set()
+
+    def readable(raw):
         parts = _split_line(raw)
-        if parts and parts[0] == setting.key and parts[1]:
-            place = parse_place(parts[1])[0]
-            if place is not None:
-                line = place_line(place)
-                if line not in wanted:
-                    continue
-                present.add(line)
+        place = parse_place(parts[1])[0] if parts and parts[0] == setting.key and parts[1] else None
+        if place is None or place.name in taken:
+            return None
+        taken.add(place.name)
+        return place_line(place)
+
+    readable_lines = [readable(raw) for raw in lines]
+    on_file = {line for line in readable_lines if line is not None}
+    edited = {line.split()[0]: line for line in wanted if line not in on_file}
+    if edited_place and len(edited) == 1:
+        edited = {edited_place: next(iter(edited.values()))}
+    out, present, last = [], set(), None
+    for raw, line in zip(lines, readable_lines):
+        if line is None:
             out.append(raw)
-            last = len(out) - 1
+            continue
+        if line in wanted:
+            present.add(line)
+        elif line.split()[0] in edited and edited[line.split()[0]] not in present:
+            line = edited[line.split()[0]]
+            present.add(line)
+            raw = f"{setting.key} = {line}" + ("\n" if raw.endswith("\n") else "")
         else:
-            out.append(raw)
+            continue
+        out.append(raw)
+        last = len(out) - 1
     new = [f"{setting.key} = {line}" for line in wanted if line not in present]
     return _insert_under_section(out, setting, new, last) if new else out
 
 
-def write_config_text(text: str, changes: Mapping, home: str) -> str:
-    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. Raises OSError for a value that would break a line."""
+def write_config_text(text: str, changes: Mapping, home: str, edited_place: str = "") -> str:
+    """`text` with only the changed keys' lines replaced, added or removed; every other byte stays. `edited_place` names the place being edited (see `_write_places`). Raises OSError for a value that would break a line."""
     for key, value in changes.items():
         if any(has_control(v) for v in (value if isinstance(value, list) else [value]) if isinstance(v, str)):
             raise OSError(f"{key}: {UNSAFE_TEXT}")
@@ -3473,7 +3536,7 @@ def write_config_text(text: str, changes: Mapping, home: str) -> str:
         if setting.kind == "folders":
             lines = _write_favourites(lines, setting, changes[setting.key], home)
         elif setting.kind == "places":
-            lines = _write_places(lines, setting, changes[setting.key])
+            lines = _write_places(lines, setting, changes[setting.key], edited_place)
         else:
             lines = _write_scalar(lines, setting, changes[setting.key])
         text = "".join(lines)
@@ -3587,7 +3650,7 @@ def merge_prefs(base: dict, mine: dict, disk: dict) -> dict:
     return merged
 
 
-def save_prefs(files: PrefsFiles, prefs: dict) -> None:
+def save_prefs(files: PrefsFiles, prefs: dict, edited_place: str = "") -> None:
     """Writes the changed settings into the config text and the state keys into the state file. Callers hold `prefs_lock` (see `change_prefs`)."""
     prefs = normalize_prefs(prefs)
     home = _home()
@@ -3611,18 +3674,18 @@ def save_prefs(files: PrefsFiles, prefs: dict) -> None:
     parsed = read_config(text, home)[0]
     changes = {k: v for k, v in wanted.items() if v != parsed[k]}
     if changes:
-        new = refresh_template_comments(write_config_text(text, changes, home))
+        new = refresh_template_comments(write_config_text(text, changes, home, edited_place))
         if new != text:
             _atomic_write(files.config, new, mode=files.config.stat().st_mode & 0o777)
 
 
-def change_prefs(files: PrefsFiles, fn: Callable) -> dict:
+def change_prefs(files: PrefsFiles, fn: Callable, edited_place: str = "") -> dict:
     """Reads the settings, applies `fn` and writes the result, all under the cross-process lock; returns what `fn` gave."""
     with prefs_lock(files):
         disk = load_prefs(files)
         new = fn(disk)
         if new != disk:
-            save_prefs(files, new)
+            save_prefs(files, new, edited_place)
         return new
 
 
@@ -3691,7 +3754,7 @@ def shown_value(setting: Setting, prefs: Mapping, selected: bool) -> str:
     if setting.kind == "folders":
         return f"{len(value)} ›"
     if setting.kind == "places":
-        return str(len(value))
+        return f"{len(value)} ›"
     return str(value)
 
 
@@ -3814,6 +3877,19 @@ def remember_opened(prefs: dict, folder: str) -> dict:
 def present_folders(folders, readable: Mapping) -> list:
     """`folders` without those a read has found missing or unreadable; one not read yet stays."""
     return [f for f in folders if readable.get(f) is not False]
+
+
+def find_editor(env: Mapping, which: Callable | None = None) -> str:
+    """The editor command to run: $VISUAL, $EDITOR, else the first of `editor`, `nano`, `vi` on PATH; "" when none is found. A $VISUAL or $EDITOR naming a program not on PATH is skipped."""
+    which = which or shutil.which
+    for value in (env.get("VISUAL", ""), env.get("EDITOR", ""), "editor", "nano", "vi"):
+        try:
+            words = shlex.split(value)
+        except ValueError:
+            continue
+        if words and which(words[0]):
+            return value.strip()
+    return ""
 
 
 def tilde_path(path: str, home: str) -> str:

@@ -1772,6 +1772,7 @@ class ConfigCommand(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
         os.environ.pop("EDITOR", None)
+        os.environ.pop("VISUAL", None)
         self.files = core.prefs_files()
 
     def run_main(self, *argv):
@@ -1788,8 +1789,23 @@ class ConfigCommand(unittest.TestCase):
         os.environ["EDITOR"] = path
 
     def test_config_prints_the_path_without_editor(self):
+        patch = mock.patch.object(core.shutil, "which", return_value=None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.assertEqual(self.run_main(), (0, f"{self.files.config}\n", ""))
         self.assertTrue(self.files.config.exists())
+
+    def test_config_runs_the_machines_editor(self):
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.mkdir(bin_dir)
+        path = os.path.join(bin_dir, "editor")
+        with open(path, "w") as fh:
+            fh.write('#!/bin/sh\necho "side = left" >> "$1"\n')
+        os.chmod(path, 0o755)
+        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")}):
+            code, out, _ = self.run_main()
+        self.assertEqual((code, out), (0, ""))
+        self.assertIn("\nside = left\n", self.files.config.read_text(encoding="utf-8"))
 
     def test_config_runs_the_editor_on_the_file(self):
         self.editor('echo "side = left" >> "$1"', status=3)

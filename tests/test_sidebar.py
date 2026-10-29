@@ -7622,6 +7622,79 @@ class Routines(AppCase):
         self.assertEqual((self.opened, activated), ([], []))
         self.assertIsNotNone(self.app.routines_view)
 
+    def click(self, x, y):
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, x, y, 0, curses.BUTTON1_CLICKED)):
+            self.app.handle_key(curses.KEY_MOUSE)
+
+    def find_row(self, text):
+        self.drawn()
+        return next(y for (y, x), (t, _) in self.scr.drawn.items() if text in t)
+
+    def test_a_click_on_a_chip_switches_place(self):
+        self.two_places()
+        self.open_view()
+        y = self.find_row(" this user ")
+        self.click(1 + len(" this user ") + 2, y)
+        self.assertEqual(self.app.routines_view["place"], 1)
+        self.assertIsNone(self.app.routines_view["run"])
+        self.drawn()
+        self.click(3, y)
+        self.assertEqual(self.app.routines_view["place"], 0)
+
+    def run_row(self, stamp):
+        self.drawn()
+        return next((y, x) for (y, x), (t, _) in self.scr.drawn.items() if t.strip().startswith(stamp))
+
+    def test_a_click_on_a_run_selects_it(self):
+        tmux = self.app.tmux = SwitchToTmux()
+        self.open_view()
+        y, x = self.run_row("06:30")
+        self.assertEqual(self.app.routines_view["run"], None)
+        yesterday = [(yy, xx) for (yy, xx), (t, _) in self.scr.drawn.items() if "06:30" in t and yy > y]
+        self.assertTrue(yesterday, self.scr.text())
+        yy, xx = yesterday[0]
+        self.click(xx + 4, yy)
+        self.assertEqual(self.app.routines_view["run"], (0, 1))
+        self.assertEqual([c for c in tmux.calls if c[0] == "respawn"], [])
+
+    def test_a_click_on_the_selected_run_opens_the_reader(self):
+        self.app.me = "%1"
+        self.app.attached = 1
+        tmux = self.app.tmux = SwitchToTmux()
+        self.open_view()
+        self.assertIsNone(self.app.routines_view["run"])
+        y = next(y for (y, x), (t, _) in self.scr.drawn.items() if "↵ read" in t)
+        self.click(10, y)
+        respawns = [c for c in tmux.calls if c[0] == "respawn"]
+        self.assertEqual(len(respawns), 1)
+        self.assertIn(" read ", respawns[0][2])
+
+    def test_a_click_between_runs_does_nothing(self):
+        kinds = ((600, core.PASSED, 1), (1200, core.PASSED, 0), (1800, core.PASSED, 0))
+        self.answer = [core.PlaceView(HERE_PLACE, (timer_view(kinds=kinds),), None)]
+        self.open_view()
+        before = dict(self.app.routines_view)
+        self.drawn()
+        y, x = next((y, x) for (y, x), (t, _) in self.scr.drawn.items() if "07:" in t and "read" not in t)
+        row = self.scr.drawn[(y, x)][0]
+        gap = x + row.index("  ", 2)
+        self.click(gap, y)
+        self.click(gap + 1, y)
+        self.click(3, self.find_row("backup-nightly") + 1)
+        self.assertEqual(self.app.routines_view, before)
+
+    def test_the_wheel_scrolls_the_routines_view(self):
+        self.answer = [core.PlaceView(HERE_PLACE, tuple(timer_view(f"job-{i}") for i in range(12)), None)]
+        self.scr = TallScr(width=60, height=12)
+        self.app.scr = self.scr
+        self.open_view()
+        self.drawn()
+        before = self.app.routines_view["run"]
+        with mock.patch.object(sidebar.curses, "getmouse", return_value=(0, 5, 5, 0, sidebar.WHEEL_DOWN)):
+            self.app.handle_key(curses.KEY_MOUSE)
+        self.assertEqual(self.app.routines_view["scroll"], 3)
+        self.assertEqual(self.app.routines_view["run"], before)
+
     def test_the_panel_is_busy_while_the_view_is_open(self):
         self.assertFalse(self.app.update_busy())
         self.app.handle_key("R")
@@ -7652,9 +7725,10 @@ class Routines(AppCase):
         rows = core.routines_rows(self.app.place_views, 1, None, 60, ROUTINES_NOW)
         text, tone, kind = rows[1]
         self.assertEqual((text, tone), (" this user  worker ", "muted"))
-        self.assertEqual(kind, ("tabs", 11, 19))
+        self.assertEqual(kind[:3], ("tabs", 11, 19))
+        self.assertEqual(kind[3], [(0, 11, 0), (11, 19, 1)])
         self.assertEqual(text[11:19], " worker ")
-        self.assertEqual(core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)[1][2], ("tabs", 0, 11))
+        self.assertEqual(core.routines_rows(self.app.place_views, 0, None, 60, ROUTINES_NOW)[1][2][:3], ("tabs", 0, 11))
         chip = [attr for t, attr in self.scr.drawn.values() if t == " this user "]
         self.assertTrue(chip and chip[0] & curses.A_REVERSE and chip[0] & curses.A_BOLD)
 
@@ -9483,7 +9557,7 @@ class SettingsMenu(AppCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        for name in ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND", "EDITOR"):
+        for name in ("EMX_PHONE_PORT", "EMX_UPDATE_SECONDS", "EMX_CLAUDE", "EMX_REMOTE_COMMAND", "EDITOR", "VISUAL"):
             os.environ.pop(name, None)
 
     def screen(self):
@@ -9645,11 +9719,138 @@ class SettingsMenu(AppCase):
         self.assertFalse(any(line.startswith("favourite_folders = ") for line in self.config_lines()))
         self.assertEqual(core.favourite_folders(self.app.prefs), [])
 
-    def test_places_row_points_to_the_file(self):
+    THREE = ["worker user bot", "far server srv2 user bot", "w3 user x"]
+
+    def with_places(self, lines=None):
+        self.app.apply_setting({**self.app.prefs, "place": list(lines or self.THREE)})
+
+    def places_on_file(self):
+        return [line for line in self.config_lines() if line.startswith("place = ")]
+
+    def type_form(self, *fields):
+        for text in fields:
+            self.press(sidebar.CTRL_U, *text, "\n")
+
+    def test_enter_on_places_opens_the_list(self):
+        self.tall()
+        self.with_places(["worker user bot", "server-2 server srv2"])
+        self.go_to("Places")
+        self.assertIn("2 ›", self.screen())
+        self.press("\n")
+        self.assertEqual(self.app.settings["places"], 0)
+        rows = [line.strip().rstrip() for line in self.screen().splitlines()]
+        for expected in ("worker user bot", "server-2 server srv2", "+ add a place"):
+            self.assertTrue(any(row.endswith(expected) for row in rows), (expected, rows))
+
+    def test_add_a_place_each_combination(self):
+        for fields, line in ((("w2", "", "bot"), "place = w2 user bot"), (("s3", "srv3", ""), "place = s3 server srv3"),
+                             (("f4", "srv4", "bot"), "place = f4 server srv4 user bot")):
+            with self.subTest(fields=fields):
+                self.go_to("Places")
+                self.press("\n", "a")
+                self.type_form(*fields)
+                self.assertIsNone(self.app.settings["edit"])
+                self.assertEqual(self.places_on_file()[-1], line)
+                place = core.parse_place(line[len("place = "):])[0]
+                self.assertIn(place, sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files)))
+                self.press("c")
+        self.go_to("Places")
+        self.press("\n", "a")
+        before = self.places_on_file()
+        self.type_form("me", "", "")
+        self.assertEqual(self.app.settings["edit"]["hint"], "place needs server <host> or user <login>")
+        self.assertEqual(self.places_on_file(), before)
+
+    def test_edit_a_place(self):
+        self.with_places()
+        before = self.config_lines()
+        old = before.index("place = far server srv2 user bot")
+        self.go_to("Places")
+        self.press("\n", "j", "\n")
+        self.assertEqual(self.app.settings["edit"]["place"]["name"], "far")
+        self.press("\n", "\n")
+        self.type_form("bot2")
+        after = self.config_lines()
+        self.assertEqual(after[old], "place = far server srv2 user bot2")
+        self.assertEqual(after[:old] + after[old + 1:], before[:old] + before[old + 1:])
+        self.assertEqual([p.name for p in sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files))], ["this user", "worker", "far", "w3"])
+
+    def test_renaming_a_place_in_the_form_keeps_its_file_line(self):
+        self.with_places()
+        before = self.config_lines()
+        old = before.index("place = far server srv2 user bot")
+        self.go_to("Places")
+        self.press("\n", "j", "\n")
+        self.type_form("farther", "srv2", "bot")
+        after = self.config_lines()
+        self.assertEqual(after[old], "place = farther server srv2 user bot")
+        self.assertEqual(after[:old] + after[old + 1:], before[:old] + before[old + 1:])
+        self.assertEqual([p.name for p in sidebar.places.from_prefs(core.load_prefs(self.app.prefs_files))], ["this user", "worker", "farther", "w3"])
+
+    def test_remove_a_place_needs_two_x(self):
+        self.tall()
+        self.with_places()
         self.go_to("Places")
         self.press("\n")
-        self.assertEqual(self.app.notice, "Places are set in the file; e opens it.")
-        self.assertIsNone(self.app.settings["edit"])
+        clock = [100.0]
+        with mock.patch.object(sidebar.time, "monotonic", lambda: clock[0]):
+            before = self.places_on_file()
+            self.press("x")
+            self.assertEqual(self.places_on_file(), before)
+            self.assertIn("x again to remove worker", self.screen())
+            self.press("x")
+            self.assertEqual(self.places_on_file(), ["place = far server srv2 user bot", "place = w3 user x"])
+            self.press("x", "j", "x")
+            self.assertEqual(len(self.places_on_file()), 2)
+            self.press("k")
+            self.press("x")
+            clock[0] += core.CONFIRM_SECONDS + 1
+            self.assertNotIn("x again to remove", self.screen())
+            self.press("x")
+            self.assertEqual(len(self.places_on_file()), 2)
+            self.assertIn("x again to remove far", self.screen())
+
+    def test_bad_server_and_user_are_refused_with_the_reason(self):
+        self.with_places(["worker user bot"])
+        self.go_to("Places")
+        self.press("\n", "a")
+        before = self.config_lines()
+        self.type_form("a b")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_name_problem("a b"))
+        self.type_form("worker")
+        self.assertEqual(self.app.settings["edit"]["hint"], 'place "worker" is already set')
+        self.type_form("okay")
+        self.assertEqual(self.app.settings["edit"]["place"]["step"], 1)
+        self.type_form("-oProxyCommand=x")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_host_problem("-oProxyCommand=x"))
+        self.assertEqual(self.app.settings["edit"]["place"]["step"], 1)
+        self.type_form("srv9")
+        self.type_form("Bad")
+        self.assertEqual(self.app.settings["edit"]["hint"], core.place_login_problem("Bad"))
+        self.assertIsNotNone(self.app.settings["edit"])
+        self.assertEqual(self.config_lines(), before)
+
+    def test_the_form_shows_an_example_for_each_field(self):
+        self.tall()
+        self.go_to("Places")
+        self.press("\n", "a")
+        examples = ("e.g. worker", "e.g. srv2", "e.g. bot")
+        for step, mine in enumerate(examples):
+            shown = self.screen()
+            self.assertIn(mine, shown)
+            for other in examples:
+                if other != mine:
+                    self.assertNotIn(other, shown)
+            self.press(*"w", "\n") if step == 0 else self.press("\n")
+        self.assertIn("place = w", self.screen())
+
+    def test_places_enter_no_longer_says_set_in_the_file(self):
+        self.go_to("Places")
+        self.press("\n")
+        self.assertEqual(self.app.notice, "")
+        self.assertEqual(self.app.settings["places"], 0)
+        source = (Path(sidebar.__file__)).read_text(encoding="utf-8")
+        self.assertNotIn("Places are set in the file", source)
 
     def test_a_folder_with_a_line_break_is_refused_and_adds_no_line(self):
         folder = os.path.realpath(tempfile.mkdtemp()) + "\nscheme = dark"
@@ -9695,16 +9896,32 @@ class SettingsMenu(AppCase):
 
     def test_e_opens_a_popup_with_the_editor(self):
         os.environ["EDITOR"] = "vi"
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("vi",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.press("c", "e")
         self.app.tmux.popup.assert_called_once_with(f"exec vi {shlex.quote(str(self.app.prefs_files.config))}", " emx config ")
 
+    def test_e_uses_the_machines_editor_when_editor_is_unset(self):
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("nano",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.press("c", "e")
+        self.app.tmux.popup.assert_called_once_with(f"exec nano {shlex.quote(str(self.app.prefs_files.config))}", " emx config ")
+
     def test_e_without_an_editor_says_where_the_file_is(self):
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in () else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.press("c", "e")
         self.app.tmux.popup.assert_not_called()
         self.assertEqual(self.app.notice, "The config file is " + core.tilde_path(str(self.app.prefs_files.config), self.app.home))
 
     def test_e_when_tmux_refuses_says_where_the_file_is(self):
         os.environ["EDITOR"] = "vi"
+        patch = mock.patch.object(core.shutil, "which", lambda program: "/x" if program in ("vi",) else None)
+        patch.start()
+        self.addCleanup(patch.stop)
         self.app.tmux.popup.side_effect = sidebar.TmuxError("no client")
         self.press("c", "e")
         self.assertTrue(self.app.notice.startswith("The config file is "))

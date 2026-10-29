@@ -150,6 +150,26 @@ class Reader:
         self.pinned = self.top >= last
         return True
 
+    def mouse(self, event) -> None:
+        """The wheel scrolls; a click on the `session N of M` note of the header goes to the next session, as Tab does."""
+        from emx.sidebar import WHEEL_DOWN, WHEEL_ROWS
+
+        _, x, y, _, state = event
+        rows = self.rows(max(1, self.scr.getmaxyx()[1] - 1))
+        last = self.last_top(rows)
+        if self.pinned:
+            self.top = last
+        if state & curses.BUTTON4_PRESSED:
+            self.top -= WHEEL_ROWS
+        elif state & WHEEL_DOWN:
+            self.top += WHEEL_ROWS
+        elif state & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED) and y == 0 and len(self.sids) > 1:
+            if core.display_width(self.label) + 2 <= x < core.display_width(rows[0][0]):
+                self.load((self.at + 1) % len(self.sids))
+                return
+        self.top = max(0, min(self.top, last))
+        self.pinned = self.top >= last
+
     def tick(self) -> None:
         """A run still going, at a place reached without ssh, is read again when its file changed; over ssh the session is read when opened and on Tab only."""
         doc = self.doc
@@ -170,7 +190,12 @@ class Reader:
                 key = self.scr.get_wch()
             except curses.error:
                 key = None
-            if key is not None and not self.key(key):
+            if key == curses.KEY_MOUSE:
+                try:
+                    self.mouse(curses.getmouse())
+                except curses.error:
+                    pass
+            elif key is not None and not self.key(key):
                 return 0
             self.tick()
 
@@ -195,7 +220,7 @@ def runner(place, prefs: dict):
 
 
 def run(socket: str, place_name: str, label: str, sids: list) -> int:
-    from emx.sidebar import Palette
+    from emx.sidebar import Palette, mouse_mask
 
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")
@@ -218,6 +243,8 @@ def run(socket: str, place_name: str, label: str, sids: list) -> int:
             pass
         scr.keypad(True)
         scr.timeout(KEY_WAIT_MS)
+        curses.mousemask(mouse_mask())
+        curses.mouseinterval(0)
         Reader(scr, place or places.HERE, label, sids, fetch, stat, Palette(core.scheme(prefs)), tag).loop()
 
     os.environ.pop("LINES", None)
