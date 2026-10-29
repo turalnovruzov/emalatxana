@@ -948,6 +948,21 @@ class Actions(ApiCase):
 class Routines(ApiCase):
     NOW = 1_800_000_000.0
 
+    def setUp(self):
+        super().setUp()
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(self.restore_zone, old)
+
+    @staticmethod
+    def restore_zone(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
     def test_routines_carry_their_tag_tone_runs_and_next_time(self):
         passed = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
         failed = core.RoutineView("sync", "failed · exit 2", "error", ((self.NOW - 900, core.FAILED, "2"),), None, note="no calendar schedule")

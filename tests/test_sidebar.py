@@ -7502,6 +7502,10 @@ class AppBuildsNoHelper(unittest.TestCase):
 class Routines(AppCase):
     def setUp(self):
         super().setUp()
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(self.restore_zone, old)
         self.scr = TallScr()
         self.app.scr = self.scr
         self.reads = []
@@ -7518,6 +7522,14 @@ class Routines(AppCase):
         patch.start()
         self.addCleanup(patch.stop)
         self.addCleanup(self.gate.set)
+
+    @staticmethod
+    def restore_zone(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
 
     def settle(self):
         reader = self.app.routines_reader

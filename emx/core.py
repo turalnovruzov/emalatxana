@@ -2180,7 +2180,24 @@ def updated_heading(version: str) -> str:
 
 ROUTINES_WINDOW = 86400
 MISSED_SLACK = 300
-CALENDAR_CAP = 1500
+CALENDAR_CAP = 3000
+CYCLE_GAP = 300
+MATCH_SLACK = 5
+
+
+def _seconds_into_day(at: float, local: Callable) -> int:
+    t = local(at)
+    return t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec
+
+
+def routines_since(now: float, local: Callable = time.localtime) -> float:
+    """Local midnight of yesterday, where the Routines view starts: it covers yesterday and today."""
+    midnight = int(now) - _seconds_into_day(now, local)
+    return midnight - 1 - _seconds_into_day(midnight - 1, local)
+
+
+def day_word(at: float, now: float, local: Callable = time.localtime) -> str:
+    return "today" if tuple(local(at))[:3] == tuple(local(now))[:3] else "yesterday"
 
 MSG_START = "7d4958e842da4a758f6c1cdc7b36dcc5"
 MSG_DONE = "39f53479d3a045ac8e11786248231fbf"
@@ -2191,31 +2208,50 @@ MSG_CLEAN_END = "7ad2d189f7e94e70a38c781354912448"
 RUN_MESSAGES = (MSG_START, MSG_DONE, MSG_EXITED, MSG_UNIT_FAILED, MSG_JOB_FAILED, MSG_CLEAN_END)
 
 PASSED, FAILED, RUNNING, UNKNOWN, MISSED = "PASSED", "FAILED", "RUNNING", "UNKNOWN", "MISSED"
-RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?", MISSED: "⚠ missed"}
-EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted"}
+FINISHED, ERRORED, LIMIT, GOING = "FINISHED", "ERRORED", "LIMIT", "GOING"
+RUN_MARKS = {PASSED: "✓", FAILED: "✗", RUNNING: "… running", UNKNOWN: "?", MISSED: "⚠ missed",
+             FINISHED: "finished", ERRORED: "failed", LIMIT: "usage limit", GOING: "working"}
+EVENT_TONES = {PASSED: "done", FAILED: "error", MISSED: "needs", RUNNING: "plain", UNKNOWN: "muted",
+               FINISHED: "done", ERRORED: "error", LIMIT: "needs", GOING: "plain"}
 
 
-def timer_units(text: str) -> list:
-    """Unit names from `systemctl list-units --plain` rows: the first `.timer` token of each, sorted, once each."""
+def _units(text: str, suffix: str) -> list:
     units = set()
     for line in text.splitlines():
-        unit = next((tok for tok in line.split() if tok.endswith(".timer")), None)
-        if unit and not unit.startswith("-"):
+        unit = next((tok for tok in line.split() if tok.endswith(suffix)), None)
+        if unit and not unit.startswith("-") and not unit.endswith("@" + suffix):
             units.add(unit)
     return sorted(units)
 
 
-def timer_unit_files(text: str) -> list:
-    """Timer names from `systemctl list-unit-files --plain` rows, sorted, once each. Templates and aliases are left out: a template name fails the whole `show`, and an alias comes back under its target's name."""
+def _unit_files(text: str, suffix: str) -> list:
     units = set()
     for line in text.splitlines():
         tokens = line.split()
-        if not tokens or not tokens[0].endswith(".timer") or tokens[0].startswith("-") or tokens[0].endswith("@.timer"):
+        if not tokens or not tokens[0].endswith(suffix) or tokens[0].startswith("-") or tokens[0].endswith("@" + suffix):
             continue
         if len(tokens) > 1 and tokens[1] == "alias":
             continue
         units.add(tokens[0])
     return sorted(units)
+
+
+def timer_units(text: str) -> list:
+    """Unit names from `systemctl list-units --plain` rows: the first `.timer` token of each, sorted, once each."""
+    return _units(text, ".timer")
+
+
+def timer_unit_files(text: str) -> list:
+    """Timer names from `systemctl list-unit-files --plain` rows, sorted, once each. Templates and aliases are left out: a template name fails the whole `show`, and an alias comes back under its target's name."""
+    return _unit_files(text, ".timer")
+
+
+def service_units(text: str) -> list:
+    return _units(text, ".service")
+
+
+def service_unit_files(text: str) -> list:
+    return _unit_files(text, ".service")
 
 
 def show_blocks(text: str) -> dict:
@@ -2272,9 +2308,11 @@ def calendar_times(text: str) -> list:
 
 @dataclass(frozen=True)
 class Run:
+    """`end` is the latest lifecycle stamp of a finished invocation, None while it runs."""
     start: float
     result: str
     status: str = ""
+    end: float | None = None
 
 
 def journal_runs(text: str, active: frozenset) -> dict:
@@ -2299,13 +2337,14 @@ def journal_runs(text: str, active: frozenset) -> dict:
             found.append(_run_of(lines))
         found.sort(key=lambda run: run.start)
         if found and unit in active and found[-1].result != FAILED:
-            found[-1] = replace(found[-1], result=RUNNING)
+            found[-1] = replace(found[-1], result=RUNNING, end=None)
         runs[unit] = found
     return runs
 
 
 def _run_of(lines: list) -> Run:
     start = min(stamp for stamp, _ in lines)
+    end = max(stamp for stamp, _ in lines)
     failed, passed, status = False, False, ""
     for _, entry in lines:
         message, job = entry["MESSAGE_ID"], entry.get("JOB_RESULT")
@@ -2321,8 +2360,8 @@ def _run_of(lines: list) -> Run:
         if entry.get("EXIT_STATUS") and not status:
             status = str(entry["EXIT_STATUS"])
     if failed:
-        return Run(start, FAILED, status)
-    return Run(start, PASSED if passed else UNKNOWN)
+        return Run(start, FAILED, status, end)
+    return Run(start, PASSED if passed else UNKNOWN, "", end)
 
 
 def missed_times(slots: list, starts: list, since: float, now: float) -> list:
@@ -2347,6 +2386,27 @@ class RoutineView:
     next_at: float | None = None
     note: str = ""
     error: str = ""
+    kind: str = "timer"
+    sessions: tuple = ()
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class RunSession:
+    """A Claude session behind a run; `first` and `last` are epoch seconds."""
+    id: str
+    title: str
+    first: float
+    last: float
+    ending: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class PlaceView:
+    place: Place
+    views: tuple = ()
+    error: str | None = None
 
 
 ACTIVE_WHILE_RUNNING = ("activating", "deactivating", "reloading")
@@ -2367,25 +2427,33 @@ def _status_word(run_status: str) -> str:
     return f"failed · exit {run_status}" if run_status else "failed"
 
 
+def window_runs(runs: list, service: dict | None, since: float) -> list:
+    """A routine's runs in the window: the journal's, else the one run systemd's own record of the service gives."""
+    runs = [run for run in runs if run.start >= since]
+    started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
+    if runs or started is None or started < since:
+        return runs
+    if service_running(service):
+        return [Run(started, RUNNING)]
+    exited = show_time(service.get("ExecMainExitTimestamp", ""))
+    if service.get("Result") == "success":
+        return [Run(started, PASSED, "", exited)]
+    return [Run(started, FAILED, service.get("ExecMainStatus", ""), exited)]
+
+
 def routine_view(name: str, timer: dict | None, service: dict | None, runs: list, slots: list,
-                 now: float, capped: bool = False, journal_error: str = "") -> RoutineView:
+                 now: float, capped: bool = False, journal_error: str = "", matched: Mapping | None = None,
+                 local: Callable = time.localtime) -> RoutineView:
     """What the view shows for one routine. `timer` and `service` are `systemctl show` properties, `runs` the journal's, `slots` the calendar's scheduled times, `journal_error` why the journal couldn't be read.
 
     Missed times are judged against a journal that was read. When it holds no run of this routine in the window, systemd's own record of the last start decides: none in the window agrees nothing ran, so the times are judged; a start in the window means the journal lost it (rotated, say), so they are not."""
     if not timer or timer.get("LoadState") == "not-found":
         return RoutineView(name, "not found", "error")
-    window = now - ROUTINES_WINDOW
-    runs = [run for run in runs if run.start >= window]
+    window = routines_since(now, local)
     started = show_time((service or {}).get("ExecMainStartTimestamp", ""))
     systemd_ran = started is not None and started >= window
-    judged = not journal_error and (bool(runs) or not systemd_ran)
-    if not runs and systemd_ran:
-        if service_running(service):
-            runs = [Run(started, RUNNING)]
-        elif service.get("Result") == "success":
-            runs = [Run(started, PASSED)]
-        else:
-            runs = [Run(started, FAILED, service.get("ExecMainStatus", ""))]
+    judged = not journal_error and (any(run.start >= window for run in runs) or not systemd_ran)
+    runs = window_runs(runs, service, window)
     events = [(run.start, run.result, run.status) for run in runs]
     calendar = bool(calendar_specs(timer.get("TimersCalendar", "")))
     on = timer.get("ActiveState") == "active"
@@ -2399,15 +2467,220 @@ def routine_view(name: str, timer: dict | None, service: dict | None, runs: list
         events += [(slot, MISSED, "") for slot in missed_times(slots, starts, floor, now)]
     events.sort(key=lambda event: event[0], reverse=True)
     next_at = show_time(timer.get("NextElapseUSecRealtime", ""))
+    behind = {run.start: tuple(run_session(found, run.result == RUNNING, local) for found in (matched or {}).get(run.start, ()))
+              for run in runs}
+    sessions = tuple(behind.get(at, ()) if kind != MISSED else () for at, kind, _ in events)
     if not on:
-        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error)
+        return RoutineView(name, "timer off", "muted", tuple(events), next_at, note, journal_error, "timer", sessions)
     if events:
         _, kind, status = events[0]
         tag = {PASSED: "passed", RUNNING: "running", MISSED: "missed", UNKNOWN: "unknown"}.get(kind) or _status_word(status)
-        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error)
+        return RoutineView(name, tag, EVENT_TONES[kind], tuple(events), next_at, note, journal_error, "timer", sessions)
     if not judged and any(floor <= slot <= now - MISSED_SLACK for slot in slots):
         return RoutineView(name, "unknown", "muted", (), next_at, note, journal_error)
     return RoutineView(name, "not due", "muted", (), next_at, note, journal_error)
+
+
+def _limit_reset(entry: dict, local: Callable) -> str:
+    """`till HH:MM` from the usage-limit line's own reset stamp (epoch seconds or milliseconds), else nothing."""
+    params = entry.get("apiErrorParams")
+    info = params.get("rate_limit_info") if isinstance(params, dict) else None
+    at = info.get("resetsAt") if isinstance(info, dict) else None
+    if isinstance(at, bool) or not isinstance(at, (int, float)) or at <= 0:
+        return ""
+    return "till " + time.strftime("%H:%M", local(at / 1000 if at > 1e11 else at))
+
+
+def session_ending(summary: dict, live_unit: bool, local: Callable = time.localtime) -> tuple:
+    """(ending, detail) of one Claude session from the probe's summary of it. A usage limit is the final assistant line flagged as an API error with error `rate_limit`, never matched on its text."""
+    tail = summary.get("tail") or []
+    last = tail[-1] if tail and isinstance(tail[-1], dict) else {}
+    if last.get("type") == "assistant":
+        if last.get("isApiErrorMessage") is True:
+            if last.get("error") == "rate_limit":
+                return LIMIT, _limit_reset(last, local)
+            return ERRORED, ""
+        message = last.get("message")
+        blocks = [b for b in (message.get("content") if isinstance(message, dict) else None) or [] if isinstance(b, dict)]
+        if any(b.get("type") == "text" and _text(b.get("text")).strip() for b in blocks) and not any(b.get("type") == "tool_use" for b in blocks):
+            return FINISHED, ""
+    return (GOING, "") if live_unit else (ERRORED, "ended mid-step")
+
+
+def run_session(summary: dict, live_unit: bool, local: Callable = time.localtime) -> RunSession:
+    ending, detail = session_ending(summary, live_unit, local)
+    first = summary["first"] / 1000
+    last = summary["last"] / 1000 if isinstance(summary.get("last"), (int, float)) else first
+    return RunSession(summary["id"], _text(summary.get("title")), first, last, ending, detail)
+
+
+def probe_sessions(text: str) -> list:
+    """The session summaries of the probe's `list` output; a line that is no JSON object is skipped."""
+    found = []
+    for line in (text or "").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and is_session_id(entry.get("id")) and isinstance(entry.get("first"), (int, float)):
+            found.append(entry)
+    return found
+
+
+def _inside(cwd, folder: str) -> bool:
+    return isinstance(cwd, str) and (cwd == folder or cwd.startswith(folder.rstrip("/") + "/"))
+
+
+def workdir_of(props: Mapping) -> str:
+    folder = (props.get("WorkingDirectory") or "").lstrip("!")
+    return "" if folder.startswith("~") else folder
+
+
+SERVICE_ACTIVE = ("active", "activating", "reloading", "deactivating")
+
+
+def candidate_service(props: Mapping, since: float) -> bool:
+    """A service the user made (its file is under `~/.config/systemd/user`), that no timer starts, and that was active at some point since `since`."""
+    if "/.config/systemd/user/" not in (props.get("FragmentPath") or "") or ".timer" in (props.get("TriggeredBy") or ""):
+        return False
+    if props.get("ActiveState") in SERVICE_ACTIVE:
+        return True
+    stamps = [show_time(props.get(key, "")) for key in ("ExecMainStartTimestamp", "ExecMainExitTimestamp", "ActiveEnterTimestamp")]
+    return any(at is not None and at >= since for at in stamps)
+
+
+def _service_active_at(props: Mapping, at: float) -> bool:
+    entered = show_time(props.get("ActiveEnterTimestamp", ""))
+    if entered is not None and at < entered - MATCH_SLACK:
+        return False
+    if props.get("ActiveState") not in SERVICE_ACTIVE:
+        exited = show_time(props.get("ExecMainExitTimestamp", ""))
+        return exited is None or at <= exited + MATCH_SLACK
+    return True
+
+
+def match_runs(timers: Mapping, services: Mapping, sessions: list, now: float, exclude=frozenset()) -> tuple:
+    """(by timer, by service): which Claude sessions each run started.
+
+    `timers` is `name -> (working directory, runs)`, `services` `name -> systemctl show properties`, `sessions` the probe's summaries. Sessions an interactive claude started (an entrypoint other than `sdk-cli`) or that emx lists itself (`exclude`) never match; one with no entrypoint at all does. A timer run takes the sessions that began within its time (and under its working directory, when it has one). Of two timers' runs that fit a session, the routine whose other sessions share its folder wins, then the run that began last. What no timer took goes to a long-running service active when it began: the one whose working directory holds the session's folder, else the only candidate. Results are `{timer: {run start: [sessions]}}` and `{service: [[sessions of one run], ...]}`, a new run after `CYCLE_GAP` seconds without a session.
+    """
+    eligible = sorted(
+        (s for s in sessions if s.get("id") not in exclude and s.get("entrypoint") in (None, "sdk-cli")),
+        key=lambda s: s["first"])
+    fits = {}
+    for found in eligible:
+        at = found["first"] / 1000
+        for name, (workdir, runs) in timers.items():
+            if workdir and not _inside(found.get("cwd"), workdir):
+                continue
+            for run in runs:
+                if run.start - MATCH_SLACK <= at <= (run.end if run.end is not None else now) + MATCH_SLACK:
+                    fits.setdefault(found["id"], []).append((name, run))
+    taken = {}
+    for found in eligible:
+        names = {name for name, _ in fits.get(found["id"], ())}
+        if len(names) == 1:
+            taken[found["id"]] = next(iter(names))
+    for found in eligible:
+        names = {name for name, _ in fits.get(found["id"], ())}
+        if len(names) < 2:
+            continue
+        shared = {n: sum(1 for other in eligible if taken.get(other["id"]) == n and other.get("cwd") == found.get("cwd")) for n in names}
+        newest = {n: max(run.start for name, run in fits[found["id"]] if name == n) for n in names}
+        taken[found["id"]] = max(names, key=lambda n: (shared[n], newest[n], n))
+    by_timer, left = {}, []
+    for found in eligible:
+        name = taken.get(found["id"])
+        if name is None:
+            left.append(found)
+            continue
+        run = max((r for n, r in fits[found["id"]] if n == name), key=lambda r: r.start)
+        by_timer.setdefault(name, {}).setdefault(run.start, []).append(found)
+    owned = {}
+    for found in left:
+        at = found["first"] / 1000
+        active = {n: p for n, p in services.items() if _service_active_at(p, at)}
+        inside = [n for n, p in active.items() if workdir_of(p) and _inside(found.get("cwd"), workdir_of(p))]
+        if inside:
+            owned.setdefault(max(inside, key=lambda n: (len(workdir_of(active[n])), n)), []).append(found)
+        elif len(active) == 1:
+            owned.setdefault(next(iter(active)), []).append(found)
+    by_service = {}
+    for name, found in owned.items():
+        cycles, reach = [], None
+        for one in found:
+            if reach is None or one["first"] / 1000 - reach > CYCLE_GAP:
+                cycles.append([])
+            cycles[-1].append(one)
+            reach = (one["last"] if isinstance(one.get("last"), (int, float)) else one["first"]) / 1000
+        by_service[name] = cycles
+    return by_timer, by_service
+
+
+def service_view(name: str, props: Mapping, cycles: list, local: Callable = time.localtime) -> RoutineView:
+    """A long-running service as a routine: each cycle of sessions is a run, ended as its last session ended (a session still going wins)."""
+    active = props.get("ActiveState") in SERVICE_ACTIVE
+    events, sessions = [], []
+    for i, cycle in enumerate(cycles):
+        newest = i == len(cycles) - 1
+        behind = tuple(run_session(found, active and newest and j == len(cycle) - 1, local) for j, found in enumerate(cycle))
+        kind = GOING if any(one.ending == GOING for one in behind) else behind[-1].ending
+        events.append((behind[0].first, kind, ""))
+        sessions.append(behind)
+    events.reverse()
+    sessions.reverse()
+    latest = events[0][1] if events else None
+    if not active:
+        tag, tone = "stopped", "muted"
+    elif latest is None:
+        tag, tone = "between runs", "muted"
+    else:
+        tag, tone = RUN_MARKS[latest], EVENT_TONES[latest]
+    detail = ""
+    if latest == LIMIT:
+        reset = sessions[0][-1].detail
+        detail = ("waiting on the usage limit " + reset).strip()
+    elif latest == GOING:
+        detail = "working"
+    elif active:
+        detail = "between runs"
+    return RoutineView(name, tag, tone, tuple(events), None, "", "", "service", tuple(sessions), detail)
+
+
+def routine_problem(view: RoutineView) -> tuple | None:
+    """("failed" or "usage limit", when) for a routine whose latest run failed or hit the usage limit, else None; missed times are not runs."""
+    for i, (at, kind, _) in enumerate(view.events):
+        if kind == MISSED:
+            continue
+        ending = view.sessions[i][-1].ending if i < len(view.sessions) and view.sessions[i] else None
+        if kind in (FAILED, ERRORED) or (kind != LIMIT and ending == ERRORED):
+            return "failed", at
+        if kind == LIMIT or ending == LIMIT:
+            return "usage limit", at
+        return None
+    return None
+
+
+def problems_line(place_views: list, local: Callable = time.localtime) -> str:
+    """`⚠ 1 failed · worker, 19:42` for one problem (its place and when), `⚠ 2 failed, 1 usage limit · this user, worker` for several (the places, in tab order); nothing when all is fine. Every place counts, whichever one is on screen."""
+    found = []
+    for place_view in place_views:
+        for view in place_view.views:
+            problem = routine_problem(view)
+            if problem:
+                found.append((place_view.place.name, *problem))
+    if not found:
+        return ""
+    counts = []
+    for word in ("failed", "usage limit"):
+        n = sum(1 for _, w, _ in found if w == word)
+        if n:
+            counts.append(f"{n} {word}")
+    if len(found) == 1:
+        where = f"{found[0][0]}, {time.strftime('%H:%M', local(found[0][2]))}"
+    else:
+        where = ", ".join(dict.fromkeys(name for name, _, _ in found))
+    return f"⚠ {', '.join(counts)} · {where}"
 
 
 def routine_words(view: RoutineView, now: float, local: Callable = time.localtime) -> tuple:

@@ -5624,6 +5624,20 @@ class Routines(unittest.TestCase):
     UNIT_FAILED, JOB_FAILED = core.MSG_UNIT_FAILED, core.MSG_JOB_FAILED
     NOW = 1_800_000_000.0
 
+    def setUp(self):
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(self.restore_zone, old)
+
+    @staticmethod
+    def restore_zone(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
     def runs(self, *lines, active=frozenset()):
         return core.journal_runs("\n".join(lines), frozenset(active))
 
@@ -5682,7 +5696,7 @@ class Routines(unittest.TestCase):
             journal_line(self.START, "backup-job.service", "i1", 1000, JOB_TYPE="start"),
             journal_line(self.DONE, "backup-job.service", "i1", 1002, JOB_RESULT="done"),
         )
-        self.assertEqual(runs, {"backup-job.service": [core.Run(1000.0, core.PASSED, "")]})
+        self.assertEqual(runs, {"backup-job.service": [core.Run(1000.0, core.PASSED, "", 1002.0)]})
 
     def test_a_failed_oneshot_is_one_failed_run_with_its_status(self):
         runs = self.runs(
@@ -5691,7 +5705,7 @@ class Routines(unittest.TestCase):
             journal_line(self.UNIT_FAILED, "backup-job.service", "i1", 1001, UNIT_RESULT="exit-code"),
             journal_line(self.JOB_FAILED, "backup-job.service", "i1", 1001, JOB_RESULT="failed"),
         )
-        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "2")])
+        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "2", 1001.0)])
 
     def test_a_failed_simple_run_starts_at_its_done_line(self):
         runs = self.runs(
@@ -5699,14 +5713,14 @@ class Routines(unittest.TestCase):
             journal_line(self.EXITED, "loop.service", "i1", 540, EXIT_CODE="exited", EXIT_STATUS="1"),
             journal_line(self.UNIT_FAILED, "loop.service", "i1", 540, UNIT_RESULT="exit-code"),
         )
-        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "1")])
+        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "1", 540.0)])
 
     def test_a_killed_run_carries_the_signal_number(self):
         runs = self.runs(
             journal_line(self.START, "loop.service", "i1", 500),
             journal_line(self.EXITED, "loop.service", "i1", 501, EXIT_CODE="killed", EXIT_STATUS="15"),
         )
-        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "15")])
+        self.assertEqual(runs["loop.service"], [core.Run(500.0, core.FAILED, "15", 501.0)])
 
     def test_two_invocations_are_two_runs_oldest_first_even_when_interleaved(self):
         runs = self.runs(
@@ -5715,7 +5729,7 @@ class Routines(unittest.TestCase):
             journal_line(self.DONE, "backup-job.service", "late", 2003, JOB_RESULT="done"),
             journal_line(self.EXITED, "backup-job.service", "early", 1002, EXIT_STATUS="4"),
         )
-        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "4"), core.Run(2000.0, core.PASSED, "")])
+        self.assertEqual(runs["backup-job.service"], [core.Run(1000.0, core.FAILED, "4", 1002.0), core.Run(2000.0, core.PASSED, "", 2003.0)])
 
     def test_lines_that_are_not_systemds_lifecycle_are_skipped(self):
         runs = self.runs(
@@ -5739,7 +5753,7 @@ class Routines(unittest.TestCase):
             journal_line(self.EXITED, "report-job.service", "b", 1501, EXIT_STATUS="3"),
         )
         self.assertEqual(runs["backup-job.service"][0].result, core.PASSED)
-        self.assertEqual(runs["report-job.service"][0], core.Run(1500.0, core.FAILED, "3"))
+        self.assertEqual(runs["report-job.service"][0], core.Run(1500.0, core.FAILED, "3", 1501.0))
 
     def slots(self, count=6):
         return [self.NOW - 3600 * (count - i) + 600 for i in range(count)]
@@ -5808,7 +5822,7 @@ class Routines(unittest.TestCase):
         self.assertEqual(view.events, ((self.NOW - 3000, core.FAILED, "1"),))
 
     def test_a_service_run_outside_the_window_is_not_shown(self):
-        service = {"ExecMainStartTimestamp": f"@{int(self.NOW - 90000)}", "Result": "success"}
+        service = {"ExecMainStartTimestamp": f"@{int(self.NOW - 120000)}", "Result": "success"}
         self.assertEqual(self.view(service=service).events, ())
 
     def test_a_calendar_list_that_hit_the_cap_names_no_missed_times(self):
@@ -5832,7 +5846,7 @@ class Routines(unittest.TestCase):
     def test_an_hourly_routine_that_never_ran_has_every_due_slot_missed(self):
         slots = self.slots()
         for service in (None, {"ExecMainStartTimestamp": "", "Result": "success"},
-                        {"ExecMainStartTimestamp": f"@{int(self.NOW - 90000)}", "Result": "success"}):
+                        {"ExecMainStartTimestamp": f"@{int(self.NOW - 120000)}", "Result": "success"}):
             view = self.view(service=service, slots=slots)
             self.assertEqual((view.tag, view.tone), ("missed", "needs"), service)
             self.assertEqual(view.events, tuple((slot, core.MISSED, "") for slot in reversed(slots)), service)
@@ -5924,6 +5938,161 @@ class Routines(unittest.TestCase):
 
 
 VIEW_KEY = "6f1c9d52-3a7e-4c1b-9e0d-2b8a4f5c7d10"
+
+
+def a_session(sid, first, last=None, cwd="/w/a", entrypoint="sdk-cli", tail=None, title=""):
+    return {"id": f"{sid:08d}-0000-0000-0000-000000000000", "cwd": cwd, "first": first * 1000, "last": (last or first + 30) * 1000,
+            "entrypoint": entrypoint, "title": title, "tail": tail if tail is not None else [{"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}]}
+
+
+def sid_of(n):
+    return f"{n:08d}-0000-0000-0000-000000000000"
+
+
+class RoutinePlaces(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        self.addCleanup(self.restore_zone, old)
+
+    @staticmethod
+    def restore_zone(old):
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+    def test_the_window_opens_at_yesterdays_local_midnight(self):
+        self.assertEqual(core.routines_since(self.NOW), 1_799_884_800)
+        east = lambda at: time.gmtime(at + 3 * 3600)
+        self.assertEqual(core.routines_since(self.NOW, east), 1_799_884_800 - 3 * 3600)
+        self.assertEqual(core.routines_since(1_799_884_800 + 1), 1_799_884_800 - 86400)
+
+    def test_a_day_is_today_or_yesterday(self):
+        self.assertEqual(core.day_word(self.NOW - 3600, self.NOW), "today")
+        self.assertEqual(core.day_word(self.NOW - 9 * 3600, self.NOW), "yesterday")
+        self.assertEqual(core.day_word(1_799_971_200, self.NOW), "today")
+        self.assertEqual(core.day_word(1_799_971_199, self.NOW), "yesterday")
+
+    def test_shared_cwd_breaks_a_time_tie(self):
+        timers = {"a": ("", [core.Run(1000.0, core.PASSED, "", 1100.0), core.Run(2000.0, core.PASSED, "", 3000.0)]),
+                  "b": ("", [core.Run(2500.0, core.PASSED, "", 3500.0)])}
+        first = a_session(1, 1050, cwd="/w/a")
+        both = a_session(2, 2600, cwd="/w/a")
+        alone = a_session(3, 3400, cwd="/w/b")
+        by_timer, by_service = core.match_runs(timers, {}, [first, both, alone], self.NOW)
+        self.assertEqual({k: {s: [x["id"] for x in v] for s, v in runs.items()} for k, runs in by_timer.items()},
+                         {"a": {1000.0: [sid_of(1)], 2000.0: [sid_of(2)]}, "b": {2500.0: [sid_of(3)]}})
+        self.assertEqual(by_service, {})
+
+    def test_without_a_shared_cwd_the_run_that_began_last_wins(self):
+        timers = {"a": ("", [core.Run(2000.0, core.PASSED, "", 3000.0)]), "b": ("", [core.Run(2500.0, core.PASSED, "", 3500.0)])}
+        by_timer, _ = core.match_runs(timers, {}, [a_session(1, 2600, cwd="/w/c")], self.NOW)
+        self.assertEqual(list(by_timer), ["b"])
+
+    def test_a_session_outside_every_run_matches_no_timer(self):
+        timers = {"a": ("", [core.Run(2000.0, core.PASSED, "", 2100.0)])}
+        by_timer, _ = core.match_runs(timers, {}, [a_session(1, 2200), a_session(2, 1990)], self.NOW)
+        self.assertEqual(by_timer, {})
+
+    def test_a_running_run_reaches_to_now(self):
+        timers = {"a": ("", [core.Run(self.NOW - 600, core.RUNNING)])}
+        by_timer, _ = core.match_runs(timers, {}, [a_session(1, self.NOW - 100)], self.NOW)
+        self.assertEqual(list(by_timer["a"]), [self.NOW - 600])
+
+    def test_leftover_sessions_go_to_the_service_holding_their_folder_else_the_only_one(self):
+        props = lambda wd: {"ActiveState": "active", "ActiveEnterTimestamp": "@1000", "WorkingDirectory": wd}
+        both = {"x.service": props("/w/x"), "y.service": props("/w/y")}
+        _, by_service = core.match_runs({}, both, [a_session(1, 5000, cwd="/w/y/sub"), a_session(2, 5000, cwd="/elsewhere")], self.NOW)
+        self.assertEqual({k: [[s["id"] for s in cycle] for cycle in v] for k, v in by_service.items()}, {"y.service": [[sid_of(1)]]})
+        _, alone = core.match_runs({}, {"x.service": props("")}, [a_session(2, 5000, cwd="/elsewhere")], self.NOW)
+        self.assertEqual(list(alone), ["x.service"])
+
+    def test_a_service_not_yet_active_when_a_session_began_does_not_take_it(self):
+        props = {"x.service": {"ActiveState": "active", "ActiveEnterTimestamp": "@9000"}}
+        self.assertEqual(core.match_runs({}, props, [a_session(1, 5000)], self.NOW)[1], {})
+
+    def test_candidate_services(self):
+        mine = {"FragmentPath": "/home/x/.config/systemd/user/s.service", "ActiveState": "active", "TriggeredBy": ""}
+        self.assertTrue(core.candidate_service(mine, 0))
+        self.assertFalse(core.candidate_service({**mine, "FragmentPath": "/usr/lib/systemd/user/s.service"}, 0))
+        self.assertFalse(core.candidate_service({**mine, "TriggeredBy": "s.timer"}, 0))
+        idle = {**mine, "ActiveState": "inactive", "ExecMainExitTimestamp": "@500"}
+        self.assertFalse(core.candidate_service(idle, 1000))
+        self.assertTrue(core.candidate_service(idle, 400))
+
+    def ending(self, tail, live=False):
+        return core.session_ending({"tail": tail}, live)
+
+    def test_endings(self):
+        text = lambda words: {"type": "assistant", "message": {"content": [{"type": "text", "text": words}]}}
+        self.assertEqual(self.ending([text("All done.")]), (core.FINISHED, ""))
+        api = {**text("API Error: 500"), "isApiErrorMessage": True, "error": "unknown", "apiErrorStatus": 500}
+        self.assertEqual(self.ending([text("x"), api]), (core.ERRORED, ""))
+        limit = {**text("You've hit your session limit"), "isApiErrorMessage": True, "error": "rate_limit", "apiErrorStatus": 429,
+                 "apiErrorParams": {"rate_limit_info": {"resetsAt": 1_799_962_800}}}
+        self.assertEqual(self.ending([text("x"), limit]), (core.LIMIT, "till 21:40"))
+        self.assertEqual(self.ending([{**limit, "apiErrorParams": {}}]), (core.LIMIT, ""))
+        mentions = {"type": "user", "message": {"content": [{"type": "text", "text": "you hit your limit"}]}}
+        self.assertNotEqual(self.ending([mentions])[0], core.LIMIT)
+        self.assertNotEqual(self.ending([text("hit your limit")])[0], core.LIMIT)
+        tool = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash"}]}}
+        self.assertEqual(self.ending([tool], live=True), (core.GOING, ""))
+        self.assertEqual(self.ending([tool], live=False), (core.ERRORED, "ended mid-step"))
+        self.assertEqual(self.ending([], live=False), (core.ERRORED, "ended mid-step"))
+
+    def test_a_limit_stamp_in_milliseconds_reads_the_same(self):
+        limit = {"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                 "apiErrorParams": {"rate_limit_info": {"resetsAt": 1_799_962_800_000}}}
+        self.assertEqual(self.ending([limit]), (core.LIMIT, "till 21:40"))
+
+    def view_with(self, name, kind, ending, at, tag="x"):
+        behind = core.RunSession(sid_of(1), "", at, at + 5, ending)
+        return core.RoutineView(name, tag, "plain", ((at, kind, ""),), None, sessions=((behind,),))
+
+    def test_problems_line_counts_every_place(self):
+        here, worker = core.Place("this user"), core.Place("worker", None, "bot")
+        failed = core.RoutineView("backup", "failed · exit 1", "error", ((1_799_971_200 + 9 * 3600 + 600, core.FAILED, "1"),), None)
+        limit = self.view_with("loop", core.LIMIT, core.LIMIT, 1_799_971_200 + 19 * 3600 + 42 * 60)
+        both = [core.PlaceView(here, (failed,)), core.PlaceView(worker, (limit,))]
+        self.assertEqual(core.problems_line(both), "⚠ 1 failed, 1 usage limit · this user, worker")
+        self.assertEqual(core.problems_line(both[1:]), "⚠ 1 usage limit · worker, 19:42")
+        self.assertEqual(core.problems_line(both[:1]), "⚠ 1 failed · this user, 09:10")
+
+    def test_problems_line_empty_when_all_fine(self):
+        ok = core.RoutineView("backup", "passed", "done", ((1_799_971_200, core.PASSED, ""),), None)
+        missed = core.RoutineView("backup", "missed", "needs", ((1_799_971_200, core.MISSED, ""),), None)
+        self.assertEqual(core.problems_line([core.PlaceView(core.Place("this user"), (ok, missed))]), "")
+        self.assertEqual(core.problems_line([core.PlaceView(core.Place("far", "srv2"), (), "Can't reach srv2: x")]), "")
+        self.assertEqual(core.problems_line([]), "")
+
+    def test_the_latest_run_decides_and_a_failed_session_in_a_passed_timer_run_counts(self):
+        older = core.RoutineView("a", "passed", "done", ((200.0, core.PASSED, ""), (100.0, core.FAILED, "1")), None)
+        self.assertIsNone(core.routine_problem(older))
+        behind = core.RunSession(sid_of(1), "", 200.0, 210.0, core.ERRORED, "ended mid-step")
+        passed = core.RoutineView("a", "passed", "done", ((200.0, core.PASSED, ""),), None, sessions=((behind,),))
+        self.assertEqual(core.routine_problem(passed), ("failed", 200.0))
+
+    def test_service_tags(self):
+        props = {"ActiveState": "active"}
+        done = [[a_session(1, 100, 130)]]
+        self.assertEqual(core.service_view("loop", props, done).detail, "between runs")
+        self.assertEqual(core.service_view("loop", {"ActiveState": "inactive"}, done).tag, "stopped")
+        two = [[a_session(1, 100, 130)], [a_session(2, 1000, 1030)]]
+        view = core.service_view("loop", props, two)
+        self.assertEqual([e[0] for e in view.events], [1000.0, 100.0])
+        self.assertEqual([len(s) for s in view.sessions], [1, 1])
+        self.assertEqual(view.sessions[0][0].id, sid_of(2))
+
+    def test_runs_carry_their_end_and_a_running_one_has_none(self):
+        line = lambda mid, at, **extra: json.dumps({"MESSAGE_ID": mid, "USER_UNIT": "u.service", "USER_INVOCATION_ID": "i", "__REALTIME_TIMESTAMP": str(int(at * 1e6)), **extra})
+        text = "\n".join([line(core.MSG_START, 100), line(core.MSG_DONE, 140, JOB_RESULT="done")])
+        self.assertEqual(core.journal_runs(text, frozenset())["u.service"][0].end, 140.0)
+        self.assertIsNone(core.journal_runs(line(core.MSG_START, 100), frozenset({"u.service"}))["u.service"][0].end)
 
 
 class MergePrefs(unittest.TestCase):
