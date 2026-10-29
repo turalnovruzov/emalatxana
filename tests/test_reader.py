@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from emx import core, reader
+from emx import core, reader, sidebar
 from emx.core import FINISHED, GOING, ERRORED, LIMIT
 
 FIXTURE = Path(__file__).parent / "fixtures" / "reader" / "run.jsonl"
@@ -287,6 +287,62 @@ class ReaderKeys(unittest.TestCase):
         self.assertIn("■ stopped here", scr.lines()[-1])
         view.key(curses.KEY_DOWN)
         self.assertTrue(view.pinned)
+
+    def test_wheel_up_scrolls_three_rows_and_unpins(self):
+        view, _ = self.make(sids=[self.A])
+        last = view.last_top(view.rows(59))
+        self.assertGreater(last, 3)
+        view.mouse((0, 5, 4, 0, curses.BUTTON4_PRESSED))
+        self.assertEqual(view.top, last - 3)
+        self.assertFalse(view.pinned)
+
+    def test_wheel_down_at_the_end_stays_pinned(self):
+        view, _ = self.make(sids=[self.A])
+        last = view.last_top(view.rows(59))
+        view.mouse((0, 5, 4, 0, sidebar.WHEEL_DOWN))
+        self.assertEqual(view.top, last)
+        self.assertTrue(view.pinned)
+
+    def test_a_click_on_the_session_note_goes_to_the_next_session(self):
+        view, scr = self.make()
+        self.assertEqual(view.at, 1)
+        self.fetcher.fetched.clear()
+        view.mouse((0, 30, 0, 0, curses.BUTTON1_CLICKED))
+        view.draw()
+        self.assertEqual((view.at, self.fetcher.fetched), (0, [self.A]))
+        self.assertIn("session 1 of 2", scr.lines()[0])
+        view.mouse((0, 30, 0, 0, curses.BUTTON1_PRESSED))
+        self.assertEqual(view.at, 1)
+
+    def test_a_click_on_the_label_or_with_one_session_does_nothing(self):
+        view, _ = self.make()
+        self.fetcher.fetched.clear()
+        view.mouse((0, 3, 0, 0, curses.BUTTON1_CLICKED))
+        view.mouse((0, 30, 2, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual((view.at, self.fetcher.fetched), (1, []))
+        view, _ = self.make(sids=[self.A])
+        self.fetcher.fetched.clear()
+        view.mouse((0, 30, 0, 0, curses.BUTTON1_CLICKED))
+        self.assertEqual((view.at, self.fetcher.fetched), (0, []))
+
+    def test_run_turns_the_mouse_on(self):
+        calls = []
+
+        def wrapper(body):
+            body(Scr())
+
+        with mock.patch.object(reader.curses, "wrapper", wrapper), \
+                mock.patch.object(reader.curses, "mousemask", lambda m: calls.append(("mousemask", m))), \
+                mock.patch.object(reader.curses, "mouseinterval", lambda n: calls.append(("mouseinterval", n))), \
+                mock.patch.object(reader.curses, "curs_set"), \
+                mock.patch.object(reader.core, "load_prefs", return_value={}), \
+                mock.patch.object(reader.core, "prefs_files"), \
+                mock.patch.object(reader.core, "scheme", return_value="dark"), \
+                mock.patch.object(reader.Reader, "loop", return_value=0), \
+                mock.patch.object(sidebar.Palette, "__init__", return_value=None), \
+                mock.patch.object(Scr, "keypad", create=True), mock.patch.object(Scr, "timeout", create=True):
+            reader.run("emx-test", "none", "label", ["x"])
+        self.assertEqual(calls, [("mousemask", sidebar.mouse_mask()), ("mouseinterval", 0)])
 
     def test_header_names_the_shown_session_and_never_repeats_a_title(self):
         def titled(name):
