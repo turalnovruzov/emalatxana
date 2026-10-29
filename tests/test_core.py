@@ -1594,6 +1594,11 @@ class ConfigFile(unittest.TestCase):
         first = core.write_config_text(text, {"place": [b, c]}, CFG_HOME)
         self.assertEqual(first, text.replace("place = a user x\n", ""))
 
+    def test_write_places_edit_lands_on_its_own_line_with_duplicate_names(self):
+        text = "## Routines\nplace = w user a\nplace = w user b\nplace = x user c\n"
+        edited = core.write_config_text(text, {"place": ["w user a", "w user b", "x user c2"]}, CFG_HOME)
+        self.assertEqual(edited, text.replace("x user c\n", "x user c2\n"))
+
     def test_place_lines_round_trip(self):
         text = BOARD + "# my note\nplace = worker   user bot\nfavourite_folders = ~/a\n"
         self.assertEqual(core.read_config(text, CFG_HOME)[0]["place"], ["worker user bot"])

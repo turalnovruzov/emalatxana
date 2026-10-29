@@ -3484,10 +3484,10 @@ def _write_favourites(lines: list, setting: Setting, folders: list, home: str) -
 def _write_places(lines: list, setting: Setting, wanted: list) -> list:
     """Keeps the lines still wanted and the ones emx can't read (they are his to fix), appends what is new.
 
-    A place line no longer wanted is the edited place when the k-th readable
-    place line of the file and `wanted[k]` meet there and `wanted[k]` is on no
-    line yet: it is then rewritten where it stands, so an edit keeps its line
-    and its tab. Otherwise it was removed and is dropped.
+    A place line no longer wanted is the edited place when `wanted` holds a
+    line of the same name that is on no line yet: it is then rewritten where it
+    stands, so an edit keeps its line and its tab. Otherwise it was removed and
+    is dropped.
     """
     def readable(raw):
         parts = _split_line(raw)
@@ -3495,7 +3495,8 @@ def _write_places(lines: list, setting: Setting, wanted: list) -> list:
         return None if place is None else place_line(place)
 
     on_file = {line for line in map(readable, lines) if line is not None}
-    out, present, last, k = [], set(), None, 0
+    edited = {line.split()[0]: line for line in wanted if line not in on_file}
+    out, present, last = [], set(), None
     for raw in lines:
         line = readable(raw)
         if line is None:
@@ -3503,14 +3504,12 @@ def _write_places(lines: list, setting: Setting, wanted: list) -> list:
             continue
         if line in wanted:
             present.add(line)
-        elif k < len(wanted) and wanted[k] not in on_file | present:
-            line = wanted[k]
+        elif line.split()[0] in edited and edited[line.split()[0]] not in present:
+            line = edited[line.split()[0]]
             present.add(line)
             raw = f"{setting.key} = {line}" + ("\n" if raw.endswith("\n") else "")
         else:
-            k += 1
             continue
-        k += 1
         out.append(raw)
         last = len(out) - 1
     new = [f"{setting.key} = {line}" for line in wanted if line not in present]

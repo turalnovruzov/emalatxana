@@ -76,7 +76,7 @@ On a screen narrower than 70 columns (`emx docs phone`) the panel and the sessio
 | `e` | Open the config file in your editor (`$VISUAL`, `$EDITOR`, else `editor`, `nano` or `vi`), in a popup. With none found, the notice gives the file's path. |
 | `x` | In Favourites, remove the selected folder; `+ add a folder` takes a typed folder. In Places, `x` twice removes the selected place. |
 | `a` | In Places, add a place: name, server, then user, one question each. `Enter` on a place changes it. |
-| `Esc` `c` | Close the menu (`Esc` in Favourites goes back to the list). |
+| `Esc` `c` | Close the menu (`Esc` in Favourites or Places goes back to the list). |
 
 Every change is saved into the config file.
 

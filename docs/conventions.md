@@ -438,6 +438,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: ``places.run(place, probe.command("read", sid), prefs, timeout=READER_TIMEOUT)``
 4. **Gotcha**: the probe must import nothing from emx. A new read at a place is a new probe verb, covered by `test_only_session_files_are_opened`.
 
+### A panel view's click targets come from the same row kinds that are drawn
+
+1. **Rule**: in a panel view, what a click can hit comes from the same core row kinds that are drawn. A row's kind carries `(x0, x1, target)` spans, and the draw rebuilds the hit map (`routines_hits`) each frame, cleared with `row_map`.
+2. **Why**: hit columns can't drift from the drawn text, so a click on a packed row lands on the run under the cursor.
+3. **Minimal example**: `("runs", ((x0, x1, (ri, ei)), ...))`, `("tabs", start, end, spans)`; `draw_routines` adds the x=1 indent.
+4. **Gotcha**: spans count columns within the row text, so the draw offset must be added. Rebuilding rows narrower for the scroll bar must happen before the map is filled.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**
