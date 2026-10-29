@@ -4301,9 +4301,9 @@ class App:
         items = self.settings_items()
         st["at"] = at = max(0, min(st["at"], len(items) - 1))
         if listing:
-            lines, footer = [], [FAVOURITES_HINT if folders else PLACES_HINT]
+            lines, footer = [], core.wrap_words(FAVOURITES_HINT if folders else PLACES_HINT, max(1, width - 2))
             if placing and self.removal_armed():
-                footer = [f"x again to remove {self.removal_armed()}"] + footer
+                footer = core.wrap_words(f"x again to remove {self.removal_armed()}", max(1, width - 2)) + footer
         else:
             saved = "saved to " + core.tilde_path(str(self.prefs_files.config), self.home)
             footer = core.wrap_words(self.setting_description(items[at]), max(1, width - 2))[:3] + [saved]
