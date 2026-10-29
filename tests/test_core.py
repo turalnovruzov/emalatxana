@@ -834,6 +834,37 @@ class RowLayout(unittest.TestCase):
     def test_no_age(self):
         self.assertNotIn("age", [p for _, _, p in self.row(30, age="")])
 
+    def test_no_dot_gives_the_same_parts_as_before(self):
+        for width in range(0, 70):
+            for name in ("x", "emx-test-a-very-long-session-name", "日本語の名前"):
+                for worktree in ("", "feat"):
+                    with self.subTest(width=width, name=name, worktree=worktree):
+                        self.assertEqual(core.row_layout(name, worktree, "12m", width, dot=False),
+                                         core.row_layout(name, worktree, "12m", width))
+
+    def test_the_dot_sits_one_space_before_the_age(self):
+        plain = self.row(40)
+        dotted = core.row_layout("emx-test-perm", "", "12m", 40, dot=True)
+        age_x = next(x for x, _, p in plain if p == "age")
+        self.assertIn((age_x - 2, core.UNREAD_DOT, "unread"), dotted)
+        self.assertEqual(next(x for x, _, p in dotted if p == "age"), age_x)
+
+    def test_the_dot_takes_its_room_from_the_name(self):
+        name = "emx-test-" + "n" * 9
+        fits = core.row_layout(name, "", "12m", 3 + len(name) + 1 + 3 + 1)
+        self.assertEqual(fits[0][1], name)
+        cut = core.row_layout(name, "", "12m", 3 + len(name) + 1 + 3 + 1, dot=True)
+        self.assertTrue(cut[0][1].endswith("…"))
+        self.assertEqual(core.display_width(cut[0][1]), len(name) - 2)
+
+    def test_with_no_room_for_it_or_no_age_there_is_no_dot(self):
+        for width in range(0, 70):
+            with self.subTest(width=width):
+                parts = core.row_layout("emx-test-perm", "", "12m", width, dot=True)
+                if not any(p == "name" for _, _, p in parts):
+                    self.assertNotIn("unread", [p for _, _, p in parts])
+                self.assertLessEqual(max([x + core.display_width(t) for x, t, _ in parts] or [0]), max(0, width - 1))
+
 
 class TwoLineRows(unittest.TestCase):
     """A live row is the name over its whole status, however many lines that takes; a stopped one is one line."""

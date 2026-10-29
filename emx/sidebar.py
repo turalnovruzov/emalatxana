@@ -4515,15 +4515,20 @@ class App:
     def worktree(self, s) -> str:
         return self.placements.get(s.cwd, core.Placement(s.cwd)).worktree
 
+    def unread_kinds(self) -> dict:
+        """Session id to the kind of its unread notice, for the dots and the Unread box."""
+        return {e.id: e.kind for e in core.unread_entries(self.history)}
+
     def session_lines(
         self, s, width: int, now_ms: float, armed: core.Confirm | None = None, group_key: str = "",
         max_lines: int = 0, inline: str | None = None, no_app: bool = False,
     ) -> list:
         """The row's lines as `core.row_lines` gives them, with `inline` placed on the last one when it fits, or, while it is closing, armed or renamed, that label's or the rename edit's padded to as many."""
         word = "" if core.state_group(self.view(), group_key) and not core.idle(s) else core.state_word(s)
+        unread = self.unread_kinds()
         age = core.session_age(s, now_ms)
         detail = NO_APP_DETAIL if no_app else core.row_detail(s, self.transcripts.get(s.id), self.summaries.get(s.id))
-        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED, max_lines)
+        lines = core.row_lines(s.name, self.worktree(s), word, detail, age, width, core.category(s) == core.STOPPED, max_lines, s.id in unread)
         if s.id in self.closing:
             return core.confirm_lines(core.CLOSING_LABEL, width, len(lines))
         if armed is not None:
@@ -4568,6 +4573,9 @@ class App:
                 if part in ("confirm", "rename"):
                     tone = "error" if part == "confirm" else "accent"
                     self.put(y + i, x, text, pal.attr(tone, selected) | curses.A_BOLD)
+                    continue
+                if part == "unread":
+                    self.put(y + i, x, text, pal.attr(CATEGORY_TONE[self.unread_kinds()[s.id]], selected))
                     continue
                 emphasis = curses.A_BOLD if part == "name" and (selected is not None or in_main) else 0
                 if part == "hint":

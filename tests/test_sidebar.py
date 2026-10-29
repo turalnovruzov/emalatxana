@@ -4705,6 +4705,50 @@ class IdleRows(AppCase):
         self.assertEqual(title[3], TonePalette().attr("idle") | curses.A_BOLD)
 
 
+class UnreadDot(AppCase):
+    def drawn(self, *entries, width=60):
+        scr = AttrScr(20, width)
+        self.app.scr = scr
+        self.app.palette = TonePalette()
+        self.poll(session("s1", "/p/alpha"), session("s2", "/p/alpha"))
+        self.app.refresh()
+        self.app.poller.notices.outbox = list(entries)
+        self.app.refresh()
+        scr.drawn.clear()
+        self.app.draw()
+        return scr.drawn
+
+    def test_an_unread_session_row_shows_a_dot_in_its_notice_tone(self):
+        drawn = self.drawn(entry("s1", "Needs you.", time.monotonic(), core.NOTICE_NEEDS),
+                           entry("s2", "All done.", time.monotonic() - 1))
+        dots = [d for d in drawn if d[2] == core.UNREAD_DOT and d[1] > 4]
+        tones = sorted(d[3] for d in dots)
+        self.assertEqual(tones, sorted([TonePalette().attr("needs"), TonePalette().attr("done")]))
+        self.assertEqual(len(dots), 2)
+        ages = {d[0]: d[1] for d in drawn if d[3] == TonePalette().attr("muted") and d[1] > 40}
+        for y, x, _, _ in dots:
+            self.assertEqual(x, ages[y] - 2)
+
+    def test_a_read_or_noticeless_row_has_no_dot(self):
+        drawn = self.drawn()
+        self.assertNotIn(core.UNREAD_DOT, [d[2] for d in drawn])
+        drawn = self.drawn(entry("s1", "Done.", time.monotonic()))
+        self.app.history = core.history_read(self.app.history, "s1")
+        self.app.scr.drawn.clear()
+        self.app.draw()
+        self.assertNotIn(core.UNREAD_DOT, [d[2] for d in self.app.scr.drawn])
+
+    def test_opening_the_session_removes_its_dot(self):
+        self.app.tmux = SwitchTmux(False)
+        self.app.me = "%1"
+        drawn = self.drawn(entry("s1", "Done.", time.monotonic()))
+        self.assertIn(core.UNREAD_DOT, [d[2] for d in drawn if d[1] > 4])
+        sidebar.App.switch_to(self.app, "s1", core.OPEN)
+        self.app.scr.drawn.clear()
+        self.app.draw()
+        self.assertNotIn(core.UNREAD_DOT, [d[2] for d in self.app.scr.drawn])
+
+
 class PanelGround(AppCase):
     """2.6.0 gave the panel its own background; it is the terminal's again, and a workspace upgrading from 2.6.0 loses the option."""
 

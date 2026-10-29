@@ -1674,14 +1674,16 @@ def _bare_label(name: str) -> int:
     return display_width(name) + 1 + display_width(BARE_MARK)
 
 
-def row_layout(name: str, worktree: str, age: str, width: int) -> list:
-    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra" and "age".
+def row_layout(name: str, worktree: str, age: str, width: int, dot: bool = False) -> list:
+    """Where a session row's first line puts its parts: (x, text, part) for "name", "extra", "age" and, with `dot`, "unread".
 
     Columns 0 and 1 hold the in-main marker and the glyph, and the age sits
-    right-aligned one column in from the edge. As space runs out, in order: the
-    worktree's branch shortens, down to BRANCH_MIN, then goes, leaving the bare
-    mark; the name is cut to whatever is left, keeping the bare mark when the
-    whole name alone would have fitted.
+    right-aligned one column in from the edge. The unread dot sits one space
+    before the age and takes its two columns from the name's room; with no room
+    for it, or no room for the name at all, the dot is left out. As space runs
+    out, in order: the worktree's branch shortens, down to BRANCH_MIN, then
+    goes, leaving the bare mark; the name is cut to whatever is left, keeping
+    the bare mark when the whole name alone would have fitted.
     """
     usable = width - 1
     age = fit(age, max(0, usable - ROW_LEAD))
@@ -1689,6 +1691,16 @@ def row_layout(name: str, worktree: str, age: str, width: int) -> list:
     room = age_x - 1 - ROW_LEAD
     if room <= 0:
         return [(age_x, age, "age")] if age else []
+    show_dot = dot and room - 2 > 0
+    if show_dot:
+        room -= 2
+    parts = _name_parts(name, worktree, age, age_x, room)
+    if show_dot:
+        parts.append((age_x - 2, UNREAD_DOT, "unread"))
+    return parts
+
+
+def _name_parts(name: str, worktree: str, age: str, age_x: int, room: int) -> list:
     name_w = display_width(name)
     extra = ""
     if worktree:
@@ -1716,6 +1728,7 @@ def _row(name: str, extra: str, age: str, age_x: int) -> list:
 
 def row_lines(
     name: str, worktree: str, word: str, detail: str, age: str, width: int, stopped: bool = False, max_lines: int = 0,
+    dot: bool = False,
 ) -> list:
     """A session row as lines of (x, text, part).
 
@@ -1728,7 +1741,7 @@ def row_lines(
     A row taller than `max_lines` (when given) can never be shown whole, so it
     ends there with the last line cut short by an ellipsis.
     """
-    first = row_layout(name, worktree, age, width)
+    first = row_layout(name, worktree, age, width, dot)
     room = width - 1 - ROW_LEAD
     detail = detail if detail.strip() else ""
     if stopped or not (word or detail) or room < 2:
