@@ -261,6 +261,23 @@ function markRead(id) {
   setTimeout(render, 0);
 }
 
+// An Unread entry whose session find hides: clear find at once, then open it as a tap on its row would.
+async function openHidden(id) {
+  clearTimeout(findTimer);
+  $("find").value = "";
+  $("find-clear").hidden = true;
+  findText = "";
+  await poll();
+  const found = findSession(id);
+  if (!found) {
+    toast(data.look ? data.look.open_gone : "That session isn't listed any more.");
+    return;
+  }
+  markRead(id);
+  if (found.session.running) openSheet(id);
+  else resume(id);
+}
+
 function unreadEntry(item) {
   const found = findSession(item.id);
   const linked = found && found.session.link && APP_LINK.test(found.session.link);
@@ -274,7 +291,7 @@ function unreadEntry(item) {
     entry = el("button", "unread-entry");
     entry.type = "button";
     entry.addEventListener("click", () => {
-      if (!found) clearFind();
+      if (!found) openHidden(item.id);
       else if (found.session.running) openSheet(item.id);
       else resume(item.id);
     });
@@ -291,7 +308,7 @@ function unreadEntry(item) {
 function renderUnread() {
   const box = el("section", "unread");
   const title = el("div", "unread-title");
-  title.append(el("b", "", "Unread"));
+  title.append(el("b", "", data.look.unread_title));
   box.append(title);
   for (const item of data.unread_list) box.append(unreadEntry(item));
   return box;
@@ -314,10 +331,10 @@ function renderList() {
     list.append(el("p", "empty", data.error));
     return;
   }
+  if (data.unread_list && data.unread_list.length) list.append(renderUnread());
   if (!data.groups.length) {
     list.append(el("p", "empty", data.finding ? data.look.find_none : "No sessions yet. Tap + New."));
   }
-  if (data.unread_list && data.unread_list.length) list.append(renderUnread());
   for (const group of data.groups) {
     list.append(renderFolder(group));
     if (folded.has(group.key) && !data.finding) continue;
@@ -746,7 +763,7 @@ function noticeRow(entry) {
     row.type = "button";
     row.addEventListener("click", () => openFromNotice(entry));
   }
-  if (!entry.read) row.addEventListener("click", () => markRead(entry.id));
+  row.addEventListener("click", () => markRead(entry.id));
   const tone = entry.read ? "muted" : entry.tone;
   const head = el("span", "notice-head");
   head.append(el("b", "tone-" + tone, glyphText(entry.mark) + " " + entry.title), el("span", "age muted", entry.age));

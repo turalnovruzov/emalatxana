@@ -5540,6 +5540,14 @@ UNREAD_MORE = "… {n} more"
 UNREAD_MIN_WIDTH = 12
 
 
+def unread_text(name: str, text: str) -> str:
+    """A notice's text for the Unread line, without a leading copy of the session's name (the line shows the name), capitalised."""
+    if name and text.lower().startswith(name.lower()) and not text[len(name):len(name) + 1].isalnum():
+        text = text[len(name):].lstrip(" ,:;.-–—")
+        return text[:1].upper() + text[1:]
+    return text
+
+
 def unread_box(items: list, width: int, height: int) -> list:
     """The Unread box at the top of the panel as (target, kind, parts) lines, parts being (x, text, part) with part one of frame, title, mark, name, text and more.
 

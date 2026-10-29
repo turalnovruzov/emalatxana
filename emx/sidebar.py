@@ -4158,7 +4158,7 @@ class App:
         for e in core.unread_entries(self.history):
             listed = self.session(e.id)
             if listed is not None:
-                items.append((e.id, e.kind, listed.name, e.text))
+                items.append((e.id, e.kind, listed.name, core.unread_text(listed.name, e.text)))
         return items
 
     def draw_unread(self, top: int, bottom: int, width: int) -> tuple:

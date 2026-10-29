@@ -570,7 +570,7 @@ class StateView(ApiCase):
         self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
                                 "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL,
                                 "worktree_mark": core.WORKTREE_MARK, "find_none": "No session matches.",
-                                "open_gone": sidebar.OPEN_GONE, "dot": core.UNREAD_DOT})
+                                "open_gone": sidebar.OPEN_GONE, "dot": core.UNREAD_DOT, "unread_title": core.UNREAD_TITLE})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")
@@ -1217,6 +1217,25 @@ class Page(ServerCase):
         self.assertEqual(js.count(core.UNREAD_DOT), 1)
         self.assertIn('el("span", "tone-error", " ●")', js)
 
+    def test_an_unread_entry_hidden_by_find_is_opened_and_marked_read(self):
+        js, _ = self.text("/app.js")
+        body = re.search(r"async function openHidden\(id\) \{(.*?)\n\}\n", js, re.S).group(1)
+        for text in ('findText = ""', "await poll()", "markRead(id)", "openSheet(id)", "resume(id)"):
+            self.assertIn(text, body)
+        self.assertLess(body.index("await poll()"), body.index("markRead(id)"))
+        self.assertIn("openHidden(item.id)", js)
+
+    def test_the_unread_section_comes_before_the_no_match_line_and_takes_its_title_from_data(self):
+        js, _ = self.text("/app.js")
+        self.assertLess(js.index("list.append(renderUnread())"), js.index("data.look.find_none"))
+        self.assertIn("data.look.unread_title", js)
+        self.assertNotIn('"Unread"', js)
+
+    def test_opening_a_read_notice_marks_its_session_read_too(self):
+        js, _ = self.text("/app.js")
+        self.assertIn('row.addEventListener("click", () => markRead(entry.id));', js)
+        self.assertNotIn("if (!entry.read) row.addEventListener", js)
+
     def test_the_unread_box_matches_the_design(self):
         css, _ = self.text("/app.css")
         rule = lambda selector: re.search(re.escape(selector) + r" \{([^}]*)\}", css).group(1)
@@ -1806,6 +1825,19 @@ class Notifications(ApiCase):
             {"id": self.sessions[1].id, "name": "b", "mark": "●", "tone": "needs", "text": "Asks which file"},
         ])
         self.assertNotIn("c" * 8 + "-cccc-4ccc-8ccc-" + "c" * 12, [e["id"] for e in data["unread_list"]])
+
+    def test_the_unread_line_drops_a_leading_copy_of_the_name(self):
+        self.history[0] = core.Entry(self.sessions[1].id, core.NOTICE_NEEDS, "b · emalatxana", "b, in emalatxana, needs you.", time.monotonic() - 30)
+        data = self.api().get("/api/state", "")[1]
+        self.assertEqual(data["unread_list"][-1]["text"], "In emalatxana, needs you.")
+
+    def test_look_carries_the_unread_title(self):
+        self.assertEqual(self.api().get("/api/state", "")[1]["look"]["unread_title"], core.UNREAD_TITLE)
+
+    def test_a_read_post_for_an_id_that_is_not_listed_is_refused(self):
+        api = self.api()
+        self.assertEqual(api.post("/api/read", {"id": "d" * 8 + "-dddd-4ddd-8ddd-" + "d" * 12})[0], 400)
+        self.assertEqual(api.take_reads(), set())
 
     def test_the_snapshot_has_an_empty_unread_list_when_none_or_on_error(self):
         self.history = []

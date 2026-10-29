@@ -820,6 +820,20 @@ class RowLayout(unittest.TestCase):
                 self.assertLessEqual(max([x + core.display_width(t) for x, t, _ in parts] or [0]), max(0, width - 1))
 
 
+class UnreadText(unittest.TestCase):
+    def test_the_fallback_line_loses_the_name_and_starts_capitalised(self):
+        text = core.fallback_notice("emalatxana", "api-fix", True, core.NOTICE_NEEDS)
+        self.assertEqual(core.unread_text("api-fix", text), "In emalatxana, needs you.")
+
+    def test_a_text_that_does_not_start_with_the_name_is_unchanged(self):
+        self.assertEqual(core.unread_text("api-fix", "approve npm test?"), "approve npm test?")
+        self.assertEqual(core.unread_text("api", "apiary is down"), "apiary is down")
+        self.assertEqual(core.unread_text("", "hello"), "hello")
+
+    def test_the_name_alone_leaves_nothing(self):
+        self.assertEqual(core.unread_text("api-fix", "api-fix"), "")
+
+
 class UnreadBox(unittest.TestCase):
     ITEMS = [("s1", core.NOTICE_NEEDS, "api-fix", "approve npm test?"), ("s2", core.NOTICE_DONE, "docs-pass", "updated 3 pages")]
 

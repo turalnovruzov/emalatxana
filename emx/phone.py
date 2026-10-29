@@ -390,6 +390,8 @@ class PhoneApi:
         sid = body.get("id")
         if not core.is_session_id(sid):
             return 400, {"ok": False, "message": NOT_A_SESSION}
+        if self.listed(sid)[0] is None:
+            return 400, {"ok": False, "message": NOT_A_SESSION}
         with self.reads_lock:
             self.reads.add(sid)
         return 200, {"ok": True}
@@ -452,12 +454,12 @@ class PhoneApi:
             "error": None, "finding": bool(find), "version": emx.__version__,
             "look": {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
                      "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL, "worktree_mark": core.WORKTREE_MARK,
-                     "find_none": FIND_NONE, "open_gone": GONE, "dot": core.UNREAD_DOT},
+                     "find_none": FIND_NONE, "open_gone": GONE, "dot": core.UNREAD_DOT, "unread_title": core.UNREAD_TITLE},
             "counts": [{"key": COUNT_WORDS[k], "number": n, "tone": core.BAR_COUNT_TONES[k]} for k, n in core.bar_counts(sessions)],
             "unread": core.history_unread(history),
             "unread_list": [
                 {"id": e.id, "name": names[e.id], "mark": core.HISTORY_MARKS.get(e.kind, "·"),
-                 "tone": sidebar.CATEGORY_TONE.get(e.kind, "plain"), "text": e.text}
+                 "tone": sidebar.CATEGORY_TONE.get(e.kind, "plain"), "text": core.unread_text(names[e.id], e.text)}
                 for e in unread.values() if e.id in names
             ],
             "groups": groups,
