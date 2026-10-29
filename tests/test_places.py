@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from emx import core, places
+from emx import core, places, probe
 
 SSH = "/opt/fake/ssh"
 BOT = core.Place("worker", None, "bot")
@@ -123,6 +123,16 @@ class PrivateFiles(unittest.TestCase):
             for cmd in reads:
                 with self.subTest(place=place.name, cmd=cmd[0]):
                     self.assert_clean(places.argv(place, cmd, "sudo -n -u", SSH))
+
+    def test_probe_commands_name_no_private_file_outside_their_source(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        for place in (places.HERE, BOT, OTHER_SERVER, FAR):
+            for args in (("list", "0"), ("read", sid), ("stat", sid)):
+                with self.subTest(place=place.name, probe=args[0]):
+                    line = places.argv(place, probe.command(*args), "sudo -n -u", SSH)
+                    outside = [e for e in line if probe.SOURCE not in e and shlex.quote(probe.SOURCE) not in e]
+                    self.assertLess(len(outside), len(line))
+                    self.assert_clean(outside)
 
     def assert_clean(self, line):
         for element in line:
