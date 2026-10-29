@@ -2955,6 +2955,10 @@ def reader_ending(text: str, now: float, local: Callable = time.localtime) -> tu
     return ending, at, detail
 
 
+def end_word(kind: str, detail: str = "") -> str:
+    return END_WORDS[kind] + (f" {detail}" if detail else "")
+
+
 def reader_rows(steps: list, header: tuple, ending: tuple | None, width: int, local: Callable = time.localtime) -> list:
     """(text, tone, spans, step) for each row of the reader: two header rows, then every step with a hanging indent, then the end line.
 
@@ -2997,8 +3001,7 @@ def reader_rows(steps: list, header: tuple, ending: tuple | None, width: int, lo
         if kind == GOING:
             rows.append((fit(f"… still going · {stamp}", width), "plain", (), -1))
         else:
-            word = END_WORDS[kind] + (f" {detail}" if detail else "")
-            rows.append((fit(f"■ stopped here · {stamp} · the run ended: {word}", width), "needs", (), -1))
+            rows.append((fit(f"■ stopped here · {stamp} · the run ended: {end_word(kind, detail)}", width), "needs", (), -1))
     return rows
 
 

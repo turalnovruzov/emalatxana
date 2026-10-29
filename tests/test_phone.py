@@ -427,6 +427,8 @@ class ProcGuard(ServerCase):
 
 KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+SPARE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+READER_RUN = Path(__file__).parent / "fixtures" / "reader" / "run.jsonl"
 
 
 def session(n, name, cwd, state, status="", started=1000.0, running=True):
@@ -963,41 +965,158 @@ class Routines(ApiCase):
             os.environ["TZ"] = old
         time.tzset()
 
-    def test_routines_carry_their_tag_tone_runs_and_next_time(self):
-        passed = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
-        failed = core.RoutineView("sync", "failed · exit 2", "error", ((self.NOW - 900, core.FAILED, "2"),), None, note="no calendar schedule")
-        api = self.api(FakeEngine([]), read_routines=lambda now: ([passed, failed], None))
-        data = api.get("/api/routines", "")[1]
-        one, two = data["routines"]
-        self.assertEqual((one["name"], one["tag"], one["tone"]), ("backup-nightly", "passed", "done"))
-        self.assertRegex(one["runs"][0], r"^\d\d:\d\d ✓$")
-        self.assertRegex(one["next"], r"^next ")
-        self.assertEqual((two["tone"], two["next"]), ("error", "no calendar schedule"))
-        self.assertRegex(two["runs"][0], r"✗2$")
-        self.assertIsNone(data["error"])
+    def sessions(self, *ends):
+        return tuple(core.RunSession(sid, title, self.NOW - 3000, self.NOW - 2000, ending, detail)
+                     for sid, title, ending, detail in ends)
 
-    def test_the_panels_lines_for_the_same_views_are_unchanged(self):
-        view = core.RoutineView("backup-nightly", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
-        rows = core.routine_lines(view, 40, self.NOW, local=time.gmtime)
-        self.assertEqual(rows[1][0], "  " + time.strftime("%H:%M", time.gmtime(self.NOW - 600)) + " ✓")
+    def places(self):
+        pick = self.sessions((KEY, "pick", core.FINISHED, ""), (OTHER, "build", core.LIMIT, "till 21:40"))
+        loop = core.RoutineView(
+            "loop", "usage limit", "needs", ((self.NOW - 3600, core.LIMIT, ""), (self.NOW - 90000, core.FINISHED, "")),
+            None, "", "", "service", (pick, self.sessions((SPARE, "old", core.FINISHED, ""))),
+            "waiting on the usage limit till 21:40")
+        digest = core.RoutineView("daily-digest", "passed", "done", ((self.NOW - 600, core.PASSED, ""),), self.NOW + 7200)
+        return [
+            core.PlaceView(core.Place("this user"), (digest,)),
+            core.PlaceView(core.Place("worker", None, "bot"), (loop,)),
+            core.PlaceView(core.Place("server-2", "srv2", None), (), "Can't reach srv2: no route"),
+        ]
+
+    def routines_api(self, found=None):
+        found = self.places() if found is None else found
+        with open(self.prefs.config, "w") as fh:
+            fh.write("place = worker user bot\nplace = server-2 server srv2\n")
+        calls = []
+
+        def read(now, place_list, prefs, exclude):
+            calls.append([place.name for place in place_list])
+            return found
+
+        api = self.api(FakeEngine([]), read_routines=read)
+        api.calls = calls
+        return api
+
+    def routines(self, api):
+        with mock.patch("emx.phone.time.time", return_value=self.NOW):
+            return api.get("/api/routines", "")[1]
+
+    def test_routines_answer_has_places_and_problems(self):
+        api = self.routines_api()
+        data = self.routines(api)
+        self.assertEqual([p["name"] for p in data["places"]], ["this user", "worker", "server-2"])
+        self.assertEqual(api.calls, [["this user", "worker", "server-2"]])
+        here, worker, far = data["places"]
+        self.assertEqual((here["problem"], here["error"]), (False, None))
+        self.assertEqual((worker["problem"], worker["error"]), (True, None))
+        self.assertEqual((far["error"], far["routines"]), ("Can't reach srv2: no route", []))
+        self.assertEqual(data["problems"], core.problems_line(self.places()))
+        loop = worker["routines"][0]
+        self.assertEqual((loop["name"], loop["tag"], loop["tone"], loop["detail"]),
+                         ("loop", "usage limit", "needs", "waiting on the usage limit till 21:40"))
+        self.assertEqual([d["day"] for d in loop["days"]], ["Today", "Yesterday"])
+        run = loop["days"][0]["runs"][0]
+        self.assertEqual((run["word"], run["tone"], run["label"], run["problem"]), ("usage limit", "needs", "build", True))
+        self.assertEqual([(x["id"], x["ending"]) for x in run["sessions"]], [(KEY, "finished"), (OTHER, "usage limit")])
+        self.assertEqual(data["title"], sidebar.ROUTINES_TITLE)
+
+    def test_a_timer_run_keeps_its_mark_and_next_time(self):
+        data = self.routines(self.routines_api())
+        digest = data["places"][0]["routines"][0]
+        run = digest["days"][0]["runs"][0]
+        self.assertEqual((run["word"], run["tone"], run["sessions"]), ("✓", "done", []))
+        self.assertRegex(digest["next"], r"^next ")
+        self.assertTrue(digest["plain"])
 
     def test_an_error_from_the_reader_reaches_the_page(self):
-        api = self.api(FakeEngine([]), read_routines=lambda now: (None, "systemd isn't here"))
-        self.assertEqual(api.get("/api/routines", "")[1], {
-            "routines": [], "error": "systemd isn't here", "title": sidebar.ROUTINES_TITLE, "none": sidebar.ROUTINES_NONE})
-
-    def test_a_reader_that_raises_is_an_error_not_a_crash(self):
-        def boom(now):
+        def boom(*args):
             raise RuntimeError("no systemctl")
 
-        self.assertEqual(self.api(FakeEngine([]), read_routines=boom).get("/api/routines", "")[1]["error"], "no systemctl")
+        data = self.api(FakeEngine([]), read_routines=boom).get("/api/routines", "")[1]
+        self.assertEqual((data["places"], data["error"]), ([], "no systemctl"))
 
     def test_the_reader_runs_once_a_minute_not_per_request(self):
-        calls = []
-        api = self.api(FakeEngine([]), read_routines=lambda now: calls.append(now) or ([], None))
+        api = self.routines_api([])
         api.get("/api/routines", "")
         api.get("/api/routines", "")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(api.calls), 1)
+
+    def run_api(self, text="", error=None):
+        api = self.routines_api()
+        self.routines(api)
+        probes = []
+
+        def fake_run(place, argv, prefs=None, env=None, timeout=10):
+            probes.append((place.name, argv[-2:]))
+            return (text, None) if error is None else (None, error)
+
+        patch = mock.patch("emx.places.run", fake_run)
+        patch.start()
+        self.addCleanup(patch.stop)
+        api.probes = probes
+        return api
+
+    def test_run_refuses_a_non_uuid(self):
+        api = self.run_api()
+        for sid in ("", "../etc/passwd", "not-an-id"):
+            with self.subTest(sid=sid):
+                self.assertEqual(api.get("/api/run", f"place=worker&id={sid}")[0], 400)
+        self.assertEqual(api.get("/api/run", f"place=nowhere&id={KEY}")[0], 400)
+        self.assertEqual(api.probes, [])
+
+    def test_run_refuses_an_unlisted_session(self):
+        api = self.run_api()
+        status, body = api.get("/api/run", "place=worker&id=cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+        self.assertEqual((status, body), (200, {"ok": False, "message": "That run isn't listed any more."}))
+        self.assertEqual(api.get("/api/run", f"place=this%20user&id={KEY}")[1]["ok"], False)
+        self.assertEqual(api.probes, [])
+
+    def test_run_returns_steps_and_end(self):
+        api = self.run_api(READER_RUN.read_text())
+        body = api.get("/api/run", f"place=worker&id={OTHER}")[1]
+        self.assertTrue(body["ok"])
+        self.assertEqual([s["kind"] for s in body["steps"]], ["prompt", "tool", "tool", "error", "reply"])
+        self.assertEqual(body["steps"][1]["text"], "Bash git status --short")
+        self.assertEqual((body["steps"][2]["mark"], body["steps"][2]["tone"]), ("✗ exit 1", "error"))
+        self.assertTrue(body["end"]["text"].startswith("Stopped here"))
+        self.assertEqual((body["live"], body["remote"]), (False, False))
+        self.assertEqual(body["sessions"], [KEY, OTHER])
+        self.assertIn("session 2 of 2", body["sub"])
+        self.assertEqual(api.probes, [("worker", ["read", OTHER])])
+
+    def test_run_at_a_server_place_is_remote(self):
+        found = self.places()
+        found[2] = core.PlaceView(found[2].place, found[1].views)
+        api = self.routines_api(found)
+        self.routines(api)
+        with mock.patch("emx.places.run", lambda *args, **kwargs: (READER_RUN.read_text(), None)):
+            body = api.get("/api/run", f"place=server-2&id={OTHER}")[1]
+        self.assertEqual((body["ok"], body["remote"]), (True, True))
+
+    def test_run_says_why_a_session_could_not_be_read(self):
+        api = self.run_api(error="Can't reach srv2: no route")
+        body = api.get("/api/run", f"place=worker&id={KEY}")[1]
+        self.assertEqual(body, {"ok": False, "message": "Can't reach srv2: no route"})
+
+    def test_run_cuts_long_text(self):
+        long = json.dumps({"type": "assistant", "timestamp": "2027-01-15T19:42:00.000Z", "isSidechain": False,
+                           "message": {"role": "assistant", "content": [{"type": "text", "text": "x" * 10000}]}})
+        body = self.run_api(long).get("/api/run", f"place=worker&id={KEY}")[1]
+        self.assertLessEqual(len(body["steps"][0]["text"]), phone.PEEK_TEXT_MAX)
+        many = "\n".join(json.dumps({"type": "assistant", "timestamp": "2027-01-15T19:42:00.000Z", "isSidechain": False,
+                                     "message": {"role": "assistant", "content": [{"type": "text", "text": f"reply {i}"}]}})
+                         for i in range(1500))
+        body = self.run_api(many).get("/api/run", f"place=worker&id={KEY}")[1]
+        self.assertEqual((len(body["steps"]), body["earlier"]), (1000, 500))
+        self.assertEqual(body["steps"][-1]["text"], "reply 1499")
+
+    def test_a_session_still_going_is_live_when_local_only(self):
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(now - 10))
+        text = json.dumps({"type": "assistant", "timestamp": stamp, "isSidechain": False, "message": {
+            "role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "Bash", "input": {"command": "sleep 9"}}]}})
+        body = self.run_api(text).get("/api/run", f"place=worker&id={KEY}")[1]
+        self.assertEqual((body["live"], body["end"]["tone"]), (True, "plain"))
+        self.assertTrue(body["end"]["text"].startswith("Still going"))
 
 
 class Page(ServerCase):
@@ -1133,7 +1252,7 @@ class Page(ServerCase):
 
     def test_peek_and_names_are_written_as_text(self):
         js, _ = self.text("/app.js")
-        for name in ("loadPeek", "suggestName", "noticeRow", "askUpdate", "openRoutineSheet"):
+        for name in ("loadPeek", "suggestName", "noticeRow", "askUpdate", "renderPlaces", "renderRun"):
             body = re.search(r"function %s\(.*?\n\}\n" % name, js, re.S).group(0)
             self.assertNotRegex(body, r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(")
         self.assertRegex(js, r"el\(\"div\", \"peek-line[^\n]*line\.text\)")
@@ -1153,6 +1272,27 @@ class Page(ServerCase):
 
     def test_a_script_gets_the_page_only_through_the_guard(self):
         self.assertEqual(self.request(path="/app.js", host="evil.example")[0], 400)
+
+    def test_the_screens_have_their_functions(self):
+        js, _ = self.text("/app.js")
+        for name in ("renderPlaces", "openReader", "loadRun", "closeReader"):
+            self.assertRegex(js, r"function %s\(" % name)
+
+    def test_reader_polls_only_when_live_and_local(self):
+        js, _ = self.text("/app.js")
+        self.assertIn("reading.live = answer.live && !answer.remote;", js)
+        self.assertRegex(js, r"if \(reading\.live\) readerTimer = setInterval\(\(\) => loadRun\(true\), POLL_MS\);")
+
+    def test_the_reader_screen_and_its_buttons_are_on_the_page(self):
+        html, _ = self.text("/")
+        for ident in ("reader-layer", "reader-back", "reader-other", "reader-steps", "reader-end", "routines-chips"):
+            self.assertIn(f'id="{ident}"', html)
+
+    def test_the_reader_writes_text_never_html(self):
+        js, _ = self.text("/app.js")
+        for name in ("renderRun", "runCard", "placeChips"):
+            body = re.search(r"function %s\(.*?\n\}\n" % name, js, re.S).group(0)
+            self.assertNotRegex(body, r"innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(")
 
 
 class ScriptedTailnet(StubTailnet):
@@ -1659,7 +1799,7 @@ class WhatsNew(ApiCase):
 
 class RoutineWords(ApiCase):
     def test_routines_carry_the_panels_title_and_empty_line(self):
-        data = self.api(FakeEngine([]), read_routines=lambda now: ([], None)).get("/api/routines", "")[1]
+        data = self.api(FakeEngine([]), read_routines=lambda *args: []).get("/api/routines", "")[1]
         self.assertEqual((data["title"], data["none"]), (sidebar.ROUTINES_TITLE, sidebar.ROUTINES_NONE))
 
 

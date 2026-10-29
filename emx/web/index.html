@@ -79,17 +79,6 @@
   </div>
 </div>
 
-<div class="layer" id="routine-layer" hidden>
-  <button class="backdrop" id="routine-backdrop" type="button" aria-label="Close"></button>
-  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="routine-name">
-    <button class="grab" id="routine-grab" type="button" aria-label="Close"></button>
-    <div class="sheet-title">
-      <b id="routine-name"></b> <span id="routine-tag"></span>
-    </div>
-    <div class="sheet-items" id="routine-lines"></div>
-  </div>
-</div>
-
 <div class="layer" id="update-layer" hidden>
   <button class="backdrop" id="update-backdrop" type="button" aria-label="Close"></button>
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="update-heading">
@@ -128,7 +117,23 @@
     <b id="routines-title"></b>
     <span class="spacer"></span>
   </header>
+  <div id="routines-chips" class="chips"></div>
   <div id="routines-list"></div>
+</div>
+
+<div class="screen" id="reader-layer" hidden>
+  <header class="top bar">
+    <button class="plain-button accent" id="reader-back" type="button">‹ Back</button>
+    <span class="spacer"></span>
+    <button class="plain-button accent" id="reader-other" type="button" hidden>Other session ›</button>
+  </header>
+  <div class="reader-head">
+    <b id="reader-title"></b>
+    <div class="small muted" id="reader-sub"></div>
+  </div>
+  <div class="small muted reader-earlier" id="reader-earlier" hidden></div>
+  <div id="reader-steps"></div>
+  <div id="reader-end"></div>
 </div>
 
 <div class="screen" id="notices-layer" hidden>

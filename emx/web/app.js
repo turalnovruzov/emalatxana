@@ -22,6 +22,9 @@ let sheet = null;
 let pollSeq = 0;
 let pollTimer = null;
 let routinesTimer = null;
+let readerTimer = null;
+let routinesPlace = 0;
+let reading = { place: "", ids: [], at: 0, live: false };
 let suggestTimer = null;
 let suggestSeq = 0;
 let toastTimer = null;
@@ -731,44 +734,74 @@ function closeNotices() {
   clearInterval(noticesTimer);
 }
 
-function openRoutineSheet(routine) {
-  $("routine-name").textContent = routine.name;
-  const tag = $("routine-tag");
-  tag.textContent = routine.tag;
-  tag.className = "tone-" + routine.tone;
-  const box = $("routine-lines");
+function placeChips(answer) {
+  const box = $("routines-chips");
   clear(box);
-  if (routine.error) box.append(el("div", "tone-error", routine.error));
-  for (const run of routine.runs) box.append(el("div", "", run));
-  if (routine.next) box.append(el("div", "small muted", routine.next));
-  $("routine-layer").hidden = false;
+  answer.places.forEach((place, i) => {
+    const chip = el("button", "chip" + (i === routinesPlace ? " selected" : ""));
+    chip.type = "button";
+    chip.append(el("span", "", place.name));
+    if (place.problem) chip.append(el("span", "tone-error", " ●"));
+    chip.addEventListener("click", () => {
+      routinesPlace = i;
+      renderPlaces(answer);
+    });
+    box.append(chip);
+  });
 }
 
-function renderRoutines(answer) {
+function runCard(place, run) {
+  const found = run.sessions;
+  const card = el("button", "run-card" + (run.problem ? " problem" : "") + (found.length ? "" : " idle"));
+  card.type = "button";
+  const word = el("span", "tone-" + run.tone, run.at + " " + run.word);
+  card.append(word);
+  if (run.label) card.append(el("span", "muted", " · " + run.label));
+  if (found.length) {
+    card.append(el("span", "read" + (run.problem ? " accent" : " muted"), "Read ›"));
+    card.addEventListener("click", () => openReader(place, found.map((one) => one.id)));
+  } else {
+    card.disabled = true;
+  }
+  return card;
+}
+
+function renderPlaces(answer) {
   const box = $("routines-list");
   clear(box);
   if (!answer) {
+    clear($("routines-chips"));
     box.append(el("p", "empty", "Can't reach emx"));
     return;
   }
   $("routines-title").textContent = answer.title;
+  routinesPlace = Math.max(0, Math.min(routinesPlace, answer.places.length - 1));
+  placeChips(answer);
   if (answer.error) box.append(el("p", "empty tone-error", answer.error));
-  if (!answer.routines.length && !answer.error) box.append(el("p", "empty", answer.none));
-  for (const routine of answer.routines) {
-    const item = el("button", "routine");
-    item.type = "button";
+  if (answer.problems) box.append(el("p", "problems tone-error", answer.problems));
+  const place = answer.places[routinesPlace];
+  if (!place) return;
+  if (place.error) box.append(el("p", "empty tone-error", place.error));
+  else if (!place.routines.length) box.append(el("p", "empty", answer.none));
+  for (const routine of place.routines) {
+    const item = el("div", "routine");
     const head = el("span", "head");
     head.append(el("b", "", routine.name), el("span", "tone-" + routine.tone, routine.tag));
     item.append(head);
-    const latest = routine.runs.length ? routine.runs[0] + (routine.next ? "   " + routine.next : "") : routine.next;
-    if (latest) item.append(el("span", "next", latest));
-    item.addEventListener("click", () => openRoutineSheet(routine));
+    if (routine.detail) item.append(el("span", "next", routine.detail));
+    if (routine.error) item.append(el("span", "next tone-error", routine.error));
+    for (const day of routine.days) {
+      item.append(el("div", "day small muted", day.day));
+      for (const run of day.runs) item.append(runCard(place.name, run));
+    }
+    if (routine.plain) item.append(el("span", "next", "No Claude session · a plain script"));
+    if (routine.next) item.append(el("span", "next", routine.next));
     box.append(item);
   }
 }
 
 async function loadRoutines() {
-  renderRoutines(await api("/api/routines"));
+  renderPlaces(await api("/api/routines"));
 }
 
 function openRoutines() {
@@ -779,9 +812,76 @@ function openRoutines() {
 }
 
 function closeRoutines() {
+  closeReader();
   $("routines-layer").hidden = true;
-  $("routine-layer").hidden = true;
   clearInterval(routinesTimer);
+}
+
+function renderRun(answer) {
+  const box = $("reader-steps");
+  clear(box);
+  if (!answer || !answer.ok) {
+    $("reader-end").replaceChildren(el("p", "empty tone-error", answer ? answer.message : "Can't reach emx"));
+    reading.live = false;
+    return;
+  }
+  $("reader-title").textContent = answer.title;
+  $("reader-sub").textContent = answer.sub;
+  $("reader-other").hidden = reading.ids.length < 2;
+  const earlier = $("reader-earlier");
+  earlier.hidden = !answer.earlier;
+  earlier.textContent = "↑ " + answer.earlier + " earlier step" + (answer.earlier === 1 ? "" : "s") + " · scroll up";
+  for (const step of answer.steps) {
+    if (step.kind === "tool") {
+      const card = el("div", "step-card");
+      const space = step.text.indexOf(" ");
+      const name = space < 0 ? step.text : step.text.slice(0, space);
+      const head = el("div", "step-head");
+      head.append(el("span", "tone-accent", name));
+      if (step.mark) head.append(el("span", step.tone === "error" ? "tone-error" : "tone-done", step.mark));
+      card.append(head);
+      if (space >= 0) card.append(el("div", "small muted", step.text.slice(space + 1)));
+      box.append(card);
+    } else if (step.kind === "error") {
+      box.append(el("div", "small tone-error step-error", step.text));
+    } else {
+      box.append(el("p", "step-text" + (step.kind === "cut" ? " muted" : ""), step.text));
+    }
+  }
+  const end = $("reader-end");
+  clear(end);
+  if (answer.end.text) end.append(el("div", "end-line tone-" + answer.end.tone, answer.end.text));
+  reading.live = answer.live && !answer.remote;
+}
+
+async function loadRun(stay) {
+  const at = reading.at;
+  const answer = await api("/api/run?place=" + encodeURIComponent(reading.place) + "&id=" + encodeURIComponent(reading.ids[at]));
+  if (reading.at !== at || $("reader-layer").hidden) return;
+  const screen = $("reader-layer");
+  const atEnd = !stay || screen.scrollHeight - screen.scrollTop - screen.clientHeight < 80;
+  renderRun(answer);
+  if (atEnd) screen.scrollTop = screen.scrollHeight;
+  clearInterval(readerTimer);
+  if (reading.live) readerTimer = setInterval(() => loadRun(true), POLL_MS);
+}
+
+function openReader(place, ids) {
+  reading = { place, ids, at: ids.length - 1, live: false };
+  clear($("reader-steps"));
+  clear($("reader-end"));
+  openScreen("reader-layer");
+  loadRun(false);
+}
+
+function otherSession() {
+  reading.at = (reading.at + 1) % reading.ids.length;
+  loadRun(false);
+}
+
+function closeReader() {
+  clearInterval(readerTimer);
+  $("reader-layer").hidden = true;
 }
 
 // A new version: reload once so a home-screen app runs the new script, then say what changed since this device last saw emx.
@@ -848,6 +948,8 @@ $("rename-suggest").addEventListener("click", suggestName);
 $("sheet-edit").addEventListener("submit", saveRename);
 $("sheet-close").addEventListener("click", closeSession);
 $("routines-back").addEventListener("click", closeRoutines);
+$("reader-back").addEventListener("click", closeReader);
+$("reader-other").addEventListener("click", otherSession);
 $("notices-back").addEventListener("click", closeNotices);
 $("find").addEventListener("input", onFindInput);
 $("find").addEventListener("keydown", (event) => {
@@ -859,8 +961,6 @@ $("folder-backdrop").addEventListener("click", closeFolderSheet);
 $("folder-grab").addEventListener("click", closeFolderSheet);
 $("folder-new").addEventListener("click", newInFolder);
 $("folder-close").addEventListener("click", closeFolder);
-$("routine-backdrop").addEventListener("click", () => { $("routine-layer").hidden = true; });
-$("routine-grab").addEventListener("click", () => { $("routine-layer").hidden = true; });
 $("update-backdrop").addEventListener("click", dismissUpdate);
 $("update-grab").addEventListener("click", dismissUpdate);
 $("update-ok").addEventListener("click", dismissUpdate);
