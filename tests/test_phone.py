@@ -570,7 +570,7 @@ class StateView(ApiCase):
         self.assertEqual(look, {"frames": core.WORKING_FRAMES, "frame_ms": round(sidebar.FRAME_SECONDS * 1000),
                                 "fold": [core.UNFOLDED, core.FOLDED], "closing": core.CLOSING_LABEL,
                                 "worktree_mark": core.WORKTREE_MARK, "find_none": "No session matches.",
-                                "open_gone": sidebar.OPEN_GONE})
+                                "open_gone": sidebar.OPEN_GONE, "dot": core.UNREAD_DOT})
 
     def test_counts_are_the_bars_and_leave_out_stopped_sessions(self):
         folder = self.path("Workspace", "emalatxana")
