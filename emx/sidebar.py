@@ -4018,13 +4018,6 @@ class App:
             return core.hint_variants(core.CLOSING_HINTS)
         return core.hint_variants(core.session_hints(s, s.id in core.pinned_ids(self.prefs), listing))
 
-    def notice_key_live(self) -> bool:
-        """Whether `N` opens the notifications now: not while a prompt, find, rename, help, the history or the routines view has the keys."""
-        return (
-            self.history_view is None and self.routines_view is None and self.settings is None and not self.help
-            and self.prompt is None and self.find is None and self.rename_edit is None
-        )
-
     def narrow_hints(self) -> tuple:
         """The key hints a phone's bar offers over its panel: the phone's own on a row or a header, the panel's own anywhere else."""
         if self.menu is not None:
@@ -4066,8 +4059,7 @@ class App:
             return
         tag = core.mode_tag(self.mode(), self.poller.notifier.state, self.relayed)
         parts = core.bar_parts(
-            __version__, core.bar_counts(self.sessions), self.history[0] if self.history else None,
-            time.monotonic(), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded, self.notice_key_live(),
+            __version__, core.bar_counts(self.sessions), tag, self.relay_host, self.bar_hints(), self.window_width, self.loaded,
         )
         self.bar.push(bar_format(parts, core.scheme(self.prefs)))
 

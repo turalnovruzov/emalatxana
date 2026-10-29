@@ -4891,7 +4891,7 @@ class KeyWording(AppCase):
         self.app.cursor = ("session", "a")
         texts = [*(f"{key} {what}" for key, what in sidebar.HELP), sidebar.CONFIRM_FOOTER, sidebar.RENAME_FOOTER,
                  sidebar.FIND_HINT, sidebar.HISTORY_HINT, sidebar.ROUTINES_HINT,
-                 core.PEEK_EDGE, core.NOTICE_KEY, *self.hint_texts(),
+                 core.PEEK_EDGE, *self.hint_texts(),
                  core.confirm_label(core.Confirm("a", "n", True, 0.0)), core.group_confirm_label(1), core.group_confirm_label(3),
                  core.GROUP_CLOSE_REFUSAL, core.PINNED_CLOSE_REFUSAL]
         for key in ("n", "\t"):
@@ -4938,20 +4938,23 @@ WIDE_BAR_GOLDEN = Path(__file__).parent / "fixtures" / "bar" / "wide-2.10.0.json
 
 
 class WideBarIsUnchanged(unittest.TestCase):
-    """The laptop's bar at 200 columns is byte-for-byte what 2.10.0 gave: the expected values were captured from tag v2.10.0's code, not from the code under test."""
+    """The laptop's bar at 200 columns is byte-for-byte what 2.10.0 gave: the expected values were captured from tag v2.10.0's code, not from the code under test.
+
+    The bar no longer carries a notice, so only the captured cases with no notification (`latest` null, no `N all`) still apply; the file is left as captured.
+    """
 
     def test_every_captured_case_gives_the_same_parts_and_the_same_tmux_format(self):
-        cases = json.loads(WIDE_BAR_GOLDEN.read_text("utf-8"))["cases"]
-        self.assertGreater(len(cases), 100)
+        captured = json.loads(WIDE_BAR_GOLDEN.read_text("utf-8"))["cases"]
+        self.assertEqual(len(captured), 144)
+        cases = [c for c in captured if c["args"]["latest"] is None and not c["args"]["notice_key"]]
+        self.assertEqual(len(cases), 36)
         for i, case in enumerate(cases):
             a = case["args"]
-            latest = core.Entry(**a["latest"]) if a["latest"] else None
             hints = tuple(tuple(tuple(p) for p in h) if isinstance(h, list) else h for h in a["hints"])
             with self.subTest(case=i):
                 self.assertEqual(a["width"], 200)
                 parts = core.bar_parts(
-                    a["version"], [tuple(c) for c in a["counts"]], latest, a["now"], a["tag"], a["remote"], hints,
-                    a["width"], a["loaded"], a["notice_key"],
+                    a["version"], [tuple(c) for c in a["counts"]], a["tag"], a["remote"], hints, a["width"], a["loaded"],
                 )
                 self.assertEqual([list(p) for p in parts], case["parts"])
                 self.assertEqual(sidebar.bar_format(parts, "dark"), case["format"])
@@ -5092,10 +5095,6 @@ class AppBar(AppCase):
         self.app.handle_key("N")
         self.assertIn(sidebar.HISTORY_HINT, self.bar())
 
-    def test_the_newest_notification_shows(self):
-        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
-        self.assertIn("✻ 1m Alpha finished the tax fix.", self.bar())
-
     def test_the_list_starts_on_the_first_row_with_nothing_above_or_below_it(self):
         scr = RecordingScr(20, 40)
         self.app.scr = scr
@@ -5179,41 +5178,10 @@ class HintsInTheBar(AppCase):
         self.assertFalse(self.app.peeking)
         self.assertEqual(self.opened, [("a", core.OPEN)])
 
-    def test_n_all_sits_next_to_the_notification(self):
-        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
-        self.assertIn("Alpha finished the tax fix.  N all", self.bar(200))
-        self.app.handle_key("N")
-        self.assertNotIn("N all", self.bar(200))
-        self.app.handle_key("\x1b")
-        self.app.handle_key("?")
-        self.assertNotIn("N all", self.bar(200))
-        self.app.handle_key("x")
-        self.app.history = []
-        self.assertNotIn("N all", self.bar(200))
-
-    def test_n_all_is_gone_while_the_routines_view_has_the_keys(self):
-        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
-        self.app.handle_key("R")
-        self.assertIsNotNone(self.app.routines_view)
-        self.assertNotIn("N all", self.bar(200))
-        self.app.handle_key("\x1b")
-        self.assertIsNone(self.app.routines_view)
-        self.assertIn("N all", self.bar(200))
-
     def test_the_routines_view_bar_names_only_keys_it_handles(self):
         self.app.handle_key("R")
         self.assertEqual(self.app.bar_hints(), (sidebar.ROUTINES_HINT, "Esc back"))
         self.assertNotRegex(self.bar(200), r"\^x|\^r|\^f|peek|new|close")
-
-    def test_n_all_keeps_two_spaces_from_the_counts_at_every_width(self):
-        self.app.history = [core.Entry("a", core.NOTICE_DONE, "a · alpha", "Alpha finished the tax fix.", time.monotonic() - 70)]
-        seen = 0
-        for width in range(40, 140):
-            text = self.bar(width)
-            if "N all" in text:
-                seen += 1
-                self.assertNotRegex(text, r"N all \S", msg=f"width {width}: {text!r}")
-        self.assertGreater(seen, 0)
 
     def test_close_and_rename_hints_go_while_sessions_cannot_be_listed(self):
         self.app.list_error = "listing broken"
@@ -6845,17 +6813,29 @@ class HistoryWiring(AppCase):
         self.poll(*[session(sid, "/p/alpha") for sid in sids])
         self.app.refresh()
 
-    def test_a_taken_notice_shows_in_the_bar_and_not_in_the_panel(self):
+    def test_a_taken_notice_shows_in_the_unread_box_and_not_in_the_bar(self):
+        self.listed("s1")
         self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5))
         self.assertEqual(self.bottom(), [])
-        self.assertRegex(self.bar(), r"✻ \ds Alpha is done\.")
+        self.assertEqual(self.app.unread_items(), [("s1", core.NOTICE_DONE, "emx-test-s1", "Alpha is done.")])
+        self.assertNotIn("Alpha is done.", self.bar())
 
-    def test_the_bar_shows_the_newest_of_several_notices(self):
+    def test_the_box_lists_each_session_of_several_notices(self):
+        self.listed("s1", "s2", "s3")
         self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5), entry("s2", "Beta is done.", time.monotonic() - 9),
                      entry("s3", "Gamma is done.", time.monotonic() - 9))
-        bar = self.bar()
-        self.assertIn("Alpha is done.", bar)
-        self.assertNotIn("Beta is done.", bar)
+        self.assertEqual([i[0] for i in self.app.unread_items()][0], "s1")
+        self.assertEqual(sorted(i[0] for i in self.app.unread_items()), ["s1", "s2", "s3"])
+
+    def test_the_bar_never_shows_a_notice(self):
+        self.listed("s1")
+        self.deliver(entry("s1", "Alpha is done.", time.monotonic() - 5, core.NOTICE_NEEDS))
+        self.assertTrue(core.unread_entries(self.app.history))
+        for width in (60, 100, 200):
+            text = self.bar(width)
+            self.assertNotIn("Alpha is done.", text)
+            self.assertNotIn("N all", text)
+            self.assertNotRegex(text, r"✻ \d+[smhd]\b")
 
     def test_a_taken_notice_lands_in_the_history_in_both_modes(self):
         for mode in core.MODES:
@@ -6866,9 +6846,10 @@ class HistoryWiring(AppCase):
                 self.assertEqual([(e.id, e.kind, e.title, e.text) for e in self.app.history],
                                  [("s1", core.NOTICE_DONE, "s1 · alpha", "Alpha is done.")])
 
-    def test_two_notices_of_one_session_are_two_entries(self):
+    def test_two_notices_of_one_session_are_two_entries_and_only_the_newer_is_unread(self):
         self.deliver(entry("s1", "First.", time.monotonic() - 5), entry("s1", "Second.", time.monotonic() - 1, core.NOTICE_NEEDS))
         self.assertEqual([(e.text, e.kind) for e in self.app.history], [("Second.", core.NOTICE_NEEDS), ("First.", core.NOTICE_DONE)])
+        self.assertEqual([e.read for e in self.app.history], [False, True])
 
     def test_a_notice_is_listed_whether_attached_or_detached(self):
         for state in ((1, "0", "%1", 3.0), (0, "", "%1", None)):
@@ -6943,15 +6924,11 @@ class HistoryWiring(AppCase):
         self.assertEqual(self.app.poller.notices.pending, [])
         self.assertEqual(self.app.history, [])
 
-    def test_the_bar_dims_a_read_newest_notice(self):
-        self.app.prefs = {**self.app.prefs, "scheme": "dark"}
+    def test_opening_the_session_takes_it_out_of_the_unread_box(self):
         self.deliver(entry("other", "Beta is done.", time.monotonic() - 5), entry("s1", "Alpha is done.", time.monotonic() - 4))
-        self.app.window_width = 140
-        self.app.update_bar()
-        self.assertIn("#[fg=default,nobold]Alpha is done.", self.app.bar.pushed[-1])
         self.open_s1()
-        self.app.update_bar()
-        self.assertIn("#[fg=colour245,nobold]Alpha is done.", self.app.bar.pushed[-1])
+        self.assertEqual(self.app.unread_items(), [])
+        self.assertEqual([e.id for e in core.unread_entries(self.app.history)], ["other"])
 
     def test_the_history_is_empty_in_a_new_app(self):
         self.assertEqual(self.app.history, [])
@@ -10077,7 +10054,6 @@ class SettingsMenu(AppCase):
         self.assertIsNone(self.app.history_view)
         self.press("n")
         self.assertIsNone(self.app.prompt)
-        self.assertFalse(self.app.notice_key_live())
 
     def test_a_tap_selects_a_row_and_a_tap_on_the_selected_row_acts(self):
         self.press("c")

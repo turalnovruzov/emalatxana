@@ -437,12 +437,11 @@ class BarCounts(unittest.TestCase):
 
 class BarParts(unittest.TestCase):
     COUNTS = [("needs_input", 1), ("working", 2), ("done", 1), ("idle", 1)]
-    ENTRY = core.Entry("s1", core.NOTICE_NEEDS, "t-fix · proj", "test-fix wants to run Bash for a long while", 100.0)
     HINTS = core.hint_variants(core.REST_HINTS)
     REST = "→ open  ␣ peek  n new  ^f find  ^x close  ? keys"
 
     def bar(self, width, **kw):
-        args = dict(version="2.6.0", counts=self.COUNTS, latest=self.ENTRY, now=220.0, tag=None, remote=None, hints=self.HINTS, width=width)
+        args = dict(version="2.6.0", counts=self.COUNTS, tag=None, remote=None, hints=self.HINTS, width=width)
         args.update(kw)
         return core.bar_parts(**args)
 
@@ -455,7 +454,6 @@ class BarParts(unittest.TestCase):
         self.assertTrue(text.startswith(" ⚒ emx 2.6.0"), text)
         self.assertTrue(text.endswith(self.REST + " "), text)
         self.assertEqual(core.display_width(text), 140)
-        self.assertIn("✻ 2m test-fix wants to run Bash for a long while", text)
 
     def test_the_counts_are_four_parts_in_their_tones(self):
         counts = [(t, tone, bold) for t, tone, bold in self.bar(120) if re.fullmatch(r"✻\d", t) and bold]
@@ -464,26 +462,17 @@ class BarParts(unittest.TestCase):
     def test_the_width_is_exact_and_the_mark_stays_from_120_down_to_8(self):
         for tag, remote in ((None, None), ("voice", "myserver")):
             for width in range(120, 7, -1):
-                for notice_key in (False, True):
-                    text = self.text(self.bar(width, tag=tag, remote=remote, notice_key=notice_key))
-                    self.assertEqual(core.display_width(text), width, (width, text))
-                    self.assertIn("⚒", text)
+                text = self.text(self.bar(width, tag=tag, remote=remote))
+                self.assertEqual(core.display_width(text), width, (width, text))
+                self.assertIn("⚒", text)
+
+    ORDER = ["long hints", "any hints", "version", "tag", "host", "mark", "name"]
 
     def test_room_runs_out_in_the_stated_order(self):
-        for notice_key in (False, True):
-            with self.subTest(notice_key=notice_key):
-                self.assertEqual(self.order_of_loss(notice_key), self.ORDER)
-
-    ORDER = ["long hints", "notice", "any hints", "version", "tag", "host", "mark", "name"]
-
-    def order_of_loss(self, notice_key):
         def stage(width):
-            text = self.text(self.bar(width, tag="voice", remote="myserver-host", notice_key=notice_key))
-            if notice_key:
-                self.assertEqual("N all" in text, "test-fix" in text, (width, text))
+            text = self.text(self.bar(width, tag="voice", remote="myserver-host"))
             return (
-                bool(re.search(r"✻ 2m [^│]*…", text)), "test-fix" in text, "^x close" in text,
-                "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
+                "^x close" in text, "? keys" in text, "2.6.0" in text, "voice" in text, "myserver-host" in text,
                 "⇄" in text, "emx" in text,
             )
         seen = []
@@ -491,22 +480,10 @@ class BarParts(unittest.TestCase):
             now = stage(width)
             if not seen or seen[-1] != now:
                 seen.append(now)
-        names = ["notice cut", "notice", "long hints", "any hints", "version", "tag", "host", "mark", "name"]
-        gone = []
-        for before, after in zip(seen, seen[1:]):
-            gone.append([n for n, b, a in zip(names, before, after) if b != a])
-        self.assertEqual(seen[0], (False,) + (True,) * 8)
-        return [n for step in gone for n in step if n != "notice cut"]
-
-    def test_the_notice_is_cut_with_an_ellipsis_before_anything_else_goes(self):
-        text = ""
-        for width in range(120, 40, -1):
-            text = self.text(self.bar(width))
-            if "…" in text:
-                break
-        self.assertRegex(text, r"✻ 2m [^│]*…")
-        self.assertIn(self.REST, text)
-        self.assertIn("2.6.0", text)
+        names = ["long hints", "any hints", "version", "tag", "host", "mark", "name"]
+        gone = [[n for n, b, a in zip(names, before, after) if b != a] for before, after in zip(seen, seen[1:])]
+        self.assertEqual(seen[0], (True,) * 7)
+        self.assertEqual([n for step in gone for n in step], self.ORDER)
 
     def test_the_short_hint_shows_after_the_long_one(self):
         for width in range(120, 20, -1):
@@ -514,7 +491,6 @@ class BarParts(unittest.TestCase):
             if "^x close" not in text:
                 break
         self.assertIn("? keys", text)
-        self.assertRegex(text, r"✻ 2m test-fix w[^│]*…")
 
     def test_a_remote_host_shows_in_the_remote_tone_bold(self):
         parts = self.bar(120, remote="myserver")
@@ -530,25 +506,13 @@ class BarParts(unittest.TestCase):
         self.assertIn((" notifications blocked", "error", False), blocked)
         self.assertIn((" voice", "muted", False), self.bar(120, tag="voice"))
 
-    def test_a_read_entry_is_muted_throughout(self):
-        read = replace(self.ENTRY, read=True)
-        parts = self.bar(140, latest=read)
-        self.assertIn(("✻", "muted", False), parts)
-        self.assertIn((" 2m ", "muted", False), parts)
-        self.assertIn(("test-fix wants to run Bash for a long while", "muted", False), parts)
-
-    def test_an_unread_needs_entry_has_a_needs_mark_and_plain_text(self):
-        parts = self.bar(140)
-        self.assertIn(("✻", "needs", False), parts)
-        self.assertIn(("test-fix wants to run Bash for a long while", "plain", False), parts)
-
     def test_not_loaded_shows_an_ellipsis_for_the_counts(self):
         text = self.text(self.bar(120, loaded=False))
         self.assertNotRegex(text, r"✻\d")
         self.assertIn(" …  ", text)
 
-    def test_no_notification_still_fills_the_width(self):
-        text = self.text(self.bar(80, latest=None))
+    def test_the_bar_fills_the_width(self):
+        text = self.text(self.bar(80))
         self.assertEqual(core.display_width(text), 80)
         self.assertTrue(text.endswith(self.REST + " "))
 
@@ -563,16 +527,6 @@ class BarParts(unittest.TestCase):
 
     def test_a_string_hint_is_one_muted_part(self):
         self.assertIn(("^x to confirm", "muted", False), self.bar(120, hints=("^x to confirm",)))
-
-    def test_n_all_follows_the_notice_only_when_asked(self):
-        self.assertIn("a long while  N all", self.text(self.bar(200, notice_key=True)))
-        self.assertNotIn("N all", self.text(self.bar(200, notice_key=False)))
-        self.assertNotIn("N all", self.text(self.bar(200, latest=None, notice_key=True)))
-
-    def test_n_all_shows_exactly_when_the_notice_does(self):
-        for width in range(200, 7, -1):
-            text = self.text(self.bar(width, notice_key=True))
-            self.assertEqual("N all" in text, "test-fix" in text, (width, text))
 
 
 class HintVariants(unittest.TestCase):
