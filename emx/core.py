@@ -1198,7 +1198,7 @@ def bar_parts(version: str, counts: list, tag: str | None, remote: str | None, h
     Left: the mark, the name, the version, the remote host and the mode tag.
     Right: a count per state, then the first of `hints` that fits. A fill of spaces sits between.
     A hint variant is a string (drawn as one muted part) or a tuple of (key, label) pairs
-    (keys bold, labels muted). Notifications are not in the bar: they are the dots and the Unread box.
+    (keys bold, labels muted). Notifications are not in the bar: they are the dots and the Unread box, so it takes no notice and no clock.
     Room runs out in this order: the hints step through their variants, the hints go, then the
     version, the tag, the host (cut, then the mark), the name; the counts are cut from the right
     last, and the mark stays.
