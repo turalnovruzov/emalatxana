@@ -2,6 +2,10 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.24.2 — 2026-10-30
+
+- The README now says what emx is, how to install it and how the repo is built; emx is MIT-licensed, and CONTRIBUTING.md says how to report a bug. Nothing changes in how emx works.
+
 ## 2.24.1 — 2026-10-29
 
 - A session you have on screen no longer gets a dot or an Unread line when it finishes or needs you, even after you have not typed for a while.

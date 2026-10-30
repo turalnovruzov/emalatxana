@@ -1,14 +1,54 @@
-# Emalatxana
+# emx
 
-His words: "lets do emalatxana with emx as the shorthand". [Nizam: emalatxana is Azerbaijani for a workshop, a place where things are made; `emx` is the shorthand.]
+**A tmux workspace for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).** Every Claude Code session you run sits in a side panel next to the one you are working in, with its live state (working, needs input, done), so you see them all and switch with a key or a click. Sessions live in emx's own private tmux server, so they keep running when you detach, close the terminal or lose the connection.
 
-## The idea
+*Emalatxana* is Azerbaijani for a workshop, a place where things are made; `emx` is the shorthand.
+
+## What it does
+
+- **A side panel of sessions**, grouped by project, each with its state and a line on what it is doing. Start, switch, find, pin, rename and close sessions from the panel, by key or mouse.
+- **A narrow session beside it**, so text reads like a page rather than a wide landscape screen.
+- **Tells you when a session needs you** or has finished, spoken or as a notification.
+- **Remote:** `emx remote <host>` opens the emx running on a server over SSH; its sessions keep running there while your laptop sleeps.
+- **Phone page:** a small web page over Tailscale, reachable only from your own devices, to check on sessions and start, rename or close them.
+- **Routines:** what your server's scheduled jobs ran in the past day.
+
+## Requirements
+
+- macOS or Linux, tmux and Python 3 (standard library only, nothing to `pip install`).
+- `claude` (Claude Code), installed and logged in.
+
+## Install
+
+```sh
+git clone https://github.com/turalnovruzov/emalatxana.git /tmp/emx-src
+sh /tmp/emx-src/install.sh
+emx
+```
+
+It installs into `~/.local/share/emx` and links `emx` into `~/.local/bin`, editing none of your shell files. emx updates itself from this repo.
+
+## Docs
+
+How to use emx is in [`user-docs/`](user-docs/index.md), also printed by `emx docs`. Start with [getting started](user-docs/getting-started.md); every key, command and setting is in the [reference](user-docs/reference.md).
+
+## How this repo is built
+
+emx is a personal tool and an experiment in agent-driven development: its owner acts only as product owner and does not write or review the code. Claude Code agents plan, build, test and audit every change under the rules in [`CLAUDE.md`](CLAUDE.md) (the "Codery" template; "Nizam" in issues and docs is its systems-engineer agent). That is why issues, ADRs and docs quote the owner's words verbatim. Design decisions are in [`docs/adr/`](docs/adr/README.md), and every release is in [`CHANGELOG.md`](CHANGELOG.md).
+
+Tests: `python3 -m unittest discover -s tests -v`. Issues are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## The idea, in the owner's words
+
+The words that started the project, kept as they were said. His words: "lets do emalatxana with emx as the shorthand". [Nizam: emalatxana is Azerbaijani for a workshop, a place where things are made; `emx` is the shorthand.]
+
+### The vision
 
 > The vision is a workspace, my main workspace, where I work with Claude Code This is gonna hopefully evolve to have a lot of features that will be good for me And its purpose will be when I'm working, I open this and I start working with Claude Code It's my workspace.
 
 > I don't know the CLI seems more comfortable to me I tried that a few times it wasn't as comfortable as me working in the CLI Maybe I could try working in cloud desktop but also that consumed so much more RAM and resources than this Which is the CLI
 
-## What he wants first
+### What he wanted first
 
 From his opening message, about the `claude agents` view, which he calls "cloud agents view":
 
@@ -30,10 +70,6 @@ After a prototype that switched sessions via `/resume`, which loaded another con
 
 > this doesn't have to be a mod [...] maybe this can be something else You know CLI tool, visual tool
 
-## Docs
+## License
 
-How to use emx is in [`user-docs/`](user-docs/index.md), also printed by `emx docs`.
-
-## How this project runs
-
-See [`CLAUDE.md`](CLAUDE.md).
+[MIT](LICENSE)
