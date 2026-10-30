@@ -11,11 +11,11 @@
 Clone the emx repo to a temporary folder and run its `install.sh`:
 
 ```
-git clone <the emx repo url> /tmp/emx-src
+git clone https://github.com/turalnovruzov/emalatxana.git /tmp/emx-src
 sh /tmp/emx-src/install.sh
 ```
 
-It puts emx in `~/.local/share/emx` and the `emx` command in `~/.local/bin`. If that folder is not on your PATH, the installer prints the one line to add; it changes none of your shell files. It uses git and your own GitHub login. You can delete the temporary clone afterwards.
+It puts emx in `~/.local/share/emx` and the `emx` command in `~/.local/bin`. If that folder is not on your PATH, the installer prints the one line to add; it changes none of your shell files. It uses git, and needs no GitHub login. You can delete the temporary clone afterwards.
 
 ## First run
 
