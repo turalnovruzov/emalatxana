@@ -8,10 +8,10 @@
 
 - **A side panel of sessions**, grouped by project, each with its state and a line on what it is doing. Start, switch, find, pin, rename and close sessions from the panel, by key or mouse.
 - **A narrow session beside it**, so text reads like a page rather than a wide landscape screen.
-- **Tells you when a session needs you** or has finished, spoken or as a notification.
+- **Tells you when a session needs you** or has finished, spoken or as a notification (both on a Mac).
 - **Remote:** `emx remote <host>` opens the emx running on a server over SSH; its sessions keep running there while your laptop sleeps.
 - **Phone page:** a small web page over Tailscale, reachable only from your own devices, to check on sessions and start, rename or close them.
-- **Routines:** what your server's scheduled jobs ran in the past day.
+- **Routines:** what the scheduled Claude runs on your machines (systemd user timers) did today and yesterday.
 
 ## Requirements
 
