@@ -4900,6 +4900,19 @@ class UnreadBoxDrawn(AppCase):
         self.assertEqual({sid: y for sid, y in self.session_ys().items()}, {sid: y for sid, y in before.items() if sid in self.session_ys()})
         self.assertTrue(self.session_ys())
 
+    def test_a_resize_that_changes_the_box_keeps_the_cursors_row_in_view(self):
+        self.scr.size = (30, 40)
+        now = time.monotonic()
+        self.show([session(f"s{i}", "/p/alpha") for i in range(20)], *[entry(f"s{i}", "Done.", now - i) for i in range(6)])
+        ys = self.session_ys()
+        last = max(ys, key=ys.get)
+        self.app.cursor = ("session", last)
+        self.app.draw()
+        self.scr.size = (9, 40)
+        self.app.handle_key(curses.KEY_RESIZE)
+        self.app.draw()
+        self.assertIn(("session", last), self.app.row_map.values())
+
     def test_the_peek_ends_above_the_box(self):
         self.scr.size = (30, 40)
         self.two()

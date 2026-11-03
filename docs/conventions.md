@@ -445,6 +445,13 @@ The house style for writing code in this repo: how *this* codebase does things, 
 3. **Minimal example**: `("runs", ((x0, x1, (ri, ei)), ...))`, `("tabs", start, end, spans)`; `draw_routines` adds the x=1 indent.
 4. **Gotcha**: spans count columns within the row text, so the draw offset must be added. Rebuilding rows narrower for the scroll bar must happen before the map is filled.
 
+### Anything in the panel that changes height sits below the clickable list, never above it
+
+1. **Rule**: anything in the panel that changes height (boxes, notices) sits below the clickable list, never above it.
+2. **Why**: rows above the pointer must not move between aiming and clicking (#102).
+3. **Minimal example**: `draw_unread` draws ending above `list_bottom`; the list starts at `list_top`.
+4. **Gotcha**: the peek's room and `peek_fits` must subtract the box's rows.
+
 ## The contract for this file
 
 **Every entry has four parts, in this order:**

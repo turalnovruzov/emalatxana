@@ -4139,9 +4139,11 @@ class App:
             rows, hits = self.draw_unread(list_top, list_bottom, w)
             box_top = list_bottom - rows
             # A box that appeared, grew or went must not scroll the list under the pointer.
-            if self.box_seen is not None and self.box_seen[0] != rows and self.box_seen[1] == self.cursor and self.held is None:
+            # A resize changes the box's height too, but then the cursor's row must stay in view instead.
+            seen = self.box_seen
+            if seen is not None and seen[0] != rows and seen[1] == self.cursor and seen[2] == (h, w) and self.held is None:
                 self.held = ("list", self.cursor)
-            self.box_seen = (rows, self.cursor)
+            self.box_seen = (rows, self.cursor, (h, w))
             layout = self.list_layout(w, max(1, box_top - list_top))
             room = core.peek_room(h, w, len(bottom) + rows)
             peek_rows = self.draw_peek(box_top, w, room, self.cursor_rows(layout)) if self.peeking else 0
