@@ -1232,9 +1232,12 @@ class Page(ServerCase):
         self.assertLess(body.index("await poll()"), body.index('$("offline").hidden'))
         self.assertLess(body.index('$("offline").hidden'), body.index("toast("))
 
-    def test_the_unread_section_comes_before_the_no_match_line_and_takes_its_title_from_data(self):
+    def test_the_unread_section_comes_after_the_folders_and_before_notifications_and_takes_its_title_from_data(self):
         js, _ = self.text("/app.js")
-        self.assertLess(js.index("list.append(renderUnread())"), js.index("data.look.find_none"))
+        body = re.search(r"function renderList\(\) \{(.*?)\n\}\n", js, re.S).group(1)
+        order = [body.index(part) for part in ("data.look.find_none", "for (const group of data.groups)",
+                                                "list.append(renderUnread())", 'bottomRow("Notifications"')]
+        self.assertEqual(order, sorted(order))
         self.assertIn("data.look.unread_title", js)
         self.assertNotIn('"Unread"', js)
 
