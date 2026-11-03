@@ -2,6 +2,11 @@
 
 What changed in emx, newest version first. The panel shows a version's lines the first time that version runs.
 
+## 2.24.3 — 2026-11-03
+
+- A click on the side panel opens the session you clicked. The `Unread` box now sits under the list, at the bottom of the panel, so the rows no longer move when a session finishes or you open one.
+- On the phone page the `Unread` section now sits under the folders, above `Notifications`, for the same reason.
+
 ## 2.24.2 — 2026-10-30
 
 - The README now says what emx is, how to install it and how the repo is built; emx is MIT-licensed, and CONTRIBUTING.md says how to report a bug. Nothing changes in how emx works.
