@@ -332,7 +332,6 @@ function renderList() {
     list.append(el("p", "empty", data.error));
     return;
   }
-  if (data.unread_list && data.unread_list.length) list.append(renderUnread());
   if (!data.groups.length) {
     list.append(el("p", "empty", data.finding ? data.look.find_none : "No sessions yet. Tap + New."));
   }
@@ -341,6 +340,7 @@ function renderList() {
     if (folded.has(group.key) && !data.finding) continue;
     for (const session of group.sessions) list.append(renderRow(session));
   }
+  if (data.unread_list && data.unread_list.length) list.append(renderUnread());
   list.append(bottomRow("Notifications", data.unread, openNotices));
   list.append(bottomRow("Routines", 0, openRoutines));
 }

@@ -5559,10 +5559,10 @@ def unread_text(name: str, text: str) -> str:
 
 
 def unread_box(items: list, width: int, height: int) -> list:
-    """The Unread box at the top of the panel as (target, kind, parts) lines, parts being (x, text, part) with part one of frame, title, mark, name, text and more.
+    """The Unread box under the list as (target, kind, parts) lines, parts being (x, text, part) with part one of frame, title, mark, name, text and more.
 
     `items` are (sid, kind, name, text). The box spans x=1 to x=width-2 and
-    shows at most `UNREAD_ROWS` lines, always leaving the list below it
+    shows at most `UNREAD_ROWS` lines, always leaving the list above it
     `UNREAD_LIST_MIN` of the `height` rows; when not every item fits the last
     line is "… N more". `target` is the item's session id, "more" or None for
     the frame. Empty when there is nothing to show or no room.
