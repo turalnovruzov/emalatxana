@@ -4771,52 +4771,158 @@ class UnreadBoxDrawn(AppCase):
         self.show([session("s1", "/p/alpha"), session("s2", "/p/alpha")],
                   entry("s1", "Alpha needs you.", now - 5, core.NOTICE_NEEDS), entry("s2", "Beta is done.", now - 1))
 
-    def test_unread_sessions_show_in_a_box_above_the_first_group(self):
+    def box_top(self):
+        return next(y for y in range(self.scr.size[0]) if self.row(y).startswith(" ╭─ Unread"))
+
+    def session_ys(self):
+        return {item[1]: y for y, item in self.app.row_map.items() if item[0] == "session"}
+
+    def five(self):
+        return [session(f"s{i}", "/p/alpha") for i in range(1, 6)]
+
+    def notice(self, sid, text="Done."):
+        self.app.poller.notices.outbox = self.app.poller.notices.outbox + [entry(sid, text, time.monotonic())]
+        self.app.refresh()
+        self.app.draw()
+
+    def assert_unscrolled(self):
+        self.assertLessEqual(self.app.extent[0], self.app.extent[1])
+        self.assertEqual(self.app.scroll, 0)
+
+    def test_unread_sessions_show_in_a_box_below_the_list(self):
         self.two()
-        self.assertTrue(self.row(0).startswith(" ╭─ Unread"), self.row(0))
-        self.assertTrue(self.row(1).startswith(" │ ✓ emx-test-s2 Beta is done."), self.row(1))
-        self.assertTrue(self.row(2).startswith(" │ ● emx-test-s1 Alpha needs you."), self.row(2))
-        self.assertTrue(self.row(3).startswith(" ╰"), self.row(3))
-        self.assertTrue(self.row(4).startswith("▾"), self.row(4))
+        self.assertTrue(self.row(0).startswith("▾"), self.row(0))
+        top = self.box_top()
+        self.assertTrue(self.row(top + 1).startswith(" │ ✓ emx-test-s2 Beta is done."), self.row(top + 1))
+        self.assertTrue(self.row(top + 2).startswith(" │ ● emx-test-s1 Alpha needs you."), self.row(top + 2))
+        self.assertTrue(self.row(top + 3).startswith(" ╰"), self.row(top + 3))
+        self.assertLess(max(self.session_ys().values()), top)
 
     def test_the_box_tones(self):
         self.two()
         pal = TonePalette()
+        top = self.box_top()
         cell = {(y, x): attr for y, x, t, attr in self.scr.drawn}
-        self.assertEqual(cell[(0, 1)], pal.attr("muted"))
-        self.assertEqual(cell[(0, 4)], pal.attr("plain") | curses.A_BOLD)
-        self.assertEqual(cell[(1, 3)], pal.attr("done"))
-        self.assertEqual(cell[(2, 3)], pal.attr("needs"))
-        self.assertEqual(cell[(2, 5)], pal.attr("plain") | curses.A_BOLD)
+        self.assertEqual(cell[(top, 1)], pal.attr("muted"))
+        self.assertEqual(cell[(top, 4)], pal.attr("plain") | curses.A_BOLD)
+        self.assertEqual(cell[(top + 1, 3)], pal.attr("done"))
+        self.assertEqual(cell[(top + 2, 3)], pal.attr("needs"))
+        self.assertEqual(cell[(top + 2, 5)], pal.attr("plain") | curses.A_BOLD)
 
     def test_the_box_is_gone_when_nothing_is_unread(self):
         self.show([session("s1", "/p/alpha")])
         self.assertTrue(self.row(0).startswith("▾"), self.row(0))
+        self.assertNotIn("Unread", "".join(self.row(y) for y in range(20)))
 
     def test_an_unlisted_sessions_notice_is_not_in_the_box(self):
         self.show([session("s1", "/p/alpha")], entry("gone", "Left.", time.monotonic()))
         self.assertTrue(self.row(0).startswith("▾"), self.row(0))
+        self.assertNotIn("Unread", "".join(self.row(y) for y in range(20)))
+
+    def unread_ys(self):
+        return {item[1]: y for y, item in self.app.row_map.items() if item[0] == "unread"}
 
     def test_a_click_on_a_box_line_opens_that_session(self):
         self.two()
-        self.app.handle_mouse(event=(0, 5, 1, 0, curses.BUTTON1_CLICKED))
+        ys = self.unread_ys()
+        self.app.handle_mouse(event=(0, 5, ys["s2"], 0, curses.BUTTON1_CLICKED))
         self.assertEqual(self.opened, [("s2", core.OPEN)])
         self.app.tmux = SwitchTmux(False)
         self.app.me = "%1"
         self.app.__dict__.pop("switch_to")
-        self.app.handle_mouse(event=(0, 5, 2, 0, curses.BUTTON1_CLICKED))
+        self.app.handle_mouse(event=(0, 5, ys["s1"], 0, curses.BUTTON1_CLICKED))
         self.app.draw()
         self.assertEqual([e.id for e in core.unread_entries(self.app.history)], ["s2"])
         self.assertNotIn("emx-test-s1 Alpha", "".join(self.row(y) for y in range(20)))
 
-    def test_a_click_on_a_row_below_the_box_still_hits_that_row(self):
+    def test_a_click_on_a_row_above_the_box_still_hits_that_row(self):
         self.two()
-        rows = {y: item for y, item in self.app.row_map.items() if item[0] == "session"}
+        rows = self.session_ys()
         self.assertTrue(rows)
-        self.assertGreaterEqual(min(rows), 5)
-        y, item = next(iter(rows.items()))
+        boxed = [y for y, item in self.app.row_map.items() if item[0] in ("unread", "unread-more")]
+        self.assertLess(max(rows.values()), min(boxed))
+        sid, y = next(iter(rows.items()))
         self.app.handle_mouse(event=(0, 5, y, 0, curses.BUTTON1_CLICKED))
-        self.assertEqual(self.opened, [(item[1], core.OPEN)])
+        self.assertEqual(self.opened, [(sid, core.OPEN)])
+
+    def test_a_rows_y_holds_when_a_notice_arrives(self):
+        self.show(self.five())
+        self.assert_unscrolled()
+        before = self.session_ys()
+        self.assertEqual(len(before), 5)
+        self.notice("s1")
+        self.assert_unscrolled()
+        self.assertEqual(self.session_ys(), before)
+        self.app.handle_mouse(event=(0, 5, before["s4"], 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.opened, [("s4", core.OPEN)])
+
+    def test_a_rows_y_holds_when_an_unread_session_is_opened(self):
+        self.show(self.five(), entry("s2", "Beta is done.", time.monotonic()))
+        self.assert_unscrolled()
+        before = self.session_ys()
+        self.app.history = core.history_read(self.app.history, "s2")
+        self.app.draw()
+        self.assert_unscrolled()
+        self.assertEqual(self.session_ys(), before)
+        self.app.handle_mouse(event=(0, 5, before["s5"], 0, curses.BUTTON1_CLICKED))
+        self.assertEqual(self.opened, [("s5", core.OPEN)])
+
+    def test_a_rows_y_holds_as_the_box_grows(self):
+        self.show(self.five(), entry("s1", "Done.", time.monotonic()))
+        self.assert_unscrolled()
+        before = self.session_ys()
+        self.notice("s2")
+        self.assert_unscrolled()
+        self.assertEqual(self.session_ys(), before)
+
+    def test_an_overflowing_list_at_the_top_holds_its_rows(self):
+        self.scr.size = (12, 40)
+        self.show([session(f"s{i}", "/p/alpha") for i in range(12)])
+        self.assertEqual(self.app.scroll, 0)
+        before = self.session_ys()
+        self.notice("s11")
+        self.assertEqual(self.app.scroll, 0)
+        after = self.session_ys()
+        self.assertTrue(after)
+        for sid, y in after.items():
+            self.assertEqual(before[sid], y)
+
+    def test_a_notice_does_not_scroll_the_list_when_the_cursor_is_on_its_last_visible_row(self):
+        self.scr.size = (12, 40)
+        self.show([session(f"s{i}", "/p/alpha") for i in range(12)])
+        last = max((sid for sid, y in self.session_ys().items() if y + 2 <= 12), key=self.session_ys().get)
+        self.app.cursor = ("session", last)
+        self.app.draw()
+        before = self.session_ys()
+        self.assertEqual(self.app.scroll, 0)
+        self.notice("s0")
+        self.assertEqual(self.app.scroll, 0)
+        self.assertEqual({sid: y for sid, y in self.session_ys().items()}, {sid: y for sid, y in before.items() if sid in self.session_ys()})
+        self.assertTrue(self.session_ys())
+
+    def test_the_peek_ends_above_the_box(self):
+        self.scr.size = (30, 40)
+        self.two()
+        self.app.cursor = ("session", "s1")
+        self.app.open_peek()
+        self.assertTrue(self.app.peeking)
+        self.app.draw()
+        top = self.box_top()
+        self.assertTrue(self.row(top - 1).startswith("╰─"), self.row(top - 1))
+        self.assertNotIn("Unread", self.row(top - 1))
+
+    def test_peek_fits_counts_the_box(self):
+        # peek_height needs 4 rows plus PEEK_MIN_LIST_ROWS; one unread line makes a 3-row box, so h = need + 2 fits without it and not with it.
+        need = 4 + core.PEEK_MIN_LIST_ROWS
+        h = need + 2
+        self.scr.size = (h, 40)
+        self.show([session("s1", "/p/alpha")])
+        self.app.cursor = ("session", "s1")
+        self.assertTrue(self.app.peek_fits())
+        now = time.monotonic()
+        self.show([session("s1", "/p/alpha"), session("s2", "/p/alpha")], entry("s2", "Done.", now))
+        self.assertGreater(len(core.unread_box(self.app.unread_items(), 40, h)), 0)
+        self.assertFalse(self.app.peek_fits())
 
     def test_a_click_on_more_opens_the_history(self):
         now = time.monotonic()
@@ -4844,7 +4950,7 @@ class UnreadBoxDrawn(AppCase):
         self.app.window_width = 40
         self.assertTrue(self.app.narrow)
         self.two()
-        self.app.handle_mouse(event=(0, 5, 1, 0, curses.BUTTON1_CLICKED))
+        self.app.handle_mouse(event=(0, 5, self.unread_ys()["s2"], 0, curses.BUTTON1_CLICKED))
         self.assertEqual(self.opened, [("s2", core.OPEN)])
         self.assertEqual(self.app.cursor, ("session", "s2"))
 

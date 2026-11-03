@@ -1999,6 +1999,7 @@ class App:
         self.scroll = 0
         self.extent = (0, 0)
         self.held = None
+        self.box_seen = None
         self.last_housekeep = 0.0
         self.poller = Poller(Engine(tmux, claude, self.state), primary=self.primary)
         self.apply_mode()
@@ -4132,20 +4133,22 @@ class App:
             self.put(list_top + 2, 7, "n", curses.A_BOLD)
             self.put(list_top + 2, 8, " to start one in a folder.", curses.A_DIM)
         elif not self.groups:
-            rows, hits = self.draw_unread(list_top, list_bottom, w)
-            list_top += rows
             self.put(list_top, 1, FIND_NONE, curses.A_DIM)
-            self.row_map.update(hits)
+            self.row_map.update(self.draw_unread(list_top, list_bottom, w)[1])
         else:
             rows, hits = self.draw_unread(list_top, list_bottom, w)
-            list_top += rows
-            layout = self.list_layout(w, max(1, list_bottom - list_top))
-            room = core.peek_room(h, w, len(bottom))
-            peek_rows = self.draw_peek(list_bottom, w, room, self.cursor_rows(layout)) if self.peeking else 0
-            list_height = max(1, list_bottom - peek_rows - list_top)
+            box_top = list_bottom - rows
+            # A box that appeared, grew or went must not scroll the list under the pointer.
+            if self.box_seen is not None and self.box_seen[0] != rows and self.box_seen[1] == self.cursor and self.held is None:
+                self.held = ("list", self.cursor)
+            self.box_seen = (rows, self.cursor)
+            layout = self.list_layout(w, max(1, box_top - list_top))
+            room = core.peek_room(h, w, len(bottom) + rows)
+            peek_rows = self.draw_peek(box_top, w, room, self.cursor_rows(layout)) if self.peeking else 0
+            list_height = max(1, box_top - peek_rows - list_top)
             if core.scroll_thumb(sum(layout[2]), list_height, 0) is not None:
-                w, layout = w - 1, self.list_layout(w - 1, max(1, list_bottom - list_top))
-            self.draw_list(list_top, list_bottom - peek_rows, w, layout)
+                w, layout = w - 1, self.list_layout(w - 1, max(1, box_top - list_top))
+            self.draw_list(list_top, box_top - peek_rows, w, layout)
             self.row_map.update(hits)
         for i, (text, attr) in enumerate(bottom):
             self.put(list_bottom + i, 0, " " + text, attr)
@@ -4162,8 +4165,9 @@ class App:
         return items
 
     def draw_unread(self, top: int, bottom: int, width: int) -> tuple:
-        """Draw the Unread box from row `top` and return (rows taken, {screen row: row_map item}) for its clickable lines."""
+        """Draw the Unread box ending above row `bottom` and return (rows taken, {screen row: row_map item}) for its clickable lines."""
         box = core.unread_box(self.unread_items(), width, bottom - top)
+        top = bottom - len(box)
         pal = self.palette
         hits = {}
         for i, (target, kind, parts) in enumerate(box):
@@ -4736,9 +4740,11 @@ class App:
             self.say(PEEK_NO_ROOM, seconds=RESTORED_NOTICE_SECONDS)
 
     def peek_fits(self) -> bool:
-        """Whether the pane, at its size now, has room for the peek box under the list."""
+        """Whether the pane, at its size now, has room for the peek box under the list and above the Unread box."""
         h, w = self.scr.getmaxyx()
-        return core.peek_height(core.peek_room(h, w, len(self.bottom_lines(max(1, w - 1), h))), 1) > 0
+        below = len(self.bottom_lines(max(1, w - 1), h))
+        box = len(core.unread_box(self.unread_items(), w, h - below))
+        return core.peek_height(core.peek_room(h, w, below + box), 1) > 0
 
     def peek_key(self, key) -> None:
         if key in (" ", "\x1b"):
